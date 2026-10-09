@@ -150,6 +150,11 @@ services:
         condition: service_healthy
       processor:
         condition: service_started
+      # Restarted with the collector (e.g. by the Langfuse override): agentgateway
+      # resolves the collector's address once, at startup.
+      otel-collector:
+        condition: service_started
+        restart: true
     restart: unless-stopped
 
   otel-collector:

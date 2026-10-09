@@ -76,7 +76,7 @@ class Settings:
     gateway_port: int = 8080
     # Address agentgateway uses to reach the governance processor.
     processor_address: str = "processor:50051"
-    # OTLP endpoint for gateway traces.
+    # OTLP/gRPC endpoint for gateway traces, e.g. http://otel-collector:4317.
     gateway_otlp_endpoint: str | None = None
     # agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts.
     gateway_ipv6: bool = False

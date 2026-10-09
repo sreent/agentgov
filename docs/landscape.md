@@ -13,7 +13,7 @@ standards the platform aligns with. Survey date: October 2026.
 | MCP enforcement | **agentgateway** (Apache-2.0, Linux Foundation / Agentic AI Foundation) | Tracks the MCP spec (2026-07-28 support since 1.4.1); JWT auth; CEL; an MCP-aware external policy protocol (`ExtMcp`) that can rewrite and reject requests and results; A2A and LLM routes; OTel | Agent Router (formerly Envoy AI Gateway; Kubernetes only), IBM ContextForge, Docker MCP Gateway, microsoft/mcp-gateway (session-based routing, obsoleted by stateless MCP) |
 | Personal data detection | **Presidio** (MIT) | Established analyzer with offsets for redaction; runs offline | LLM Guard (archived July 2026), LlamaFirewall (stale), NeMo Guardrails (possible future addition for ML checks) |
 | Telemetry | **OpenTelemetry Collector** | Vendor-neutral, speaks the GenAI semantic conventions that Agent 365 also uses | — |
-| Trace UI (optional) | **Langfuse** (MIT core) | Understands GenAI spans out of the box | Arize Phoenix (ELv2, not OSI), Grafana Tempo/Loki (AGPL, semconv-agnostic) |
+| Trace UI (optional) | **Langfuse** (MIT core) | Understands GenAI spans out of the box and accepts OTLP directly; optional because self-hosting adds ClickHouse, Redis and S3-compatible storage | Arize Phoenix (ELv2, not OSI), Grafana Tempo/Loki (AGPL, semconv-agnostic) |
 | In-process enforcement (optional) | **Microsoft Agent Governance Toolkit** (MIT) | Framework adapters for Agent Framework, LangGraph, CrewAI, OpenAI Agents SDK, ADK, … | — |
 
 ### What we did not reuse, and why

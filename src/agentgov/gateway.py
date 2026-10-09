@@ -23,6 +23,7 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from sqlalchemy import select
@@ -101,16 +102,18 @@ def render(servers: list[ToolServer], settings: Settings) -> dict[str, Any]:
             "policies": {"directResponse": {"body": "ok", "status": 200}},
         }
     )
-    global_config: dict[str, Any] = {"enableIpv6": settings.gateway_ipv6}
+    config: dict[str, Any] = {"config": {"enableIpv6": settings.gateway_ipv6}}
     if settings.gateway_otlp_endpoint:
-        global_config["tracing"] = {
-            "otlpEndpoint": settings.gateway_otlp_endpoint,
-            "randomSampling": True,
+        endpoint = urlsplit(settings.gateway_otlp_endpoint)
+        config["frontendPolicies"] = {
+            "tracing": {
+                "host": endpoint.netloc or endpoint.path,
+                "protocol": "grpc",
+                "randomSampling": "true",
+            }
         }
-    return {
-        "config": global_config,
-        "binds": [{"port": settings.gateway_port, "listeners": [{"routes": routes}]}],
-    }
+    config["binds"] = [{"port": settings.gateway_port, "listeners": [{"routes": routes}]}]
+    return config
 
 
 def to_yaml(config: dict[str, Any]) -> str:

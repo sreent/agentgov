@@ -90,7 +90,8 @@ def test_monitor_mode_relaxes_authentication() -> None:
 
 def test_tracing_and_ipv6() -> None:
     config = render([], SETTINGS)
-    assert config["config"]["tracing"]["otlpEndpoint"] == "http://otel-collector:4317"
+    tracing = config["frontendPolicies"]["tracing"]
+    assert (tracing["host"], tracing["protocol"]) == ("otel-collector:4317", "grpc")
     assert config["config"]["enableIpv6"] is False
 
 
