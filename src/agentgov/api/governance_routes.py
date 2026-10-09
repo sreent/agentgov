@@ -216,17 +216,17 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
             )
             .group_by(LedgerEntry.decision)
         ).all()
+        # Policy decisions only: a held call is also recorded as approval.requested.
         recent = s.scalars(
             select(LedgerEntry)
-            .where(LedgerEntry.decision.in_(("deny", "require_approval")))
+            .where(
+                LedgerEntry.type.like("decision.%"),
+                LedgerEntry.decision.in_(("deny", "require_approval")),
+            )
             .order_by(LedgerEntry.seq.desc())
             .limit(10)
         ).all()
-        head = (
-            ledger.verify(s)
-            if s.scalar(select(func.count()).select_from(LedgerEntry)) < 50000
-            else None
-        )
+        head = rt.ledger_integrity.check(s)
         return {
             "agents": {
                 "total": len(all_agents),

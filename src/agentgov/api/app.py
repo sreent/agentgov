@@ -11,18 +11,43 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
+from starlette.responses import Response
+from starlette.types import Scope
 
 from agentgov import __version__
 from agentgov.api import governance_routes, integration_routes, registry_routes
+from agentgov.api.auth import Principal, require
 from agentgov.config import Settings
+from agentgov.registry import apikeys
 from agentgov.registry.errors import RegistryError
 from agentgov.runtime import Runtime
 
 log = logging.getLogger(__name__)
+
+# The admin UI renders data that agents and telemetry senders control (names,
+# descriptions, reasons), so it only runs its own script and talks to its own API.
+UI_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "form-action 'self'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+class _UiFiles(StaticFiles):
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers.update(UI_HEADERS)
+        return response
 
 
 def create_app(
@@ -60,6 +85,18 @@ def create_app(
     async def registry_error(_: Request, exc: RegistryError) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
+    @app.exception_handler(RequestValidationError)
+    async def request_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        # Same shape as every other error ({"detail": "..."}), with the field errors kept.
+        errors = jsonable_encoder(exc.errors())
+        message = "; ".join(
+            ".".join(str(p) for p in e.get("loc", []) if p != "body") + f": {e.get('msg')}"
+            for e in errors
+        )
+        return JSONResponse(
+            status_code=422, content={"detail": message or "invalid request", "errors": errors}
+        )
+
     @app.get("/healthz", tags=["health"])
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -86,13 +123,18 @@ def create_app(
             "unknown_agent_mode": settings.unknown_agent_mode,
         }
 
+    @app.get("/v1/me", tags=["system"])
+    def whoami(principal: Principal = Depends(require(*apikeys.ROLES))) -> dict[str, str]:
+        """The caller's identity and role, so clients can tailor what they offer."""
+        return {"name": principal.name, "role": principal.role, "actor": principal.actor}
+
     app.include_router(registry_routes.router)
     app.include_router(governance_routes.router)
     app.include_router(integration_routes.router)
 
     ui_dir = Path(str(resources.files("agentgov") / "ui"))
     if (ui_dir / "index.html").exists():
-        app.mount("/ui", StaticFiles(directory=ui_dir, html=True), name="ui")
+        app.mount("/ui", _UiFiles(directory=ui_dir, html=True), name="ui")
 
         @app.get("/", include_in_schema=False)
         def root() -> RedirectResponse:

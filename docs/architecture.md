@@ -117,8 +117,9 @@ Every lifecycle change, admin action, approval, policy decision and OPA decision
 is appended to a hash chain (`hash = sha256(prev_hash ‖ canonical_json(entry))`).
 Appenders take a row lock on the chain head, so concurrent writers extend it one at a
 time. `GET /v1/ledger/verify` recomputes the chain and reports the first broken entry
-(edited, deleted or truncated). `GET /v1/ledger/export` streams it as JSON Lines for a
-SIEM or for offline verification.
+(edited, deleted or truncated). The overview's integrity badge checks new entries as they
+arrive and re-verifies the whole chain every five minutes. `GET /v1/ledger/export`
+streams the ledger as JSON Lines for a SIEM or for offline verification.
 
 ## Trust boundaries and failure modes
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
@@ -109,24 +111,35 @@ def append(
     return entry
 
 
-def iter_entries(session: Session, *, batch: int = 1000) -> Iterator[LedgerEntry]:
-    last = 0
+def iter_entries(
+    session: Session, *, batch: int = 1000, after: int = 0, until: int | None = None
+) -> Iterator[LedgerEntry]:
+    last = after
     while True:
-        rows = session.scalars(
-            select(LedgerEntry).where(LedgerEntry.seq > last).order_by(LedgerEntry.seq).limit(batch)
-        ).all()
+        stmt = select(LedgerEntry).where(LedgerEntry.seq > last)
+        if until is not None:
+            stmt = stmt.where(LedgerEntry.seq <= until)
+        rows = session.scalars(stmt.order_by(LedgerEntry.seq).limit(batch)).all()
         if not rows:
             return
         yield from rows
         last = rows[-1].seq
 
 
-def verify(session: Session) -> dict[str, Any]:
-    """Recompute the chain and report the first inconsistency, if any."""
-    prev = GENESIS
-    expected_seq = 1
-    checked = 0
-    for entry in iter_entries(session):
+def verify(session: Session, *, start: tuple[int, str] | None = None) -> dict[str, Any]:
+    """Recompute the chain and report the first inconsistency, if any.
+
+    ``start`` is the ``(seq, hash)`` of an entry that was already verified: only the
+    entries after it are checked. Only a full verification detects later edits to
+    entries before ``start``.
+    """
+    # The head is read first and the chain checked up to it: entries committed while
+    # we read are beyond it, so concurrent appends cannot look like a broken chain.
+    head = session.get(LedgerHead, 1, populate_existing=True)
+    checked, prev = start or (0, GENESIS)
+    expected_seq = checked + 1
+    until = head.last_seq if head is not None else None
+    for entry in iter_entries(session, after=checked, until=until):
         problem = None
         if entry.seq != expected_seq:
             problem = f"missing entry before seq {entry.seq}"
@@ -139,7 +152,13 @@ def verify(session: Session) -> dict[str, Any]:
         prev = entry.hash
         expected_seq += 1
         checked += 1
-    head = session.get(LedgerHead, 1)
+    if head is None and checked:
+        return {
+            "valid": False,
+            "checked": checked,
+            "broken_at": None,
+            "problem": "chain head is missing",
+        }
     if head is not None and (head.last_seq != checked or head.last_hash != prev):
         return {
             "valid": False,
@@ -148,6 +167,31 @@ def verify(session: Session) -> dict[str, Any]:
             "problem": "chain head does not match the last entry (entries removed?)",
         }
     return {"valid": True, "checked": checked, "broken_at": None, "head": prev}
+
+
+class IntegrityMonitor:
+    """Ledger integrity for dashboards, without re-hashing the whole chain on every request.
+
+    New entries are verified incrementally; the whole chain is re-verified when the last
+    full check is older than ``full_every`` seconds, or after a failed check.
+    """
+
+    def __init__(self, full_every: float = 300.0) -> None:
+        self.full_every = full_every
+        self._lock = threading.Lock()
+        self._last: dict[str, Any] | None = None
+        self._full_at = 0.0
+
+    def check(self, session: Session) -> dict[str, Any]:
+        with self._lock:
+            last, now = self._last, time.monotonic()
+            if last is None or not last["valid"] or now - self._full_at >= self.full_every:
+                result = verify(session)
+                self._full_at = now
+            else:
+                result = verify(session, start=(last["checked"], last["head"]))
+            self._last = result
+            return dict(result)
 
 
 def to_dict(entry: LedgerEntry) -> dict[str, Any]:

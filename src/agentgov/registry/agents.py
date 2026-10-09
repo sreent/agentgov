@@ -20,7 +20,7 @@ from agentgov.models import (
     PENDING,
     Agent,
 )
-from agentgov.registry import blueprints, findings, risk, validation
+from agentgov.registry import approvals, blueprints, findings, risk, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 
 # action -> (allowed source states, target state)
@@ -241,6 +241,8 @@ def transition(
         reason=reason,
         details={"from": previous, "to": target},
     )
+    if action in ("block", "delete"):
+        approvals.cancel_for_agent(session, agent, actor=actor, reason=f"agent {target}")
     mark_changed(session, "agents")
     return agent
 

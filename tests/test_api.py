@@ -51,6 +51,30 @@ class TestAuth:
         assert client.get("/healthz").json() == {"status": "ok"}
         assert client.get("/readyz").json()["status"] == "ready"
 
+    def test_whoami(self, client) -> None:
+        me = client.get("/v1/me", headers=ADMIN).json()
+        assert me == {"name": "bootstrap", "role": "admin", "actor": "admin:bootstrap"}
+        assert client.get("/v1/me", headers=key(client, "registrar", "ci")).json()["actor"] == (
+            "registrar:ci"
+        )
+        assert client.get("/v1/me").status_code == 401
+
+    def test_validation_errors_use_the_common_error_shape(self, client) -> None:
+        resp = client.get("/v1/ledger", params={"limit": "many"}, headers=ADMIN)
+        assert resp.status_code == 422
+        assert resp.json()["detail"].startswith("query.limit: ")
+        assert resp.json()["errors"][0]["loc"] == ["query", "limit"]
+
+    def test_ui_is_served_with_a_restrictive_csp(self, client) -> None:
+        resp = client.get("/", follow_redirects=True)
+        assert resp.status_code == 200
+        assert resp.url.path == "/ui/"
+        csp = resp.headers["content-security-policy"]
+        assert "script-src 'self';" in csp
+        assert "frame-ancestors 'none'" in csp
+        assert resp.headers["x-content-type-options"] == "nosniff"
+        assert "content-security-policy" not in client.get("/healthz").headers
+
 
 class TestRoles:
     def test_registrar_requests_are_pending(self, client) -> None:
@@ -216,6 +240,75 @@ class TestGovernance:
         assert any(f["type"] == "agent.credential_exfiltration_attempt" for f in found)
         risk = client.get("/v1/agents/support-bot/risk", headers=ADMIN).json()
         assert risk["score"] > 10
+
+    def test_risk_reads_are_read_only_and_refresh_is_for_admins(self, client) -> None:
+        seed(client)
+        auditor = key(client, "auditor")
+        risk = client.get("/v1/agents/support-bot/risk", headers=auditor)
+        assert risk.status_code == 200
+        assert set(risk.json()) == {"score", "level", "factors"}
+        refresh = "/v1/agents/support-bot/risk/refresh"
+        assert client.post(refresh, headers=auditor).status_code == 403
+        assert client.post(refresh, headers=ADMIN).json()["level"] == risk.json()["level"]
+
+    def test_blocking_an_agent_cancels_its_open_approvals(self, client) -> None:
+        agent = seed(client)
+        check = {
+            "agent_id": agent["id"],
+            "action": "tools/call",
+            "resource": "crm/delete_customer",
+            "arguments": {"id": "c-1"},
+            "reasons": ["destructive"],
+        }
+        created = client.post("/v1/internal/approvals/check", json=check, headers=SERVICE).json()
+        approval_id = created["approval"]["id"]
+        client.post(
+            "/v1/agents/support-bot/block", json={"reason": "incident"}, headers=ADMIN
+        ).raise_for_status()
+        assert client.get(f"/v1/approvals/{approval_id}", headers=ADMIN).json()["status"] == (
+            "cancelled"
+        )
+        resp = client.post(f"/v1/approvals/{approval_id}/approve", json={}, headers=ADMIN)
+        assert resp.status_code == 409
+        cancelled = client.get("/v1/ledger", params={"type": "approval.cancelled"}, headers=ADMIN)
+        assert cancelled.json()[0]["details"]["approval_id"] == approval_id
+
+    def test_finding_status_changes_are_recorded_in_the_ledger(self, client) -> None:
+        seed(client)
+        client.post("/v1/agents", json={"name": "ownerless"}, headers=ADMIN).raise_for_status()
+        client.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
+        finding = client.get("/v1/findings", headers=ADMIN).json()[0]
+        for action in ("resolve", "resolve", "reopen"):
+            client.post(f"/v1/findings/{finding['id']}/{action}", headers=ADMIN).raise_for_status()
+        entries = client.get("/v1/ledger", params={"type": "finding.*"}, headers=ADMIN).json()
+        assert [e["type"] for e in entries] == ["finding.reopened", "finding.resolved"]
+        assert entries[0]["actor"] == "admin:bootstrap"
+        assert entries[0]["details"]["finding_id"] == finding["id"]
+
+    def test_overview_lists_each_held_call_once(self, client) -> None:
+        agent = seed(client)
+        check = {
+            "agent_id": agent["id"],
+            "action": "tools/call",
+            "resource": "crm/delete_customer",
+            "arguments": {"id": "c-1"},
+            "reasons": ["destructive"],
+        }
+        client.post("/v1/internal/approvals/check", json=check, headers=SERVICE).raise_for_status()
+        record = {
+            "phase": "request",
+            "method": "tools/call",
+            "resource": "crm/delete_customer",
+            "agent": {"id": agent["id"]},
+            "effect": "require_approval",
+            "reasons": ["destructive"],
+        }
+        client.post(
+            "/v1/internal/decisions", json={"records": [record]}, headers=SERVICE
+        ).raise_for_status()
+        overview = client.get("/v1/overview", headers=ADMIN).json()
+        assert [e["type"] for e in overview["recent_blocks"]] == ["decision.request"]
+        assert overview["ledger"]["valid"] is True
 
     def test_findings_actions(self, client) -> None:
         seed(client)

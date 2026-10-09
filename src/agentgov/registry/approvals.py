@@ -26,6 +26,7 @@ APPROVED = "approved"
 DENIED = "denied"
 EXPIRED = "expired"
 USED = "used"
+CANCELLED = "cancelled"
 
 
 def arguments_hash(arguments: Any) -> str:
@@ -165,6 +166,32 @@ def decide(
     if not approve:
         risk.add_signal(session, req.agent_id, "approval_denied", req.resource)
     return req
+
+
+def cancel_for_agent(session: Session, agent: Agent, *, actor: str, reason: str) -> int:
+    """Withdraw an agent's open requests and unused approvals (it was blocked or deleted)."""
+    open_requests = session.scalars(
+        select(ApprovalRequest).where(
+            ApprovalRequest.agent_id == agent.id,
+            ApprovalRequest.status.in_((PENDING, APPROVED)),
+        )
+    ).all()
+    for req in open_requests:
+        req.status = CANCELLED
+        req.decided_by = actor
+        req.decided_at = ids.utcnow()
+        req.decision_note = reason
+        ledger.append(
+            session,
+            type="approval.cancelled",
+            actor=actor,
+            agent=agent,
+            action=req.action,
+            resource=req.resource,
+            reason=reason,
+            details={"approval_id": req.id},
+        )
+    return len(open_requests)
 
 
 def to_dict(req: ApprovalRequest) -> dict[str, Any]:

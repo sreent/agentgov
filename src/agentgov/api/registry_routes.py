@@ -178,6 +178,14 @@ def purge_agent(
 
 @router.get("/agents/{ref}/risk", tags=["agents"])
 def agent_risk(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
+    """The agent's current risk, as last computed from decisions and posture scans."""
+    with _rt(request).db.session() as s:
+        return agents.to_dict(agents.get(s, ref))["risk"]
+
+
+@router.post("/agents/{ref}/risk/refresh", tags=["agents"])
+def refresh_agent_risk(request: Request, ref: str, _: Principal = Depends(admin)) -> dict[str, Any]:
+    """Recompute risk now. May raise findings and, with auto-block enabled, block the agent."""
     rt = _rt(request)
     with rt.db.session() as s:
         agent = agents.get(s, ref)

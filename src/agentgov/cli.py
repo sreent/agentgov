@@ -63,6 +63,12 @@ def version() -> None:
 
 
 @app.command()
+def whoami() -> None:
+    """Show the identity and role of the configured token."""
+    _print(_call("GET", "/v1/me"))
+
+
+@app.command()
 def server(
     host: str = typer.Option("0.0.0.0", help="Bind address."),  # noqa: S104
     port: int = typer.Option(8000, help="Port."),

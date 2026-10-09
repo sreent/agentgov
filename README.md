@@ -16,6 +16,8 @@ Agent 365 capability next to its AgentGov equivalent.
 > **Status: alpha.** The reference deployment runs end to end and is exercised in CI.
 > APIs and manifests may change before 1.0.
 
+![The AgentGov admin UI: agent inventory, policy decisions, recent blocks and ledger integrity](docs/images/admin-ui-overview.png)
+
 ## Why
 
 Agents act with their own credentials. They read customer records, call internal APIs

@@ -85,6 +85,7 @@ class Runtime:
         self.bundles = BundleServer(self.db)
         self.gateway = GatewayConfigWriter(self.db, settings)
         self.alerts = AlertSink(settings.alert_webhook_url)
+        self.ledger_integrity = ledger.IntegrityMonitor()
         self.identity: IdentityReconciler | None = None
         if settings.keycloak_enabled:
             admin = KeycloakAdmin(

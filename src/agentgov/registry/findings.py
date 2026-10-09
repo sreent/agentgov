@@ -7,8 +7,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agentgov import ids
-from agentgov.models import SEVERITIES, Finding
+from agentgov import ids, ledger
+from agentgov.models import SEVERITIES, Agent, Finding
 from agentgov.registry.errors import NotFound, ValidationError
 
 POSTURE = "posture"
@@ -95,6 +95,8 @@ def set_status(session: Session, finding_id: str, status: str, actor: str) -> Fi
     finding = session.get(Finding, finding_id)
     if finding is None:
         raise NotFound(f"finding {finding_id} not found")
+    if finding.status == status:
+        return finding
     finding.status = status
     if status == "open":
         finding.resolved_at = None
@@ -102,6 +104,16 @@ def set_status(session: Session, finding_id: str, status: str, actor: str) -> Fi
     else:
         finding.resolved_at = ids.utcnow()
         finding.resolved_by = actor
+    ledger.append(
+        session,
+        type=f"finding.{'reopened' if status == 'open' else status}",
+        actor=actor,
+        agent=session.get(Agent, finding.agent_id) if finding.agent_id else None,
+        agent_id=finding.agent_id,
+        resource=finding.subject,
+        reason=finding.title,
+        details={"finding_id": finding.id, "type": finding.type, "severity": finding.severity},
+    )
     return finding
 
 
