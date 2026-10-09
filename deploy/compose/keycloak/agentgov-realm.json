@@ -1,0 +1,34 @@
+{
+  "realm": "agentgov",
+  "displayName": "AgentGov",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 300,
+  "clients": [
+    {
+      "clientId": "agentgov-control-plane",
+      "name": "AgentGov control plane",
+      "description": "Provisions one OAuth client per registered agent.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${AGENTGOV_KEYCLOAK_CLIENT_SECRET}"
+    }
+  ],
+  "users": [
+    {
+      "username": "service-account-agentgov-control-plane",
+      "enabled": true,
+      "serviceAccountClientId": "agentgov-control-plane",
+      "clientRoles": {
+        "realm-management": ["manage-clients", "view-clients", "query-clients"]
+      }
+    }
+  ]
+}
