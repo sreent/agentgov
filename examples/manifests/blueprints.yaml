@@ -1,0 +1,33 @@
+# Blueprints are IT-approved templates: what a class of agents may do, how
+# risky it is, and how often sponsors must re-attest that each agent is needed.
+apiVersion: agentgov/v1alpha1
+kind: Blueprint
+metadata:
+  name: customer-support
+spec:
+  description: Tier-1 support agents that look up and annotate customer records.
+  risk_tier: medium
+  require_sponsor: true
+  attestation_days: 90
+  permissions:
+    - server: crm
+      tools:
+        - search_customers
+        - get_customer
+        - get_customer_notes
+        - add_note
+        - delete_customer   # destructive: the baseline policy routes it to a human
+---
+apiVersion: agentgov/v1alpha1
+kind: Blueprint
+metadata:
+  name: analytics
+spec:
+  description: Reporting agents with read-only access and entitlement to personal data.
+  risk_tier: high
+  attestation_days: 30
+  labels:
+    pii-access: "true"
+  permissions:
+    - server: crm
+      tools: ["search_*", "get_*", "export_customers"]

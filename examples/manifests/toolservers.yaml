@@ -1,0 +1,12 @@
+# MCP servers published through the gateway at http://<gateway>/mcp/<name>.
+apiVersion: agentgov/v1alpha1
+kind: ToolServer
+metadata:
+  name: crm
+spec:
+  url: http://crm-mcp:9000/mcp
+  description: Customer records (demo server in examples/mcp-servers/crm).
+  owner: crm-team
+  trust_level: verified
+  data_classification: confidential
+  status: approved
