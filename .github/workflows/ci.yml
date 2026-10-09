@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OPA_VERSION: 1.21.1
+  AGENTGATEWAY_IMAGE: ghcr.io/agentgateway/agentgateway:v1.6.0
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check src tests examples
+      - run: ruff format --check src tests examples
+      - uses: open-policy-agent/setup-opa@v2
+        with:
+          version: ${{ env.OPA_VERSION }}
+      - name: Rego format, strict compile and unit tests
+        run: |
+          test -z "$(opa fmt --list src/agentgov/policies examples/manifests/policies)"
+          opa check --strict src/agentgov/policies
+          opa test -v src/agentgov/policies
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: open-policy-agent/setup-opa@v2
+        with:
+          version: ${{ env.OPA_VERSION }}
+      - name: Pull agentgateway (validates generated configs)
+        if: matrix.python-version == '3.12'
+        run: docker pull "$AGENTGATEWAY_IMAGE"
+      - run: pip install -e ".[dev,postgres]"
+      - run: pytest -q
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the control plane / processor image
+        run: docker build -t agentgov:ci .
+      - name: Smoke test
+        run: |
+          docker run --rm agentgov:ci version
+          docker run --rm --entrypoint opa agentgov:ci version
