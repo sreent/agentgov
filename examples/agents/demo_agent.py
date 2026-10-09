@@ -185,10 +185,6 @@ async def run_scenarios(name: str, token: str) -> None:
                     f"{match.group()}; the agent retries the same call"
                 )
                 allowed, payload = await call(client, "delete_customer", {"customer_id": "c-003"})
-                print(
-                    f"  {DIM}(the CRM is in-memory: after the first run it answers "
-                    f"'No customer with id', which is the server's own error){RESET}"
-                )
                 report(allowed, payload, expect_allowed=True)
 
             step("8. Kill switch: blocking the agent takes effect everywhere within a second")

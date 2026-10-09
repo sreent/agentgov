@@ -78,6 +78,9 @@ NOTES = {
 }
 
 
+DELETED: set[str] = set()
+
+
 def _get(customer_id: str) -> Customer:
     if customer_id not in CUSTOMERS:
         raise ToolError(f"No customer with id {customer_id!r}")
@@ -115,7 +118,11 @@ def add_note(customer_id: str, text: str) -> list[str]:
 @mcp.tool(title="Delete customer", annotations=DESTRUCTIVE)
 def delete_customer(customer_id: str) -> dict[str, str]:
     """Permanently delete a customer record."""
-    del CUSTOMERS[_get(customer_id).id]
+    # Idempotent, as annotated: deleting an already deleted customer succeeds,
+    # so the demo walkthrough can be repeated against the same server.
+    if customer_id not in DELETED:
+        CUSTOMERS.pop(_get(customer_id).id)
+        DELETED.add(customer_id)
     return {"deleted": customer_id}
 
 
