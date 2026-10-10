@@ -12,12 +12,27 @@ validation whichever way you do it. Every change is also recorded in the
 | | How |
 |---|---|
 | Admin UI | `<control plane>/ui`. Sign in with single sign-on, or paste an API token |
-| CLI | Set `AGENTGOV_URL` (default `http://localhost:8000`) and `AGENTGOV_TOKEN` to an API key or the bootstrap token. `agentgov whoami` shows who you are |
+| CLI | Set `AGENTGOV_URL` (default `http://localhost:8000`), then run `agentgov login` to sign in with single sign-on, or set `AGENTGOV_TOKEN` to an API key or the bootstrap token. `agentgov whoami` shows who you are |
 | API | `Authorization: Bearer <token>`. The interactive reference is at `<control plane>/docs` |
 
 Create API keys on the UI's **Access** page or with `agentgov apikeys create`. The key is
 shown once; only a hash is stored. Keep the bootstrap token (`AGENTGOV_ADMIN_TOKEN`)
 for setup and emergencies.
+
+`agentgov login` opens your browser at the identity provider. After you sign in, the
+browser goes back to the CLI, which listens on a loopback address (`127.0.0.1`) for this
+one sign-in. The CLI proves with PKCE that it started the sign-in and gets an AgentGov
+session of its own, which lasts as long as one in the UI (`AGENTGOV_SESSION_HOURS`). The
+session is saved for `AGENTGOV_URL` in `sessions.json` in the agentgov config directory
+(`~/.config/agentgov` on Linux; set `AGENTGOV_CONFIG_DIR` to move it), readable only by
+you. `agentgov logout` ends it. `AGENTGOV_TOKEN` takes precedence over a saved session.
+The session appears on the **Access** page like any other, and the ledger's
+`admin.login` entry says it came from the CLI.
+
+To sign in on a machine you reach over SSH, forward a port and fix the CLI to it:
+`ssh -L 8765:127.0.0.1:8765 HOST`, then `agentgov login --no-browser --port 8765` on that
+machine, and open the link it prints in your local browser. For scripts and CI
+pipelines, use an API key instead.
 
 ## Roles
 
@@ -65,6 +80,8 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Sign someone out | Access → People → **Sign out** | `agentgov access sign-out PERSON`, `agentgov access end-session ID` | `POST /v1/access/people/{subject}/sign-out`, `DELETE /v1/access/sessions/{id}` |
 | Sync the Microsoft 365 agent catalog | Platforms → **Sync now** | `agentgov platforms sync` | `POST /v1/platforms/microsoft-365/sync` |
 | Import Copilot Studio agents | Platforms → **Import inventory** | `agentgov platforms import FILE` | `POST /v1/platforms/copilot-studio/import` |
+| Sync Copilot Studio agents as yourself (Entra ID sign-in) | Platforms → Copilot Studio → **Sync now** | `agentgov platforms sync copilot-studio` | `POST /v1/platforms/copilot-studio/sync` |
+| Quarantine or block an agent in Copilot Studio or Microsoft 365 as yourself (Entra ID sign-in) | Agent → its platform card, or tick the box in **Block** / **Unblock** | `agentgov agents platform-block\|platform-unblock REF`, `agentgov agents block\|unblock REF --in-platform` | `POST /v1/agents/{ref}/platform/block\|unblock` |
 | List agents from one platform | Platforms → *n agents* | `agentgov agents list --source platform:copilot-studio` | `GET /v1/agents?source=…` |
 | See the connectors agents use; approve or remove one | Platforms → Connectors | `agentgov platforms connectors`, `approve-connector ID`, `unapprove-connector ID` | `GET /v1/platforms/connectors`, `PUT`/`DELETE /v1/platforms/connectors/{id}/approval` |
 | See an agent's instructions and the problems in them | Agent → Instructions | `agentgov agents instructions REF` | `GET /v1/agents/{ref}/instructions` |

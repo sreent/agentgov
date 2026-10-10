@@ -120,6 +120,10 @@ def end_session(session: Session, session_id: str, *, actor: str) -> int:
     return _end(session, [record], actor=actor)
 
 
+def session_ids(session: Session, subject: str) -> list[str]:
+    return list(session.scalars(select(AdminSession.id).where(AdminSession.subject == subject)))
+
+
 def sign_out(session: Session, subject: str, *, actor: str) -> int:
     """End every session of one person; returns how many were ended."""
     records = list(session.scalars(select(AdminSession).where(AdminSession.subject == subject)))

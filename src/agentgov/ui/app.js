@@ -1616,7 +1616,8 @@ async function renderAgent({ match }) {
   ]);
   // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
   const views = agent.platforms || [];
-  const main = views.length ? views.map((v) => platformCard(agent, v)) : [permissionsCard(agent)];
+  const where = views.length && agent.status !== 'deleted' ? await platformActionTarget(agent) : null;
+  const main = views.length ? views.map((v) => platformCard(agent, v, where)) : [permissionsCard(agent)];
   return h('div', { class: 'page', 'data-title': agent.name },
     agentHeader(agent),
     h('div', { class: 'detail-grid' },
@@ -1682,28 +1683,94 @@ async function runLifecycle(a, action) {
       });
     }
   }
+  // A platform agent can be blocked (or released) in its own platform too, as the signed-in admin.
+  const where = action === 'block' || action === 'unblock' ? await platformActionTarget(a) : null;
+  let text = spec.text;
+  if (where && me?.microsoft) {
+    // The checkbox covers the platform, so the text says only what AgentGov does.
+    text = action === 'block' ? "This marks the agent as blocked in AgentGov's registry and ledger." : 'The agent is no longer marked as blocked in AgentGov.';
+    fields.push({
+      id: 'in_platform', type: 'checkbox', value: true,
+      label: action === 'block' ? where.blockLabel : where.unblockLabel,
+      hint: `AgentGov does this in ${where.name} as you, so ${where.name} records it under your name.`,
+    });
+  } else if (where) {
+    text += ` To do that from here, sign in to AgentGov with Microsoft Entra ID.`;
+  }
   fields.push({ id: 'reason', label: 'Reason', type: 'textarea', hint: 'Recorded in the evidence ledger.' });
-  const values = await ask({
+  const done = await ask({
     title: `${spec.label.replace(' (kill switch)', '')} ${a.name}?`,
-    text: spec.text, tone: spec.tone, iconName: spec.icon, confirm: spec.confirm, fields,
+    text, tone: spec.tone, iconName: spec.icon, confirm: spec.confirm, fields, busy: 'Working…',
+    submit: async (values) => {
+      const body = {};
+      if (values.reason) body.reason = values.reason;
+      if (action === 'adopt') {
+        if (values.owner) body.owner = values.owner;
+        const sponsors = values.sponsors.split(',').map((x) => x.trim()).filter(Boolean);
+        if (sponsors.length) body.sponsors = sponsors;
+        if (values.blueprint) body.blueprint = values.blueprint;
+      }
+      // AgentGov first: if it refuses (an unblock needs a sponsor), the platform is left
+      // alone. If the platform then refuses, the agent is still blocked where it runs.
+      await api(`v1/agents/${encodeURIComponent(a.id)}/${action}`, { method: 'POST', body });
+      if (!values.in_platform) return { inPlatform: false };
+      try {
+        await api(`v1/agents/${encodeURIComponent(a.id)}/platform/${action}`, { method: 'POST' });
+        return { inPlatform: true };
+      } catch (err) {
+        return { inPlatform: false, platformError: err };
+      }
+    },
   });
-  if (!values) return;
-  const body = {};
-  if (values.reason) body.reason = values.reason;
-  if (action === 'adopt') {
-    if (values.owner) body.owner = values.owner;
-    const sponsors = values.sponsors.split(',').map((x) => x.trim()).filter(Boolean);
-    if (sponsors.length) body.sponsors = sponsors;
-    if (values.blueprint) body.blueprint = values.blueprint;
+  if (!done) return;
+  if (done.platformError) {
+    const verb = action === 'block' ? 'Blocked' : 'Unblocked';
+    toast(`${verb} ${a.name} in AgentGov. ${done.platformError.message}`, { tone: 'critical' });
+  } else {
+    toast(done.inPlatform ? (action === 'block' ? where.blocked(a.name) : where.unblocked(a.name)) : spec.done(a.name));
   }
-  try {
-    await api(`v1/agents/${encodeURIComponent(a.id)}/${action}`, { method: 'POST', body });
-    toast(spec.done(a.name));
-    refreshBadges();
-    await refresh();
-  } catch (err) {
-    toast(err.message, { tone: 'critical' });
+  refreshBadges();
+  await refresh();
+}
+
+/** Where Block can also act for a platform agent, when signed-in admins may act in Microsoft. */
+async function platformActionTarget(a) {
+  const views = a.platforms || [];
+  const info = await getInfo();
+  if (!views.length || !info?.microsoft_admin_actions || !can('admin')) return null;
+  // The control plane quarantines the Copilot Studio agent when there is one (no licence needed).
+  if (views.some((v) => v.source === 'copilot-studio')) {
+    return {
+      name: 'Copilot Studio', source: 'copilot-studio',
+      blockLabel: 'Also quarantine it in Copilot Studio', unblockLabel: 'Also release it from quarantine in Copilot Studio',
+      blocked: (n) => `Blocked ${n} in AgentGov and quarantined it in Copilot Studio.`,
+      unblocked: (n) => `Unblocked ${n} in AgentGov and released it from quarantine in Copilot Studio.`,
+    };
   }
+  return {
+    name: 'Microsoft 365', source: 'microsoft-365',
+    blockLabel: 'Also block it in Microsoft 365', unblockLabel: 'Also unblock it in Microsoft 365',
+    blocked: (n) => `Blocked ${n} in AgentGov and in Microsoft 365.`,
+    unblocked: (n) => `Unblocked ${n} in AgentGov and in Microsoft 365.`,
+  };
+}
+
+async function platformBlock(a, where, blocking) {
+  const studio = where.source === 'copilot-studio';
+  const verb = blocking ? (studio ? 'Quarantine' : 'Block') : (studio ? 'Release' : 'Unblock');
+  const done = await ask({
+    title: `${verb} ${a.name} in ${where.name}?`,
+    text: blocking
+      ? (studio ? 'Copilot Studio stops the agent on every channel; its makers can still open and test it. ' : 'Microsoft 365 blocks the agent for everyone in the organisation. ')
+        + `AgentGov does this as you and records it in the evidence ledger. The agent's status in AgentGov doesn't change.`
+      : `${where.name} lets people use the agent again. AgentGov does this as you and records it in the evidence ledger.`,
+    tone: blocking ? 'danger' : 'primary', iconName: blocking ? 'ban' : 'undo',
+    confirm: `${verb} in ${where.name}`, busy: 'Working…',
+    submit: () => api(`v1/agents/${encodeURIComponent(a.id)}/platform/${blocking ? 'block' : 'unblock'}`, { method: 'POST' }),
+  });
+  if (!done) return;
+  toast(blocking ? `${studio ? 'Quarantined' : 'Blocked'} ${a.name} in ${where.name}.` : `${studio ? 'Released' : 'Unblocked'} ${a.name} in ${where.name}.`);
+  await refresh();
 }
 
 async function runAttest(a) {
@@ -3712,7 +3779,7 @@ async function renderPlatforms() {
     }),
     callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov reads these platforms; it does not change them. '),
       "Blocking one of their agents here marks it in AgentGov only. To stop it from being used, block it in the Microsoft 365 admin center or the Power Platform admin center.")),
-    h('div', { class: 'grid-halves' }, m365Card(sources['microsoft-365']), copilotStudioCard(sources['copilot-studio'])),
+    h('div', { class: 'grid-halves' }, m365Card(sources['microsoft-365']), copilotStudioCard(sources['copilot-studio'], view.admin_actions)),
     connectorsCard(usage));
 }
 
@@ -3755,16 +3822,37 @@ async function syncMicrosoft365(button) {
   await refresh();
 }
 
-function copilotStudioCard(src) {
+function copilotStudioCard(src, adminActions) {
+  const asYou = adminActions && can('admin') && me?.microsoft;
+  const actions = can('admin') ? [
+    asYou ? h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'studio-sync', onclick: (e) => syncCopilotStudio(e.currentTarget) }, icon('refresh'), 'Sync now') : null,
+    h('button', { type: 'button', class: asYou ? 'btn btn--sm' : 'btn btn--sm btn--primary', 'data-focus-key': 'studio-import', onclick: guarded(importCopilotStudio) }, icon('upload'), 'Import inventory'),
+  ].filter(Boolean) : null;
   return card({
     title: 'Copilot Studio',
-    sub: 'Copilot Studio and Agent Builder agents with the connectors they use, from the Power Platform inventory. Microsoft only lets a signed-in admin read the inventory, so export it and import the file here.',
-    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'studio-import', onclick: guarded(importCopilotStudio) }, icon('upload'), 'Import inventory')] : null,
+    sub: asYou
+      ? 'Copilot Studio and Agent Builder agents with the connectors they use, from the Power Platform inventory. Microsoft only lets a signed-in admin read it, so AgentGov syncs it as you.'
+      : 'Copilot Studio and Agent Builder agents with the connectors they use, from the Power Platform inventory. Microsoft only lets a signed-in admin read the inventory, so export it and import the file here'
+        + (adminActions && can('admin') ? ', or sign in to AgentGov with Microsoft Entra ID to sync it from here.' : '.'),
+    actions,
     body: src.last_sync
-      ? sourceFacts(src, 'import')
+      ? sourceFacts(src, 'update')
       : emptyState('Nothing imported yet', 'Export the inventory as a Power Platform or AI administrator (a reader role is enough), then import the file:',
         h('pre', { class: 'kv-pre' }, INVENTORY_EXPORT)),
   });
+}
+
+async function syncCopilotStudio(button) {
+  button.disabled = true;
+  button.lastChild.textContent = 'Syncing…';
+  try {
+    const counts = await api('v1/platforms/copilot-studio/sync', { method: 'POST' });
+    toast(`Synced the Copilot Studio inventory: ${syncCounts(counts)}.`);
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+  }
+  refreshBadges();
+  await refresh();
 }
 
 async function importCopilotStudio() {
@@ -3871,13 +3959,20 @@ async function unapproveConnector(row, approvedCount) {
 }
 
 /** What Microsoft 365 or Copilot Studio reports about an agent (its page's main card). */
-function platformCard(a, v) {
+function platformCard(a, v, where) {
   const studio = v.source === 'copilot-studio';
+  // Only on the card for the record the control plane acts on.
+  const acts = where && where.source === v.source;
+  const blockedThere = studio ? v.quarantined : v.blocked;
+  const actions = acts && me?.microsoft ? [blockedThere
+    ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'platform-unblock', onclick: guarded(() => platformBlock(a, where, false)) }, icon('undo'), studio ? 'Release from quarantine' : 'Unblock in Microsoft 365')
+    : h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': 'platform-block', onclick: guarded(() => platformBlock(a, where, true)) }, icon('ban'), studio ? 'Quarantine' : 'Block in Microsoft 365')] : null;
   const yesNo = (value) => (value == null ? null : value ? 'Yes' : 'No');
   const notes = [];
   if (v.in_catalog === false) notes.push(callout('warning', 'triangle', `This agent is no longer in the Microsoft 365 catalog. Delete it here when you no longer need its record.`));
-  if (v.blocked) notes.push(callout('neutral', 'ban', 'Blocked in the Microsoft 365 admin center.'));
-  if (v.quarantined) notes.push(callout('neutral', 'ban', 'Quarantined (blocked) in the Power Platform admin center.'));
+  if (v.blocked) notes.push(callout('neutral', 'ban', 'Blocked in Microsoft 365.'));
+  if (v.quarantined) notes.push(callout('neutral', 'ban', 'Quarantined in Copilot Studio: it works only in its makers\' test pane.'));
+  if (acts && !me?.microsoft) notes.push(h('p', { class: 'hint' }, `To ${studio ? 'quarantine' : 'block'} it in ${v.source_name} from here, sign in to AgentGov with Microsoft Entra ID.`));
   const rows = studio ? [
     ['Name in Copilot Studio', v.display_name],
     ['Created in', v.created_in],
@@ -3912,6 +4007,7 @@ function platformCard(a, v) {
   return card({
     title: v.source_name,
     sub: studio ? 'As the Power Platform inventory reported it at the last import' : 'As the Microsoft 365 agent catalog reported it at the last sync',
+    actions,
     body: [...notes, facts(rows), studio ? connectorList(v) : null],
   });
 }

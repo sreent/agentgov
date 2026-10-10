@@ -10,13 +10,21 @@ same endpoints and with the same role checks.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import html
+import http.server
 import json
 import logging
 import os
+import secrets
 import sys
+import threading
+import webbrowser
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import httpx
 import typer
@@ -72,9 +80,22 @@ YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 # ------------------------------------------------------------------ plumbing
 
 
+def _url() -> str:
+    return os.environ.get("AGENTGOV_URL", "http://localhost:8000").rstrip("/")
+
+
+def _env_token() -> str | None:
+    return os.environ.get("AGENTGOV_TOKEN") or os.environ.get("AGENTGOV_ADMIN_TOKEN")
+
+
+def _token(url: str) -> str | None:
+    """AGENTGOV_TOKEN (or AGENTGOV_ADMIN_TOKEN), else the session from `agentgov login`."""
+    return _env_token() or _stored_session(url).get("token")
+
+
 def _client() -> httpx.Client:
-    url = os.environ.get("AGENTGOV_URL", "http://localhost:8000")
-    token = os.environ.get("AGENTGOV_TOKEN") or os.environ.get("AGENTGOV_ADMIN_TOKEN")
+    url = _url()
+    token = _token(url)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return httpx.Client(base_url=url, headers=headers, timeout=30)
 
@@ -96,6 +117,8 @@ def _call(method: str, path: str, **kwargs: Any) -> Any:
             detail = resp.json().get("detail", resp.text)
         except ValueError:
             detail = resp.text
+        if resp.status_code == 401 and not _env_token():
+            detail = f"{detail} (sign in with `agentgov login`, or set AGENTGOV_TOKEN)"
         typer.secho(f"error {resp.status_code}: {detail}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
     content_type = resp.headers.get("content-type", "")
@@ -176,6 +199,228 @@ def version() -> None:
 def whoami() -> None:
     """Show the identity and role of the configured token."""
     _print(_call("GET", "/v1/me"))
+
+
+# ------------------------------------------------------------------- sign-in
+
+# How long to wait for the browser; the control plane keeps a sign-in open as long.
+LOGIN_WAIT_SECONDS = 600
+# Reasons /auth/callback sends back (?error=...), as the admin UI words them.
+LOGIN_ERRORS = {
+    "no_role": "you signed in, but your account has no AgentGov role. Ask an administrator "
+    "for agentgov-admin, agentgov-approver or agentgov-auditor.",
+    "state": "that sign-in could not be completed in this browser. Start again.",
+    "expired": "that sign-in expired or was already used. Start again.",
+    "provider": "the identity provider could not complete the sign-in. Try again.",
+    "token": "the control plane could not verify the identity provider's response. Ask an "
+    "administrator to check the single sign-on settings.",
+}
+
+
+def _sessions_file() -> Path:
+    base = os.environ.get("AGENTGOV_CONFIG_DIR") or typer.get_app_dir("agentgov")
+    return Path(base) / "sessions.json"
+
+
+def _sessions() -> dict[str, Any]:
+    try:
+        data = json.loads(_sessions_file().read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_sessions(sessions: dict[str, Any]) -> None:
+    """Write the sessions file, readable by this user only (it holds bearer tokens)."""
+    path = _sessions_file()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(sessions, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _stored_session(url: str) -> dict[str, Any]:
+    """The session `agentgov login` keeps for ``url``, unless it has ended."""
+    entry = _sessions().get(url)
+    if not isinstance(entry, dict) or not entry.get("token"):
+        return {}
+    try:
+        if datetime.fromisoformat(entry["expires_at"]) <= datetime.now(UTC):
+            return {}
+    except (KeyError, TypeError, ValueError):
+        return {}
+    return entry
+
+
+class _LoginCallback(http.server.BaseHTTPRequestHandler):
+    """The loopback page the browser lands on after signing in."""
+
+    server: _LoginServer
+
+    def do_GET(self) -> None:
+        parts = urlsplit(self.path)
+        query = {k: v[0] for k, v in parse_qs(parts.query).items()}
+        if parts.path != "/callback" or not ({"code", "error"} & query.keys()):
+            self.send_error(404)
+            return
+        if self.server.done.is_set():
+            self._page("This sign-in is already finished. You can close this tab.")
+            return
+        ok, message = self.server.finish(query)
+        self._page(message if ok else f"Sign-in failed: {message}")
+        self.server.done.set()
+
+    def _page(self, text: str) -> None:
+        body = (
+            '<!doctype html><meta charset="utf-8"><title>AgentGov</title>'
+            '<body style="font-family:system-ui,sans-serif;margin:3rem auto;max-width:36rem">'
+            f"<h1>AgentGov</h1><p>{html.escape(text)}</p>"
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass  # the terminal shows the outcome instead
+
+
+class _LoginServer(http.server.HTTPServer):
+    def __init__(self, port: int, verifier: str) -> None:
+        super().__init__(("127.0.0.1", port), _LoginCallback)
+        self.verifier = verifier
+        self.done = threading.Event()
+        self.session: dict[str, Any] = {}
+        self.error = ""
+
+    def finish(self, query: dict[str, str]) -> tuple[bool, str]:
+        """Exchange the one-time code for a session; returns ``(ok, message)``."""
+        if "error" in query:
+            self.error = LOGIN_ERRORS.get(query["error"], LOGIN_ERRORS["provider"])
+            return False, self.error
+        try:
+            with _client() as client:
+                resp = client.post(
+                    "/auth/cli/token", json={"code": query["code"], "verifier": self.verifier}
+                )
+        except httpx.HTTPError as exc:
+            self.error = f"cannot reach the control plane: {exc}"
+            return False, self.error
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        if resp.status_code != 200 or not isinstance(body, dict) or "token" not in body:
+            detail = body.get("detail") if isinstance(body, dict) else None
+            self.error = str(detail or f"the control plane answered {resp.status_code}")
+            return False, self.error
+        self.session = body
+        return True, (
+            f"You're signed in to the AgentGov command line as {body.get('name')}. "
+            "You can close this tab."
+        )
+
+
+@app.command()
+def login(
+    browser: bool = typer.Option(
+        True, "--browser/--no-browser", help="Open the sign-in page in a browser."
+    ),
+    port: int = typer.Option(
+        0, help="Loopback port for the browser to come back to (default: any free port)."
+    ),
+) -> None:
+    """Sign in through single sign-on, as yourself.
+
+    You sign in in a browser on this computer; the CLI then keeps a session for
+    AGENTGOV_URL and uses it until the session ends or you run `agentgov logout`.
+    Admins signed in through Microsoft Entra ID can also act in Microsoft 365 and
+    Power Platform (see docs/platforms.md). To sign in on a remote machine, forward
+    a port over SSH (ssh -L 8765:127.0.0.1:8765 HOST) and run
+    `agentgov login --no-browser --port 8765` there.
+    """
+    url = _url()
+    if port and not 1024 <= port <= 65535:
+        _fail("choose a --port from 1024 to 65535")
+    info = _call("GET", "/v1/info")
+    if not (info.get("sso") or {}).get("enabled"):
+        _fail(f"{url} has no single sign-on; use an API key (AGENTGOV_TOKEN) instead")
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+    try:
+        server = _LoginServer(port, verifier)
+    except OSError as exc:
+        _fail(f"cannot listen on 127.0.0.1:{port}: {exc}")
+    query = {"cli_port": server.server_port, "cli_challenge": challenge.rstrip(b"=").decode()}
+    login_url = f"{url}/auth/login?{urlencode(query)}"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        if browser and webbrowser.open(login_url):
+            typer.echo(f"Opened a browser to sign in. If it didn't open, visit:\n  {login_url}")
+        else:
+            typer.echo(f"Open this link in a browser on this computer to sign in:\n  {login_url}")
+        typer.echo("Waiting for you to sign in (Ctrl+C to cancel)...")
+        finished = server.done.wait(LOGIN_WAIT_SECONDS)
+    except KeyboardInterrupt:
+        finished = False
+        server.error = "cancelled"
+    finally:
+        server.shutdown()
+        server.server_close()
+    if not finished and not server.error:
+        server.error = "timed out waiting for you to sign in"
+    if not server.session:
+        _fail(f"sign-in failed: {server.error}")
+    session = server.session
+    sessions = _sessions()
+    sessions[url] = {
+        "token": session["token"],
+        "expires_at": session["expires_at"],
+        "name": session.get("name"),
+    }
+    _save_sessions(sessions)
+    until = datetime.fromisoformat(session["expires_at"]).astimezone()
+    typer.echo(
+        f"Signed in to {url} as {session['name']} ({', '.join(session['roles'])}) "
+        f"until {until:%Y-%m-%d %H:%M %Z}."
+    )
+    if session.get("microsoft"):
+        typer.echo("While it lasts, AgentGov can act as you in Microsoft 365 and Power Platform.")
+    if _env_token():
+        typer.secho(
+            "AGENTGOV_TOKEN or AGENTGOV_ADMIN_TOKEN is set, so the CLI keeps using it: "
+            "unset it to use this sign-in.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+
+
+@app.command()
+def logout() -> None:
+    """End the session `agentgov login` started for AGENTGOV_URL."""
+    url = _url()
+    sessions = _sessions()
+    entry = sessions.pop(url, None)
+    if not isinstance(entry, dict) or not entry.get("token"):
+        typer.echo(f"Not signed in to {url}.")
+        return
+    try:
+        with _client() as client:
+            client.post("/auth/logout", headers={"Authorization": f"Bearer {entry['token']}"})
+    except httpx.HTTPError as exc:
+        typer.secho(
+            f"warning: cannot reach the control plane, so the session stays valid there until "
+            f"it ends or an admin ends it: {exc}",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+    _save_sessions(sessions)
+    typer.echo(f"Signed out of {url}.")
 
 
 @app.command()
@@ -417,16 +662,53 @@ def agents_approve(ref: str, reason: str | None = REASON) -> None:
     _lifecycle(ref, "approve", reason)
 
 
+IN_PLATFORM = typer.Option(
+    False,
+    "--in-platform",
+    help="For agents on Microsoft 365 or Copilot Studio: also do it there, as you "
+    "(needs `agentgov login` through Microsoft Entra ID).",
+)
+
+
 @agents_app.command("block")
-def agents_block(ref: str, reason: str = typer.Option("blocked from CLI", help="Why.")) -> None:
+def agents_block(
+    ref: str,
+    reason: str = typer.Option("blocked from CLI", help="Why."),
+    in_platform: bool = IN_PLATFORM,
+) -> None:
     """Kill switch: block the agent everywhere (identity, gateway, in-process OPA)."""
+    # AgentGov first, then the platform: if the platform refuses, AgentGov has still blocked it.
     _lifecycle(ref, "block", reason)
+    if in_platform:
+        _platform_block(ref, blocked=True)
 
 
 @agents_app.command("unblock")
-def agents_unblock(ref: str, reason: str | None = REASON) -> None:
+def agents_unblock(ref: str, reason: str | None = REASON, in_platform: bool = IN_PLATFORM) -> None:
     """Unblock an agent: its calls are evaluated against policy again."""
+    # AgentGov first: if it refuses (an agent needs a sponsor), the platform keeps it blocked.
     _lifecycle(ref, "unblock", reason)
+    if in_platform:
+        _platform_block(ref, blocked=False)
+
+
+def _platform_block(ref: str, *, blocked: bool) -> None:
+    out = _call("POST", f"/v1/agents/{ref}/platform/{'block' if blocked else 'unblock'}")
+    verb = "blocked" if blocked else "unblocked"
+    _done("agent", out["agent"], f"{verb} in {out['platform']}")
+
+
+@agents_app.command("platform-block")
+def agents_platform_block(ref: str) -> None:
+    """Block the agent in its own platform, as you: quarantine a Copilot Studio agent, or
+    block a Microsoft 365 agent for the organisation. Its AgentGov status stays as it is."""
+    _platform_block(ref, blocked=True)
+
+
+@agents_app.command("platform-unblock")
+def agents_platform_unblock(ref: str) -> None:
+    """Undo a block in the agent's own platform, as you."""
+    _platform_block(ref, blocked=False)
 
 
 @agents_app.command("delete")
@@ -489,8 +771,8 @@ def agents_risk(ref: str, refresh: bool = typer.Option(False, help="Recompute it
 
 
 SEVERITIES = ("critical", "high", "medium", "low")
-# A classifier on a CPU takes seconds per criterion.
-CLASSIFIER_TIMEOUT = 600
+# For calls that wait on slow work: a classifier on a CPU, or paging through an inventory.
+LONG_TIMEOUT = 600
 
 
 def _read_text(file: Path) -> str:
@@ -1116,9 +1398,18 @@ def platforms_status() -> None:
 
 
 @platforms_app.command("sync")
-def platforms_sync() -> None:
-    """Read the Microsoft 365 agent catalog now (it is also read on a schedule)."""
-    _synced("microsoft-365", "synced", _call("POST", "/v1/platforms/microsoft-365/sync"))
+def platforms_sync(
+    source: str = typer.Argument(
+        "microsoft-365",
+        help="microsoft-365 (as AgentGov's app), or copilot-studio (as you, after "
+        "`agentgov login` through Microsoft Entra ID).",
+    ),
+) -> None:
+    """Read a platform's agents now (the Microsoft 365 catalog is also read on a schedule)."""
+    if source not in ("microsoft-365", "copilot-studio"):
+        _fail("the source is microsoft-365 or copilot-studio")
+    counts = _call("POST", f"/v1/platforms/{source}/sync", timeout=LONG_TIMEOUT)
+    _synced(source, "synced", counts)
 
 
 @platforms_app.command("import")
@@ -1204,7 +1495,7 @@ def instructions_check(
         "POST",
         "/v1/instructions/check",
         json={"text": _read_text(file), "classifier": classifier},
-        timeout=CLASSIFIER_TIMEOUT,
+        timeout=LONG_TIMEOUT,
     )
     _issues(result["issues"])
     typer.echo(_classifier_state(result["classifier"]), err=True)

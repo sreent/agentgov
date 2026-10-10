@@ -37,7 +37,8 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Unmanaged / shadow agents | ✅ | Discovery from OpenTelemetry spans, gateway callers (monitor mode) and scanner imports (`/v1/discovery/import`, e.g. the Agent Governance Toolkit's `agent-discovery`) |
 | IT-approved agent blueprints | ✅ | `Blueprint`: permissions, risk tier, sponsor requirement, attestation period, labels |
 | Management rules (e.g. block ownerless agents) | 🟡 | Posture findings + optional auto-block on risk; rule engine ⏳ |
-| Agents built in Microsoft 365 Copilot, Copilot Studio and Agent Builder | ✅ | The Microsoft 365 agent catalog synced from Microsoft Graph, and the Copilot Studio inventory imported from the Power Platform inventory ([platforms](platforms.md)) |
+| Agents built in Microsoft 365 Copilot, Copilot Studio and Agent Builder | ✅ | The Microsoft 365 agent catalog synced from Microsoft Graph, and the Copilot Studio inventory imported from the Power Platform inventory or synced as the signed-in admin ([platforms](platforms.md)) |
+| Block Microsoft 365 and Copilot Studio agents | 🟡 | Admins signed in through Entra ID quarantine Copilot Studio agents and block Microsoft 365 agents from AgentGov, which calls Microsoft's admin APIs as them ([platforms](platforms.md#acting-as-the-signed-in-admin)); without that sign-in, block them in Microsoft's admin centers |
 | Registry sync from AWS, Google, Salesforce, Databricks, … | ⏳ | More platform connectors on the roadmap; OTel discovery covers instrumented agents today |
 | Agent store / catalog for end users | ➖ | AgentGov governs agents; it is not a distribution channel |
 | A2A-shaped agent records (agent cards) | ✅ | Agents carry an A2A v1.0 `agent_card` |

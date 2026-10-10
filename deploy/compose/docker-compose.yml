@@ -80,8 +80,13 @@ services:
       AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
       AGENTGOV_KEYCLOAK_ISSUER: http://localhost:8180/realms/agentgov
       AGENTGOV_KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/agentgov/protocol/openid-connect/certs
-      # Administrator single sign-on through Keycloak (client agentgov-admin).
+      # Administrator single sign-on through Keycloak (client agentgov-admin), or through
+      # Microsoft Entra ID when AGENTGOV_OIDC_ISSUER names an Entra tenant (docs/platforms.md).
+      AGENTGOV_OIDC_ISSUER: ${AGENTGOV_OIDC_ISSUER:-}
+      AGENTGOV_OIDC_CLIENT_ID: ${AGENTGOV_OIDC_CLIENT_ID:-}
       AGENTGOV_OIDC_CLIENT_SECRET: ${AGENTGOV_OIDC_CLIENT_SECRET:-dev-oidc-secret}
+      AGENTGOV_OIDC_ROLES_CLAIM: ${AGENTGOV_OIDC_ROLES_CLAIM:-}
+      AGENTGOV_MICROSOFT_ADMIN_ACTIONS: ${AGENTGOV_MICROSOFT_ADMIN_ACTIONS:-}
       AGENTGOV_GATEWAY_CONFIG_PATH: /gateway/config.yaml
       AGENTGOV_GATEWAY_PUBLIC_URL: http://localhost:8080
       AGENTGOV_GATEWAY_OTLP_ENDPOINT: http://otel-collector:4317

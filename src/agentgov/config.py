@@ -10,11 +10,17 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
 UNKNOWN_AGENT_MODES = ("reject", "monitor")
 M365_PACKAGE_TYPES = ("custom", "shared", "external", "microsoft")
+# Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
+ENTRA_ISSUER = re.compile(
+    r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
+    r"/(?P<tenant>[^/]+)/v2\.0$"
+)
 
 
 def _coerce(raw: str, target: str) -> Any:
@@ -85,6 +91,13 @@ class Settings:
     oidc_roles_claim: str = "realm_access.roles"
     oidc_role_prefix: str = "agentgov-"
     session_hours: int = 8
+    # Act in Microsoft 365 and Power Platform as the administrator who is signed in
+    # (quarantine Copilot Studio agents, read the Power Platform inventory, block
+    # Microsoft 365 agents): Microsoft accepts these only from a signed-in admin.
+    # Needs sign-in through Microsoft Entra ID (oidc_issuer
+    # https://login.microsoftonline.com/<tenant>/v2.0) and an app registration with
+    # the delegated permissions listed in docs/platforms.md.
+    microsoft_admin_actions: bool = False
 
     # --- Microsoft 365 agent inventory --------------------------------------------
     # An Entra app registration with the Microsoft Graph application permission
@@ -100,6 +113,7 @@ class Settings:
     m365_package_types: str = "custom,shared,external"
     graph_url: str = "https://graph.microsoft.com"
     entra_login_url: str = "https://login.microsoftonline.com"
+    power_platform_url: str = "https://api.powerplatform.com"
 
     # --- Instruction classifier (optional) ----------------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
@@ -191,6 +205,11 @@ class Settings:
                 "set AGENTGOV_M365_TENANT_ID, AGENTGOV_M365_CLIENT_ID and "
                 "AGENTGOV_M365_CLIENT_SECRET together"
             )
+        if self.microsoft_admin_actions and not (self.sso_enabled and self.oidc_issuer):
+            raise ValueError(
+                "AGENTGOV_MICROSOFT_ADMIN_ACTIONS needs single sign-on through Microsoft Entra "
+                "ID: set AGENTGOV_OIDC_ISSUER and AGENTGOV_OIDC_CLIENT_SECRET"
+            )
         self.m365_types()  # raises on unknown package types
         self.guardian_criteria_list()  # raises on unknown criteria
         self.pii_thresholds()  # raises on malformed entries
@@ -239,8 +258,21 @@ class Settings:
         return bool(self.oidc_client_secret and (self.oidc_issuer or self.keycloak_issuer))
 
     def oidc_endpoints(self) -> dict[str, str]:
-        """Issuer and endpoints for administrator sign-in (Keycloak paths by default)."""
+        """Issuer and endpoints for administrator sign-in (Keycloak paths by default,
+        Microsoft Entra ID's when the issuer is an Entra tenant)."""
         issuer = (self.oidc_issuer or self.keycloak_issuer or "").rstrip("/")
+        entra = ENTRA_ISSUER.match(issuer)
+        if entra:
+            tenant = f"{entra['base']}/{entra['tenant']}"
+            return {
+                "issuer": issuer,
+                "authorization_endpoint": self.oidc_authorization_endpoint
+                or f"{tenant}/oauth2/v2.0/authorize",
+                "token_endpoint": self.oidc_token_endpoint or f"{tenant}/oauth2/v2.0/token",
+                "jwks_uri": self.oidc_jwks_url or f"{tenant}/discovery/v2.0/keys",
+                "end_session_endpoint": self.oidc_end_session_endpoint
+                or f"{tenant}/oauth2/v2.0/logout",
+            }
         backchannel = issuer
         if self.keycloak_url and not self.oidc_issuer:
             backchannel = f"{self.keycloak_url.rstrip('/')}/realms/{self.keycloak_realm}"

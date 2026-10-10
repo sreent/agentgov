@@ -105,6 +105,114 @@ class Microsoft365Catalog:
         return self._get(f"{self._packages_url}/{quote(package_id, safe='')}")
 
 
+# The Power Platform inventory query for Copilot Studio agents, a page at a time.
+INVENTORY_QUERY = {
+    "TableName": "PowerPlatformResources",
+    "Clauses": [
+        {
+            "$type": "where",
+            "FieldName": "type",
+            "Operator": "==",
+            "Values": ["'microsoft.copilotstudio/agents'"],
+        }
+    ],
+}
+INVENTORY_PAGE = 1000
+POWER_PLATFORM_HINT = (
+    " (you need the AI administrator, Power Platform administrator or Global administrator "
+    "role, and AgentGov's app registration the Power Platform API permissions "
+    "CopilotStudio.AdminActions.Invoke and ResourceQuery.Resources.Read)"
+)
+GRAPH_HINT = (
+    " (you need an admin role such as AI administrator, AgentGov's app registration the "
+    "delegated permission CopilotPackages.ReadWrite.All, and the tenant a Microsoft Agent 365 "
+    "licence)"
+)
+
+
+class MicrosoftAdmin:
+    """Admin actions Microsoft accepts only from a signed-in administrator.
+
+    Each call takes that administrator's access token (see
+    ``agentgov.identity.delegation``); AgentGov never holds an application
+    permission for them.
+    """
+
+    def __init__(self, settings: Settings, *, http: httpx.Client | None = None) -> None:
+        self.settings = settings
+        self._http = http or httpx.Client(timeout=30)
+
+    def _call(
+        self, url: str, token: str, *, what: str, hint: str, body: Any = None
+    ) -> dict[str, Any]:
+        try:
+            resp = self._http.post(url, json=body, headers={"Authorization": f"Bearer {token}"})
+        except httpx.HTTPError as exc:
+            raise PlatformError(f"{what}: Microsoft is unreachable: {exc}") from exc
+        if resp.status_code >= 300:
+            extra = hint if resp.status_code in (401, 403) else ""
+            raise PlatformError(f"{what}: Microsoft answered {_error(resp)}{extra}")
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    def quarantine(
+        self, token: str, environment_id: str, bot_id: str, *, quarantined: bool
+    ) -> None:
+        """Quarantine a Copilot Studio agent (blocked on every channel), or release it."""
+        action = "SetAsQuarantined" if quarantined else "SetAsUnquarantined"
+        base = self.settings.power_platform_url.rstrip("/")
+        url = (
+            f"{base}/copilotstudio/environments/{quote(environment_id, safe='')}"
+            f"/bots/{quote(bot_id, safe='')}/api/botQuarantine/{action}?api-version=1"
+        )
+        verb = "quarantine" if quarantined else "release"
+        self._call(
+            url,
+            token,
+            what=f"Could not {verb} the agent in Copilot Studio",
+            hint=POWER_PLATFORM_HINT,
+        )
+
+    def copilot_studio_agents(self, token: str) -> list[dict[str, Any]]:
+        """Every Copilot Studio agent in the Power Platform inventory (all pages)."""
+        url = (
+            f"{self.settings.power_platform_url.rstrip('/')}"
+            "/resourcequery/resources/query?api-version=2024-10-01"
+        )
+        rows: list[dict[str, Any]] = []
+        skip_token = ""
+        for _ in range(MAX_PAGES):
+            body = self._call(
+                url,
+                token,
+                what="Could not read the Power Platform inventory",
+                hint=POWER_PLATFORM_HINT,
+                body={
+                    **INVENTORY_QUERY,
+                    "Options": {"Top": INVENTORY_PAGE, "Skip": 0, "SkipToken": skip_token},
+                },
+            )
+            rows.extend(r for r in body.get("data") or [] if isinstance(r, dict))
+            skip_token = body.get("skipToken") or ""
+            if not skip_token:
+                return rows
+        raise PlatformError(f"stopped after {MAX_PAGES} pages of the Power Platform inventory")
+
+    def block_package(self, token: str, package_id: str, *, blocked: bool) -> None:
+        """Block a Microsoft 365 agent for everyone in the organisation, or unblock it."""
+        action = "block" if blocked else "unblock"
+        url = (
+            f"{self.settings.graph_url.rstrip('/')}/beta/copilot/admin/catalog/packages/"
+            f"{quote(package_id, safe='')}/{action}"
+        )
+        self._call(
+            url, token, what=f"Could not {action} the agent in Microsoft 365", hint=GRAPH_HINT
+        )
+
+
 def is_declarative(package: dict[str, Any]) -> bool:
     return any(str(t).lower() == DECLARATIVE_AGENT for t in package.get("elementTypes") or [])
 

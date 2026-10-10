@@ -44,7 +44,7 @@ from agentgov.models import (
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings
 from agentgov.registry import instructions as instructions_svc
-from agentgov.registry.errors import NotFound, ValidationError
+from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
 SOURCES = {"microsoft-365": "Microsoft 365", "copilot-studio": "Copilot Studio"}
 FINDING_TYPES = {
@@ -144,6 +144,9 @@ def upsert(
     if record is None:
         record = PlatformAgent(id=key, source=source, external_id=external_id, agent_id=agent.id)
         session.add(record)
+    elif details.get("quarantined") is None and (record.data or {}).get("quarantined") is not None:
+        # The inventory may not report quarantines: keep the one AgentGov made.
+        details = {**details, "quarantined": record.data["quarantined"]}
     record.agent_id, record.name, record.data = agent.id, name, details
     record.synced_at = ids.utcnow()
     return agent, created
@@ -504,6 +507,49 @@ def refresh_risk(session: Session, settings: Settings) -> None:
         select(Agent).where(Agent.source.like("platform:%"), Agent.status != DELETED)
     ).unique():
         agents_svc.refresh_risk(session, settings, agent)
+
+
+# ------------------------------------------------- acting in Microsoft's platforms
+
+
+def target(session: Session, agent: Agent) -> dict[str, str]:
+    """Where to block ``agent`` in its own platform: the Copilot Studio agent (quarantine
+    needs no Agent 365 licence) when there is one, otherwise the Microsoft 365 package."""
+    records = {
+        r.source: r
+        for r in session.scalars(select(PlatformAgent).where(PlatformAgent.agent_id == agent.id))
+    }
+    studio = records.get("copilot-studio")
+    if studio is not None:
+        environment = (studio.data or {}).get("environment_id")
+        if not environment:
+            raise Conflict(
+                f"the inventory gave no environment for {agent.name}: import it again first"
+            )
+        return {"source": "copilot-studio", "id": studio.external_id, "environment": environment}
+    m365 = records.get("microsoft-365")
+    if m365 is not None:
+        return {"source": "microsoft-365", "id": m365.external_id}
+    raise Conflict(f"{agent.name} is not an agent on Microsoft 365 or Copilot Studio")
+
+
+def record_platform_block(
+    session: Session, agent: Agent, where: dict[str, str], *, blocked: bool, actor: str
+) -> None:
+    """Remember that ``actor`` blocked (or unblocked) the agent in its platform."""
+    record = session.get(PlatformAgent, f"{where['source']}:{where['id']}")
+    if record is not None:
+        flag = "quarantined" if where["source"] == "copilot-studio" else "blocked"
+        record.data = {**(record.data or {}), flag: blocked}
+    ledger.append(
+        session,
+        type="platform.agent_blocked" if blocked else "platform.agent_unblocked",
+        actor=actor,
+        agent=agent,
+        severity="warning" if blocked else "info",
+        resource=f"{where['source']}/{where['id']}",
+        details={"platform": SOURCES[where["source"]], **where},
+    )
 
 
 # -------------------------------------------------------------------- views
