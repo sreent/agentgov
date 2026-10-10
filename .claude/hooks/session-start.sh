@@ -14,4 +14,4 @@ scripts/ci.sh --setup
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   echo "export PATH=\"$PWD/.venv/bin:\$PATH\"" >>"$CLAUDE_ENV_FILE"
 fi
-echo "Checks run locally, not on GitHub Actions: scripts/ci.sh (add --e2e for the full stack)."
+echo "Run the checks with scripts/ci.sh (add --e2e for the full stack); GitHub Actions runs the same script."

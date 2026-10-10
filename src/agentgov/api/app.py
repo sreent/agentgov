@@ -127,13 +127,7 @@ def create_app(
     @app.get("/v1/me", tags=["system"])
     def whoami(principal: Principal = Depends(require(*apikeys.ROLES))) -> dict[str, Any]:
         """The caller's identity and roles, so clients can tailor what they offer."""
-        return {
-            "name": principal.name,
-            "role": principal.role,
-            "roles": sorted(principal.roles),
-            "actor": principal.actor,
-            "via": principal.via,
-        }
+        return principal.describe()
 
     app.include_router(registry_routes.router)
     app.include_router(governance_routes.router)

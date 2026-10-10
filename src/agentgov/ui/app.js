@@ -225,6 +225,29 @@ class ApiError extends Error {
 }
 
 let token = readStore('sessionStorage', TOKEN_KEY);
+// Signed in through single sign-on: the control plane keeps the session and the
+// browser holds only an HttpOnly cookie, so there is no token in this tab.
+let session = false;
+// Who is signed in (GET /v1/me): name, roles and how they authenticated.
+let me = null;
+const READ_ROLES = ['admin', 'approver', 'auditor'];
+
+// What the signed-in person may change. The control plane enforces roles; this
+// only hides controls it would refuse.
+function can(kind) {
+  const roles = me?.roles || [];
+  if (roles.includes('admin')) return true;
+  return kind === 'approve' && roles.includes('approver');
+}
+
+// Reasons /auth/callback sends back (?sso_error=...). Only these fixed texts are shown.
+const SSO_ERRORS = {
+  no_role: 'You signed in, but your account has no AgentGov role. Ask an administrator for agentgov-admin, agentgov-approver or agentgov-auditor.',
+  state: 'That sign-in could not be completed in this browser. Start again.',
+  expired: 'That sign-in expired or was already used. Start again.',
+  provider: 'The identity provider could not complete the sign-in. Try again, or use an API token.',
+  token: "The control plane could not verify the identity provider's response. Try again, or ask an administrator to check the single sign-on settings.",
+};
 
 function describeDetail(detail) {
   if (!detail) return '';
@@ -240,8 +263,8 @@ function describeDetail(detail) {
 
 function friendlyError(status, detail) {
   const d = detail ? `${cap(detail).replace(/\.$/, '')}.` : '';
-  if (status === 401) return 'Your API token was not accepted. Sign in again with a valid token.';
-  if (status === 403) return `Your token's role can't do this. ${d}`.trim();
+  if (status === 401) return session ? 'Your session has ended. Sign in again.' : 'Your API token was not accepted. Sign in again with a valid token.';
+  if (status === 403) return `Your role can't do this. ${d}`.trim();
   if (status === 404) return d || 'Not found.';
   if (status === 409) return d || 'That change conflicts with the current state. Refresh and try again.';
   if (status === 400 || status === 422) return `The control plane rejected the request. ${d}`.trim();
@@ -251,7 +274,8 @@ function friendlyError(status, detail) {
 }
 
 async function api(path, { method = 'GET', body, raw = false, auth = true, signingIn = false } = {}) {
-  const headers = { Accept: 'application/json' };
+  // Required on writes authenticated by the session cookie (other sites cannot set it).
+  const headers = { Accept: 'application/json', 'X-AgentGov-CSRF': '1' };
   if (auth && token) headers.Authorization = `Bearer ${token}`;
   const init = { method, headers, cache: 'no-store' };
   if (body !== undefined) {
@@ -631,7 +655,7 @@ function setActiveNav(key) {
 }
 
 async function route({ soft = false } = {}) {
-  if (!token) return;
+  if (!me) return; // not signed in (by token or single sign-on)
   const { path, params } = parseHash();
   let page = null;
   let match = null;
@@ -739,6 +763,12 @@ function showSignin(message) {
   input.value = '';
   input.focus();
   document.title = 'Sign in · AgentGov';
+  getInfo().then((info) => {
+    const sso = Boolean(info?.sso?.enabled);
+    $('#sso').hidden = !sso;
+    $('#sso-link').href = new URL('auth/login', API_ROOT).href;
+    $('#signin-submit').className = `btn btn--block${sso ? '' : ' btn--primary'}`;
+  });
 }
 
 function enterApp() {
@@ -749,14 +779,17 @@ function enterApp() {
   if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', '#/overview');
   route();
   refreshBadges();
-  Promise.all([getInfo(), api('v1/me').catch(() => null)]).then(([info, me]) => {
+  getInfo().then((info) => {
     if (!info) return;
-    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'Keycloak identities' : 'no identity provider'} · OPA ${info.opa ? 'connected' : 'not configured'}${me ? ` · signed in as ${me.actor}` : ''}`;
+    const who = me ? ` · signed in as ${me.actor}${me.via === 'session' ? ' (single sign-on)' : ''}` : '';
+    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'Keycloak identities' : 'no identity provider'} · OPA ${info.opa ? 'connected' : 'not configured'}${who}`;
   });
 }
 
-function signOut(message) {
+function resetToSignin(message) {
   token = null;
+  session = false;
+  me = null;
   writeStore('sessionStorage', TOKEN_KEY, null);
   $('#toasts').replaceChildren();
   if ($('#dialog').open) $('#dialog').close();
@@ -764,9 +797,23 @@ function signOut(message) {
   showSignin(message);
 }
 
+async function signOut(message) {
+  if (session) {
+    // End the control plane's session, then the identity provider's.
+    try {
+      const out = await api('auth/logout', { method: 'POST', signingIn: true });
+      if (out?.logout_url) {
+        location.assign(out.logout_url);
+        return;
+      }
+    } catch { /* already ended or unreachable: show the sign-in page anyway */ }
+  }
+  resetToSignin(message);
+}
+
 function expireSession() {
-  if (!token) return;
-  signOut('Your API token was rejected. It may have been revoked or rotated. Sign in again.');
+  if (session) resetToSignin('Your session has ended. Sign in again.');
+  else if (token) resetToSignin('Your API token was rejected. It may have been revoked or rotated. Sign in again.');
 }
 
 async function onSignin(event) {
@@ -785,9 +832,11 @@ async function onSignin(event) {
   button.textContent = 'Signing in…';
   try {
     token = value;
-    const pending = await api('v1/approvals?status=pending', { signingIn: true });
+    const who = await api('v1/me', { signingIn: true });
+    if (!who.roles.some((r) => READ_ROLES.includes(r))) throw new ApiError(403, '', `its role is ${who.role}`);
+    me = who;
+    session = false;
     writeStore('sessionStorage', TOKEN_KEY, value);
-    updateBadges({ pendingApprovals: pending.length });
     focusAfterSignin = true;
     enterApp();
   } catch (ex) {
@@ -828,8 +877,35 @@ function boot() {
     if (e.key === 'Escape' && $('#nav').dataset.open === 'true') closeNav(true);
   });
   window.addEventListener('hashchange', () => route());
-  if (token) enterApp();
-  else showSignin();
+  start();
+}
+
+// Resume a token kept in this tab, or a single sign-on session (auth/session
+// answers 200 either way, so a visitor who is not signed in causes no failed
+// request); otherwise show the sign-in page, with the reason a single sign-on
+// attempt failed.
+async function start() {
+  const ssoError = new URLSearchParams(location.search).get('sso_error');
+  if (ssoError) history.replaceState(null, '', location.pathname + location.hash);
+  try {
+    const who = token ? await api('v1/me', { signingIn: true }) : await api('auth/session', { signingIn: true });
+    if (!token && !who.signed_in) {
+      showSignin(ssoError ? SSO_ERRORS[ssoError] || SSO_ERRORS.provider : undefined);
+      return;
+    }
+    if (!who.roles.some((r) => READ_ROLES.includes(r))) {
+      if (!token) await api('auth/logout', { method: 'POST', signingIn: true }).catch(() => null);
+      resetToSignin(`Your role (${who.role}) can't open the admin center. Use an admin, approver or auditor account.`);
+      return;
+    }
+    me = who;
+    session = who.via === 'session';
+    enterApp();
+  } catch (err) {
+    if (token && err.status === 401) resetToSignin('Your API token was rejected. It may have been revoked or rotated. Sign in again.');
+    else if (ssoError) showSignin(SSO_ERRORS[ssoError] || SSO_ERRORS.provider);
+    else showSignin(err.status === 401 ? undefined : err.message);
+  }
 }
 
 /* =================================================================== pages */
@@ -1377,17 +1453,24 @@ function agentHeader(a) {
     agentToolbar(a));
 }
 
+// Sponsors attest their own agents; admins any agent.
+function mayAttest(a) {
+  if (!ATTESTABLE.has(a.status)) return false;
+  return can('admin') || (can('approve') && (a.sponsors || []).includes(me?.name));
+}
+
 function agentToolbar(a) {
-  const buttons = (ACTIONS_BY_STATUS[a.status] || []).map((action) => {
+  const buttons = (can('admin') ? ACTIONS_BY_STATUS[a.status] || [] : []).map((action) => {
     const spec = LIFECYCLE[action];
     return h('button', {
       type: 'button', class: `btn ${spec.cls}`, 'data-focus-key': `lifecycle-${action}`,
       onclick: () => runLifecycle(a, action),
     }, icon(spec.icon), spec.label);
   });
-  if (ATTESTABLE.has(a.status)) {
+  if (mayAttest(a)) {
     buttons.push(h('button', { type: 'button', class: 'btn', 'data-focus-key': 'attest', onclick: () => runAttest(a) }, icon('shield-check'), 'Attest'));
   }
+  if (!buttons.length) return null;
   return h('div', { class: 'toolbar', role: 'group', 'aria-label': 'Agent actions' }, buttons);
 }
 
@@ -1491,7 +1574,7 @@ function riskCard(a) {
   return card({
     title: 'Risk',
     sub: 'Posture factors plus runtime signals from the last 24 hours',
-    actions: [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'recalc', onclick: () => recalcRisk(a) }, icon('refresh'), 'Recalculate')],
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'recalc', onclick: () => recalcRisk(a) }, icon('refresh'), 'Recalculate')] : null,
     body: [
       h('div', { class: 'risk-head' },
         h('span', { class: 'hero-figure' }, fmt(risk.score ?? 0)), h('span', { class: 'of' }, 'of 100'), chip('risk', risk.level || 'low')),
@@ -1543,7 +1626,7 @@ function attestationCard(a) {
   return card({
     title: 'Attestation',
     sub: 'Periodic confirmation by a sponsor that the agent is still needed',
-    actions: ATTESTABLE.has(a.status) ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'attest-card', onclick: () => runAttest(a) }, icon('shield-check'), 'Attest')] : null,
+    actions: mayAttest(a) ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'attest-card', onclick: () => runAttest(a) }, icon('shield-check'), 'Attest')] : null,
     body: [status, facts([
       ['Last attested', att.attested_at ? [timeEl(att.attested_at), att.attested_by ? ` by ${att.attested_by}` : ''] : h('span', { class: 'muted' }, 'Never')],
       ['Review due', att.expires_at ? h('time', { datetime: att.expires_at, title: fullFmt.format(new Date(att.expires_at)) }, dateFmt.format(new Date(att.expires_at))) : null],
@@ -2071,9 +2154,11 @@ function approvalCard(r, agent) {
             ? h('ul', { class: 'reasons', role: 'list' }, r.reasons.map((reason) => h('li', {}, icon('user-check'), h('span', {}, reason))))
             : h('p', { class: 'muted small' }, 'No reason recorded.')),
         h('div', { class: 'stack', style: 'gap:8px' }, h('span', { class: 'field-label' }, 'Arguments (redacted)'), jsonBlock(r.arguments ?? {}))),
-      h('div', { class: 'decide' },
-        h('div', { class: 'field' }, h('label', { for: noteId }, 'Note for the ledger ', h('span', { class: 'muted' }, '(optional)')), note),
-        h('div', { class: 'btn-row' }, denyBtn, approveBtn))));
+      can('approve')
+        ? h('div', { class: 'decide' },
+          h('div', { class: 'field' }, h('label', { for: noteId }, 'Note for the ledger ', h('span', { class: 'muted' }, '(optional)')), note),
+          h('div', { class: 'btn-row' }, denyBtn, approveBtn))
+        : h('p', { class: 'muted small' }, 'An approver or admin decides this request.')));
 }
 
 function approvalHistoryTable(rows) {
@@ -2138,9 +2223,11 @@ function serverCard(ts) {
     toggle.lastChild.textContent = `${open ? 'Hide' : 'Show'} tool catalog (${tools.length})`;
   });
   const actions = [];
-  if (ts.status === 'pending') actions.push(h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': `ts-approve-${ts.name}`, onclick: () => serverAction(ts, 'approve') }, icon('check'), 'Approve'));
-  if (ts.status === 'blocked') actions.push(h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': `ts-unblock-${ts.name}`, onclick: () => serverAction(ts, 'unblock') }, icon('undo'), 'Unblock'));
-  else actions.push(h('button', { type: 'button', class: 'btn btn--danger-quiet', 'data-focus-key': `ts-block-${ts.name}`, onclick: () => serverAction(ts, 'block') }, icon('power'), 'Block server'));
+  if (can('admin')) {
+    if (ts.status === 'pending') actions.push(h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': `ts-approve-${ts.name}`, onclick: () => serverAction(ts, 'approve') }, icon('check'), 'Approve'));
+    if (ts.status === 'blocked') actions.push(h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': `ts-unblock-${ts.name}`, onclick: () => serverAction(ts, 'unblock') }, icon('undo'), 'Unblock'));
+    else actions.push(h('button', { type: 'button', class: 'btn btn--danger-quiet', 'data-focus-key': `ts-block-${ts.name}`, onclick: () => serverAction(ts, 'block') }, icon('power'), 'Block server'));
+  }
   const headingId = nextId('server');
   const trustChip = ts.trust_level === 'verified'
     ? plainChip('Verified', { tone: 'good', iconName: 'shield-check' })
@@ -2202,7 +2289,7 @@ function toolTable(ts) {
           }))
           : h('span', { class: 'muted small' }, 'None')),
         h('td', { 'data-label': 'Status' }, status),
-        h('td', { 'data-label': '' }, changed
+        h('td', { 'data-label': '' }, changed && can('admin')
           ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `approve-tool-${ts.name}-${t.name}`, onclick: () => approveTool(ts, t) }, icon('shield-check'), 'Approve new definition')
           : null));
     }))));
@@ -2345,7 +2432,7 @@ function findingCard(f, agentsById, act) {
   const tone = toneOf('severity', f.severity);
   const agent = f.agent_id ? agentsById.get(f.agent_id) : null;
   const headingId = `finding-title-${f.id}`;
-  const actions = f.status === 'open'
+  const actions = !can('approve') ? [] : f.status === 'open'
     ? [h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('dismiss') }, icon('minus'), 'Dismiss'),
       h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => act('resolve') }, icon('check'), 'Resolve')]
     : [h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('reopen') }, icon('undo'), 'Reopen')];

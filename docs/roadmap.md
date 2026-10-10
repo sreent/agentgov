@@ -14,7 +14,8 @@ and write only the glue.
 | Identity | **Incremental identity reconciliation**: a change notification per agent instead of a periodic full sync | — |
 | Deployment | **Kubernetes packaging**: Helm chart for the control plane and processor, agentgateway via its Kubernetes controller, OPA as a sidecar or deployment | Helm, agentgateway |
 | Deployment | **Multi-replica control plane**: fan out bundle and config change notifications across replicas | PostgreSQL `LISTEN` / `NOTIFY` |
-| Admin access | **Single sign-on for administrators**: OIDC login to the UI and API, with roles mapped from groups | Keycloak |
+| Admin access | **Back-channel logout**: end administrator sessions as soon as the identity provider ends them, instead of at expiry | OpenID Connect Back-Channel Logout (supported by Keycloak) |
+| Security | **Mutual TLS between components**: the gateway, processor, OPA and control plane authenticate each other instead of relying on network isolation | SPIFFE / SPIRE or cert-manager certificates |
 | Detection | **Prompt-injection classifier**: an optional model-based detector next to the heuristics | An open classifier model served behind a small HTTP API |
 | Security operations | **SIEM integration**: stream ledger entries and findings in a standard schema | OCSF, OpenTelemetry logs |
 

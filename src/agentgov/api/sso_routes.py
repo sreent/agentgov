@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from agentgov.api.auth import CSRF_HEADER, SESSION_COOKIE
+from agentgov.api.auth import CSRF_HEADER, SESSION_COOKIE, session_principal
 from agentgov.identity import sso
 
 log = logging.getLogger(__name__)
@@ -96,6 +96,19 @@ def callback(
         path="/",
     )
     return resp
+
+
+@router.get("/session")
+def current_session(request: Request) -> dict[str, Any]:
+    """Whether this browser is signed in through single sign-on, and as whom.
+
+    Always answers 200 (unlike ``/v1/me``), so the UI can check on first load
+    without logging a failed request for every visitor who is not signed in.
+    """
+    principal = session_principal(request)
+    if principal is None:
+        return {"signed_in": False}
+    return {"signed_in": True, **principal.describe()}
 
 
 @router.post("/logout")

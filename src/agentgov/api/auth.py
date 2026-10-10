@@ -10,6 +10,7 @@ from __future__ import annotations
 import hmac
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import HTTPException, Request
 
@@ -47,6 +48,15 @@ class Principal:
     def is_admin(self) -> bool:
         return "admin" in self.roles
 
+    def describe(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "role": self.role,
+            "roles": sorted(self.roles),
+            "actor": self.actor,
+            "via": self.via,
+        }
+
 
 def _bearer(request: Request) -> str | None:
     header = request.headers.get("authorization", "")
@@ -70,11 +80,19 @@ def authenticate(request: Request) -> Principal | None:
             if key is not None:
                 return Principal(key.name, key.role, via="api_key")
         return None
-    cookie = request.cookies.get(SESSION_COOKIE)
-    if not cookie or not settings.sso_enabled:
+    if not request.cookies.get(SESSION_COOKIE) or not settings.sso_enabled:
         return None
     if request.method not in SAFE_METHODS and request.headers.get(CSRF_HEADER) != "1":
         raise HTTPException(403, "cross-site request refused: send the X-AgentGov-CSRF header")
+    return session_principal(request)
+
+
+def session_principal(request: Request) -> Principal | None:
+    """The person signed in through single sign-on, from the session cookie."""
+    rt = request.app.state.rt
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if not cookie or not rt.settings.sso_enabled:
+        return None
     with rt.db.session() as session:
         record = sso.lookup(session, cookie)
         roles = [r for r in sso.SSO_ROLES if record is not None and r in (record.roles or [])]

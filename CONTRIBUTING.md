@@ -38,8 +38,8 @@ and rebuild the image with `docker compose up -d --build control-plane processor
 
 ## Checks
 
-The checks run locally, so pushes and pull requests use no GitHub Actions minutes. Run
-them before you open a pull request:
+`scripts/ci.sh` runs the same checks as GitHub Actions, which calls it on every pull
+request. Run it before you open one:
 
 ```bash
 scripts/ci.sh             # ruff, opa fmt/check/test, pytest, image build and smoke test
@@ -49,8 +49,9 @@ scripts/ci.sh --matrix    # also: the tests on each Python 3.11-3.13 installed
 
 Run `--e2e` when you change the processor, the Rego library, the gateway configuration or
 the identity reconciler. It uses its own Compose project and the stack's usual ports, so
-stop a running local stack first. The GitHub workflows (`ci`, `e2e`) run the same checks
-but only when started by hand from the Actions tab.
+stop a running local stack first. On GitHub, the `ci` workflow runs the checks on Python
+3.11, 3.12 and 3.13, and the `e2e` workflow runs the end-to-end check for pull requests
+that change code or the deployment.
 
 ## Where things live
 

@@ -45,13 +45,17 @@ AgentGov is pre-1.0. Security fixes are made on `main` and included in the next 
 The reference stack in `deploy/compose` is for evaluation. For anything else:
 
 * Replace every default secret (`deploy/compose/.env.example` lists them), in particular
-  `AGENTGOV_ADMIN_TOKEN`, `AGENTGOV_SERVICE_TOKEN`, the Keycloak client secret and
+  `AGENTGOV_ADMIN_TOKEN`, `AGENTGOV_SERVICE_TOKEN`, the Keycloak client secrets and
   database passwords. Use long random values.
-* After bootstrapping, create role-scoped API keys and stop using the bootstrap admin
-  token.
-* Terminate TLS in front of the control plane, Keycloak and agentgateway. Keep OPA, the
-  processor, Presidio and the MCP servers on a private network that agents cannot reach,
-  so that the gateway is the only path to tools.
+* Delete the realm's demo users (`admin`, `alice`, `audrey`) and sign people in through
+  your own directory, federated into Keycloak, with the `agentgov-*` roles assigned to
+  groups. Use role-scoped API keys for automation, and keep the bootstrap admin token for
+  break-glass access only.
+* Terminate TLS in front of the control plane, Keycloak and agentgateway, and set
+  `AGENTGOV_PUBLIC_URL` to the control plane's `https://` address so that session
+  cookies are marked `Secure`.
+* Keep OPA, the processor, Presidio and the MCP servers on a private network that agents
+  cannot reach, so that the gateway is the only path to tools.
 * Keep `AGENTGOV_UNKNOWN_AGENT_MODE=reject` (the default) and the processor fail-closed.
   Use `monitor` only for discovery and only where that is acceptable.
 * Back up PostgreSQL, export the ledger regularly (`GET /v1/ledger/export`) and store the
@@ -68,3 +72,7 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   processes or see traffic that bypasses the gateway.
 * Connections between components are not mutually authenticated yet (mTLS is on the
   [roadmap](docs/roadmap.md)); rely on network isolation.
+* Administrators' roles are read from the identity provider when they sign in. Removing a
+  role or disabling an account there takes effect at the next sign-in; a session that is
+  already open lasts until it expires (`AGENTGOV_SESSION_HOURS`, default 8) or the person
+  signs out.

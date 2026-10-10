@@ -57,6 +57,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Access reviews / sponsor attestation | ✅ | Periodic attestation by sponsors; expiry raises findings |
 | Access packages for agents | ⏳ | — |
 | Kill switch | ✅ | `block` disables the Keycloak client and denies at the gateway within a second (OPA long polling) |
+| Administrators sign in with their organisation account; delegated admin roles | ✅ | Single sign-on to the admin UI and API through **Keycloak** (which can federate an existing directory); provider roles map to `admin`, `approver`, `auditor`, `registrar` |
 
 ### Visualization and observability
 

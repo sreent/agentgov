@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2329  # check functions are called through run()
-# Runs this repository's checks locally: the same steps as the GitHub workflows,
-# without spending Actions minutes.
+# Runs this repository's checks. The GitHub workflows call this script too, so a
+# local run matches CI.
 #
 #   scripts/ci.sh             lint, Rego checks, tests and the image build (ci.yml)
 #   scripts/ci.sh --e2e       all of the above, then the full stack and the demo (e2e.yml)

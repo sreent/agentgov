@@ -204,6 +204,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .signin-title { font-size: var(--fs-xl); margin-top: 8px; }
 .signin-lede { color: var(--ink-2); }
+.sso { display: flex; flex-direction: column; gap: 14px; }
+.signin-or { display: flex; align-items: center; gap: 12px; color: var(--ink-3); font-size: var(--fs-sm); }
+.signin-or::before, .signin-or::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 
 /* ----------------------------------------------------------------- shell */
 
