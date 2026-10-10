@@ -1,36 +1,40 @@
 # Brings up the full reference stack (Keycloak, OPA, agentgateway, Presidio,
 # OTel Collector, control plane, processor, demo MCP server) and drives every
-# governance control with a real MCP client. Manual only, to save Actions
-# minutes; the same run happens locally with scripts/ci.sh --e2e.
+# governance control with a real MCP client: scripts/ci.sh --e2e-only. Runs on
+# main, on pull requests that change code or the deployment, and on demand.
 name: e2e
 
 on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "src/**"
+      - "deploy/**"
+      - "examples/**"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "scripts/ci.sh"
+      - ".github/workflows/e2e.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   compose:
+    name: Stack, demo and ledger
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      AGENTGOV_URL: http://localhost:8000
-      AGENTGOV_TOKEN: dev-admin-token
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Start the stack
-        run: docker compose -f deploy/compose/docker-compose.yml up -d --build --wait --wait-timeout 600
-      - run: pip install -e ".[demo]"
-      - name: Register the demo blueprint, tool server, agent and policy
-        run: agentgov apply -f examples/manifests
-      - name: Run the governance walkthrough
-        run: python examples/agents/demo_agent.py
-      - name: Verify the evidence ledger
-        run: agentgov ledger verify
-      - name: Logs on failure
-        if: failure()
-        run: docker compose -f deploy/compose/docker-compose.yml logs --no-color --tail 200
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: scripts/ci.sh --e2e-only

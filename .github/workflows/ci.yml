@@ -1,64 +1,45 @@
-# Manual only (Actions -> ci -> Run workflow), so pushes and pull requests use
-# no Actions minutes. The same checks run locally with scripts/ci.sh.
+# Runs scripts/ci.sh, the same checks contributors run locally: ruff, opa
+# fmt/check/test and pytest on each supported Python, plus the image build and
+# smoke test once.
 name: ci
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  OPA_VERSION: 1.21.1
-  AGENTGATEWAY_IMAGE: ghcr.io/agentgateway/agentgateway:v1.6.0
+# A new push to a pull request replaces its older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  lint:
+  checks:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install "ruff==0.17.0"
-      - run: ruff check src tests examples
-      - run: ruff format --check src tests examples
-      - uses: open-policy-agent/setup-opa@v2
-        with:
-          version: ${{ env.OPA_VERSION }}
-      - name: Rego format, strict compile and unit tests
-        run: |
-          test -z "$(opa fmt --list src/agentgov/policies examples/manifests/policies)"
-          opa check --strict src/agentgov/policies
-          opa test -v src/agentgov/policies
-
-  test:
-    runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - name: Python 3.12 and image
+            python-version: "3.12"
+            args: ""
+          - name: Python 3.11
+            python-version: "3.11"
+            args: --quick
+          - name: Python 3.13
+            python-version: "3.13"
+            args: --quick
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: open-policy-agent/setup-opa@v2
-        with:
-          version: ${{ env.OPA_VERSION }}
-      - name: Pull agentgateway (validates generated configs)
-        if: matrix.python-version == '3.12'
-        run: docker pull "$AGENTGATEWAY_IMAGE"
-      - run: pip install -e ".[dev,postgres]"
-      - run: pytest -q
-
-  image:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build the control plane / processor image
-        run: docker build -t agentgov:ci .
-      - name: Smoke test
-        run: |
-          docker run --rm agentgov:ci version
-          docker run --rm --entrypoint opa agentgov:ci version
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: scripts/ci.sh ${{ matrix.args }}
