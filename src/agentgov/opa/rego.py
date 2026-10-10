@@ -39,7 +39,22 @@ SMOKE_INPUTS: list[dict[str, Any]] = [
         "result": {"content": [{"type": "text", "text": "ok"}]},
         "detections": {"categories": ["pii"], "entities": ["EMAIL_ADDRESS"]},
     },
+    # A Copilot Studio agent's tool call (threat detection), decided by its own package.
+    {
+        "platform": "copilot-studio",
+        "agent": {"platform_id": "smoke-bot", "environment_id": "smoke-env", "published": True},
+        "user": {"id": "smoke-user"},
+        "tool": {"id": "smoke-tool", "type": "ConnectorTool", "name": "tool"},
+        "arguments": {"text": "hello", "amount": 10},
+        "detections": {"categories": [], "entities": [], "prompt_injection": False},
+    },
 ]
+
+
+def _decision_for(sample: dict[str, Any]) -> str:
+    if sample.get("platform") == "copilot-studio":
+        return "data.agentgov.copilotstudio.decision"
+    return "data.agentgov.mcp.decision"
 
 
 def opa_binary() -> str | None:
@@ -115,7 +130,7 @@ def check_custom_policy(
                     str(data_file),
                     "--input",
                     str(input_file),
-                    "data.agentgov.mcp.decision",
+                    _decision_for(sample),
                 ],
                 capture_output=True,
                 text=True,

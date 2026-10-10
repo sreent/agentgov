@@ -124,6 +124,52 @@ Before a policy is accepted, the control plane compiles it with the library
 it every later registry change, including blocks — is rejected with the compiler's
 message instead of being shipped.
 
+## Copilot Studio's tool calls
+
+With [Copilot Studio threat detection](microsoft-connections.md#copilot-studio-threat-detection)
+connected, the same OPA also decides the tool calls of Copilot Studio agents, through
+`data.agentgov.copilotstudio.decision`. Its built-in rules deny a call when the agent is
+blocked in AgentGov or critical risk, when the tool's connector isn't on the [connector
+allowlist](platforms.md#connector-allowlist), when the inputs contain credentials, and
+when an earlier tool result in the plan carried instructions aimed at the agent.
+
+Organisation policies' `deny` rules apply to these calls too. Copilot Studio can't wait
+for an approver or change a tool's inputs, so `require_approval` and `redact` don't. The
+input is different, and `input.platform` tells the two apart:
+
+```json
+{
+  "platform": "copilot-studio",
+  "agent": {"id": "agt_…", "platform_id": "…", "environment_id": "…", "tenant_id": "…",
+            "published": true},
+  "user": {"id": "…"},                        // the Entra object ID of the agent's user
+  "tool": {"id": "…", "type": "ConnectorTool", "name": "Send an email",
+           "connector": "shared_office365"},  // no connector for tools that aren't one
+  "arguments": {"to": "…"},
+  "detections": {"categories": [], "prompt_injection": false}
+}
+```
+
+`input.agent.id` is missing when AgentGov doesn't know the agent yet. `ctx.agent` and
+`ctx.label(name)` work as they do for the gateway; `ctx.server` and `ctx.tool` don't apply.
+A policy for these calls looks like this:
+
+```rego
+package agentgov.custom.studio_mail
+
+import data.agentgov.context as ctx
+
+deny contains "Only agents labelled for it may send email from Copilot Studio" if {
+	input.platform == "copilot-studio"
+	input.tool.connector == "shared_office365"
+	ctx.label("send-email") != "true"
+}
+```
+
+Rules written for the gateway look at `input.phase` and `input.resource`, which these
+calls don't have, so they don't apply here. In `monitor` mode, nothing is blocked:
+the ledger records what the policies would have decided.
+
 ## Testing policies
 
 * **Unit tests**: the library's tests live in `src/agentgov/policies/tests/`; run

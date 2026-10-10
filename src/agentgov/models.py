@@ -253,6 +253,17 @@ class PlatformSync(Base):
     counts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class IntegrationState(Base):
+    """Where an integration with another service got to, between runs (a cursor, a
+    pending query, the permissions an app was granted)."""
+
+    __tablename__ = "integration_state"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
 class AgentInstructions(Base):
     """What an agent is instructed to do (its system prompt), from one source, and
     what scanning found in it. Credentials in the text are redacted before storing."""

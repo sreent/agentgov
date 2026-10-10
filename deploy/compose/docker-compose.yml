@@ -74,7 +74,7 @@ services:
     environment:
       <<: *agentgov-env
       AGENTGOV_DATABASE_URL: postgresql+psycopg://agentgov:${POSTGRES_PASSWORD:-agentgov}@postgres:5432/agentgov
-      AGENTGOV_PUBLIC_URL: http://localhost:8000
+      AGENTGOV_PUBLIC_URL: ${AGENTGOV_PUBLIC_URL:-http://localhost:8000}
       AGENTGOV_ADMIN_TOKEN: ${AGENTGOV_ADMIN_TOKEN:-dev-admin-token}
       AGENTGOV_KEYCLOAK_URL: http://keycloak:8080
       AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
@@ -92,10 +92,19 @@ services:
       AGENTGOV_GATEWAY_OTLP_ENDPOINT: http://otel-collector:4317
       AGENTGOV_PROCESSOR_ADDRESS: processor:50051
       AGENTGOV_POSTURE_INTERVAL_SECONDS: "60"
-      # Microsoft 365 agent catalog sync (docs/platforms.md). Off while these are empty.
+      # AgentGov's Microsoft app registration: the Microsoft 365 agent catalog, Entra Agent
+      # ID, the Purview audit log and Defender alerts, each with its own permission
+      # (docs/microsoft-connections.md). Off while these are empty.
       AGENTGOV_M365_TENANT_ID: ${AGENTGOV_M365_TENANT_ID:-}
       AGENTGOV_M365_CLIENT_ID: ${AGENTGOV_M365_CLIENT_ID:-}
       AGENTGOV_M365_CLIENT_SECRET: ${AGENTGOV_M365_CLIENT_SECRET:-}
+      AGENTGOV_M365_SYNC_INTERVAL_SECONDS: ${AGENTGOV_M365_SYNC_INTERVAL_SECONDS:-3600}
+      # Copilot Studio asks AgentGov's policies before each tool call (off, monitor, enforce).
+      AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION: ${AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION:-off}
+      AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS: ${AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS:-}
+      AGENTGOV_COPILOT_STUDIO_TENANT_ID: ${AGENTGOV_COPILOT_STUDIO_TENANT_ID:-}
+      AGENTGOV_COPILOT_STUDIO_AUDIENCES: ${AGENTGOV_COPILOT_STUDIO_AUDIENCES:-}
+      AGENTGOV_COPILOT_STUDIO_ON_ERROR: ${AGENTGOV_COPILOT_STUDIO_ON_ERROR:-block}
       # Classifier for agent instructions (docs/instructions.md); see docker-compose.guardian.yml.
       AGENTGOV_GUARDIAN_URL: ${AGENTGOV_GUARDIAN_URL:-}
       AGENTGOV_GUARDIAN_API_KEY: ${AGENTGOV_GUARDIAN_API_KEY:-}

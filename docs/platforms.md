@@ -2,21 +2,30 @@
 
 In an organisation that uses Microsoft 365, most agents don't call tools through
 AgentGov's gateway. People build them in Copilot Studio or Agent Builder, or install
-them from partners, and they run inside Microsoft 365. AgentGov can't sit in front of
-these agents, but it can govern what Microsoft reports about them. The **Platforms**
-page (and `agentgov platforms`) brings two sources into the registry:
+them from partners, and they run inside Microsoft 365. AgentGov's gateway can't sit in
+front of these agents, but AgentGov can govern what Microsoft reports about them. The
+**Platforms** page (and `agentgov platforms`) brings three sources into the registry:
 
 * the organisation's **Microsoft 365 agent catalog**, synced from Microsoft Graph;
 * the **Copilot Studio inventory**: Copilot Studio and Agent Builder agents, imported
-  from the Power Platform inventory together with the connectors each one uses.
+  from the Power Platform inventory together with the connectors each one uses;
+* **Microsoft Entra Agent ID**: the tenant's agent identities, linked to the agents
+  above, plus agents built elsewhere that have one, such as in Microsoft Foundry
+  ([details](microsoft-connections.md#microsoft-entra-agent-id)).
 
-Each agent becomes a registry agent with the source `platform:microsoft-365` or
-`platform:copilot-studio`. It starts as `discovered`, with an "agent to review" finding.
-Adopt it to give it an owner, sponsors and periodic attestation, like any other agent.
-AgentGov issues these agents no gateway credentials and doesn't apply blueprints to them,
-because they never call the gateway. When both sources report the same agent (a Copilot
-Studio agent published to Microsoft 365), AgentGov matches them by Entra agent ID when
-both carry one.
+Each agent becomes a registry agent with the source `platform:microsoft-365`,
+`platform:copilot-studio` or `platform:entra-agent-id`. It starts as `discovered`, with an
+"agent to review" finding. Adopt it to give it an owner, sponsors and periodic
+attestation, like any other agent. AgentGov issues these agents no gateway credentials
+and doesn't apply blueprints to them, because they never call the gateway. When more than
+one source reports the same agent (a Copilot Studio agent published to Microsoft 365, and
+its Entra agent identity), AgentGov matches them by Entra agent ID.
+
+Microsoft's other services can tell AgentGov more, or let it act: the Purview audit log
+(who uses each agent, and attacks on them), Defender's alerts, Power Platform's connector
+policies and Copilot Studio's threat detection. Each one is optional, and AgentGov works
+with whichever it can reach. [Connecting AgentGov to Microsoft's
+services](microsoft-connections.md) covers them all.
 
 **On its own, AgentGov reads these platforms; it doesn't change them.** Blocking or
 deleting one of these agents in AgentGov records the decision in the registry and the
@@ -25,7 +34,10 @@ Microsoft 365 admin center (**Agents**), in the Power Platform admin center (**M
 Inventory**), or from AgentGov itself if admins sign in through Microsoft Entra ID (see
 [Acting as the signed-in admin](#acting-as-the-signed-in-admin)). Microsoft's APIs for
 blocking agents accept only a signed-in administrator, not an application, so AgentGov
-can only block an agent on behalf of an admin who signed in.
+can only block an agent on behalf of an admin who signed in. With [Copilot Studio threat
+detection](microsoft-connections.md#copilot-studio-threat-detection) enforcing, blocking a
+Copilot Studio agent in AgentGov also stops its tool calls, because Copilot Studio asks
+AgentGov before each one.
 
 ## Microsoft 365 agent catalog
 
@@ -33,9 +45,9 @@ AgentGov reads the catalog through the Microsoft Graph [Package Management
 API][packages], as an application, so nobody needs to be signed in. It lists the
 packages that Microsoft 365 Copilot can host
 (`GET /v1.0/copilot/admin/catalog/packages?$filter=supportedHosts/any(h:h eq 'Copilot')`).
-Microsoft requires a Microsoft Agent 365 licence for this API. Without one, leave the
-sync off: nothing else in AgentGov needs Agent 365, and the Copilot Studio import below
-works without it.
+Microsoft requires a Microsoft Agent 365 licence for this API. Without one, don't grant
+the permission below: AgentGov then leaves the catalog out, and the Copilot Studio import
+below works without it.
 
 1. In the Microsoft Entra admin center, register an application (**App registrations >
    New registration**).
@@ -53,8 +65,10 @@ works without it.
 
 The control plane syncs when it starts and every hour after that
 (`AGENTGOV_M365_SYNC_INTERVAL_SECONDS`; `0` syncs only on demand). Admins can sync at any
-time with **Sync now** or `agentgov platforms sync`. A failed sync is shown on the
-Platforms page with Microsoft's error.
+time with **Sync now** or `agentgov platforms sync microsoft-365`. A failed sync is shown
+on the Platforms page with Microsoft's error. The same app registration can also read
+Entra Agent ID, the Purview audit log and Defender's alerts, each with a permission of its
+own ([AgentGov's app registration](microsoft-connections.md#agentgovs-app-registration)).
 
 By default AgentGov imports agents built in your organisation (`custom`), shared by
 their users (`shared`) and installed from partners (`external`), but not Microsoft's own.
@@ -143,8 +157,20 @@ connector is approved, nothing is flagged. After that, every agent that uses a c
 not on the list gets a `platform.unapproved_connector` finding. Approving or removing a
 connector is recorded in the ledger and takes effect at once.
 
-The allowlist reports; it does not enforce. To stop makers from using a connector,
-use Power Platform data policies (DLP) and keep them consistent with the allowlist.
+On its own, the allowlist reports; it does not enforce. Two optional connections make it
+enforce:
+
+* **Push to Power Platform** (`agentgov platforms push-connector-policy`) makes Power
+  Platform block every other connector, as an [advanced connector
+  policy](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform)
+  on the environments an admin picks. It applies to apps and flows as well as agents, so
+  AgentGov shows what it would do first.
+* [Copilot Studio threat
+  detection](microsoft-connections.md#copilot-studio-threat-detection) blocks a tool call
+  that uses a connector not on the list, when Copilot Studio names the connector.
+
+Without either, use Power Platform data policies (DLP) and keep them consistent with the
+allowlist.
 
 ## Acting as the signed-in admin
 
@@ -193,6 +219,7 @@ action under their name, and so does the ledger (`platform.agent_blocked`,
    |---|---|---|
    | Power Platform API | `CopilotStudio.AdminActions.Invoke` | Quarantine and release Copilot Studio agents |
    | Power Platform API | `ResourceQuery.Resources.Read` | Sync the Copilot Studio inventory |
+   | Power Platform API | `EnvironmentManagement.Groups.Read` | [Push the connector allowlist](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform) to environment groups (optional) |
    | Microsoft Graph | `CopilotPackages.ReadWrite.All` | Block Microsoft 365 agents (optional; needs Agent 365) |
 
    If **Power Platform API** isn't listed under **APIs my organization uses**, add it to
@@ -251,7 +278,8 @@ See [Signing in](administration.md#signing-in) for how the CLI keeps its session
 | Task | Admin UI | CLI | API |
 |---|---|---|---|
 | See each source and its last sync | Platforms | `agentgov platforms status` | `GET /v1/platforms` |
-| Sync the Microsoft 365 catalog | Platforms > **Sync now** | `agentgov platforms sync` | `POST /v1/platforms/microsoft-365/sync` |
+| Sync the Microsoft 365 catalog | Platforms > **Sync now** | `agentgov platforms sync microsoft-365` | `POST /v1/platforms/microsoft-365/sync` |
+| Sync every connection AgentGov's app may use | Platforms > Microsoft connections > **Sync all** | `agentgov platforms sync` | `POST /v1/platforms/sync` |
 | Sync the Copilot Studio inventory, as you | Platforms > Copilot Studio > **Sync now** | `agentgov platforms sync copilot-studio` | `POST /v1/platforms/copilot-studio/sync` |
 | Import the Copilot Studio inventory | Platforms > **Import inventory** | `agentgov platforms import FILE` | `POST /v1/platforms/copilot-studio/import` |
 | Quarantine or block an agent in its platform, as you | Agent > Copilot Studio or Microsoft 365 card, or **Block** / **Unblock** | `agentgov agents platform-block\|platform-unblock REF`, or `agentgov agents block\|unblock REF --in-platform` | `POST /v1/agents/{ref}/platform/block\|unblock` |
@@ -259,12 +287,13 @@ See [Signing in](administration.md#signing-in) for how the CLI keeps its session
 | See the connectors in use | Platforms > Connectors | `agentgov platforms connectors` | `GET /v1/platforms/connectors` |
 | Approve a connector | Platforms > **Approve** | `agentgov platforms approve-connector shared_office365 --note "…"` | `PUT /v1/platforms/connectors/{id}/approval` |
 | Remove an approval | Platforms > **Remove approval** | `agentgov platforms unapprove-connector shared_office365` | `DELETE /v1/platforms/connectors/{id}/approval` |
+| Push the allowlist into Power Platform, as you | Platforms > Connectors > **Push to Power Platform** | `agentgov platforms connector-policy`, then `push-connector-policy --group ID` | `GET`/`POST /v1/platforms/connector-policy` |
 | What a platform reports about one agent | Agent page | `agentgov agents get REF` | `platforms` in `GET /v1/agents/{ref}` |
 
 Auditors and approvers can see everything here. Syncing, importing, changing the
-allowlist and acting in a platform need an admin. Acting in a platform, and syncing the
-Copilot Studio inventory, also need an admin who signed in through Entra ID: an API key
-can't do them.
+allowlist and acting in a platform need an admin. Acting in a platform, syncing the
+Copilot Studio inventory and pushing the allowlist into Power Platform also need an admin
+who signed in through Entra ID: an API key can't do them.
 
 [packages]: https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/api/admin-settings/package/copilotpackages-list
 [inventory-schema]: https://learn.microsoft.com/en-us/microsoft-copilot-studio/admin-agent-inventory

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.identity.delegation import GRAPH, POWER_PLATFORM, DelegationError
+from agentgov.platforms import connections, threat_detection
 from agentgov.platforms.microsoft import PlatformError
-from agentgov.registry import agents, platforms
+from agentgov.registry import agents, connector_policy, platforms
 
 router = APIRouter(prefix="/v1/platforms", tags=["platforms"])
 agent_router = APIRouter(prefix="/v1/agents", tags=["platforms"])
@@ -43,24 +45,58 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
     rt = request.app.state.rt
     with rt.db.session() as s:
         view = platforms.overview(s, m365_configured=rt.m365 is not None)
-    # Whether signed-in administrators can act in Microsoft through AgentGov.
-    return {**view, "admin_actions": rt.delegations is not None}
+        detection = threat_detection.summary(s, rt.settings.copilot_studio_threat_detection)
+        links = connections.state(s, rt.settings, threat_detection=detection)
+    return {
+        **view,
+        # Whether signed-in administrators can act in Microsoft through AgentGov.
+        "admin_actions": rt.delegations is not None,
+        "threat_detection": detection,
+        "connections": links,
+    }
+
+
+NOT_CONFIGURED = (
+    "AgentGov's Microsoft app registration is not configured: set AGENTGOV_M365_TENANT_ID, "
+    "AGENTGOV_M365_CLIENT_ID and AGENTGOV_M365_CLIENT_SECRET"
+)
+
+
+def _app_sync(rt: Any, key: str, actor: str) -> dict[str, Any]:
+    if rt.m365 is None:
+        raise HTTPException(409, NOT_CONFIGURED)
+    try:
+        outcome = rt.sync_microsoft([key], actor=actor)[key]
+    except PlatformError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if "lacks_permission" in outcome:
+        raise HTTPException(
+            409,
+            "AgentGov's app registration lacks the application permission "
+            f"{outcome['lacks_permission']}: grant it, with admin consent, then sync again",
+        )
+    if "error" in outcome:
+        raise HTTPException(502, outcome["error"])
+    return outcome
+
+
+@router.post("/sync")
+def sync_all(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
+    """Run every connection AgentGov's app registration may use (they also run on a
+    schedule); returns each one's counts, its error, or the permission it lacks."""
+    rt = request.app.state.rt
+    if rt.m365 is None:
+        raise HTTPException(409, NOT_CONFIGURED)
+    try:
+        return rt.sync_microsoft(actor=principal.actor)
+    except PlatformError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @router.post("/microsoft-365/sync")
-def sync_microsoft_365(request: Request, principal: Principal = Depends(admin)) -> dict[str, int]:
+def sync_microsoft_365(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
     """Read the Microsoft 365 agent catalog now (it is also read on a schedule)."""
-    rt = request.app.state.rt
-    if rt.m365 is None:
-        raise HTTPException(
-            409,
-            "Microsoft 365 sync is not configured: set AGENTGOV_M365_TENANT_ID, "
-            "AGENTGOV_M365_CLIENT_ID and AGENTGOV_M365_CLIENT_SECRET",
-        )
-    try:
-        return rt.sync_microsoft_365(actor=principal.actor)
-    except PlatformError as exc:
-        raise HTTPException(502, str(exc)) from exc
+    return _app_sync(request.app.state.rt, "microsoft-365", principal.actor)
 
 
 @router.post("/copilot-studio/import")
@@ -92,6 +128,16 @@ def sync_copilot_studio(request: Request, principal: Principal = Depends(admin))
         counts = platforms.import_copilot_studio(s, rows, actor=principal.actor)
         platforms.refresh_risk(s, rt.settings)
         return counts
+
+
+@router.post("/{source}/sync")
+def sync_source(
+    request: Request, source: str, principal: Principal = Depends(admin)
+) -> dict[str, Any]:
+    """Run one of the app's connections now: entra-agent-id, purview-audit or defender."""
+    if source not in connections.APP_CONNECTIONS:
+        raise HTTPException(404, f"no connection {source!r} to sync")
+    return _app_sync(request.app.state.rt, source, principal.actor)
 
 
 @router.get("/connectors")
@@ -129,6 +175,134 @@ def remove_approval(
         platforms.remove_approval(s, connector_id, actor=principal.actor)
         platforms.refresh_risk(s, rt.settings)
     return {"connector_id": platforms.connector_key(connector_id), "approved": False}
+
+
+# ------------------------------------------------- the allowlist in Power Platform
+
+
+class PolicyTarget(BaseModel):
+    scope: Literal["group", "environment"]
+    id: str = Field(min_length=1, max_length=100)
+
+
+class PolicyPush(BaseModel):
+    targets: list[PolicyTarget] = Field(min_length=1)
+
+
+def _policy_targets(rt: Any, token: str) -> list[dict[str, Any]]:
+    """Environment groups, and environments with Copilot Studio agents, with the
+    policies applied to each."""
+    admin_api = rt.microsoft_admin
+    targets = []
+    for group in admin_api.environment_groups(token):
+        assigned = admin_api.policy_assignments(token, "group", str(group.get("id")))
+        targets.append(
+            {
+                "scope": "group",
+                "id": str(group.get("id")),
+                "name": group.get("displayName") or str(group.get("id")),
+                "assigned": [a.get("policyId") for a in assigned],
+            }
+        )
+    with rt.db.session() as s:
+        environments = connector_policy.studio_environments(s)
+    for environment, count in sorted(environments.items()):
+        assigned = admin_api.policy_assignments(token, "environment", environment)
+        targets.append(
+            {
+                "scope": "environment",
+                "id": environment,
+                "name": environment,
+                "agents": count,
+                "assigned": [a.get("policyId") for a in assigned],
+            }
+        )
+    return targets
+
+
+@router.get("/connector-policy")
+def connector_policy_preview(request: Request, principal: Principal = Depends(admin)) -> dict:
+    """What pushing the connector allowlist into Power Platform would do, read as the
+    signed-in administrator."""
+    rt = request.app.state.rt
+    token = _as_signed_in_admin(rt, principal, POWER_PLATFORM)
+    try:
+        policies = rt.microsoft_admin.connector_policies(token)
+        targets = _policy_targets(rt, token)
+    except PlatformError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    with rt.db.session() as s:
+        view = connector_policy.preview(s, policies, targets)
+        return {**view, "last_push": connector_policy.pushed(s) or None}
+
+
+@router.post("/connector-policy")
+def push_connector_policy(
+    request: Request, body: PolicyPush, principal: Principal = Depends(admin)
+) -> dict[str, Any]:
+    """Make Power Platform's connector policy "AgentGov connector allowlist" allow
+    exactly the approved connectors, and apply it to ``targets``. Every other
+    connector is blocked there, for apps and flows as well as agents."""
+    rt = request.app.state.rt
+    with rt.db.session() as s:
+        allowlist = connector_policy.approved(s)
+    if not allowlist:
+        raise HTTPException(
+            409,
+            "the connector allowlist is empty: approve at least one connector first "
+            "(Power Platform would block every connector)",
+        )
+    token = _as_signed_in_admin(rt, principal, POWER_PLATFORM)
+    admin_api = rt.microsoft_admin
+    try:
+        policies = admin_api.connector_policies(token)
+        mine = connector_policy.ours(policies)
+        mine_id = str(mine["id"]) if mine is not None else None
+        names = {str(p.get("id")): p.get("name") for p in policies}
+        others = {str(p.get("id")) for p in policies if connector_policy.is_connector_policy(p)} - {
+            mine_id
+        }
+        to_apply = []
+        for target in body.targets:
+            assigned = {
+                str(a.get("policyId"))
+                for a in admin_api.policy_assignments(token, target.scope, target.id)
+            }
+            if assigned & others:
+                taken = ", ".join(sorted(str(names.get(a) or a) for a in assigned & others))
+                raise HTTPException(
+                    409,
+                    f"{target.scope} {target.id} already has the connector policy {taken}, and "
+                    "an environment takes one: remove it in the Power Platform admin center, "
+                    "or add AgentGov's connectors to it there",
+                )
+            if mine_id not in assigned:
+                to_apply.append(target)
+        saved = admin_api.save_connector_policy(
+            token, mine_id, connector_policy.policy_body(allowlist, mine)
+        )
+    except PlatformError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    policy_id = str(saved.get("id") or mine_id or "")
+    if not policy_id:
+        raise HTTPException(502, "Power Platform saved the policy but gave it no ID")
+    applied: list[dict[str, Any]] = [t.model_dump() for t in body.targets if t not in to_apply]
+    failure = None
+    for target in to_apply:
+        try:
+            admin_api.assign_policy(token, policy_id, target.scope, target.id)
+        except PlatformError as exc:
+            failure = str(exc)
+            break
+        applied.append(target.model_dump())
+    # The policy changed in Power Platform either way: record what was done.
+    with rt.db.session() as s:
+        connector_policy.record_push(
+            s, policy_id=policy_id, connectors=allowlist, targets=applied, actor=principal.actor
+        )
+    if failure:
+        raise HTTPException(502, failure)
+    return {"policy_id": policy_id, "connectors": allowlist, "targets": applied}
 
 
 def _platform_block(request: Request, ref: str, principal: Principal, *, blocked: bool) -> dict:

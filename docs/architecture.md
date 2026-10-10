@@ -43,7 +43,7 @@ flowchart LR
 
 | Component | Role | Agent 365 analogue |
 |---|---|---|
-| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; syncs Microsoft 365's agent catalog and imports Copilot Studio's ([platforms](platforms.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance |
+| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; reads agents from Microsoft 365, Copilot Studio and Entra Agent ID, and their use and alerts from Purview and Defender; answers Copilot Studio's threat-detection calls ([platforms](platforms.md), [connections](microsoft-connections.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance |
 | **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server: content inspection, OPA queries, approvals, redaction, decision records | Defender real-time protection, Purview DLP enforcement |
 | [Keycloak](https://www.keycloak.org) 26.8 | One OAuth client per agent; issues short-lived tokens with `agent_id` and the gateway audience; signs administrators in to the control plane (and can federate an existing directory) | Entra Agent ID, Entra ID sign-in |
 | [OPA](https://www.openpolicyagent.org) 1.21 | Policy decision point; evaluates the Rego library against registry data | Conditional Access |
@@ -131,6 +131,8 @@ streams the ledger as JSON Lines for a SIEM or for offline verification.
 | Gateway → MCP server | The agent's token is never forwarded (MCP spec: no token passthrough); servers are only reachable through the gateway |
 | Gateway → processor | Internal network, fail-closed (`failureMode: failClosed`); mTLS ⏳ |
 | Components → control plane | Service token on internal endpoints; admin API keys are scoped by role |
+| Copilot Studio → control plane (threat detection) | The only endpoint meant for the internet: a token that Microsoft Entra ID signed (RS256, keys from the tenant's JWKS) for the configured tenant and AgentGov's API, issued to an allowed caller app; anything else gets 401 |
+| Control plane → Microsoft | AgentGov's app registration (client credentials, read-only Graph permissions) on a schedule; Power Platform and Graph admin actions only as a signed-in admin, with their delegated token |
 | Admins → control plane | Single sign-on: OIDC authorization code flow with PKCE, run by the control plane as a confidential client; the session stays server-side and the browser holds only an HttpOnly, `SameSite=Strict` cookie; writes also need an `X-AgentGov-CSRF` header. Provider roles map to `admin`, `approver`, `auditor` and `registrar`. Automation uses role-scoped API keys; the bootstrap admin token is for break-glass access |
 
 | Failure | Behaviour |
@@ -142,6 +144,8 @@ streams the ledger as JSON Lines for a SIEM or for offline verification.
 | OPA cannot activate a bundle anyway | OPA keeps the last good bundle; its status report raises a critical finding |
 | Control plane down | Enforcement continues with the last bundle; decision records queue in the processor and are retried |
 | Keycloak down | No new tokens; identity drift is reported on the agent and retried |
+| OPA unreachable during a Copilot Studio threat-detection call | AgentGov answers as `AGENTGOV_COPILOT_STUDIO_ON_ERROR` says (block by default, in enforce mode); if it doesn't answer within a second, Copilot Studio lets the tool run unless the environment is set to block |
+| A Microsoft connection fails or lacks a permission | That connection shows the error or the missing permission on the Platforms page; the others and the rest of AgentGov carry on |
 
 ## Scaling notes
 
@@ -163,7 +167,8 @@ src/agentgov/
   registry/       service layer: agents, blueprints, tool servers, approvals, findings,
                   risk, posture, discovery, platforms, instructions, decisions, manifests,
                   API keys, access
-  platforms/      clients for agent platforms (Microsoft Graph's agent catalog)
+  platforms/      Microsoft's services (Graph, the Power Platform API) and Copilot Studio
+                  threat detection
   scanners/       checks on agent instructions: rules and the Granite Guardian client
   identity/       Keycloak admin client and identity reconciler
   opa/            bundle builder and long-poll server, Rego validation, OPA client

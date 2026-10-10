@@ -394,6 +394,18 @@ const STATUS = {
     unapproved: ['serious', 'triangle', 'Not approved'],
     unchecked: ['neutral', 'minus', 'Not approved'],
   },
+  connection: {
+    ok: ['good', 'check-circle', 'Working'],
+    waiting: ['neutral', 'clock', 'Waiting for its first run'],
+    missing_permission: ['warning', 'triangle', 'Missing a permission'],
+    failing: ['critical', 'octagon', 'Failing'],
+    off: ['neutral', 'minus', 'Not set up'],
+    available: ['neutral', 'user-check', 'Ready for admins signed in with Entra ID'],
+    import: ['neutral', 'upload', 'Import only'],
+    out_of_date: ['warning', 'triangle', 'Out of date'],
+    monitor: ['neutral', 'eye', 'Monitoring'],
+    enforce: ['good', 'shield-check', 'Enforcing'],
+  },
 };
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 const TONE_COLOR = {
@@ -1618,12 +1630,15 @@ async function renderAgent({ match }) {
   const views = agent.platforms || [];
   const where = views.length && agent.status !== 'deleted' ? await platformActionTarget(agent) : null;
   const main = views.length ? views.map((v) => platformCard(agent, v, where)) : [permissionsCard(agent)];
+  // With threat detection enforcing, AgentGov's policies decide about its tool calls.
+  const enforced = (await getInfo())?.copilot_studio_threat_detection === 'enforce'
+    && views.some((v) => v.source === 'copilot-studio');
   return h('div', { class: 'page', 'data-title': agent.name },
     agentHeader(agent),
     h('div', { class: 'detail-grid' },
       h('div', { class: 'stack' }, main, instructionsCard(agent, instructions), agentLedgerCard(agent, entries),
         views.length ? null : agentCardCard(agent)),
-      h('div', { class: 'stack' }, riskCard(agent), peopleCard(agent), attestationCard(agent), identityCard(agent),
+      h('div', { class: 'stack' }, riskCard(agent, enforced), peopleCard(agent), attestationCard(agent), identityCard(agent),
         agentFindingsCard(openFindings))));
 }
 
@@ -1735,7 +1750,7 @@ async function runLifecycle(a, action) {
 
 /** Where Block can also act for a platform agent, when signed-in admins may act in Microsoft. */
 async function platformActionTarget(a) {
-  const views = a.platforms || [];
+  const views = (a.platforms || []).filter((v) => BLOCKABLE_SOURCES.has(v.source));
   const info = await getInfo();
   if (!views.length || !info?.microsoft_admin_actions || !can('admin')) return null;
   // The control plane quarantines the Copilot Studio agent when there is one (no licence needed).
@@ -1955,7 +1970,7 @@ function permissionsCard(a) {
   });
 }
 
-function riskCard(a) {
+function riskCard(a, enforced = false) {
   const risk = a.risk || {};
   const tone = toneOf('risk', risk.level);
   const platform = platformOf(a);
@@ -1973,9 +1988,9 @@ function riskCard(a) {
           h('span', {}, f.factor, f.detail ? h('span', { class: 'muted' }, ` · ${f.detail}`) : null),
           h('span', { class: 'factor-points' }, `+${f.points}`))))
         : h('p', { class: 'muted small' }, 'No risk factors.'),
-      h('p', { class: 'hint' }, platform
+      h('p', { class: 'hint' }, platform && !enforced
         ? `Levels: 25 medium, 50 high, 75 critical. High and critical risk raise an alert; ${platform} keeps running the agent.`
-        : 'Levels: 25 medium, 50 high, 75 critical. Policy blocks agents at critical risk.'),
+        : `Levels: 25 medium, 50 high, 75 critical. Policy blocks agents at critical risk${enforced ? ": Copilot Studio asks AgentGov before each of this agent's tool calls" : ''}.`),
     ],
   });
 }
@@ -3743,7 +3758,10 @@ async function revokeApiKey(k) {
 const PLATFORM_SOURCES = {
   'platform:microsoft-365': 'Microsoft 365',
   'platform:copilot-studio': 'Copilot Studio',
+  'platform:entra-agent-id': 'Microsoft Entra Agent ID',
 };
+// The platforms whose agents AgentGov can block there (an Entra identity alone isn't one).
+const BLOCKABLE_SOURCES = new Set(['copilot-studio', 'microsoft-365']);
 const M365_SETTINGS = 'AGENTGOV_M365_TENANT_ID, AGENTGOV_M365_CLIENT_ID and AGENTGOV_M365_CLIENT_SECRET';
 const INVENTORY_EXPORT = [
   'az login',
@@ -3777,10 +3795,116 @@ async function renderPlatforms() {
       sub: "Agents built on Microsoft 365 Copilot and Copilot Studio. They don't call tools through AgentGov's gateway, so AgentGov governs what their platform reports: who owns them, who they are shared with and which connectors they use.",
       actions: [refreshButton()],
     }),
-    callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov reads these platforms; it does not change them. '),
-      "Blocking one of their agents here marks it in AgentGov only. To stop it from being used, block it in the Microsoft 365 admin center or the Power Platform admin center.")),
+    platformsCallout(view),
+    connectionsCard(view),
     h('div', { class: 'grid-halves' }, m365Card(sources['microsoft-365']), copilotStudioCard(sources['copilot-studio'], view.admin_actions)),
-    connectorsCard(usage));
+    connectorsCard(usage, view));
+}
+
+function platformsCallout(view) {
+  const enforcing = view.threat_detection?.mode === 'enforce';
+  if (!view.admin_actions && !enforcing) {
+    return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov reads these platforms; on its own it does not change them. '),
+      "Blocking one of their agents here marks it in AgentGov only. To stop it, block it in the Microsoft 365 admin center or the Power Platform admin center, or connect the services below."));
+  }
+  const can = [
+    view.admin_actions ? 'admins signed in through Microsoft Entra ID can quarantine and block these agents from here' : null,
+    enforcing ? "AgentGov's policies decide about each tool call Copilot Studio agents make, so blocking one here stops its tool calls" : null,
+  ].filter(Boolean);
+  return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov works alongside these platforms: '), `${can.join(', and ')}.`));
+}
+
+const CONNECTION_COUNTS = {
+  'microsoft-365': (c) => syncCounts(c),
+  'copilot-studio': (c) => syncCounts(c),
+  'entra-agent-id': (c) => `${fmt(c.created)} new, ${fmt(c.updated)} updated, ${fmt(c.linked)} linked to agents`,
+  'purview-audit': (c) => [`${plural(c.interactions, 'interaction')}`, `${plural(c.maker_events, 'maker change')}`,
+    c.searching ? `${plural(c.searching, 'search', 'searches')} running` : null].filter(Boolean).join(', '),
+  defender: (c) => `${plural(c.alerts, 'alert')} about agents, ${fmt(c.matched)} matched, ${fmt(c.resolved)} resolved`,
+  'connector-policies': (c) => `${plural(c.connectors, 'connector')} applied to ${plural(c.targets, 'group or environment', 'groups or environments')}`,
+};
+
+function connectionHelp(c, view) {
+  if (c.status === 'missing_permission') return `Grant AgentGov's app registration the application permission ${c.permission}, with admin consent, then sync.`;
+  if (c.status === 'out_of_date') return 'The allowlist changed since it was pushed: push it again.';
+  if (c.key === 'threat-detection') {
+    const origin = new URL(API_ROOT).origin;
+    return c.status === 'off'
+      ? `Needs ${c.needs.join(', ')}. Connect ${origin}/integrations/copilot-studio in the Power Platform admin center, then set AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION.`
+      : `Endpoint: ${origin}/integrations/copilot-studio`;
+  }
+  if (c.status === 'off' || c.status === 'import') return `Needs ${c.needs.join(', and ')}.`;
+  return null;
+}
+
+function connectionLastRun(c, view) {
+  if (c.key === 'threat-detection') {
+    const t = view.threat_detection || {};
+    if (!t.calls) return h('span', { class: 'muted' }, c.status === 'off' ? '—' : 'No calls yet');
+    return h('div', {}, `${plural(t.calls, 'tool call')}, ${fmt(t.blocked || 0)} blocked`,
+      t.would_block ? `, ${fmt(t.would_block)} would have been` : '',
+      h('div', { class: 'cell-sub' }, 'Last call ', timeEl(t.last_call_at)));
+  }
+  const last = c.last_run;
+  if (!last) return h('span', { class: 'muted' }, 'Never');
+  const summary = last.ok ? (CONNECTION_COUNTS[c.key] || syncCounts)(last.counts || {}) : last.message;
+  return h('div', {}, timeEl(last.at), h('div', { class: last.ok ? 'cell-sub' : 'cell-sub tone-text-critical' }, summary));
+}
+
+function connectionsCard(view) {
+  const rows = view.connections || [];
+  const appReady = rows.some((c) => c.via === 'app' && c.status !== 'off');
+  const actions = can('admin') && appReady
+    ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'sync-all', onclick: (e) => syncConnections(e.currentTarget) }, icon('refresh'), 'Sync all')]
+    : null;
+  return card({
+    title: 'Microsoft connections',
+    sub: 'Each one is optional. AgentGov uses the ones it can reach and works without the others.',
+    actions,
+    flush: true,
+    body: h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, 'Microsoft connections'),
+      h('thead', {}, h('tr', {}, ['Connection', 'Status', 'Last run', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+      h('tbody', {}, rows.map((c) => {
+        const help = connectionHelp(c, view);
+        const syncable = can('admin') && c.via === 'app' && c.status !== 'off';
+        return h('tr', { 'data-connection': c.key },
+          h('td', { 'data-label': 'Connection' }, h('span', { class: 'cell-title' }, c.name), h('div', { class: 'cell-sub' }, c.gives)),
+          h('td', { 'data-label': 'Status' }, chip('connection', c.status), help ? h('div', { class: 'cell-sub break' }, help) : null),
+          h('td', { 'data-label': 'Last run' }, connectionLastRun(c, view)),
+          h('td', { 'data-label': '' }, syncable
+            ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `sync-${c.key}`, onclick: (e) => syncConnection(c, e.currentTarget) }, icon('refresh'), 'Sync now')
+            : null));
+      })))),
+  });
+}
+
+async function syncConnection(c, button) {
+  button.disabled = true;
+  button.lastChild.textContent = 'Syncing…';
+  try {
+    const counts = await api(`v1/platforms/${encodeURIComponent(c.key)}/sync`, { method: 'POST' });
+    toast(`${c.name}: ${(CONNECTION_COUNTS[c.key] || syncCounts)(counts)}.`);
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+  }
+  refreshBadges();
+  await refresh();
+}
+
+async function syncConnections(button) {
+  button.disabled = true;
+  button.lastChild.textContent = 'Syncing…';
+  try {
+    const results = await api('v1/platforms/sync', { method: 'POST' });
+    const failed = Object.entries(results).filter(([, r]) => r.error);
+    if (failed.length) toast(`Synced, but ${failed.map(([k]) => k).join(', ')} failed: see Microsoft connections.`, { tone: 'critical' });
+    else toast('Synced every Microsoft connection AgentGov may use.');
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+  }
+  refreshBadges();
+  await refresh();
 }
 
 function sourceFacts(src, verb) {
@@ -3880,9 +4004,10 @@ async function importCopilotStudio() {
   await refresh();
 }
 
-function connectorsCard(usage) {
+function connectorsCard(usage, view) {
   const rows = usage.connectors || [];
   const active = usage.allowlist_active;
+  const pushable = can('admin') && view?.admin_actions && me?.microsoft;
   const approved = rows.filter((r) => r.approved).length;
   const status = (r) => {
     if (r.approved) return chip('connector', 'approved', { title: [r.approved_by && `Approved by ${r.approved_by}`, r.approved_at && fullFmt.format(new Date(r.approved_at))].filter(Boolean).join(', ') || null });
@@ -3897,7 +4022,10 @@ function connectorsCard(usage) {
     sub: active
       ? 'The Power Platform connectors Copilot Studio agents use. An agent that uses a connector that is not approved gets a high-severity finding.'
       : 'The Power Platform connectors Copilot Studio agents use. The allowlist is empty, so none is flagged yet: approve the connectors your organisation allows, and agents that use any other connector get a finding.',
-    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'approve-connector', onclick: guarded(() => approveConnector(null, active)) }, icon('plus'), 'Approve a connector')] : null,
+    actions: can('admin') ? [
+      pushable ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'push-policy', onclick: guarded(pushConnectorPolicy) }, icon('upload'), 'Push to Power Platform') : null,
+      h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'approve-connector', onclick: guarded(() => approveConnector(null, active)) }, icon('plus'), 'Approve a connector'),
+    ].filter(Boolean) : null,
     flush: rows.length > 0,
     body: rows.length
       ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
@@ -3923,6 +4051,44 @@ function connectorsCard(usage) {
             : null))))))
       : emptyState('No connectors yet', 'They appear here once Copilot Studio agents are imported. You can approve connectors before that.'),
   });
+}
+
+async function pushConnectorPolicy() {
+  const preview = await api('v1/platforms/connector-policy');
+  if (!preview.allowlist.length) {
+    toast('Approve at least one connector first: Power Platform would block every connector.', { tone: 'critical' });
+    return;
+  }
+  const free = preview.targets.filter((t) => !t.other_policies.length);
+  const taken = preview.targets.filter((t) => t.other_policies.length);
+  const key = (t) => `target:${t.scope}:${t.id}`;
+  const label = (t) => (t.scope === 'group'
+    ? `${t.name} (environment group)`
+    : `Environment ${t.name}${t.agents ? ` (${plural(t.agents, 'Copilot Studio agent')})` : ''}`);
+  const losing = preview.agents_losing_connectors;
+  const extra = h('div', { class: 'stack' },
+    callout('warning', 'triangle', h('span', {}, h('strong', {}, "Power Platform blocks every connector this policy doesn't list"),
+      `, for apps and flows as well as agents, in the groups and environments you choose. It will allow: ${preview.allowlist.join(', ')}.`)),
+    losing.length ? callout('serious', 'triangle', h('span', {}, h('strong', {}, `${plural(losing.length, 'agent')} would lose connectors: `),
+      losing.map((a) => `${a.name} (${a.connectors.join(', ')})`).join('; '), '.')) : null,
+    preview.out_of_date ? h('p', { class: 'hint' }, "Power Platform's copy of the policy differs from the allowlist; pushing replaces it.") : null,
+    taken.length ? h('p', { class: 'hint' }, 'Not offered, because another connector policy applies there and an environment takes one: ',
+      taken.map((t) => `${t.name} (${t.other_policies.join(', ')})`).join('; '), '.') : null,
+    free.length ? null : h('p', { class: 'hint' }, 'No environment group or environment is free for this policy.'));
+  const done = await ask({
+    title: 'Push the connector allowlist to Power Platform?',
+    text: `AgentGov saves it as the connector policy "${preview.policy_name}" and applies it where you choose, as you. Wherever the policy already applies, its list changes too. The ledger records it.`,
+    tone: 'danger', iconName: 'upload', confirm: 'Push to Power Platform', busy: 'Pushing…', wide: true, extra,
+    fields: free.map((t) => ({ id: key(t), type: 'checkbox', value: t.applied, label: label(t), hint: t.applied ? 'Already applied: its list is updated.' : null })),
+    submit: (values) => {
+      const targets = free.filter((t) => values[key(t)]).map((t) => ({ scope: t.scope, id: t.id }));
+      if (!targets.length) throw new Error('Pick at least one environment group or environment.');
+      return api('v1/platforms/connector-policy', { method: 'POST', body: { targets } });
+    },
+  });
+  if (!done) return;
+  toast(`Pushed ${plural(done.connectors.length, 'connector')} to Power Platform, applied to ${plural(done.targets.length, 'group or environment', 'groups or environments')}.`);
+  await refresh();
 }
 
 async function approveConnector(row, active) {
@@ -3959,7 +4125,40 @@ async function unapproveConnector(row, approvedCount) {
 }
 
 /** What Microsoft 365 or Copilot Studio reports about an agent (its page's main card). */
+function entraCard(v) {
+  const yesNo = (value) => (value == null ? null : value ? 'Yes' : 'No');
+  const notes = [];
+  const why = String(v.disabled_by_microsoft || '').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+  if (v.disabled_by_microsoft) notes.push(callout('critical', 'octagon', `Microsoft disabled this identity (${why}), so the agent cannot sign in.`));
+  if (v.in_directory === false) notes.push(callout('warning', 'triangle', 'This identity is no longer in Microsoft Entra ID.'));
+  return card({
+    title: v.source_name,
+    sub: "The agent's identity in Microsoft Entra ID, as it was at the last sync",
+    body: [...notes, facts([
+      ['Name in Entra', v.display_name],
+      ['Enabled', yesNo(v.enabled)],
+      ['Created from', v.blueprint ? `${v.blueprint} (its agent identity blueprint)` : (v.blueprint_id ? h('code', {}, v.blueprint_id) : null)],
+      ['Created', timeEl(v.created_at)],
+      ['Entra agent ID', copyable(v.external_id, 'Entra agent ID')],
+      ['Synced', timeEl(v.synced_at)],
+    ])],
+  });
+}
+
+/** Who used the agent lately and where, from the Microsoft Purview audit log. */
+function usageRows(v) {
+  const u = v.usage;
+  if (!u) return [];
+  return [
+    ['Last used', timeEl(u.last_used_at)],
+    (u.recent_users || []).length ? ['Recent users', h('div', { class: 'chip-row' }, u.recent_users.slice(0, 5).map((x) => plainChip(x)),
+      u.recent_users.length > 5 ? h('span', { class: 'muted small' }, `and ${fmt(u.recent_users.length - 5)} more`) : null)] : null,
+    Object.keys(u.hosts || {}).length ? ['Used in', h('div', { class: 'chip-row' }, Object.entries(u.hosts).map(([host, n]) => plainChip(`${host} · ${fmt(n)}`)))] : null,
+  ];
+}
+
 function platformCard(a, v, where) {
+  if (v.source === 'entra-agent-id') return entraCard(v);
   const studio = v.source === 'copilot-studio';
   // Only on the card for the record the control plane acts on.
   const acts = where && where.source === v.source;
@@ -3990,6 +4189,7 @@ function platformCard(a, v, where) {
     v.environment_id ? ['Environment', h('code', {}, v.environment_id)] : null,
     ['Agent ID', copyable(v.external_id, 'Copilot Studio agent ID')],
     ['Imported', timeEl(v.synced_at)],
+    ...usageRows(v),
   ] : [
     ['Name in Microsoft 365', v.display_name],
     ['Type', PACKAGE_TYPES[v.type] || humanize(v.type)],
@@ -4003,6 +4203,7 @@ function platformCard(a, v, where) {
     ['Package ID', copyable(v.external_id, 'package ID')],
     ['Changed', timeEl(v.last_modified)],
     ['Synced', timeEl(v.synced_at)],
+    ...usageRows(v),
   ];
   return card({
     title: v.source_name,

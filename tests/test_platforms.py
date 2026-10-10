@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 import httpx
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,15 @@ from tests.test_cli import _Shared, ok, runner
 TENANT = "contoso.onmicrosoft.com"
 GRAPH = "https://graph.microsoft.com"
 PACKAGES = f"{GRAPH}/v1.0/copilot/admin/catalog/packages"
+
+
+def app_token(*roles: str) -> str:
+    """An app-only access token as Entra issues them: a JWT listing the granted permissions."""
+    key = "stand-in key, not checked: tokens only say which permissions were granted"
+    return jwt.encode({"roles": list(roles), "aud": GRAPH}, key, algorithm="HS256")
+
+
+GRAPH_TOKEN = app_token("CopilotPackages.Read.All")
 
 
 def package(id_: str, name: str, type_: str, **extra: Any) -> dict[str, Any]:
@@ -84,9 +94,9 @@ class FakeMicrosoft:
                     },
                 )
             self.tokens += 1
-            return httpx.Response(200, json={"access_token": "graph-token", "expires_in": 3599})
+            return httpx.Response(200, json={"access_token": GRAPH_TOKEN, "expires_in": 3599})
         assert str(request.url).startswith(PACKAGES)
-        assert request.headers["authorization"] == "Bearer graph-token"
+        assert request.headers["authorization"] == f"Bearer {GRAPH_TOKEN}"
         if self.graph_status != 200:
             return httpx.Response(
                 self.graph_status,
@@ -324,7 +334,7 @@ class TestMicrosoft365:
         runtime.init_db()
         with pytest.raises(PlatformError, match="AADSTS7000215"):
             runtime.sync_microsoft_365()
-        runtime._scheduled_m365_sync()  # the background loop logs it and carries on
+        runtime._scheduled_microsoft_sync()  # the background loop logs it and carries on
         runtime.db.dispose()
 
     def test_sync_needs_configuration(self, client) -> None:
@@ -620,5 +630,9 @@ class TestCli:
         assert result.exit_code == 2 and "cannot read" in result.stderr
 
     def test_sync(self, m365, monkeypatch) -> None:
-        out = ok(self.run(m365, monkeypatch, "platforms", "sync"))
+        out = ok(self.run(m365, monkeypatch, "platforms", "sync", "microsoft-365"))
         assert out.strip() == "platform/microsoft-365: synced (3 new, 0 updated, 1 skipped)"
+        # Without a source, every connection the app may use; the others are skipped.
+        out = ok(self.run(m365, monkeypatch, "platforms", "sync")).splitlines()
+        assert out[0] == "platform/microsoft-365: synced (0 new, 3 updated, 1 skipped)"
+        assert out[1] == "platform/entra-agent-id: skipped (the app lacks AgentIdentity.Read.All)"

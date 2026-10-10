@@ -45,21 +45,23 @@ Whether AgentGov replaces Agent 365 depends on where your agents run:
 | Your agents | What AgentGov does |
 |---|---|
 | Built and run by you, with any framework or cloud, calling tools over MCP | The whole job: registry, an identity per agent, policy on every tool call, data protection, approvals, a kill switch and an audit trail. For these agents it is an alternative to Agent 365, and the option for organisations that don't use Microsoft 365 |
-| Built in Microsoft 365 Copilot, Copilot Studio or Agent Builder | Works alongside Microsoft's admin centers. These agents don't pass through AgentGov's gateway, so only Microsoft can block them or apply data-loss rules to them. AgentGov lists them, checks their connectors and instructions, and keeps them in the same registry and audit trail as your other agents. Admins who sign in through Microsoft Entra ID can also have AgentGov quarantine or block them, which Microsoft then does as that admin |
+| Built in Microsoft 365 Copilot, Copilot Studio or Agent Builder | Works alongside Microsoft's admin centers. These agents don't pass through AgentGov's gateway, so Microsoft carries out the decisions about them. AgentGov lists them, checks their connectors and instructions, and keeps them in the same registry and audit trail as your other agents. With the Microsoft services you have, it also reads their Entra identities, who uses them and Defender's alerts about them; has Power Platform enforce its connector allowlist; decides Copilot Studio agents' tool calls with its own policies; and quarantines or blocks agents as the admin who signed in ([connections](docs/microsoft-connections.md)) |
 
-Agent 365 matters in two optional places: syncing the Microsoft 365 agent catalog and
-blocking Microsoft 365 agents from AgentGov, because Microsoft only opens those APIs to
-tenants with an Agent 365 licence. Without one, leave them off. Everything else works,
-including Copilot Studio agents: importing or syncing them needs only a Microsoft Entra
-role that can read the Power Platform inventory, such as Power Platform administrator or
-AI reader, and quarantining them needs the AI administrator or Power Platform
-administrator role ([details](docs/platforms.md)).
+Each Microsoft connection is optional: AgentGov uses the ones it can reach and works
+without the others. Agent 365 matters in three of them, because Microsoft offers them
+only to tenants with an Agent 365 licence: syncing the Microsoft 365 agent catalog,
+blocking Microsoft 365 agents from AgentGov, and Defender's threat detections for agents.
+Without one, leave them off. Everything else works, including Copilot Studio agents:
+importing or syncing them needs only a Microsoft Entra role that can read the Power
+Platform inventory, such as Power Platform administrator or AI reader, and quarantining
+them needs the AI administrator or Power Platform administrator role
+([details](docs/platforms.md)).
 
 ## Capabilities
 
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
-| **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery; Microsoft 365 and Copilot Studio agents with a connector allowlist | AgentGov control plane |
+| **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist | AgentGov control plane |
 | **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call using live registry context; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
@@ -244,6 +246,9 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin
+* [Connecting AgentGov to Microsoft's services](docs/microsoft-connections.md): Entra
+  Agent ID, the Purview audit log, Defender alerts, Power Platform connector policies and
+  Copilot Studio threat detection, each optional
 * [Agent instructions](docs/instructions.md): checking agents' system prompts for harmful
   or malicious content
 * [Policies](docs/policies.md)

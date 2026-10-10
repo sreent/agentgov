@@ -211,6 +211,14 @@ def test_custom_policy_is_validated_and_shipped(rt, settings) -> None:
             "does not compile",
         ),
         ('package agentgov.custom.bad\n\ndeny := "not a set"\n', "must be a set"),
+        # Breaks only Copilot Studio's decisions (two values for one rule).
+        (
+            "package agentgov.custom.bad\n\n"
+            'limit := 1 if input.platform == "copilot-studio"\n\n'
+            'limit := 2 if input.platform == "copilot-studio"\n\n'
+            'deny contains "over the limit" if limit > 5\n',
+            "fails at evaluation time",
+        ),
     ],
 )
 def test_broken_custom_policies_are_rejected(rt, settings, source, message) -> None:

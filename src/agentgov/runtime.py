@@ -6,11 +6,12 @@ import asyncio
 import json
 import logging
 import threading
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
 
-from agentgov import ledger
+from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.gateway import GatewayConfigWriter
@@ -18,20 +19,37 @@ from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
 from agentgov.opa.bundle import BundleServer
+from agentgov.platforms import connections
 from agentgov.platforms.microsoft import (
-    Microsoft365Catalog,
     MicrosoftAdmin,
+    MicrosoftApp,
     PlatformError,
     declarative_instructions,
     is_declarative,
 )
+from agentgov.platforms.threat_detection import ThreatDetection
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import instructions, platforms, posture
+from agentgov.registry import instructions, microsoft_signals, platforms, posture
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
 
 log = logging.getLogger(__name__)
 # Package details (for declarative agents' instructions) read per Microsoft 365 sync.
 MAX_PACKAGE_DETAILS = 100
+# The Purview audit searches: agents' use, and Copilot Studio makers' changes.
+# Both by operation name: Microsoft documents the record type enum's casing two ways.
+AUDIT_SEARCHES: dict[str, dict[str, Any]] = {
+    "usage": {"operations": ["CopilotInteraction"]},
+    "makers": {"operations": list(microsoft_signals.MAKER_EVENTS)},
+}
+AUDIT_LAG = timedelta(hours=1)
+AUDIT_MIN_WINDOW = timedelta(minutes=15)
+AUDIT_FIRST_WINDOW = timedelta(days=1)
+AUDIT_GIVE_UP = timedelta(hours=6)
+DEFENDER_FIRST_WINDOW = timedelta(days=7)
+
+
+def _graph_time(when: datetime) -> str:
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class _Worker:
@@ -101,6 +119,7 @@ class Runtime:
         m365_http: httpx.Client | None = None,
         guardian_http: httpx.Client | None = None,
         microsoft_http: httpx.Client | None = None,
+        copilot_studio_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
         self.db = Database(settings.database_url, on_commit=self._on_commit)
@@ -127,8 +146,14 @@ class Runtime:
             )
             self.identity = IdentityReconciler(self.db, settings, admin)
         # The Microsoft 365 agent catalog, read with Microsoft Graph (app-only).
-        self.m365 = Microsoft365Catalog(settings, http=m365_http) if settings.m365_enabled else None
+        self.m365 = MicrosoftApp(settings, http=m365_http) if settings.m365_enabled else None
         self._m365_lock = threading.Lock()
+        # Copilot Studio asks AgentGov about each tool call its agents make.
+        self.threat_detection: ThreatDetection | None = None
+        if settings.copilot_studio_threat_detection != "off":
+            self.threat_detection = ThreatDetection(
+                settings, opa_http=copilot_studio_http, keys_http=copilot_studio_http
+            )
         # Optional classifier for agent instructions (IBM Granite Guardian).
         self.guardian = Guardian(settings, http=guardian_http) if settings.guardian_url else None
         self._gateway_worker = _Worker("gateway-config", self.gateway.sync, 300)
@@ -144,7 +169,9 @@ class Runtime:
         )
         self._m365_worker = (
             _Worker(
-                "microsoft-365-sync", self._scheduled_m365_sync, settings.m365_sync_interval_seconds
+                "microsoft-sync",
+                self._scheduled_microsoft_sync,
+                settings.m365_sync_interval_seconds,
             )
             if self.m365 is not None and settings.m365_sync_interval_seconds > 0
             else None
@@ -246,11 +273,166 @@ class Runtime:
                 platforms.refresh_risk(session, self.settings)
                 return counts
 
-    def _scheduled_m365_sync(self) -> None:
+    # -- AgentGov's app connections to Microsoft -------------------------------------
+
+    def sync_microsoft(
+        self, keys: list[str] | None = None, *, actor: str | None = None
+    ) -> dict[str, Any]:
+        """Run the app connections the app registration may use; returns each outcome.
+
+        A connection whose permission the app lacks is skipped (and shown as such);
+        one that fails doesn't stop the others.
+        """
+        if self.m365 is None:
+            raise PlatformError("AgentGov's Microsoft app registration is not configured")
+        wanted = keys or list(connections.APP_CONNECTIONS)
+
+        def lacking(roles: frozenset[str] | None) -> bool:
+            return any(not connections.runnable(connections.BY_KEY[k], roles) for k in wanted)
+
         try:
-            self.sync_microsoft_365()
+            roles = self.m365.granted()
+            if actor is not None and lacking(roles):
+                # Someone asked: pick up permissions granted since the token was issued.
+                roles = self.m365.granted(refresh=True)
         except PlatformError as exc:
-            log.warning("Microsoft 365 sync failed: %s", exc)
+            with self.db.session() as session:
+                for key in wanted:
+                    platforms.set_sync(
+                        session, key, ok=False, counts={}, message=str(exc), actor=actor
+                    )
+            raise
+        with self.db.session() as session:
+            connections.remember_grants(session, roles)
+        runs = {
+            "microsoft-365": self.sync_microsoft_365,
+            "entra-agent-id": self.sync_agent_identities,
+            "purview-audit": self.sync_audit,
+            "defender": self.sync_defender,
+        }
+        results: dict[str, Any] = {}
+        for key in wanted:
+            connection = connections.BY_KEY[key]
+            if not connections.runnable(connection, roles):
+                results[key] = {"lacks_permission": connection.permission}
+                continue
+            try:
+                results[key] = runs[key](actor=actor)
+            except PlatformError as exc:
+                results[key] = {"error": str(exc)}
+        return results
+
+    def _scheduled_microsoft_sync(self) -> None:
+        try:
+            for key, outcome in self.sync_microsoft().items():
+                if "error" in outcome:
+                    log.warning("Microsoft sync of %s failed: %s", key, outcome["error"])
+        except PlatformError as exc:
+            log.warning("Microsoft sync failed: %s", exc)
+
+    def _failed(self, key: str, exc: PlatformError, actor: str | None) -> None:
+        with self.db.session() as session:
+            platforms.set_sync(session, key, ok=False, counts={}, message=str(exc), actor=actor)
+
+    def sync_agent_identities(self, *, actor: str | None = None) -> dict[str, int]:
+        """Read the tenant's Entra agent identities and link them to agents."""
+        assert self.m365 is not None
+        try:
+            identities = self.m365.agent_identities()
+        except PlatformError as exc:
+            self._failed("entra-agent-id", exc, actor)
+            raise
+        with self.db.session() as session:
+            counts = platforms.record_agent_identities(session, identities, actor=actor)
+            platforms.refresh_risk(session, self.settings)
+            return counts
+
+    def sync_audit(self, *, actor: str | None = None) -> dict[str, Any]:
+        """Read agents' use and makers' changes from the Purview audit log.
+
+        Audit searches run for minutes, so each run collects the searches the
+        previous one started, then starts the next ones; nothing waits.
+        """
+        assert self.m365 is not None
+        counts: dict[str, Any] = {"interactions": 0, "maker_events": 0, "searching": 0}
+        try:
+            for kind, search in AUDIT_SEARCHES.items():
+                self._audit_step(kind, search, counts)
+        except PlatformError as exc:
+            self._failed("purview-audit", exc, actor)
+            raise
+        with self.db.session() as session:
+            platforms.set_sync(session, "purview-audit", ok=True, counts=counts, actor=actor)
+        return counts
+
+    def _audit_step(self, kind: str, search: dict[str, Any], counts: dict[str, Any]) -> None:
+        assert self.m365 is not None
+        with self.db.session() as session:
+            state = connections.load_state(session, "purview-audit")
+        pending = state.get(kind)
+        if pending:
+            status = self.m365.audit_query_status(pending["id"])
+            started = datetime.fromisoformat(pending["started"])
+            if status == "succeeded":
+                records = self.m365.audit_records(pending["id"])
+                with self.db.session() as session:
+                    if kind == "usage":
+                        got = microsoft_signals.record_usage(session, self.settings, records)
+                        counts["interactions"] += got["interactions"]
+                    else:
+                        got = microsoft_signals.record_maker_events(session, records)
+                        counts["maker_events"] += got["events"]
+                    state = connections.load_state(session, "purview-audit")
+                    state[kind], state[f"{kind}_until"] = None, pending["end"]
+                    connections.save_state(session, "purview-audit", state)
+            elif status in ("failed", "cancelled") or ids.utcnow() - started > AUDIT_GIVE_UP:
+                # Search the same window again.
+                with self.db.session() as session:
+                    state = connections.load_state(session, "purview-audit")
+                    state[kind] = None
+                    connections.save_state(session, "purview-audit", state)
+            else:
+                counts["searching"] += 1
+                return
+        now = ids.utcnow()
+        until = state.get(f"{kind}_until")
+        start = datetime.fromisoformat(until.replace("Z", "+00:00")) if until else None
+        start = start or now - AUDIT_FIRST_WINDOW
+        end = now - AUDIT_LAG  # records reach the audit log late
+        if end - start < AUDIT_MIN_WINDOW:
+            return  # Purview takes about 200 searches a day: don't spend them on slivers
+        start_at, end_at = _graph_time(start), _graph_time(end)
+        query_id = self.m365.start_audit_query(
+            f"AgentGov {kind} {start_at}", start_at, end_at, **search
+        )
+        with self.db.session() as session:
+            state = connections.load_state(session, "purview-audit")
+            state[kind] = {
+                "id": query_id,
+                "start": start_at,
+                "end": end_at,
+                "started": now.isoformat(),
+            }
+            connections.save_state(session, "purview-audit", state)
+        counts["searching"] += 1
+
+    def sync_defender(self, *, actor: str | None = None) -> dict[str, int]:
+        """Read Defender's alerts about agents since the last run, as findings."""
+        assert self.m365 is not None
+        with self.db.session() as session:
+            state = connections.load_state(session, "defender")
+        since = state.get("since") or _graph_time(ids.utcnow() - DEFENDER_FIRST_WINDOW)
+        try:
+            alerts = self.m365.alerts_since(since)
+        except PlatformError as exc:
+            self._failed("defender", exc, actor)
+            raise
+        latest = max([str(a.get("lastUpdateDateTime") or "") for a in alerts] + [since])
+        with self.db.session() as session:
+            counts = microsoft_signals.record_alerts(session, self.settings, alerts)
+            connections.save_state(session, "defender", {"since": latest})
+            platforms.set_sync(session, "defender", ok=True, counts=counts, actor=actor)
+            return counts
 
     def classify_pending_instructions(self, limit: int = 100) -> int:
         """Run the classifier over instructions waiting for it; returns how many."""

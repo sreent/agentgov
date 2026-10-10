@@ -37,8 +37,8 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Unmanaged / shadow agents | ✅ | Discovery from OpenTelemetry spans, gateway callers (monitor mode) and scanner imports (`/v1/discovery/import`, e.g. the Agent Governance Toolkit's `agent-discovery`) |
 | IT-approved agent blueprints | ✅ | `Blueprint`: permissions, risk tier, sponsor requirement, attestation period, labels |
 | Management rules (e.g. block ownerless agents) | 🟡 | Posture findings + optional auto-block on risk; rule engine ⏳ |
-| Agents built in Microsoft 365 Copilot, Copilot Studio and Agent Builder | ✅ | The Microsoft 365 agent catalog synced from Microsoft Graph, and the Copilot Studio inventory imported from the Power Platform inventory or synced as the signed-in admin ([platforms](platforms.md)) |
-| Block Microsoft 365 and Copilot Studio agents | 🟡 | Admins signed in through Entra ID quarantine Copilot Studio agents and block Microsoft 365 agents from AgentGov, which calls Microsoft's admin APIs as them ([platforms](platforms.md#acting-as-the-signed-in-admin)); without that sign-in, block them in Microsoft's admin centers |
+| Agents built in Microsoft 365 Copilot, Copilot Studio and Agent Builder | ✅ | The Microsoft 365 agent catalog synced from Microsoft Graph, the Copilot Studio inventory imported from the Power Platform inventory or synced as the signed-in admin, and agent identities from Microsoft Entra Agent ID ([platforms](platforms.md)) |
+| Block Microsoft 365 and Copilot Studio agents | 🟡 | Admins signed in through Entra ID quarantine Copilot Studio agents and block Microsoft 365 agents from AgentGov, which calls Microsoft's admin APIs as them ([platforms](platforms.md#acting-as-the-signed-in-admin)); with Copilot Studio threat detection enforcing, a Copilot Studio agent blocked in AgentGov can't call tools ([connections](microsoft-connections.md#copilot-studio-threat-detection)); otherwise, block them in Microsoft's admin centers |
 | Registry sync from AWS, Google, Salesforce, Databricks, … | ⏳ | More platform connectors on the roadmap; OTel discovery covers instrumented agents today |
 | Agent store / catalog for end users | ➖ | AgentGov governs agents; it is not a distribution channel |
 | A2A-shaped agent records (agent cards) | ✅ | Agents carry an A2A v1.0 `agent_card` |
@@ -54,6 +54,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | On-behalf-of user flow | ⏳ | RFC 8693 token exchange (supported by Keycloak) with `act` claims in policy |
 | Secretless credentials (federated identity credentials) | ⏳ | Keycloak federated client authentication with Kubernetes / SPIFFE tokens |
 | Credential rotation | ✅ | `POST /v1/agents/{id}/credentials {"rotate": true}` |
+| Entra Agent ID identities of agents built on Microsoft's platforms | ✅ | Read from Microsoft Graph and linked to their registry agents; an identity Microsoft disabled raises a finding ([connections](microsoft-connections.md#microsoft-entra-agent-id)) |
 | Conditional Access for agents | ✅ | **OPA** policies evaluated on every tool call, with registry context |
 | Risk-based access (ID Protection "risky agents") | ✅ | Risk score from posture and runtime signals; critical risk is blocked by the baseline policy; optional auto-block |
 | Access reviews / sponsor attestation | ✅ | Periodic attestation by sponsors; expiry raises findings |
@@ -69,7 +70,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Agent map (agents, users, tools) | ✅ | `/v1/graph` and the UI map: people → agents → tool servers, with call volumes |
 | Telemetry via OpenTelemetry (invoke_agent / execute_tool / chat spans) | ✅ | **OTel Collector** → control plane; the same GenAI semantic conventions, so Agent 365-instrumented agents can report here |
 | Trace exploration | ✅ | Optional **Langfuse** (`deploy/compose/docker-compose.langfuse.yml`): the collector sends it every agent and gateway trace, and each gateway decision in the ledger links to its trace |
-| Audit of agent activity | ✅ | Hash-chained evidence ledger with verification and JSONL export |
+| Audit of agent activity | ✅ | Hash-chained evidence ledger with verification and JSONL export; the use of Microsoft 365 and Copilot Studio agents, and Copilot Studio makers' changes, read from the Purview audit log ([connections](microsoft-connections.md#microsoft-purview-audit-log)) |
 
 ### Interoperability
 
@@ -88,16 +89,16 @@ users who delegate to agents), and much of it is preview with frequent API chang
 
 | Agent 365 capability | AgentGov | How |
 |---|---|---|
-| Real-time blocking of risky tool calls | ✅ | Governance processor via agentgateway's `ExtMcp` hook, fail-closed |
+| Real-time blocking of risky tool calls | ✅ | Governance processor via agentgateway's `ExtMcp` hook, fail-closed; Copilot Studio agents' tool calls through Copilot Studio's external threat detection, decided by the same OPA ([connections](microsoft-connections.md#copilot-studio-threat-detection)) |
 | Secret exfiltration detection | ✅ | Credential detectors on tool arguments (deny) and results (redact) |
-| Prompt injection (XPIA) protection | ✅ | Tool results with injected instructions are withheld; heuristics, ML classifier ⏳ |
+| Prompt injection (XPIA) protection | ✅ | Tool results with injected instructions are withheld; heuristics, ML classifier ⏳; jailbreak and XPIA attempts that Microsoft detects against Microsoft 365 and Copilot Studio agents become findings (Purview audit log) |
 | Tool poisoning and definition drift | ✅ | Poisoned tools hidden; changed definitions refused until re-approved |
 | DLP / sensitivity of personal data | ✅ | **Presidio** detects PII; policy redacts it from results and from calls to unverified servers |
 | Posture assessment and recommendations | ✅ | Findings with remediation (ownerless, no sponsor, expired attestation, stale, broad grants, unverified servers, identity drift) |
 | Harmful or malicious agent instructions | ✅ | Agents' system prompts (registered, reported in telemetry, or read from Microsoft 365) are checked by rules and optionally by **IBM Granite Guardian**; problems become findings and add to the risk score ([instructions](instructions.md)) |
-| Connectors used by Copilot Studio agents; risky agent settings | 🟡 | Connector allowlist with findings for agents that use other connectors, publish without authentication, use their maker's connections or are shared with everyone; enforcement stays with Power Platform data policies |
+| Connectors used by Copilot Studio agents; risky agent settings | ✅ | Connector allowlist with findings for agents that use other connectors, publish without authentication, use their maker's connections or are shared with everyone; enforced by pushing it into Power Platform's advanced connector policies, and by Copilot Studio threat detection ([connections](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform)) |
 | Human approval for sensitive actions | ✅ | Destructive tools (and any policy you write) route to an approver; single-use approvals |
-| Alerts / incidents | 🟡 | Findings + webhook alerts; SIEM integration ⏳ |
+| Alerts / incidents | 🟡 | Findings + webhook alerts; Defender's alerts about agents become findings ([connections](microsoft-connections.md#microsoft-defender-alerts)); SIEM integration ⏳ |
 | Insider risk, eDiscovery, retention policies | ➖ / ⏳ | Ledger export provides evidence; retention policy ⏳ |
 
 ## Sources
@@ -120,6 +121,11 @@ Microsoft documentation and announcements, checked October 2026:
   [bring-your-own MCP servers](https://learn.microsoft.com/en-us/microsoft-365/admin/manage/manage-byo-mcp-server)
 - Security: [Defender real-time protection](https://learn.microsoft.com/en-us/defender-xdr/security-for-ai/ai-agent-real-time-protection),
   [Purview for Agent 365](https://learn.microsoft.com/en-us/purview/ai-agent-365)
+- Connections: [Entra agent identities](https://learn.microsoft.com/en-us/graph/api/resources/agentidentity),
+  [Purview audit log queries](https://learn.microsoft.com/en-us/graph/api/security-auditcoreroot-post-auditlogqueries),
+  [Defender alerts](https://learn.microsoft.com/en-us/graph/api/security-list-alerts_v2),
+  [advanced connector policies](https://learn.microsoft.com/en-us/power-platform/admin/advanced-connector-policies),
+  [Copilot Studio external threat detection](https://learn.microsoft.com/en-us/microsoft-copilot-studio/external-security-provider)
 - Licensing: [service description](https://learn.microsoft.com/en-us/office365/servicedescriptions/microsoft-agent-365/microsoft-agent-365),
   [licensing FAQ](https://www.microsoft.com/licensing/faqs/122)
 - Microsoft's own open-source complement: [Agent Governance Toolkit reference architecture](https://github.com/microsoft/agent-governance-toolkit/blob/main/docs/a365-agt-reference-architecture.md)

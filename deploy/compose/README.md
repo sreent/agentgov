@@ -112,16 +112,24 @@ per criterion; with a GPU, serve the model with vLLM instead and set
 
 ## Optional: Microsoft 365 and Copilot Studio agents
 
-To bring the organisation's Microsoft 365 agent catalog into the registry, set
-`AGENTGOV_M365_TENANT_ID`, `AGENTGOV_M365_CLIENT_ID` and `AGENTGOV_M365_CLIENT_SECRET`
-in `.env` for a Microsoft Entra app with the Microsoft Graph application permission
-`CopilotPackages.Read.All`, then run `docker compose up -d` again. The control plane
-syncs at start-up and every hour. Copilot Studio agents and their connectors are
-imported from a Power Platform inventory export on the **Platforms** page, and need no
-configuration. If admins sign in through Microsoft Entra ID instead of Keycloak (see
-`.env.example`), they can also sync the Copilot Studio inventory, quarantine Copilot
-Studio agents and block Microsoft 365 agents from AgentGov.
-[Agents on Microsoft 365 and Copilot Studio](../../docs/platforms.md) has the details.
+To connect AgentGov to Microsoft 365, set `AGENTGOV_M365_TENANT_ID`,
+`AGENTGOV_M365_CLIENT_ID` and `AGENTGOV_M365_CLIENT_SECRET` in `.env` for a Microsoft
+Entra app registration, then run `docker compose up -d` again. Its Microsoft Graph
+application permissions decide what AgentGov reads: the Microsoft 365 agent catalog
+(`CopilotPackages.Read.All`), Entra Agent ID (`AgentIdentity.Read.All`), the Purview
+audit log (`AuditLogsQuery.Read.All`) and Defender alerts (`SecurityAlert.Read.All`).
+The control plane syncs at start-up and every hour, and the **Platforms** page shows each
+connection's state. Copilot Studio agents and their connectors are imported from a Power
+Platform inventory export on the **Platforms** page, and need no configuration. If admins
+sign in through Microsoft Entra ID instead of Keycloak (see `.env.example`), they can also
+sync the Copilot Studio inventory, quarantine Copilot Studio agents, block Microsoft 365
+agents and push the connector allowlist into Power Platform from AgentGov.
+
+Copilot Studio threat detection (`AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION`) has Copilot
+Studio ask AgentGov's policies before each tool call its agents make. Microsoft calls the
+control plane, so `AGENTGOV_PUBLIC_URL` must be an HTTPS address it can reach.
+[Agents on Microsoft 365 and Copilot Studio](../../docs/platforms.md) and [Connecting
+AgentGov to Microsoft's services](../../docs/microsoft-connections.md) have the details.
 
 ## Configuration
 

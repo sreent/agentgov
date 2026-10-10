@@ -1,17 +1,23 @@
-"""Microsoft 365's agent catalog, read with Microsoft Graph.
+"""Microsoft 365, Copilot Studio and the Microsoft services around them.
 
-Uses the Package Management API (``GET /v1.0/copilot/admin/catalog/packages``)
-with an app-only token: an Entra app registration holding the application
-permission ``CopilotPackages.Read.All``. Microsoft requires a Microsoft Agent
-365 licence for this API. Blocking a package needs a signed-in admin
-(delegated only), so AgentGov reads the catalog but does not change it.
+Two ways in:
 
-A package's details include its elements' definitions; for a declarative agent
-that is its manifest, which holds the agent's instructions.
+* :class:`MicrosoftApp` reads with an app-only token: AgentGov's Entra app
+  registration and the application permissions an admin granted it. Each
+  integration needs its own permission, and runs only when the app has it:
+
+  - the Microsoft 365 agent catalog (``CopilotPackages.Read.All``; Microsoft also
+    requires a Microsoft Agent 365 licence), whose package details include a
+    declarative agent's manifest and so its instructions;
+  - and the others in ``agentgov.platforms.connections``.
+
+* :class:`MicrosoftAdmin` acts as a signed-in administrator, for the admin APIs
+  Microsoft opens only to people (see ``agentgov.identity.delegation``).
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 from typing import Any
@@ -28,15 +34,43 @@ DECLARATIVE_AGENT = "declarativeagent"
 
 
 class PlatformError(Exception):
-    """A platform could not be read; the message says why."""
+    """A platform could not be read or changed; the message says why.
+
+    ``status`` is Microsoft's HTTP status, when it answered.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
-class Microsoft365Catalog:
+def token_roles(token: str) -> frozenset[str] | None:
+    """The application permissions in an Entra access token (its ``roles`` claim).
+
+    The token came straight from Entra over TLS and only decides which reads to
+    try, so its signature isn't checked here. ``None`` when it isn't a JWT.
+    """
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return None
+    roles = claims.get("roles") if isinstance(claims, dict) else None
+    return frozenset(r for r in roles if isinstance(r, str)) if isinstance(roles, list) else None
+
+
+class MicrosoftApp:
+    """Microsoft Graph with AgentGov's app registration (client credentials)."""
+
     def __init__(self, settings: Settings, *, http: httpx.Client | None = None) -> None:
         self.settings = settings
         self._http = http or httpx.Client(timeout=30)
         self._token: str | None = None
         self._token_expires = 0.0
+
+    @property
+    def graph(self) -> str:
+        return self.settings.graph_url.rstrip("/")
 
     def _access_token(self) -> str:
         if self._token and time.monotonic() < self._token_expires:
@@ -50,59 +84,195 @@ class Microsoft365Catalog:
                     "grant_type": "client_credentials",
                     "client_id": s.m365_client_id,
                     "client_secret": s.m365_client_secret,
-                    "scope": f"{s.graph_url.rstrip('/')}/.default",
+                    "scope": f"{self.graph}/.default",
                 },
             )
         except httpx.HTTPError as exc:
             raise PlatformError(f"Microsoft Entra ID is unreachable: {exc}") from exc
         if resp.status_code != 200:
-            raise PlatformError(f"Microsoft Entra ID refused the app's credentials: {_error(resp)}")
+            raise PlatformError(
+                f"Microsoft Entra ID refused the app's credentials: {_error(resp)}",
+                status=resp.status_code,
+            )
         body = resp.json()
         self._token = body["access_token"]
         self._token_expires = time.monotonic() + max(int(body.get("expires_in", 3600)) - 120, 60)
         return self._token
 
-    @property
-    def _packages_url(self) -> str:
-        return f"{self.settings.graph_url.rstrip('/')}/v1.0/copilot/admin/catalog/packages"
+    def granted(self, *, refresh: bool = False) -> frozenset[str] | None:
+        """The application permissions the app holds (``None``: Entra didn't say).
 
-    def _get(self, url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+        ``refresh`` gets a new token, which picks up permissions granted since.
+        """
+        if refresh:
+            self._token = None
+        return token_roles(self._access_token())
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, str] | None = None,
+        body: Any = None,
+        hint: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         try:
-            resp = self._http.get(
-                url, params=params, headers={"Authorization": f"Bearer {self._access_token()}"}
+            resp = self._http.request(
+                method,
+                url,
+                params=params,
+                json=body,
+                headers={"Authorization": f"Bearer {self._access_token()}", **(headers or {})},
             )
         except httpx.HTTPError as exc:
             raise PlatformError(f"Microsoft Graph is unreachable: {exc}") from exc
-        if resp.status_code != 200:
-            hint = (
-                " (the app needs CopilotPackages.Read.All with admin consent, and the "
-                "tenant a Microsoft Agent 365 licence)"
-                if resp.status_code in (401, 403)
-                else ""
+        if resp.status_code >= 300:
+            extra = hint if resp.status_code in (401, 403) else ""
+            raise PlatformError(
+                f"Microsoft Graph answered {_error(resp)}{extra}", status=resp.status_code
             )
-            raise PlatformError(f"Microsoft Graph answered {_error(resp)}{hint}")
-        body = resp.json()
-        if not isinstance(body, dict):
+        if not resp.content:
+            return {}
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise PlatformError("Microsoft Graph answered with something other than JSON") from exc
+        if not isinstance(data, dict):
             raise PlatformError("Microsoft Graph answered with something other than an object")
-        return body
+        return data
+
+    def get(
+        self,
+        url: str,
+        params: dict[str, str] | None = None,
+        *,
+        hint: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self._request("GET", url, params=params, hint=hint, headers=headers)
+
+    def post(self, url: str, body: Any, *, hint: str = "") -> dict[str, Any]:
+        return self._request("POST", url, body=body, hint=hint)
+
+    def all_pages(
+        self,
+        url: str,
+        params: dict[str, str] | None = None,
+        *,
+        hint: str = "",
+        what: str = "results",
+        limit: int = MAX_PAGES,
+        headers: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Every item of a Graph collection, following ``@odata.nextLink``."""
+        found: list[dict[str, Any]] = []
+        next_url: str | None = url
+        for _ in range(limit):
+            if next_url is None:
+                return found
+            body = self.get(next_url, params, hint=hint, headers=headers)
+            found.extend(item for item in body.get("value", []) if isinstance(item, dict))
+            # Paging is server-driven: follow the opaque next link exactly as given.
+            next_url, params = body.get("@odata.nextLink"), None
+        raise PlatformError(f"stopped after {limit} pages of {what}")
+
+    # -- the Microsoft 365 agent catalog -------------------------------------------
+
+    CATALOG_HINT = (
+        " (the app needs CopilotPackages.Read.All with admin consent, and the "
+        "tenant a Microsoft Agent 365 licence)"
+    )
+
+    @property
+    def _packages_url(self) -> str:
+        return f"{self.graph}/v1.0/copilot/admin/catalog/packages"
 
     def agents(self) -> list[dict[str, Any]]:
         """Every agent in the organisation's catalog (all pages)."""
-        url: str | None = self._packages_url
-        params: dict[str, str] | None = {"$filter": AGENTS_FILTER}
-        found: list[dict[str, Any]] = []
-        for _ in range(MAX_PAGES):
-            if url is None:
-                return found
-            body = self._get(url, params)
-            found.extend(item for item in body.get("value", []) if isinstance(item, dict))
-            # Paging is server-driven: follow the opaque next link exactly as given.
-            url, params = body.get("@odata.nextLink"), None
-        raise PlatformError(f"stopped after {MAX_PAGES} pages of the agent catalog")
+        return self.all_pages(
+            self._packages_url,
+            {"$filter": AGENTS_FILTER},
+            hint=self.CATALOG_HINT,
+            what="the agent catalog",
+        )
 
     def package(self, package_id: str) -> dict[str, Any]:
         """One package's details, with its elements' definitions."""
-        return self._get(f"{self._packages_url}/{quote(package_id, safe='')}")
+        url = f"{self._packages_url}/{quote(package_id, safe='')}"
+        return self.get(url, hint=self.CATALOG_HINT)
+
+    # -- Microsoft Entra Agent ID -----------------------------------------------------
+
+    IDENTITY_FIELDS = (
+        "id,displayName,accountEnabled,agentIdentityBlueprintId,createdByAppId,"
+        "createdDateTime,disabledByMicrosoftStatus,tags"
+    )
+
+    def agent_identities(self) -> list[dict[str, Any]]:
+        """Every agent identity in the tenant (100 a page, Graph's maximum)."""
+        return self.all_pages(
+            f"{self.graph}/v1.0/servicePrincipals/microsoft.graph.agentIdentity",
+            {"$select": self.IDENTITY_FIELDS, "$top": "100"},
+            hint=" (the app needs AgentIdentity.Read.All with admin consent)",
+            what="agent identities",
+        )
+
+    # -- Microsoft Purview audit log -----------------------------------------------------
+
+    AUDIT_HINT = " (the app needs AuditLogsQuery.Read.All with admin consent)"
+
+    def start_audit_query(
+        self,
+        name: str,
+        start: str,
+        end: str,
+        *,
+        record_types: list[str] | None = None,
+        operations: list[str] | None = None,
+    ) -> str:
+        """Ask Purview to search the audit log; returns the query's ID (it runs for minutes)."""
+        body: dict[str, Any] = {
+            "@odata.type": "#microsoft.graph.security.auditLogQuery",
+            "displayName": name,
+            "filterStartDateTime": start,
+            "filterEndDateTime": end,
+        }
+        if record_types:
+            body["recordTypeFilters"] = record_types
+        if operations:
+            body["operationFilters"] = operations
+        url = f"{self.graph}/v1.0/security/auditLog/queries"
+        query = self.post(url, body, hint=self.AUDIT_HINT)
+        if not query.get("id"):
+            raise PlatformError("Purview accepted the audit search but gave it no ID")
+        return str(query["id"])
+
+    def audit_query_status(self, query_id: str) -> str:
+        url = f"{self.graph}/v1.0/security/auditLog/queries/{quote(query_id, safe='')}"
+        query = self.get(url, hint=self.AUDIT_HINT)
+        # The documented example wraps the query in "value".
+        if isinstance(query.get("value"), dict):
+            query = query["value"]
+        return str(query.get("status") or "unknown")
+
+    def audit_records(self, query_id: str, *, limit: int = MAX_PAGES) -> list[dict[str, Any]]:
+        url = f"{self.graph}/v1.0/security/auditLog/queries/{quote(query_id, safe='')}/records"
+        return self.all_pages(url, hint=self.AUDIT_HINT, what="audit records", limit=limit)
+
+    # -- Microsoft Defender ------------------------------------------------------------
+
+    def alerts_since(self, since: str) -> list[dict[str, Any]]:
+        """Defender alerts created or updated since ``since`` (ISO 8601)."""
+        return self.all_pages(
+            f"{self.graph}/v1.0/security/alerts_v2",
+            {"$filter": f"lastUpdateDateTime ge {since}"},
+            hint=" (the app needs SecurityAlert.Read.All with admin consent)",
+            what="Defender alerts",
+            # Security for AI's detections use enum members added after the API shipped.
+            headers={"Prefer": "include-unknown-enum-members"},
+        )
 
 
 # The Power Platform inventory query for Copilot Studio agents, a page at a time.
@@ -123,6 +293,11 @@ POWER_PLATFORM_HINT = (
     "role, and AgentGov's app registration the Power Platform API permissions "
     "CopilotStudio.AdminActions.Invoke and ResourceQuery.Resources.Read)"
 )
+POLICY_HINT = (
+    " (you need the Power Platform administrator role, and AgentGov's app registration the "
+    "Power Platform API permission EnvironmentManagement.Groups.Read)"
+)
+PP_API_VERSION = "2024-10-01"
 GRAPH_HINT = (
     " (you need an admin role such as AI administrator, AgentGov's app registration the "
     "delegated permission CopilotPackages.ReadWrite.All, and the tenant a Microsoft Agent 365 "
@@ -143,15 +318,29 @@ class MicrosoftAdmin:
         self._http = http or httpx.Client(timeout=30)
 
     def _call(
-        self, url: str, token: str, *, what: str, hint: str, body: Any = None
+        self,
+        url: str,
+        token: str,
+        *,
+        what: str,
+        hint: str,
+        body: Any = None,
+        method: str = "POST",
     ) -> dict[str, Any]:
         try:
-            resp = self._http.post(url, json=body, headers={"Authorization": f"Bearer {token}"})
+            resp = self._http.request(
+                method,
+                url,
+                json=body if method != "GET" else None,
+                headers={"Authorization": f"Bearer {token}"},
+            )
         except httpx.HTTPError as exc:
             raise PlatformError(f"{what}: Microsoft is unreachable: {exc}") from exc
         if resp.status_code >= 300:
             extra = hint if resp.status_code in (401, 403) else ""
-            raise PlatformError(f"{what}: Microsoft answered {_error(resp)}{extra}")
+            raise PlatformError(
+                f"{what}: Microsoft answered {_error(resp)}{extra}", status=resp.status_code
+            )
         try:
             data = resp.json() if resp.content else {}
         except ValueError:
@@ -210,6 +399,87 @@ class MicrosoftAdmin:
         )
         self._call(
             url, token, what=f"Could not {action} the agent in Microsoft 365", hint=GRAPH_HINT
+        )
+
+    # -- Power Platform advanced connector policies ---------------------------------
+
+    def _pp(self, path: str, **params: str) -> str:
+        query = "&".join(f"{k}={quote(v, safe='')}" for k, v in params.items())
+        base = self.settings.power_platform_url.rstrip("/")
+        return f"{base}{path}?api-version={PP_API_VERSION}" + (f"&{query}" if query else "")
+
+    def environment_groups(self, token: str) -> list[dict[str, Any]]:
+        """The tenant's environment groups."""
+        groups: list[dict[str, Any]] = []
+        url: str | None = self._pp("/environmentmanagement/environmentGroups")
+        for _ in range(MAX_PAGES):
+            if url is None:
+                return groups
+            body = self._call(
+                url,
+                token,
+                what="Could not list the environment groups",
+                hint=POLICY_HINT,
+                method="GET",
+            )
+            groups.extend(g for g in body.get("value") or [] if isinstance(g, dict))
+            url = body.get("@odata.nextLink")
+        raise PlatformError(f"stopped after {MAX_PAGES} pages of environment groups")
+
+    def connector_policies(self, token: str) -> list[dict[str, Any]]:
+        body = self._call(
+            self._pp("/governance/ruleBasedPolicies"),
+            token,
+            what="Could not read the connector policies",
+            hint=POLICY_HINT,
+            method="GET",
+        )
+        return [p for p in body.get("value") or [] if isinstance(p, dict)]
+
+    def save_connector_policy(
+        self, token: str, policy_id: str | None, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create the policy, or update its rule sets (others it holds are left alone)."""
+        if policy_id is None:
+            url, method = self._pp("/governance/ruleBasedPolicies"), "POST"
+        else:
+            url = self._pp(f"/governance/ruleBasedPolicies/{quote(policy_id, safe='')}")
+            method = "PATCH"
+        return self._call(
+            url,
+            token,
+            what="Could not save the connector policy",
+            hint=POLICY_HINT,
+            body=body,
+            method=method,
+        )
+
+    def policy_assignments(self, token: str, scope: str, scope_id: str) -> list[dict[str, Any]]:
+        """Connector policy assignments of an environment group or environment."""
+        kind = "environmentGroups" if scope == "group" else "environments"
+        body = self._call(
+            self._pp(
+                f"/governance/ruleBasedPolicies/{kind}/{quote(scope_id, safe='')}/assignments",
+                includeRuleSetCounts="true",
+            ),
+            token,
+            what="Could not read the connector policy assignments",
+            hint=POLICY_HINT,
+            method="GET",
+        )
+        return [a for a in body.get("value") or [] if isinstance(a, dict)]
+
+    def assign_policy(self, token: str, policy_id: str, scope: str, scope_id: str) -> None:
+        kind = "environmentGroups" if scope == "group" else "environments"
+        self._call(
+            self._pp(
+                f"/governance/ruleBasedPolicies/{quote(policy_id, safe='')}/{kind}/"
+                f"{quote(scope_id, safe='')}/assignments"
+            ),
+            token,
+            what="Could not apply the connector policy",
+            hint=POLICY_HINT,
+            body={},
         )
 
 
