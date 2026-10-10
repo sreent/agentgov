@@ -31,7 +31,9 @@ AgentGov reads the catalog through the Microsoft Graph [Package Management
 API][packages], as an application, so nobody needs to be signed in. It lists the
 packages that Microsoft 365 Copilot can host
 (`GET /v1.0/copilot/admin/catalog/packages?$filter=supportedHosts/any(h:h eq 'Copilot')`).
-Microsoft requires a Microsoft Agent 365 licence for this API.
+Microsoft requires a Microsoft Agent 365 licence for this API. Without one, leave the
+sync off: nothing else in AgentGov needs Agent 365, and the Copilot Studio import below
+works without it.
 
 1. In the Microsoft Entra admin center, register an application (**App registrations >
    New registration**).
