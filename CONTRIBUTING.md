@@ -15,15 +15,15 @@ Significant decisions get a short ADR in `docs/adr/`.
 
 ## Development setup
 
-You need Python 3.11 or later and the [OPA](https://www.openpolicyagent.org/docs/#running-opa)
-binary (1.21) on your `PATH`. Docker is optional; with it, the tests also validate the
-generated gateway configuration with the real agentgateway binary.
+You need Python 3.11 or later; Docker for the image and end-to-end checks. The first
+run of `scripts/ci.sh` creates `.venv` with the development dependencies and downloads
+the pinned [OPA](https://www.openpolicyagent.org) binary into it:
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev,postgres]"
-docker pull ghcr.io/agentgateway/agentgateway:v1.6.0   # optional
+scripts/ci.sh --setup && . .venv/bin/activate
 ```
+
+Claude Code cloud sessions do this automatically (`.claude/hooks/session-start.sh`).
 
 For API or UI work, the control plane runs on its own against a local SQLite file
 (`agentgov.db`); Keycloak, OPA and the gateway are optional and their reconcilers stay
@@ -38,20 +38,19 @@ and rebuild the image with `docker compose up -d --build control-plane processor
 
 ## Checks
 
-Run what CI runs before you open a pull request:
+The checks run locally, so pushes and pull requests use no GitHub Actions minutes. Run
+them before you open a pull request:
 
 ```bash
-ruff check src tests examples
-ruff format --check src tests examples
-opa fmt --list src/agentgov/policies examples/manifests/policies   # must print nothing
-opa check --strict src/agentgov/policies
-opa test -v src/agentgov/policies
-pytest -q
+scripts/ci.sh             # ruff, opa fmt/check/test, pytest, image build and smoke test
+scripts/ci.sh --e2e       # also: the Compose stack, the demo agent and ledger verification
+scripts/ci.sh --matrix    # also: the tests on each Python 3.11-3.13 installed
 ```
 
-The `e2e` workflow brings up the full stack and runs `examples/agents/demo_agent.py`; run
-it locally (see `deploy/compose/README.md`) when you change the processor, the Rego
-library, the gateway configuration or the identity reconciler.
+Run `--e2e` when you change the processor, the Rego library, the gateway configuration or
+the identity reconciler. It uses its own Compose project and the stack's usual ports, so
+stop a running local stack first. The GitHub workflows (`ci`, `e2e`) run the same checks
+but only when started by hand from the Actions tab.
 
 ## Where things live
 

@@ -1,6 +1,5 @@
 # AgentGov
 
-[![ci](https://github.com/sreent/ai-agent-governance-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/sreent/ai-agent-governance-platform/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **Open-source governance for AI agents.** AgentGov gives every agent you run an entry in
@@ -13,7 +12,7 @@ AgentGov uses [Microsoft Agent 365](https://learn.microsoft.com/en-us/microsoft-
 as its functional baseline. The [parity matrix](docs/baseline-agent365.md) shows each
 Agent 365 capability next to its AgentGov equivalent.
 
-> **Status: alpha.** The reference deployment runs end to end and is exercised in CI.
+> **Status: alpha.** The reference deployment runs end to end; `scripts/ci.sh --e2e` exercises it.
 > APIs and manifests may change before 1.0.
 
 ![The AgentGov admin UI: agent inventory, policy decisions, recent blocks and ledger integrity](docs/images/admin-ui-overview.png)
@@ -236,10 +235,8 @@ tests/          unit and integration tests
 ## Development
 
 ```bash
-pip install -e ".[dev,postgres]"
-pytest -q                          # needs the opa binary; uses Docker if available
-ruff check src tests examples && ruff format --check src tests examples
-opa test -v src/agentgov/policies
+scripts/ci.sh          # lint, Rego checks, tests, image build; sets up .venv and opa
+scripts/ci.sh --e2e    # plus the full stack and the demo walkthrough
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist, and

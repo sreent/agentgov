@@ -1,12 +1,10 @@
 # Brings up the full reference stack (Keycloak, OPA, agentgateway, Presidio,
 # OTel Collector, control plane, processor, demo MCP server) and drives every
-# governance control with a real MCP client. Heavier than ci.yml, so it runs on
-# main and on demand.
+# governance control with a real MCP client. Manual only, to save Actions
+# minutes; the same run happens locally with scripts/ci.sh --e2e.
 name: e2e
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
