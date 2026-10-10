@@ -67,6 +67,9 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Import Copilot Studio agents | Platforms → **Import inventory** | `agentgov platforms import FILE` | `POST /v1/platforms/copilot-studio/import` |
 | List agents from one platform | Platforms → *n agents* | `agentgov agents list --source platform:copilot-studio` | `GET /v1/agents?source=…` |
 | See the connectors agents use; approve or remove one | Platforms → Connectors | `agentgov platforms connectors`, `approve-connector ID`, `unapprove-connector ID` | `GET /v1/platforms/connectors`, `PUT`/`DELETE /v1/platforms/connectors/{id}/approval` |
+| See an agent's instructions and the problems in them | Agent → Instructions | `agentgov agents instructions REF` | `GET /v1/agents/{ref}/instructions` |
+| Set, forget or rescan an agent's instructions | Agent → Instructions → **Add instructions** / **Edit**, **Forget**, **Rescan** | `agentgov agents set-instructions\|clear-instructions\|rescan-instructions REF` | `PUT`/`DELETE /v1/agents/{ref}/instructions`, `POST …/rescan` |
+| Check instructions before deploying an agent | — | `agentgov instructions check FILE` | `POST /v1/instructions/check` |
 
 Every CLI command has `--help`. Commands that cannot be undone (`purge`, `delete` of
 blueprints, tool servers and policies, `apikeys revoke`) ask for confirmation unless you

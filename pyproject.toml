@@ -103,3 +103,7 @@ testpaths = ["tests"]
 # Tests share helpers through `tests.conftest`, whichever way pytest is launched.
 pythonpath = ["."]
 addopts = "-q"
+filterwarnings = [
+  # The CLI sets a longer timeout for slow calls; the in-process test client ignores it.
+  "ignore:You should not use the 'timeout' argument with the TestClient",
+]

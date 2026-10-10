@@ -21,6 +21,7 @@ risky settings; each check is a finding that resolves itself once fixed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from collections import defaultdict
@@ -42,6 +43,7 @@ from agentgov.models import (
 )
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings
+from agentgov.registry import instructions as instructions_svc
 from agentgov.registry.errors import NotFound, ValidationError
 
 SOURCES = {"microsoft-365": "Microsoft 365", "copilot-studio": "Copilot Studio"}
@@ -158,14 +160,30 @@ def _scope(value: Any) -> str | None:
     return lowered
 
 
+def instructions_checked(session: Session) -> dict[str, Any]:
+    """For each catalog package, the version (last change) whose instructions were read."""
+    return {
+        record.external_id: (record.data or {}).get("instructions_checked")
+        for record in session.scalars(
+            select(PlatformAgent).where(PlatformAgent.source == "microsoft-365")
+        )
+    }
+
+
 def record_microsoft_365(
     session: Session,
     packages: list[dict[str, Any]],
     *,
     include_types: set[str],
     actor: str | None = None,
+    agent_instructions: dict[str, str | None] | None = None,
+    classify: bool = False,
 ) -> dict[str, int]:
-    """Store the Microsoft 365 agent catalog (Graph ``copilotPackage`` objects)."""
+    """Store the Microsoft 365 agent catalog (Graph ``copilotPackage`` objects).
+
+    ``agent_instructions`` maps the packages whose details were read to their
+    declarative agents' instructions (None when there are none)."""
+    agent_instructions = agent_instructions or {}
     counts = {"created": 0, "updated": 0, "skipped": 0}
     index = _entra_index(session)
     seen: set[str] = set()
@@ -198,10 +216,16 @@ def record_microsoft_365(
             "last_modified": pkg.get("lastModifiedDateTime"),
             "in_catalog": True,
         }
+        previous = session.get(PlatformAgent, f"microsoft-365:{package_id}")
+        details["instructions_checked"] = (
+            pkg.get("lastModifiedDateTime")
+            if package_id in agent_instructions
+            else ((previous.data or {}).get("instructions_checked") if previous else None)
+        )
         external_ids = {"m365_package_id": package_id}
         if pkg.get("agentIdentityId"):
             external_ids["entra_agent_id"] = str(pkg["agentIdentityId"])
-        _, created = upsert(
+        agent, created = upsert(
             session,
             source="microsoft-365",
             external_id=package_id,
@@ -213,6 +237,17 @@ def record_microsoft_365(
             description=pkg.get("shortDescription"),
         )
         counts["created" if created else "updated"] += 1
+        text = agent_instructions.get(package_id)
+        if text:
+            with contextlib.suppress(ValidationError):  # too long to keep
+                instructions_svc.report(
+                    session,
+                    agent,
+                    source="microsoft-365",
+                    text=text,
+                    actor="system:microsoft-365",
+                    classify=classify,
+                )
     # Agents that left the catalog stay in the registry, marked as gone.
     for record in session.scalars(
         select(PlatformAgent).where(PlatformAgent.source == "microsoft-365")

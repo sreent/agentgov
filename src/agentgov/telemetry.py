@@ -11,12 +11,15 @@ uses, so agents instrumented for it can report here unchanged.
 * Tool executions by registered agents are checked against their grants. A
   call to a tool the agent was never granted shows the agent is reaching tools
   without going through the gateway, and raises a finding.
+* Agents that capture message content report their instructions
+  (``gen_ai.system_instructions``), which are checked for unsafe content.
 """
 
 from __future__ import annotations
 
 import base64
 import fnmatch
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -26,7 +29,8 @@ from sqlalchemy.orm import Session
 from agentgov import ledger
 from agentgov.models import ACTIVE
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import discovery, findings
+from agentgov.registry import discovery, findings, instructions
+from agentgov.registry.errors import ValidationError
 
 GENAI_OPERATIONS = {
     "invoke_agent",
@@ -98,6 +102,38 @@ def _int(value: Any) -> int:
         return 0
 
 
+def instruction_text(value: Any) -> str | None:
+    """Text of ``gen_ai.system_instructions``: message parts, as JSON or structured, or text."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return value.strip() or None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return None
+    texts = [
+        part.get("content") or part.get("text")
+        for part in value
+        if isinstance(part, dict) and part.get("type", "text") == "text"
+    ]
+    return "\n\n".join(t.strip() for t in texts if isinstance(t, str) and t.strip()) or None
+
+
+def system_instructions(attrs: dict[str, Any], span: dict[str, Any]) -> str | None:
+    """The instructions on a span, or on one of its events (OTel GenAI conventions)."""
+    value = attrs.get("gen_ai.system_instructions")
+    if value is None:
+        for event in span.get("events") or []:
+            value = _attrs(event.get("attributes")).get("gen_ai.system_instructions")
+            if value is not None:
+                break
+    return instruction_text(value) if value is not None else None
+
+
 def granted(grants: list[dict[str, Any]], server: str, tool: str) -> bool:
     return any(
         fnmatch.fnmatchcase(server, g["server"])
@@ -106,9 +142,17 @@ def granted(grants: list[dict[str, Any]], server: str, tool: str) -> bool:
     )
 
 
-def ingest(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
-    stats = {"spans": 0, "genai_spans": 0, "agents": 0, "discovered": 0, "ungranted": 0}
+def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False) -> dict[str, Any]:
+    stats = {
+        "spans": 0,
+        "genai_spans": 0,
+        "agents": 0,
+        "discovered": 0,
+        "ungranted": 0,
+        "instructions": 0,
+    }
     seen_agents: set[str] = set()
+    reported: dict[str, str] = {}
     for resource, scope, span in iter_spans(payload):
         stats["spans"] += 1
         attrs = _attrs(span.get("attributes"))
@@ -139,6 +183,21 @@ def ingest(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
         if before is None:
             stats["discovered"] += 1
         seen_agents.add(agent.id)
+        system = system_instructions(attrs, span)
+        if system and reported.get(agent.id) != system:
+            reported[agent.id] = system
+            try:
+                instructions.report(
+                    session,
+                    agent,
+                    source="telemetry",
+                    text=system,
+                    actor="system:otel",
+                    classify=classify,
+                )
+                stats["instructions"] += 1
+            except ValidationError:
+                pass  # too long to keep: the rest of the span still counts
         if op == "execute_tool":
             tool = attrs.get("gen_ai.tool.name") or "unknown"
             server = attrs.get("agentgov.server") or "local"

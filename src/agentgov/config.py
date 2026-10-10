@@ -101,6 +101,20 @@ class Settings:
     graph_url: str = "https://graph.microsoft.com"
     entra_login_url: str = "https://login.microsoftonline.com"
 
+    # --- Instruction classifier (optional) ----------------------------------------
+    # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
+    # Ollama), e.g. http://guardian:8000/v1. Without it, agent instructions are
+    # checked by AgentGov's rules only.
+    guardian_url: str | None = None
+    guardian_model: str = "ibm-granite/granite-guardian-4.1-8b"
+    guardian_api_key: str | None = None
+    # Criteria to judge (one classifier call each): harm, jailbreak, social_bias,
+    # violence, profanity, unethical_behavior, exfiltration, deception.
+    guardian_criteria: str = (
+        "harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception"
+    )
+    guardian_timeout_seconds: float = 60.0
+
     # --- OPA (policy decisions) --------------------------------------------------
     opa_url: str | None = None
     # Longest a bundle long-poll request is held open.
@@ -178,6 +192,7 @@ class Settings:
                 "AGENTGOV_M365_CLIENT_SECRET together"
             )
         self.m365_types()  # raises on unknown package types
+        self.guardian_criteria_list()  # raises on unknown criteria
         self.pii_thresholds()  # raises on malformed entries
 
     def m365_types(self) -> set[str]:
@@ -199,6 +214,17 @@ class Settings:
             except ValueError as exc:
                 raise ValueError(f"bad AGENTGOV_PII_ENTITIES entry {item!r}") from exc
         return thresholds
+
+    def guardian_criteria_list(self) -> list[str]:
+        from agentgov.scanners.guardian import CRITERIA
+
+        names = [c.strip().lower() for c in self.guardian_criteria.split(",") if c.strip()]
+        unknown = sorted(set(names) - set(CRITERIA))
+        if unknown or not names:
+            raise ValueError(
+                f"AGENTGOV_GUARDIAN_CRITERIA takes {', '.join(CRITERIA)}; got {unknown or 'none'}"
+            )
+        return list(dict.fromkeys(names))
 
     @property
     def m365_enabled(self) -> bool:

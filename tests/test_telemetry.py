@@ -94,7 +94,14 @@ def test_registered_agent_activity_and_ungranted_tools(rt, settings) -> None:
     )
     with rt.db.session() as s:
         stats = telemetry.ingest(s, batch)
-    assert stats == {"spans": 3, "genai_spans": 3, "agents": 1, "discovered": 0, "ungranted": 1}
+    assert stats == {
+        "spans": 3,
+        "genai_spans": 3,
+        "agents": 1,
+        "discovered": 0,
+        "ungranted": 1,
+        "instructions": 0,
+    }
     with rt.db.session() as s:
         activity = s.scalars(select(AgentActivity)).one()
         assert (activity.tool_calls, activity.model_calls, activity.input_tokens) == (2, 1, 120)

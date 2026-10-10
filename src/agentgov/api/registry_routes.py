@@ -10,7 +10,15 @@ from agentgov import ledger
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.identity.keycloak import KeycloakError
 from agentgov.models import ACTIVE
-from agentgov.registry import agents, apikeys, blueprints, platforms, policies, toolservers
+from agentgov.registry import (
+    agents,
+    apikeys,
+    blueprints,
+    instructions,
+    platforms,
+    policies,
+    toolservers,
+)
 from agentgov.registry.errors import Conflict
 
 router = APIRouter(prefix="/v1")
@@ -64,8 +72,19 @@ def register_agent(
     rt = _rt(request)
     requested = bool(body.pop("approve", False))
     approve = requested if principal.is_admin else not rt.settings.registration_requires_approval
+    text = body.pop("instructions", None)
     with rt.db.session() as s:
         agent = agents.register(s, rt.settings, body, actor=principal.actor, approve=approve)
+        if text is not None:
+            instructions.report(
+                s,
+                agent,
+                source="registered",
+                text=text,
+                actor=principal.actor,
+                classify=rt.guardian is not None,
+            )
+            agents.refresh_risk(s, rt.settings, agent)
         return agents.to_dict(agent)
 
 

@@ -24,6 +24,7 @@ from agentgov import __version__
 from agentgov.api import (
     access_routes,
     governance_routes,
+    instruction_routes,
     integration_routes,
     platform_routes,
     registry_routes,
@@ -142,6 +143,7 @@ def create_app(
     app.include_router(sso_routes.router)
     app.include_router(access_routes.router)
     app.include_router(platform_routes.router)
+    app.include_router(instruction_routes.router)
 
     ui_dir = Path(str(resources.files("agentgov") / "ui"))
     if (ui_dir / "index.html").exists():

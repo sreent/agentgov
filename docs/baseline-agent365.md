@@ -93,6 +93,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Tool poisoning and definition drift | ✅ | Poisoned tools hidden; changed definitions refused until re-approved |
 | DLP / sensitivity of personal data | ✅ | **Presidio** detects PII; policy redacts it from results and from calls to unverified servers |
 | Posture assessment and recommendations | ✅ | Findings with remediation (ownerless, no sponsor, expired attestation, stale, broad grants, unverified servers, identity drift) |
+| Harmful or malicious agent instructions | ✅ | Agents' system prompts (registered, reported in telemetry, or read from Microsoft 365) are checked by rules and optionally by **IBM Granite Guardian**; problems become findings and add to the risk score ([instructions](instructions.md)) |
 | Connectors used by Copilot Studio agents; risky agent settings | 🟡 | Connector allowlist with findings for agents that use other connectors, publish without authentication, use their maker's connections or are shared with everyone; enforcement stays with Power Platform data policies |
 | Human approval for sensitive actions | ✅ | Destructive tools (and any policy you write) route to an approver; single-use approvals |
 | Alerts / incidents | 🟡 | Findings + webhook alerts; SIEM integration ⏳ |

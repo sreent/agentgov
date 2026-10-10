@@ -204,7 +204,7 @@ async def _otlp(request: Request) -> Response:
 
     def store() -> dict[str, Any]:
         with rt.db.session() as s:
-            return ingest(s, payload)
+            return ingest(s, payload, classify=rt.guardian is not None)
 
     await anyio.to_thread.run_sync(store)
     if protobuf:

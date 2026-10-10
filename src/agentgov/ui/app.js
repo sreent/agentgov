@@ -1609,9 +1609,10 @@ const ATTESTABLE = new Set(['active', 'blocked', 'pending']);
 async function renderAgent({ match }) {
   const ref = decodeURIComponent(match[1]);
   const agent = await api(`v1/agents/${encodeURIComponent(ref)}`);
-  const [entries, openFindings] = await Promise.all([
+  const [entries, openFindings, instructions] = await Promise.all([
     api(`v1/ledger?agent=${encodeURIComponent(agent.id)}&limit=12`).catch((e) => e),
     api(`v1/findings?status=open&agent=${encodeURIComponent(agent.id)}`).catch((e) => e),
+    api(`v1/agents/${encodeURIComponent(agent.id)}/instructions`).catch((e) => e),
   ]);
   // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
   const views = agent.platforms || [];
@@ -1619,7 +1620,8 @@ async function renderAgent({ match }) {
   return h('div', { class: 'page', 'data-title': agent.name },
     agentHeader(agent),
     h('div', { class: 'detail-grid' },
-      h('div', { class: 'stack' }, main, agentLedgerCard(agent, entries), views.length ? null : agentCardCard(agent)),
+      h('div', { class: 'stack' }, main, instructionsCard(agent, instructions), agentLedgerCard(agent, entries),
+        views.length ? null : agentCardCard(agent)),
       h('div', { class: 'stack' }, riskCard(agent), peopleCard(agent), attestationCard(agent), identityCard(agent),
         agentFindingsCard(openFindings))));
 }
@@ -1892,7 +1894,7 @@ function riskCard(a) {
   const platform = platformOf(a);
   return card({
     title: 'Risk',
-    sub: platform ? `Posture factors plus ${platform}'s findings about it` : 'Posture factors plus runtime signals from the last 24 hours',
+    sub: platform ? `Posture, instructions, and how ${platform} has it set up` : 'Posture, instructions, and runtime signals from the last 24 hours',
     actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'recalc', onclick: () => recalcRisk(a) }, icon('refresh'), 'Recalculate')] : null,
     body: [
       h('div', { class: 'risk-head' },
@@ -2023,6 +2025,102 @@ function agentLedgerCard(a, entries) {
     actions: [h('a', { class: 'btn btn--sm btn--ghost', href: `#/ledger?agent=${encodeURIComponent(a.name)}` }, 'Open in ledger', icon('arrow'))],
     body, flush: !(entries instanceof Error) && entries.length > 0,
   });
+}
+
+/* ------------------------------------------------------------ instructions */
+
+const INSTRUCTION_SOURCES = {
+  registered: 'Registered', telemetry: 'Reported in telemetry', 'microsoft-365': 'From Microsoft 365',
+};
+
+function classifierLine(c, settings) {
+  if (!settings?.enabled) return h('p', { class: 'hint' }, 'Checked by AgentGov\'s rules. No classifier is configured.');
+  const model = c.model || settings.model;
+  if (c.state === 'pending') return h('p', { class: 'hint' }, icon('clock'), ` The classifier (${model}) is still checking these instructions.`);
+  if (c.state === 'error') return callout('warning', 'triangle', `The classifier (${model}) failed: ${c.error}`);
+  if (c.state === 'done') {
+    const flagged = Object.entries(c.verdicts || {}).filter(([, v]) => v === 'yes').map(([k]) => humanize(k));
+    return h('p', { class: 'hint' }, `Checked by AgentGov's rules and the classifier (${model})${flagged.length ? `, which flagged ${flagged.join(', ')}` : ', which flagged nothing'}.`);
+  }
+  return h('p', { class: 'hint' }, 'Checked by AgentGov\'s rules; the classifier hasn\'t checked them yet.');
+}
+
+function issueList(issues) {
+  if (!issues.length) return h('p', { class: 'tone-text-good small' }, icon('check-circle'), ' No problems found.');
+  return h('ul', { class: 'issue-list', role: 'list' }, issues.map((i) => h('li', {},
+    h('div', { class: 'issue-head' }, chip('severity', i.severity), h('strong', {}, i.title),
+      i.detector === 'classifier' ? plainChip('Classifier', { title: 'Judged by the classifier' }) : null),
+    i.excerpt ? h('q', { class: 'issue-excerpt' }, i.excerpt) : null)));
+}
+
+function instructionsCard(a, view) {
+  if (view instanceof Error) {
+    return card({ title: 'Instructions', body: callout('critical', 'alert-circle', `The instructions couldn't be loaded. ${view.message}`) });
+  }
+  const sources = view.sources || [];
+  const admin = can('admin') && a.status !== 'deleted';
+  const actions = admin ? [
+    sources.length ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'rescan-instructions', onclick: guarded(() => rescanInstructions(a)) }, icon('refresh'), 'Rescan') : null,
+    sources.some((x) => x.source === 'registered') ? null
+      : h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'add-instructions', onclick: guarded(() => editInstructions(a, null)) }, icon('plus'), 'Add instructions'),
+  ].filter(Boolean) : null;
+  const body = sources.length ? sources.map((x) => h('div', { class: 'instructions-source' },
+    h('div', { class: 'instructions-head' },
+      h('div', {}, h('strong', {}, INSTRUCTION_SOURCES[x.source] || x.source_name),
+        h('div', { class: 'cell-sub' }, `From ${x.reported_by}, changed `, timeEl(x.updated_at))),
+      admin ? h('div', { class: 'btn-row' },
+        x.source === 'registered' ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'edit-instructions', onclick: guarded(() => editInstructions(a, x)) }, icon('edit'), 'Edit') : null,
+        h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `forget-${x.source}`, onclick: guarded(() => forgetInstructions(a, x)) }, icon('trash'), 'Forget')) : null),
+    issueList(x.issues || []),
+    classifierLine(x.classifier || {}, view.classifier),
+    h('details', { class: 'disclosure' }, h('summary', {}, icon('chevron'), 'Show the instructions'),
+      h('pre', { class: 'kv-pre instructions-text', tabindex: '0' }, x.text),
+      x.truncated ? h('p', { class: 'hint' }, 'Only the beginning is kept.') : null)))
+    : emptyState('No instructions known',
+      "Agents that capture message content report them in telemetry (gen_ai.system_instructions), Microsoft 365 reports declarative agents' instructions, and they can be added here or in a manifest.");
+  return card({
+    title: 'Instructions',
+    sub: 'What the agent is told to do (its system prompt), checked for harmful or malicious content. Credentials in it are redacted.',
+    actions,
+    body,
+  });
+}
+
+async function editInstructions(a, current) {
+  const saved = await ask({
+    title: current ? `Edit ${a.name}'s instructions` : `Add instructions for ${a.name}`,
+    text: 'The instructions are checked as soon as they are saved, and the result is recorded in the evidence ledger. Credentials in them are redacted before they are stored.',
+    iconName: 'edit', confirm: 'Save and check', busy: 'Checking…', wide: true,
+    fields: [{ id: 'text', label: 'Instructions', type: 'code', rows: 14, required: true, file: '.txt,.md', value: current?.text || '', placeholder: 'You are the Contoso IT helpdesk assistant. …' }],
+    submit: (v) => api(`v1/agents/${encodeURIComponent(a.id)}/instructions`, { method: 'PUT', body: { text: v.text } }),
+  });
+  if (!saved) return;
+  const n = (saved.issues || []).length;
+  toast(n ? `Saved. ${plural(n, 'problem')} found in the instructions.` : 'Saved. No problems found.', { tone: n ? 'warning' : 'good' });
+  refreshBadges();
+  await refresh();
+}
+
+async function forgetInstructions(a, x) {
+  const done = await ask({
+    title: `Forget ${(INSTRUCTION_SOURCES[x.source] || x.source).toLowerCase()} instructions?`,
+    text: x.source === 'registered'
+      ? 'The registered instructions are removed. A finding about them is resolved.'
+      : 'AgentGov forgets this copy. If the source reports the instructions again, they come back and are checked again.',
+    tone: 'danger', iconName: 'trash', confirm: 'Forget', busy: 'Forgetting…',
+    submit: () => api(`v1/agents/${encodeURIComponent(a.id)}/instructions?source=${encodeURIComponent(x.source)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Forgot ${a.name}'s ${x.source} instructions.`);
+  refreshBadges();
+  await refresh();
+}
+
+async function rescanInstructions(a) {
+  const out = await api(`v1/agents/${encodeURIComponent(a.id)}/instructions/rescan`, { method: 'POST' });
+  toast(`Checked ${plural(out.rescanned, 'set')} of instructions again.`);
+  refreshBadges();
+  await refresh();
 }
 
 function agentFindingsCard(list) {

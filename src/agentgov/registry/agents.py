@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
@@ -19,6 +19,7 @@ from agentgov.models import (
     DISCOVERED,
     PENDING,
     Agent,
+    AgentInstructions,
 )
 from agentgov.registry import approvals, blueprints, findings, risk, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
@@ -278,6 +279,8 @@ def purge(session: Session, agent: Agent, *, actor: str) -> None:
     if agent.status != DELETED:
         raise InvalidTransition("only deleted agents can be purged")
     ledger.append(session, type="agent.purged", actor=actor, agent=agent, severity="warning")
+    # Its instructions go too: the ledger keeps their hashes, not their text.
+    session.execute(delete(AgentInstructions).where(AgentInstructions.agent_id == agent.id))
     session.delete(agent)
     mark_changed(session, "agents")
 

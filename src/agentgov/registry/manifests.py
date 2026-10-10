@@ -10,6 +10,8 @@ spec:
   owner: cx-platform
   sponsors: [alice@example.com]
   status: active       # optional desired state
+  instructions: |      # optional: the agent's system prompt, checked for unsafe content
+    You help customers with their orders...
 ```
 
 Applying is idempotent: unchanged resources are reported as ``unchanged``.
@@ -25,8 +27,8 @@ import yaml
 from sqlalchemy.orm import Session
 
 from agentgov.config import Settings
-from agentgov.models import ACTIVE, BLOCKED, PENDING
-from agentgov.registry import agents, blueprints, policies, toolservers
+from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
+from agentgov.registry import agents, blueprints, instructions, policies, toolservers
 from agentgov.registry.errors import NotFound, ValidationError
 
 API_VERSION = "agentgov/v1alpha1"
@@ -119,18 +121,41 @@ def _policy(session: Session, settings: Settings, spec: dict[str, Any], actor: s
     return "configured" if policies.update(session, policy, spec, actor=actor) else "unchanged"
 
 
+def _instructions(
+    session: Session, settings: Settings, agent: Agent, text: Any, actor: str
+) -> bool:
+    """Apply ``spec.instructions``; returns whether they changed."""
+    if text is None:
+        return False
+    before = session.get(AgentInstructions, f"{agent.id}:registered")
+    digest = before.sha256 if before is not None else None
+    row = instructions.report(
+        session,
+        agent,
+        source="registered",
+        text=text,
+        actor=actor,
+        classify=bool(settings.guardian_url),
+    )
+    return row.sha256 != digest
+
+
 def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", ACTIVE)
+    text = spec.pop("instructions", None)
     if desired not in (ACTIVE, PENDING, BLOCKED):
         raise ValidationError(f"agent {spec['name']}: status must be active, pending or blocked")
     try:
         agent = agents.get(session, spec["name"])
     except NotFound:
         agent = agents.register(session, settings, spec, actor=actor, approve=desired == ACTIVE)
+        _instructions(session, settings, agent, text, actor)
         if desired == BLOCKED:
             agents.transition(session, settings, agent, "block", actor=actor, reason="manifest")
         return "created"
     action = "configured" if agents.update(session, agent, spec, actor=actor) else "unchanged"
+    if _instructions(session, settings, agent, text, actor):
+        action = "configured"
     if desired == ACTIVE and agent.status in (PENDING, BLOCKED):
         verb = "approve" if agent.status == PENDING else "unblock"
         agents.transition(session, settings, agent, verb, actor=actor, reason="manifest")
@@ -165,6 +190,9 @@ def export(session: Session) -> list[dict[str, Any]]:
         d = agents.to_dict(agent)
         spec = {k: d[k] for k in agents.EDITABLE if k in d and d[k] not in (None, [], {})}
         spec["status"] = agent.status
+        registered = session.get(AgentInstructions, f"{agent.id}:registered")
+        if registered is not None and not registered.truncated:
+            spec["instructions"] = registered.text
         docs.append(_doc("Agent", agent.name, spec))
     return docs
 

@@ -31,6 +31,9 @@ SIGNAL_WEIGHTS: dict[str, tuple[int, int]] = {
     "unregistered_activity": (10, 20),
 }
 
+# An open "unsafe instructions" finding, by its severity.
+INSTRUCTION_POINTS = {"critical": 40, "high": 25, "medium": 10, "low": 5}
+
 # Open findings about how an agent on another platform (Copilot Studio) is set up.
 FINDING_WEIGHTS: dict[str, tuple[str, int]] = {
     "platform.no_authentication": ("Published without user authentication", 25),
@@ -104,6 +107,13 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
         per, cap = SIGNAL_WEIGHTS.get(kind, (2, 10))
         factor(SIGNAL_LABELS.get(kind, kind), min(cap, per * count), f"{count} in {window_hours}h")
 
+    unsafe = session.scalar(
+        select(Finding.severity).where(
+            Finding.key == f"agent.unsafe_instructions:{agent.id}", Finding.status == "open"
+        )
+    )
+    if unsafe:
+        factor("Unsafe instructions", INSTRUCTION_POINTS.get(unsafe, 10), unsafe)
     if agent.on_platform:
         open_types = session.scalars(
             select(Finding.type).where(

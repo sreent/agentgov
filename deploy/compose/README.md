@@ -94,6 +94,20 @@ Add `-f docker-compose.langfuse.yml` to every later `docker compose` command for
 stack (`ps`, `logs`, `down`), or set
 `COMPOSE_FILE=docker-compose.yml:docker-compose.langfuse.yml` in `.env`.
 
+## Optional: a classifier for agent instructions
+
+AgentGov checks every agent's instructions (its system prompt) with its own rules. To
+add IBM Granite Guardian as a second opinion, add the override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.guardian.yml up -d
+```
+
+It runs Granite Guardian 4.1 on llama.cpp's server, on the CPU. The first start
+downloads the model (about 5 GB). Checks run in the background and take a few seconds
+per criterion; with a GPU, serve the model with vLLM instead and set
+`AGENTGOV_GUARDIAN_URL`. [Agent instructions](../../docs/instructions.md) has the details.
+
 ## Optional: Microsoft 365 and Copilot Studio agents
 
 To bring the organisation's Microsoft 365 agent catalog into the registry, set

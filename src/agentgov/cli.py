@@ -2,8 +2,9 @@
 
 The administration commands are a thin layer over the HTTP API and follow the
 admin UI's pages: agents, blueprints, tool servers, policies, approvals,
-findings, the ledger, access (API keys) and platforms. Whatever the UI can change, the CLI
-can change too, through the same endpoints and with the same role checks.
+findings, the ledger, access (API keys) and platforms, plus a checker for agent
+instructions. Whatever the UI can change, the CLI can change too, through the
+same endpoints and with the same role checks.
 """
 
 from __future__ import annotations
@@ -60,6 +61,10 @@ platforms_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(platforms_app, name="platforms")
+instructions_app = typer.Typer(
+    help="Check agent instructions (system prompts) for unsafe content.", no_args_is_help=True
+)
+app.add_typer(instructions_app, name="instructions")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -75,8 +80,17 @@ def _client() -> httpx.Client:
 
 
 def _call(method: str, path: str, **kwargs: Any) -> Any:
-    with _client() as client:
-        resp = client.request(method, path, **kwargs)
+    try:
+        with _client() as client:
+            resp = client.request(method, path, **kwargs)
+    except httpx.TimeoutException:
+        typer.secho(
+            "error: the control plane did not answer in time", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(1) from None
+    except httpx.HTTPError as exc:
+        typer.secho(f"error: cannot reach the control plane: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from None
     if resp.status_code >= 400:
         try:
             detail = resp.json().get("detail", resp.text)
@@ -472,6 +486,90 @@ def agents_risk(ref: str, refresh: bool = typer.Option(False, help="Recompute it
     for factor in risk.get("factors", []):
         detail = f" ({factor['detail']})" if factor.get("detail") else ""
         typer.echo(f"  +{factor['points']}  {factor['factor']}{detail}")
+
+
+SEVERITIES = ("critical", "high", "medium", "low")
+# A classifier on a CPU takes seconds per criterion.
+CLASSIFIER_TIMEOUT = 600
+
+
+def _read_text(file: Path) -> str:
+    try:
+        return sys.stdin.read() if str(file) == "-" else file.read_text()
+    except OSError as exc:
+        _fail(f"cannot read {file}: {exc}")
+
+
+def _issues(issues: list[dict[str, Any]]) -> None:
+    if not issues:
+        typer.echo("  no problems found")
+        return
+    rows = [{**i, "excerpt": (i.get("excerpt") or "")[:70].replace("\n", " ")} for i in issues]
+    _table(rows, ["severity", "rule", "title", "excerpt"])
+
+
+def _classifier_state(classifier: dict[str, Any]) -> str:
+    state = classifier.get("state", "off")
+    if state == "done":
+        flagged = [c for c, v in (classifier.get("verdicts") or {}).items() if v == "yes"]
+        return f"classifier ({classifier.get('model')}): " + (
+            "flagged " + ", ".join(flagged) if flagged else "nothing flagged"
+        )
+    if state == "error":
+        return f"classifier failed: {classifier.get('error')}"
+    return {"off": "classifier: not configured", "pending": "classifier: pending"}.get(
+        state, f"classifier: {state}"
+    )
+
+
+@agents_app.command("instructions")
+def agents_instructions(
+    ref: str, text: bool = typer.Option(False, "--text", help="Print the instructions too.")
+) -> None:
+    """The agent's instructions from each source, and the problems found in them."""
+    view = _call("GET", f"/v1/agents/{ref}/instructions")
+    if not view["sources"]:
+        typer.echo("No instructions known for this agent.")
+    for src in view["sources"]:
+        typer.echo(
+            f"{src['source_name']} instructions, from {src['reported_by']}, "
+            f"changed {src['updated_at']}"
+        )
+        _issues(src["issues"])
+        typer.echo(f"  {_classifier_state(src['classifier'])}")
+        if text:
+            typer.echo("")
+            typer.echo(src["text"])
+        typer.echo("")
+
+
+@agents_app.command("set-instructions")
+def agents_set_instructions(
+    ref: str, file: Path = typer.Argument(..., help="A text file, or - for standard input.")
+) -> None:
+    """Set the agent's registered instructions; they are checked straight away."""
+    row = _call("PUT", f"/v1/agents/{ref}/instructions", json={"text": _read_text(file)})
+    _done("agent", ref, f"instructions set ({len(row['issues'])} problems found)")
+    _issues(row["issues"])
+
+
+@agents_app.command("clear-instructions")
+def agents_clear_instructions(
+    ref: str,
+    source: str = typer.Option("registered", help="registered, telemetry or microsoft-365."),
+    yes: bool = YES,
+) -> None:
+    """Forget the agent's instructions from one source."""
+    _confirm(f"Forget the {source} instructions of {ref}?", yes)
+    _call("DELETE", f"/v1/agents/{ref}/instructions", params={"source": source})
+    _done("agent", ref, f"{source} instructions cleared")
+
+
+@agents_app.command("rescan-instructions")
+def agents_rescan_instructions(ref: str) -> None:
+    """Check the stored instructions again (the classifier runs in the background)."""
+    out = _call("POST", f"/v1/agents/{ref}/instructions/rescan")
+    _done("agent", ref, f"{out['rescanned']} sets of instructions rescanned")
 
 
 # ---------------------------------------------------------------- blueprints
@@ -1084,6 +1182,35 @@ def platforms_unapprove_connector(connector_id: str) -> None:
     """Take a connector off the allowlist."""
     out = _call("DELETE", f"/v1/platforms/connectors/{_connector(connector_id)}/approval")
     _done("connector", out["connector_id"], "no longer approved")
+
+
+# -------------------------------------------------------------- instructions
+
+
+@instructions_app.command("check")
+def instructions_check(
+    file: Path = typer.Argument(..., help="A text file, or - for standard input."),
+    classifier: bool = typer.Option(
+        True, help="Also ask the classifier, when the control plane has one."
+    ),
+    fail_on: str = typer.Option(
+        "high", help="Exit with 1 at or above this severity: critical, high, medium or low."
+    ),
+) -> None:
+    """Check instructions without storing them, for example in a CI pipeline."""
+    if fail_on not in SEVERITIES:
+        _fail(f"--fail-on takes {', '.join(SEVERITIES)}")
+    result = _call(
+        "POST",
+        "/v1/instructions/check",
+        json={"text": _read_text(file), "classifier": classifier},
+        timeout=CLASSIFIER_TIMEOUT,
+    )
+    _issues(result["issues"])
+    typer.echo(_classifier_state(result["classifier"]), err=True)
+    worst = result["severity"]
+    if worst is not None and SEVERITIES.index(worst) <= SEVERITIES.index(fail_on):
+        raise typer.Exit(1)
 
 
 def main() -> None:

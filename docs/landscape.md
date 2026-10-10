@@ -16,6 +16,7 @@ standards the platform aligns with. Survey date: October 2026.
 | Trace UI (optional) | **Langfuse** (MIT core) | Understands GenAI spans out of the box and accepts OTLP directly; optional because self-hosting adds ClickHouse, Redis and S3-compatible storage | Arize Phoenix (ELv2, not OSI), Grafana Tempo/Loki (AGPL, semconv-agnostic) |
 | Object storage for Langfuse (optional) | **SeaweedFS** (Apache-2.0) | Officially supported by Langfuse; its single-process `mini` mode suits the reference stack. In production, use a managed bucket | MinIO (AGPL-3.0; the community edition no longer ships images or security fixes), Garage (AGPL-3.0) |
 | In-process enforcement (optional) | **Microsoft Agent Governance Toolkit** (MIT) | Framework adapters for Agent Framework, LangGraph, CrewAI, OpenAI Agents SDK, ADK, … | — |
+| Harmful-content classifier (optional) | **IBM Granite Guardian** 4.1 (Apache-2.0) | Judges text against built-in risk criteria (harm, jailbreak, social bias, violence, unethical behaviour) and criteria you write; open weights under an OSI licence; GGUF builds run on a CPU with llama.cpp | Llama Guard and Prompt Guard (Llama licence, not OSI), ShieldGemma (Gemma terms), NeMo Guardrails (a framework around such models rather than a model) |
 
 ### What we did not reuse, and why
 
