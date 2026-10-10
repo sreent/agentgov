@@ -43,6 +43,9 @@ services:
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_HEALTH_ENABLED: "true"
       AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
+      # Imported into the realm: the admin sign-in client and the demo users' password.
+      AGENTGOV_OIDC_CLIENT_SECRET: ${AGENTGOV_OIDC_CLIENT_SECRET:-dev-oidc-secret}
+      AGENTGOV_DEMO_PASSWORD: ${AGENTGOV_DEMO_PASSWORD:-dev-password}
     volumes:
       - ./keycloak/agentgov-realm.json:/opt/keycloak/data/import/agentgov-realm.json:ro
     ports:
@@ -77,6 +80,8 @@ services:
       AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
       AGENTGOV_KEYCLOAK_ISSUER: http://localhost:8180/realms/agentgov
       AGENTGOV_KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/agentgov/protocol/openid-connect/certs
+      # Administrator single sign-on through Keycloak (client agentgov-admin).
+      AGENTGOV_OIDC_CLIENT_SECRET: ${AGENTGOV_OIDC_CLIENT_SECRET:-dev-oidc-secret}
       AGENTGOV_GATEWAY_CONFIG_PATH: /gateway/config.yaml
       AGENTGOV_GATEWAY_PUBLIC_URL: http://localhost:8080
       AGENTGOV_GATEWAY_OTLP_ENDPOINT: http://otel-collector:4317

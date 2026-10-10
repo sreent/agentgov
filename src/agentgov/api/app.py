@@ -21,7 +21,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from agentgov import __version__
-from agentgov.api import governance_routes, integration_routes, registry_routes
+from agentgov.api import governance_routes, integration_routes, registry_routes, sso_routes
 from agentgov.api.auth import Principal, require
 from agentgov.config import Settings
 from agentgov.registry import apikeys
@@ -121,16 +121,24 @@ def create_app(
             "audience": settings.gateway_audience,
             "opa": bool(settings.opa_url),
             "unknown_agent_mode": settings.unknown_agent_mode,
+            "sso": {"enabled": settings.sso_enabled, "login_url": "/auth/login"},
         }
 
     @app.get("/v1/me", tags=["system"])
-    def whoami(principal: Principal = Depends(require(*apikeys.ROLES))) -> dict[str, str]:
-        """The caller's identity and role, so clients can tailor what they offer."""
-        return {"name": principal.name, "role": principal.role, "actor": principal.actor}
+    def whoami(principal: Principal = Depends(require(*apikeys.ROLES))) -> dict[str, Any]:
+        """The caller's identity and roles, so clients can tailor what they offer."""
+        return {
+            "name": principal.name,
+            "role": principal.role,
+            "roles": sorted(principal.roles),
+            "actor": principal.actor,
+            "via": principal.via,
+        }
 
     app.include_router(registry_routes.router)
     app.include_router(governance_routes.router)
     app.include_router(integration_routes.router)
+    app.include_router(sso_routes.router)
 
     ui_dir = Path(str(resources.files("agentgov") / "ui"))
     if (ui_dir / "index.html").exists():

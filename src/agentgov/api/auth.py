@@ -1,4 +1,9 @@
-"""Authentication and role checks for the control plane API."""
+"""Authentication and role checks for the control plane API.
+
+Callers authenticate with a bearer token (the bootstrap admin token, the
+internal service token or an API key) or, for people signed in through single
+sign-on, with the session cookie set by ``/auth/callback``.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +13,31 @@ from dataclasses import dataclass
 
 from fastapi import HTTPException, Request
 
+from agentgov.identity import sso
 from agentgov.registry import apikeys
 
 READ_ROLES = ("admin", "approver", "auditor")
+SESSION_COOKIE = "agentgov_session"
+# Cookie-authenticated writes must carry this header. Browsers do not let other
+# sites add custom headers to cross-origin requests (no CORS is enabled), so
+# it blocks cross-site request forgery.
+CSRF_HEADER = "x-agentgov-csrf"
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 @dataclass(frozen=True)
 class Principal:
     name: str
     role: str
+    # Every role held; ``role`` is the most privileged one (people signed in
+    # through single sign-on can hold several).
+    roles: frozenset[str] = frozenset()
+    # "token" (bootstrap/service), "api_key" or "session" (single sign-on).
+    via: str = "token"
+
+    def __post_init__(self) -> None:
+        if not self.roles:
+            object.__setattr__(self, "roles", frozenset({self.role}))
 
     @property
     def actor(self) -> str:
@@ -24,7 +45,7 @@ class Principal:
 
     @property
     def is_admin(self) -> bool:
-        return self.role == "admin"
+        return "admin" in self.roles
 
 
 def _bearer(request: Request) -> str | None:
@@ -36,20 +57,30 @@ def _bearer(request: Request) -> str | None:
 
 
 def authenticate(request: Request) -> Principal | None:
-    token = _bearer(request)
-    if not token:
-        return None
     rt = request.app.state.rt
     settings = rt.settings
-    if settings.admin_token and hmac.compare_digest(token, settings.admin_token):
-        return Principal("bootstrap", "admin")
-    if settings.service_token and hmac.compare_digest(token, settings.service_token):
-        return Principal("internal", "service")
+    token = _bearer(request)
+    if token:
+        if settings.admin_token and hmac.compare_digest(token, settings.admin_token):
+            return Principal("bootstrap", "admin")
+        if settings.service_token and hmac.compare_digest(token, settings.service_token):
+            return Principal("internal", "service")
+        with rt.db.session() as session:
+            key = apikeys.authenticate(session, token)
+            if key is not None:
+                return Principal(key.name, key.role, via="api_key")
+        return None
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if not cookie or not settings.sso_enabled:
+        return None
+    if request.method not in SAFE_METHODS and request.headers.get(CSRF_HEADER) != "1":
+        raise HTTPException(403, "cross-site request refused: send the X-AgentGov-CSRF header")
     with rt.db.session() as session:
-        key = apikeys.authenticate(session, token)
-        if key is not None:
-            return Principal(key.name, key.role)
-    return None
+        record = sso.lookup(session, cookie)
+        roles = [r for r in sso.SSO_ROLES if record is not None and r in (record.roles or [])]
+        if not roles:
+            return None
+        return Principal(record.name, roles[0], frozenset(roles), via="session")
 
 
 def require(*roles: str) -> Callable[[Request], Principal]:
@@ -63,7 +94,7 @@ def require(*roles: str) -> Callable[[Request], Principal]:
                 detail="missing or invalid bearer token",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        if principal.role not in allowed:
+        if not principal.roles & allowed:
             raise HTTPException(status_code=403, detail=f"role {principal.role!r} may not do this")
         return principal
 

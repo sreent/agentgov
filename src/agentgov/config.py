@@ -64,6 +64,27 @@ class Settings:
     # Audience every agent token carries; the gateway requires it.
     gateway_audience: str = "agentgov-gateway"
 
+    # --- Administrator single sign-on (OIDC) -------------------------------------
+    # The control plane signs administrators in with an OIDC provider (Keycloak by
+    # default) as a confidential client and keeps the session server-side: the
+    # browser only holds an HttpOnly cookie. Enabled when a client secret is set.
+    oidc_client_id: str = "agentgov-admin"
+    oidc_client_secret: str | None = None
+    # Defaults to keycloak_issuer. Endpoints default to Keycloak's paths: the
+    # authorization and logout endpoints under the issuer (browser-facing), the
+    # token endpoint and JWKS under keycloak_url when set (server-to-server).
+    oidc_issuer: str | None = None
+    oidc_authorization_endpoint: str | None = None
+    oidc_token_endpoint: str | None = None
+    oidc_jwks_url: str | None = None
+    oidc_end_session_endpoint: str | None = None
+    oidc_scopes: str = "openid profile email"
+    # Where role names are found in the tokens (a dot path), and the prefix that
+    # marks AgentGov roles: "agentgov-approver" grants the approver role.
+    oidc_roles_claim: str = "realm_access.roles"
+    oidc_role_prefix: str = "agentgov-"
+    session_hours: int = 8
+
     # --- OPA (policy decisions) --------------------------------------------------
     opa_url: str | None = None
     # Longest a bundle long-poll request is held open.
@@ -125,6 +146,8 @@ class Settings:
             raise ValueError("AGENTGOV_PROMPT_INJECTION_THRESHOLD must be in (0, 1]")
         if self.presidio_failure_mode not in ("open", "closed"):
             raise ValueError("AGENTGOV_PRESIDIO_FAILURE_MODE must be 'open' or 'closed'")
+        if self.session_hours <= 0:
+            raise ValueError("AGENTGOV_SESSION_HOURS must be positive")
         self.pii_thresholds()  # raises on malformed entries
 
     def pii_thresholds(self) -> dict[str, float]:
@@ -140,6 +163,29 @@ class Settings:
     @property
     def keycloak_enabled(self) -> bool:
         return bool(self.keycloak_url and self.keycloak_client_secret)
+
+    @property
+    def sso_enabled(self) -> bool:
+        return bool(self.oidc_client_secret and (self.oidc_issuer or self.keycloak_issuer))
+
+    def oidc_endpoints(self) -> dict[str, str]:
+        """Issuer and endpoints for administrator sign-in (Keycloak paths by default)."""
+        issuer = (self.oidc_issuer or self.keycloak_issuer or "").rstrip("/")
+        backchannel = issuer
+        if self.keycloak_url and not self.oidc_issuer:
+            backchannel = f"{self.keycloak_url.rstrip('/')}/realms/{self.keycloak_realm}"
+        return {
+            "issuer": issuer,
+            "authorization_endpoint": self.oidc_authorization_endpoint
+            or f"{issuer}/protocol/openid-connect/auth",
+            "token_endpoint": self.oidc_token_endpoint
+            or f"{backchannel}/protocol/openid-connect/token",
+            "jwks_uri": self.oidc_jwks_url
+            or (self.keycloak_jwks_url if not self.oidc_issuer else None)
+            or f"{backchannel}/protocol/openid-connect/certs",
+            "end_session_endpoint": self.oidc_end_session_endpoint
+            or f"{issuer}/protocol/openid-connect/logout",
+        }
 
     def with_overrides(self, **overrides: Any) -> Settings:
         return dataclasses.replace(self, **overrides)

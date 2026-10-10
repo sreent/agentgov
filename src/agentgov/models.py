@@ -169,6 +169,36 @@ class ApiKey(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
+class AdminSession(Base):
+    """An administrator signed in through single sign-on.
+
+    The browser holds a random token in an HttpOnly cookie; only its hash is
+    stored. The provider's ID token is kept for RP-initiated logout.
+    """
+
+    __tablename__ = "admin_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    subject: Mapped[str] = mapped_column(String(255))
+    name: Mapped[str] = mapped_column(String(255))
+    roles: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    id_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = _created()
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+
+
+class LoginState(Base):
+    """A sign-in in flight: state, nonce and PKCE verifier, used once and short-lived."""
+
+    __tablename__ = "login_states"
+
+    state: Mapped[str] = mapped_column(String(64), primary_key=True)
+    nonce: Mapped[str] = mapped_column(String(64))
+    code_verifier: Mapped[str] = mapped_column(String(128))
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+
+
 class ApprovalRequest(Base):
     """Human-in-the-loop approval for one specific tool call."""
 
