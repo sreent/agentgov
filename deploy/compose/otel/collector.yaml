@@ -1,0 +1,30 @@
+# Agents and agentgateway send OTLP here. GenAI spans go to the control plane,
+# which uses them for discovery (shadow agents), activity and detective controls.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 2s
+
+exporters:
+  otlp_http/agentgov:
+    endpoint: http://control-plane:8000/v1/otlp
+    encoding: json
+    headers:
+      Authorization: "Bearer ${env:AGENTGOV_SERVICE_TOKEN}"
+  # Add to the pipeline's exporters to print spans while troubleshooting.
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/agentgov]

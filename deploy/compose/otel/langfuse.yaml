@@ -1,0 +1,23 @@
+# Merged over collector.yaml by docker-compose.langfuse.yml: every trace also
+# goes to Langfuse for exploration. Langfuse accepts OTLP over HTTP at
+# /api/public/otel with the project's public/secret key as basic auth.
+extensions:
+  basicauth/langfuse:
+    client_auth:
+      username: ${env:LANGFUSE_PUBLIC_KEY}
+      password: ${env:LANGFUSE_SECRET_KEY}
+
+exporters:
+  otlp_http/langfuse:
+    endpoint: ${env:LANGFUSE_OTLP_ENDPOINT}
+    auth:
+      authenticator: basicauth/langfuse
+    headers:
+      # Ingest directly into Langfuse's v4 data model (visible within seconds).
+      x-langfuse-ingestion-version: "4"
+
+service:
+  extensions: [basicauth/langfuse]
+  pipelines:
+    traces:
+      exporters: [otlp_http/agentgov, otlp_http/langfuse]

@@ -1,0 +1,182 @@
+# AgentGov reference stack: an open-source take on Microsoft Agent 365, composed
+# from established projects. See docs/architecture.md.
+#
+#   docker compose up -d --build
+#
+# Host ports: control plane + UI :8000, MCP gateway :8080, Keycloak :8180,
+# OPA :8181, OTLP :4317/:4318. The demo MCP server is only reachable through
+# the gateway. The defaults below are for local evaluation only - set real
+# secrets in a .env file (see .env.example) for anything else.
+
+x-agentgov-env: &agentgov-env
+  AGENTGOV_SERVICE_TOKEN: ${AGENTGOV_SERVICE_TOKEN:-dev-service-token}
+  AGENTGOV_OPA_URL: http://opa:8181
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: agentgov
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentgov}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentgov -d keycloak"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Agent identity (the open Entra Agent ID): one OAuth client per agent.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: agentgov
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-agentgov}
+      # Tokens always carry this issuer; containers reach Keycloak at keycloak:8080.
+      KC_HOSTNAME: http://localhost:8180
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+      AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
+    volumes:
+      - ./keycloak/agentgov-realm.json:/opt/keycloak/data/import/agentgov-realm.json:ro
+    ports:
+      - "8180:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  # Registry, lifecycle, reconcilers, evidence ledger, admin UI (ours).
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: agentgov:local
+    command: ["server"]
+    environment:
+      <<: *agentgov-env
+      AGENTGOV_DATABASE_URL: postgresql+psycopg://agentgov:${POSTGRES_PASSWORD:-agentgov}@postgres:5432/agentgov
+      AGENTGOV_PUBLIC_URL: http://localhost:8000
+      AGENTGOV_ADMIN_TOKEN: ${AGENTGOV_ADMIN_TOKEN:-dev-admin-token}
+      AGENTGOV_KEYCLOAK_URL: http://keycloak:8080
+      AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
+      AGENTGOV_KEYCLOAK_ISSUER: http://localhost:8180/realms/agentgov
+      AGENTGOV_KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/agentgov/protocol/openid-connect/certs
+      AGENTGOV_GATEWAY_CONFIG_PATH: /gateway/config.yaml
+      AGENTGOV_GATEWAY_PUBLIC_URL: http://localhost:8080
+      AGENTGOV_GATEWAY_OTLP_ENDPOINT: http://otel-collector:4317
+      AGENTGOV_PROCESSOR_ADDRESS: processor:50051
+      AGENTGOV_POSTURE_INTERVAL_SECONDS: "60"
+    volumes:
+      - gateway-config:/gateway
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Policy decision point: Rego library + registry data, served by the control plane.
+  opa:
+    image: openpolicyagent/opa:1.21.1-static
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--config-file=/config/opa.yaml", "--log-level=info"]
+    environment:
+      <<: *agentgov-env
+    volumes:
+      - ./opa/config.yaml:/config/opa.yaml:ro
+    ports:
+      - "8181:8181"
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+  # PII detection (the open Purview DLP classifier).
+  presidio-analyzer:
+    image: ghcr.io/data-privacy-stack/presidio-analyzer:2.2.364@sha256:ae8f6f111ac2f04e3fec552f7f80edd0dcbfa2dd69ee1b9e030475be31669885
+    environment:
+      WORKERS: "2"
+      REGEX_TIMEOUT_SECONDS: "2"
+      TLDEXTRACT_CACHE_TIMEOUT: "1"
+
+  # agentgateway's ExtMcp policy server: content inspection, OPA decisions, approvals (ours).
+  processor:
+    image: agentgov:local
+    command: ["processor"]
+    environment:
+      <<: *agentgov-env
+      AGENTGOV_CONTROL_PLANE_URL: http://control-plane:8000
+      AGENTGOV_PRESIDIO_URL: http://presidio-analyzer:3000
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      presidio-analyzer:
+        condition: service_healthy
+      opa:
+        condition: service_started
+
+  # Policy enforcement point for MCP traffic. Its config is generated by the control plane.
+  agentgateway:
+    image: ghcr.io/agentgateway/agentgateway:v1.6.0
+    command: ["-f", "/gateway/config.yaml"]
+    volumes:
+      - gateway-config:/gateway:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      processor:
+        condition: service_started
+      # Restarted with the collector (e.g. by the Langfuse override): agentgateway
+      # resolves the collector's address once, at startup.
+      otel-collector:
+        condition: service_started
+        restart: true
+    restart: unless-stopped
+
+  otel-collector:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.162.0
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    environment:
+      <<: *agentgov-env
+    volumes:
+      - ./otel/collector.yaml:/etc/otelcol/collector.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+  # Demo MCP server (only reachable through the gateway).
+  crm-mcp:
+    build:
+      context: ../../examples/mcp-servers/crm
+    image: agentgov-demo-crm:local
+
+volumes:
+  postgres-data:
+  gateway-config:

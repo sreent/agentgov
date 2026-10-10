@@ -1,0 +1,25 @@
+# Agents: each gets its own Keycloak client when it becomes active.
+apiVersion: agentgov/v1alpha1
+kind: Agent
+metadata:
+  name: support-bot
+spec:
+  description: Answers customer tickets and keeps CRM notes up to date.
+  blueprint: customer-support
+  owner: cx-platform
+  sponsors: [alice@example.com]
+  framework: mcp-python-sdk
+  environment: prod
+  agent_card:
+    name: support-bot
+    description: Answers customer tickets and keeps CRM notes up to date.
+    version: "1.0.0"
+    capabilities: {streaming: false, pushNotifications: false}
+    defaultInputModes: [text/plain]
+    defaultOutputModes: [text/plain]
+    skills:
+      - id: ticket-triage
+        name: Ticket triage
+        description: Look up the customer behind a ticket and record the outcome.
+        tags: [support, crm]
+  status: active

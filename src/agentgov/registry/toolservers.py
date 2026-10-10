@@ -1,0 +1,286 @@
+"""MCP tool servers published through the gateway, with a governed tool catalog.
+
+The catalog is learned from ``tools/list`` responses observed by the
+governance processor. Each tool definition is fingerprinted the first time it
+is seen (trust on first use). If a server later changes a definition (an MCP
+"rug pull"), the tool is flagged and the baseline policy refuses calls to it
+until an administrator approves the new definition.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from agentgov import ids, ledger
+from agentgov.db import mark_changed
+from agentgov.models import BLOCKED, PENDING, ToolServer
+from agentgov.registry import findings, validation
+from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
+
+APPROVED = "approved"
+FIELDS = ("url", "description", "owner", "trust_level", "data_classification", "labels")
+
+
+def get(session: Session, ref: str) -> ToolServer:
+    ts = session.get(ToolServer, ref) or session.scalar(
+        select(ToolServer).where(ToolServer.name == ref)
+    )
+    if ts is None:
+        raise NotFound(f"tool server {ref!r} not found")
+    return ts
+
+
+def list_all(session: Session, status: str | None = None) -> list[ToolServer]:
+    stmt = select(ToolServer).order_by(ToolServer.name)
+    if status:
+        stmt = stmt.where(ToolServer.status == status)
+    return list(session.scalars(stmt))
+
+
+def _apply(ts: ToolServer, data: dict[str, Any]) -> list[str]:
+    changed = []
+    for key in FIELDS:
+        if key not in data:
+            continue
+        value = data[key]
+        if key == "url":
+            if not isinstance(value, str) or not value.startswith(("http://", "https://")):
+                raise ValidationError(
+                    "url must be an http(s) URL of a Streamable HTTP MCP endpoint"
+                )
+        elif key == "trust_level":
+            value = validation.trust_level(value)
+        elif key == "data_classification":
+            value = validation.data_classification(value)
+        elif key == "labels":
+            value = validation.labels(value)
+        elif key in ("description",):
+            value = str(value or "")
+        if getattr(ts, key) != value:
+            setattr(ts, key, value)
+            changed.append(key)
+    return changed
+
+
+def create(session: Session, data: dict[str, Any], *, actor: str, approve: bool) -> ToolServer:
+    """Register a server. Requests from non-admins start ``pending`` review."""
+    name = validation.slug(data.get("name"), "name")
+    if session.scalar(select(ToolServer).where(ToolServer.name == name)):
+        raise Conflict(f"tool server {name!r} already exists")
+    if "url" not in data:
+        raise ValidationError("url is required")
+    ts = ToolServer(
+        id=ids.new_id(ids.TOOL_SERVER),
+        name=name,
+        status=APPROVED if approve else PENDING,
+        labels={},
+        tools=[],
+        created_by=actor,
+    )
+    _apply(ts, data)
+    session.add(ts)
+    session.flush()
+    ledger.append(
+        session,
+        type="toolserver.registered",
+        actor=actor,
+        resource=f"toolserver/{name}",
+        details={"url": ts.url, "status": ts.status, "trust_level": ts.trust_level},
+    )
+    mark_changed(session, "toolservers")
+    return ts
+
+
+def update(session: Session, ts: ToolServer, data: dict[str, Any], *, actor: str) -> list[str]:
+    changed = _apply(ts, data)
+    if changed:
+        ledger.append(
+            session,
+            type="toolserver.updated",
+            actor=actor,
+            resource=f"toolserver/{ts.name}",
+            details={k: getattr(ts, k) for k in changed},
+        )
+        mark_changed(session, "toolservers")
+    return changed
+
+
+def set_status(session: Session, ts: ToolServer, action: str, *, actor: str) -> ToolServer:
+    targets = {"approve": APPROVED, "block": BLOCKED, "unblock": APPROVED}
+    if action not in targets:
+        raise ValidationError(f"unknown action {action!r}")
+    if action == "unblock" and ts.status != BLOCKED:
+        raise InvalidTransition("tool server is not blocked")
+    if action == "approve" and ts.status != PENDING:
+        raise InvalidTransition("tool server is not pending review")
+    previous, ts.status = ts.status, targets[action]
+    ledger.append(
+        session,
+        type=f"toolserver.{action}",
+        actor=actor,
+        resource=f"toolserver/{ts.name}",
+        severity="warning" if action == "block" else "info",
+        details={"from": previous, "to": ts.status},
+    )
+    mark_changed(session, "toolservers")
+    return ts
+
+
+def delete(session: Session, ts: ToolServer, *, actor: str) -> None:
+    ledger.append(session, type="toolserver.deleted", actor=actor, resource=f"toolserver/{ts.name}")
+    session.delete(ts)
+    mark_changed(session, "toolservers")
+
+
+def fingerprint(tool: dict[str, Any]) -> str:
+    material = {
+        "name": tool.get("name"),
+        "description": tool.get("description"),
+        "inputSchema": tool.get("inputSchema"),
+        "annotations": tool.get("annotations"),
+    }
+    canonical = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def record_catalog(
+    session: Session,
+    ts: ToolServer,
+    tools: list[dict[str, Any]],
+    *,
+    poisoned: dict[str, list[str]] | None = None,
+) -> dict[str, list[str]]:
+    """Merge an observed ``tools/list`` result into the catalog.
+
+    ``poisoned`` maps tool names to reasons the processor flagged them.
+    Returns the names of added, changed and poisoned tools.
+    """
+    poisoned = poisoned or {}
+    now = ids.isoformat(ids.utcnow())
+    catalog = {t["name"]: dict(t) for t in ts.tools or []}
+    before = {n: _policy_view(t) for n, t in catalog.items()}
+    report: dict[str, list[str]] = {"added": [], "changed": [], "poisoned": []}
+    for tool in tools:
+        name = tool.get("name")
+        if not isinstance(name, str):
+            continue
+        fp = fingerprint(tool)
+        entry = catalog.get(name)
+        if entry is None:
+            entry = {"name": name, "first_seen": now, "approved_fingerprint": fp}
+            report["added"].append(name)
+        if fp == entry.get("approved_fingerprint"):
+            entry["changed_at"] = None
+        elif fp != entry.get("fingerprint"):
+            # A new, unapproved definition (repeat observations are not re-reported).
+            entry["changed_at"] = now
+            report["changed"].append(name)
+        if name in poisoned and not entry.get("poisoned"):
+            report["poisoned"].append(name)
+        entry.update(
+            {
+                "description": (tool.get("description") or "")[:2000],
+                "annotations": tool.get("annotations") or {},
+                "fingerprint": fp,
+                "last_seen": now,
+                "poisoned": name in poisoned,
+                "poisoning_reasons": poisoned.get(name, []),
+            }
+        )
+        catalog[name] = entry
+    ts.tools = sorted(catalog.values(), key=lambda t: t["name"])
+    ts.tools_synced_at = ids.utcnow()
+
+    for name in report["changed"]:
+        findings.raise_finding(
+            session,
+            type="toolserver.tool_drift",
+            severity="high",
+            subject=f"{ts.name}/{name}",
+            category=findings.THREAT,
+            title=f"Tool definition changed: {ts.name}/{name}",
+            description="The server now advertises a different definition for this tool than the "
+            "one approved. Calls are refused until the new definition is approved.",
+            remediation=f"Review the new definition, then approve it: POST "
+            f"/v1/toolservers/{ts.name}/tools/{name}/approve",
+        )
+    for name in report["poisoned"]:
+        findings.raise_finding(
+            session,
+            type="toolserver.tool_poisoning",
+            severity="critical",
+            subject=f"{ts.name}/{name}",
+            category=findings.THREAT,
+            title=f"Possible tool poisoning: {ts.name}/{name}",
+            description="; ".join(poisoned[name]),
+            remediation="The tool is hidden from agents. Investigate the server and block it "
+            "if the definition is malicious.",
+        )
+    if any(report.values()):
+        ledger.append(
+            session,
+            type="toolserver.catalog_changed",
+            actor="service:processor",
+            resource=f"toolserver/{ts.name}",
+            severity="warning" if report["changed"] or report["poisoned"] else "info",
+            details=report,
+        )
+    if {n: _policy_view(t) for n, t in catalog.items()} != before:
+        mark_changed(session, "toolservers")
+    return report
+
+
+def _policy_view(entry: dict[str, Any]) -> tuple[Any, ...]:
+    """The catalog fields OPA policies depend on."""
+    return (
+        entry.get("fingerprint"),
+        entry.get("approved_fingerprint"),
+        bool(entry.get("changed_at")),
+        bool(entry.get("poisoned")),
+        json.dumps(entry.get("annotations") or {}, sort_keys=True),
+    )
+
+
+def approve_tool(session: Session, ts: ToolServer, tool_name: str, *, actor: str) -> dict[str, Any]:
+    """Accept a tool's current definition as the approved one."""
+    catalog = [dict(t) for t in ts.tools or []]
+    for entry in catalog:
+        if entry["name"] == tool_name:
+            entry["approved_fingerprint"] = entry.get("fingerprint")
+            entry["changed_at"] = None
+            ts.tools = catalog
+            ledger.append(
+                session,
+                type="toolserver.tool_approved",
+                actor=actor,
+                resource=f"toolserver/{ts.name}/{tool_name}",
+                details={"fingerprint": entry["approved_fingerprint"]},
+            )
+            mark_changed(session, "toolservers")
+            return entry
+    raise NotFound(f"tool {tool_name!r} is not in the {ts.name} catalog")
+
+
+def to_dict(ts: ToolServer, gateway_url: str | None = None) -> dict[str, Any]:
+    return {
+        "id": ts.id,
+        "name": ts.name,
+        "url": ts.url,
+        "gateway_url": f"{gateway_url.rstrip('/')}/mcp/{ts.name}" if gateway_url else None,
+        "description": ts.description,
+        "owner": ts.owner,
+        "status": ts.status,
+        "trust_level": ts.trust_level,
+        "data_classification": ts.data_classification,
+        "labels": ts.labels or {},
+        "tools": ts.tools or [],
+        "tools_synced_at": ids.isoformat(ts.tools_synced_at),
+        "created_by": ts.created_by,
+        "created_at": ids.isoformat(ts.created_at),
+        "updated_at": ids.isoformat(ts.updated_at),
+    }

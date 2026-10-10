@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>AgentGov</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <!-- Sign-in: shown when this tab has no API token. -->
+  <div id="signin" class="signin" hidden>
+    <form id="signin-form" class="signin-card" novalidate>
+      <div class="brand brand--lg">
+        <img src="icon.svg" alt="" width="36" height="36">
+        <span class="brand-text"><span class="brand-name">AgentGov</span><span class="brand-sub">Admin center</span></span>
+      </div>
+      <h1 class="signin-title">Sign in</h1>
+      <p class="signin-lede">Paste an API token for this control plane. Admins, approvers and auditors can sign in; what you can change depends on the token's role.</p>
+      <div class="field">
+        <label for="token">API token</label>
+        <div class="input-group">
+          <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" required aria-describedby="token-hint signin-error">
+          <button type="button" id="token-toggle" class="btn btn--ghost" aria-pressed="false" aria-controls="token">Show</button>
+        </div>
+        <p id="token-hint" class="hint">Kept in this browser tab only, and cleared when you close the tab or sign out.</p>
+      </div>
+      <p id="signin-error" class="form-error" role="alert" hidden></p>
+      <button type="submit" class="btn btn--primary btn--block" id="signin-submit">Sign in</button>
+    </form>
+  </div>
+
+  <!-- Application shell. -->
+  <div id="shell" class="shell" hidden>
+    <header class="topbar">
+      <button type="button" class="icon-btn" id="nav-toggle" aria-controls="nav" aria-expanded="false" aria-label="Open navigation"><span data-icon="menu"></span></button>
+      <a class="brand" href="#/overview" aria-label="AgentGov overview">
+        <img src="icon.svg" alt="" width="26" height="26">
+        <span class="brand-text"><span class="brand-name">AgentGov</span></span>
+      </a>
+      <span class="topbar-page" id="topbar-page"></span>
+    </header>
+
+    <div class="scrim" id="scrim" hidden></div>
+
+    <nav id="nav" class="nav" aria-label="Admin center">
+      <a class="brand nav-brand" href="#/overview">
+        <img src="icon.svg" alt="" width="30" height="30">
+        <span class="brand-text"><span class="brand-name">AgentGov</span><span class="brand-sub">Admin center</span></span>
+      </a>
+      <ul class="nav-list" role="list">
+        <li><a href="#/overview" data-nav="overview"><span data-icon="overview"></span><span>Overview</span></a></li>
+        <li><a href="#/agents" data-nav="agents"><span data-icon="agents"></span><span>Agents</span></a></li>
+        <li><a href="#/map" data-nav="map"><span data-icon="map"></span><span>Agent map</span></a></li>
+        <li><a href="#/approvals" data-nav="approvals"><span data-icon="approvals"></span><span>Approvals</span><span class="nav-badge" id="badge-approvals" hidden></span></a></li>
+        <li><a href="#/toolservers" data-nav="toolservers"><span data-icon="toolservers"></span><span>Tool servers</span></a></li>
+        <li><a href="#/findings" data-nav="findings"><span data-icon="findings"></span><span>Findings</span><span class="nav-badge" id="badge-findings" hidden></span></a></li>
+        <li><a href="#/policies" data-nav="policies"><span data-icon="policies"></span><span>Policies</span></a></li>
+        <li><a href="#/ledger" data-nav="ledger"><span data-icon="ledger"></span><span>Ledger</span></a></li>
+      </ul>
+      <div class="nav-foot">
+        <button type="button" class="nav-action" id="theme-toggle"><span data-icon="monitor"></span><span id="theme-label">Theme: system</span></button>
+        <button type="button" class="nav-action" id="signout"><span data-icon="signout"></span><span>Sign out</span></button>
+        <p class="nav-meta" id="nav-meta"></p>
+      </div>
+    </nav>
+
+    <main id="main" tabindex="-1">
+      <p class="loading-line">Loading…</p>
+    </main>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite" aria-relevant="additions"></div>
+  <dialog id="dialog" class="dialog" aria-labelledby="dialog-title"></dialog>
+  <noscript><p class="noscript">The AgentGov admin center needs JavaScript. The API itself is available at /docs.</p></noscript>
+</body>
+</html>

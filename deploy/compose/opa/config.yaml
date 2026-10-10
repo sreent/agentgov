@@ -1,0 +1,30 @@
+# OPA pulls policies + registry data from the control plane and reports
+# decision logs and status back to it. Long polling means registry changes
+# (for example blocking an agent) reach OPA in well under a second.
+services:
+  controlplane:
+    url: http://control-plane:8000/v1/opa
+    credentials:
+      bearer:
+        token: "${AGENTGOV_SERVICE_TOKEN}"
+
+bundles:
+  agentgov:
+    service: controlplane
+    resource: bundles/agentgov.tar.gz
+    polling:
+      min_delay_seconds: 5
+      max_delay_seconds: 15
+      long_polling_timeout_seconds: 30
+
+decision_logs:
+  service: controlplane
+  reporting:
+    min_delay_seconds: 2
+    max_delay_seconds: 10
+
+status:
+  service: controlplane
+
+labels:
+  id: opa-1

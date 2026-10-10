@@ -1,0 +1,171 @@
+# Optional trace exploration with Langfuse. Adds Langfuse (web + worker) and
+# its stores, and makes the OTel Collector send every agent and gateway trace to
+# Langfuse as well as to the control plane:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.langfuse.yml up -d --build
+#
+# Langfuse: http://localhost:3000, signed in as LANGFUSE_ADMIN_EMAIL /
+# LANGFUSE_ADMIN_PASSWORD (defaults below; set real values in .env). The
+# organisation, project and API keys are created on first start. Langfuse uses
+# the stack's PostgreSQL server (database "langfuse"); ClickHouse, Redis and
+# SeaweedFS (S3-compatible storage) are its own. Only port 3000 is published.
+
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: http://localhost:3000
+  DATABASE_URL: postgresql://agentgov:${POSTGRES_PASSWORD:-agentgov}@postgres:5432/langfuse
+  SALT: ${LANGFUSE_SALT:-dev-langfuse-salt}
+  # 64 hex characters (openssl rand -hex 32).
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+  TELEMETRY_ENABLED: "false"
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${SEAWEEDFS_S3_SECRET_KEY:-dev-seaweedfs-secret}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://seaweedfs:8333
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${SEAWEEDFS_S3_SECRET_KEY:-dev-seaweedfs-secret}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://seaweedfs:8333
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${REDIS_AUTH:-dev-redis-secret}
+
+x-langfuse-depends-on: &langfuse-depends-on
+  langfuse-db:
+    condition: service_completed_successfully
+  clickhouse:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  seaweedfs:
+    condition: service_healthy
+
+services:
+  otel-collector:
+    command: ["--config=/etc/otelcol/collector.yaml", "--config=/etc/otelcol/langfuse.yaml"]
+    environment:
+      LANGFUSE_OTLP_ENDPOINT: http://langfuse-web:3000/api/public/otel
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-agentgov-dev}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-agentgov-dev}
+    volumes:
+      - ./otel/langfuse.yaml:/etc/otelcol/langfuse.yaml:ro
+
+  # Creates the "langfuse" database on the stack's PostgreSQL server if missing.
+  langfuse-db:
+    image: postgres:17-alpine
+    environment:
+      PGHOST: postgres
+      PGUSER: agentgov
+      PGPASSWORD: ${POSTGRES_PASSWORD:-agentgov}
+      PGDATABASE: agentgov
+    command:
+      - sh
+      - -c
+      - >-
+        psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'langfuse'" | grep -q 1 ||
+        psql -c "CREATE DATABASE langfuse"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4.56.0
+    environment:
+      <<: *langfuse-env
+      # Listen on all interfaces (Docker sets HOSTNAME to the container id).
+      HOSTNAME: 0.0.0.0
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-dev-nextauth-secret}
+      LANGFUSE_INIT_ORG_ID: agentgov
+      LANGFUSE_INIT_ORG_NAME: AgentGov
+      LANGFUSE_INIT_PROJECT_ID: agents
+      LANGFUSE_INIT_PROJECT_NAME: Agents
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-agentgov-dev}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-agentgov-dev}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@agentgov.local}
+      LANGFUSE_INIT_USER_NAME: AgentGov admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:-agentgov-admin}
+    ports:
+      - "3000:3000"
+    depends_on: *langfuse-depends-on
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/public/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    restart: unless-stopped
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.56.0
+    environment:
+      <<: *langfuse-env
+    depends_on: *langfuse-depends-on
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["--requirepass", "${REDIS_AUTH:-dev-redis-secret}", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - langfuse-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  # S3-compatible event and media storage for Langfuse: SeaweedFS (Apache-2.0)
+  # in its single-process "mini" mode. The S3 API requires the credentials
+  # below; telemetry, the admin UI, WebDAV and the Iceberg/Lance endpoints are
+  # off. Its internal master, volume and filer APIs are unauthenticated, so keep
+  # this network private (or point Langfuse at a managed bucket instead).
+  seaweedfs:
+    image: ghcr.io/chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    environment:
+      S3_ACCESS_KEY: langfuse
+      S3_SECRET_KEY: ${SEAWEEDFS_S3_SECRET_KEY:-dev-seaweedfs-secret}
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        printf '{"identities":[{"name":"langfuse","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}'
+        "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /etc/seaweedfs-s3.json &&
+        exec /entrypoint.sh mini -dir=/data -bucket=langfuse -s3.config=/etc/seaweedfs-s3.json
+        -master.telemetry=false -admin.ui=false -webdav=false -s3.port.iceberg=0 -s3.port.lance=0
+    volumes:
+      - langfuse-seaweedfs-data:/data
+    healthcheck:
+      # Healthy once the bucket exists, not just when the server answers.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8888/buckets/langfuse/"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-redis-data:
+  langfuse-seaweedfs-data:

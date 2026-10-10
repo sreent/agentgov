@@ -1,0 +1,9 @@
+# Organisation policies are Rego modules distributed to OPA with the built-in
+# library. `agentgov apply` inlines regoFile; via the API, send `rego` directly.
+apiVersion: agentgov/v1alpha1
+kind: Policy
+metadata:
+  name: prod-verified-only
+spec:
+  description: Production agents may only call verified tool servers.
+  regoFile: policies/prod-verified-only.rego
