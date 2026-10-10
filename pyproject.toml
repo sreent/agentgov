@@ -98,4 +98,6 @@ known-first-party = ["agentgov"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tests share helpers through `tests.conftest`, whichever way pytest is launched.
+pythonpath = ["."]
 addopts = "-q"
