@@ -784,6 +784,8 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .col-agent { min-width: 9.5rem; }
 .sev-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--warning); margin-right: 6px; vertical-align: 1px; }
 .load-more { display: flex; justify-content: center; padding: 12px; border-top: 1px solid var(--line); }
+.trace-link { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; font-family: var(--font-ui); }
+.trace-link .ico { width: 12px; height: 12px; }
 
 /* ------------------------------------------------------------- toasts */
 

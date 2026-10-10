@@ -880,11 +880,13 @@ def ledger_tail(
     type: str | None = typer.Option(None, help="Event type; * is a wildcard (decision.*)."),
     agent: str | None = typer.Option(None, help="Only this agent's entries."),
     decision: str | None = typer.Option(None, help="allow, deny or require_approval."),
+    traces: bool = typer.Option(False, "--traces", help="Add links to the trace viewer."),
 ) -> None:
     """Show the latest ledger entries, oldest first."""
     params: dict[str, Any] = {"limit": limit, **_given(type=type, agent=agent, decision=decision)}
     rows = list(reversed(_call("GET", "/v1/ledger", params=params)))
-    _table(rows, ["seq", "ts", "type", "agent_name", "resource", "decision", "reason"])
+    columns = ["seq", "ts", "type", "agent_name", "resource", "decision", "reason"]
+    _table(rows, columns + (["trace_url"] if traces else []))
 
 
 @ledger_app.command("export")

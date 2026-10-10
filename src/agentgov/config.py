@@ -101,6 +101,11 @@ class Settings:
     gateway_otlp_endpoint: str | None = None
     # agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts.
     gateway_ipv6: bool = False
+    # Link to a trace in your trace viewer, with {trace_id} where the W3C trace ID
+    # goes. Ledger entries recorded at the gateway then link to their trace, e.g.
+    # Langfuse: http://localhost:3000/project/<project>/traces/{trace_id}
+    # Jaeger:   http://localhost:16686/trace/{trace_id}
+    trace_url: str | None = None
 
     # --- Governance processor ----------------------------------------------------
     processor_listen: str = "0.0.0.0:50051"
@@ -148,6 +153,8 @@ class Settings:
             raise ValueError("AGENTGOV_PRESIDIO_FAILURE_MODE must be 'open' or 'closed'")
         if self.session_hours <= 0:
             raise ValueError("AGENTGOV_SESSION_HOURS must be positive")
+        if self.trace_url and "{trace_id}" not in self.trace_url:
+            raise ValueError("AGENTGOV_TRACE_URL must contain {trace_id}")
         self.pii_thresholds()  # raises on malformed entries
 
     def pii_thresholds(self) -> dict[str, float]:

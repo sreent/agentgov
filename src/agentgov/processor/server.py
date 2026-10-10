@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -44,6 +45,26 @@ from agentgov.processor.proto import ext_mcp_pb2_grpc as pb_grpc
 log = logging.getLogger(__name__)
 
 DENIED = pb.AuthorizationError.PERMISSION_DENIED
+_TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$")
+
+
+def trace_id_of(context: Any, headers: Any = ()) -> str | None:
+    """The W3C trace ID of the call, from agentgateway's ``traceparent``.
+
+    agentgateway sends its tracing context with every ExtMcp call as gRPC
+    metadata; when the agent propagated its own trace, the gateway continues it,
+    so this is the agent's trace too. The forwarded HTTP headers are a fallback.
+    """
+    values: list[str] = []
+    metadata = getattr(context, "invocation_metadata", None)
+    if callable(metadata):
+        values += [str(v) for k, v in metadata() or () if k == "traceparent"]
+    values += [h.value.decode("latin-1") for h in headers if h.key.lower() == "traceparent"]
+    for value in values:
+        match = _TRACEPARENT.match(value.strip().lower())
+        if match and match.group(1) != "0" * 32:
+            return match.group(1)
+    return None
 
 
 def _struct(message: Any) -> dict[str, Any]:
@@ -154,7 +175,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
     # ------------------------------------------------------------ request side
     async def CheckRequest(self, request: pb.McpRequest, context: Any) -> pb.McpRequestResult:
         try:
-            return await self._check_request(request)
+            return await self._check_request(request, trace_id_of(context, request.headers))
         except Exception:
             log.exception("CheckRequest failed; denying")
             return pb.McpRequestResult(
@@ -164,7 +185,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 )
             )
 
-    async def _check_request(self, request: pb.McpRequest) -> pb.McpRequestResult:
+    async def _check_request(
+        self, request: pb.McpRequest, trace_id: str | None = None
+    ) -> pb.McpRequestResult:
         started = time.perf_counter()
         method = request.method
         meta = _struct(request.metadata_context)
@@ -201,6 +224,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 approval_id=approval_id,
                 opa_decision_id=decision_id,
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
+                trace_id=trace_id,
             )
 
         def reject(
@@ -316,7 +340,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
     # ----------------------------------------------------------- response side
     async def CheckResponse(self, request: pb.McpResponse, context: Any) -> pb.McpResponseResult:
         try:
-            return await self._check_response(request)
+            return await self._check_response(request, trace_id_of(context))
         except Exception:
             log.exception("CheckResponse failed; withholding the result")
             return pb.McpResponseResult(
@@ -326,7 +350,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 )
             )
 
-    async def _check_response(self, request: pb.McpResponse) -> pb.McpResponseResult:
+    async def _check_response(
+        self, request: pb.McpResponse, trace_id: str | None = None
+    ) -> pb.McpResponseResult:
         method = request.method
         meta = _struct(request.metadata_context)
         server = (list(request.service_names) or [meta.get("server")])[0] or "unknown"
@@ -363,6 +389,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 detections=inspection.summary,
                 opa_decision_id=decision_id,
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
+                trace_id=trace_id,
             )
 
         def withhold(reasons: list[str]) -> pb.McpResponseResult:

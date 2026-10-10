@@ -59,6 +59,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Decide an approval request | Approvals → **Approve** / **Deny** | `agentgov approvals approve\|deny ID` | `POST /v1/approvals/{id}/approve\|deny` |
 | Resolve, dismiss, reopen findings | Findings | `agentgov findings resolve\|dismiss\|reopen ID` | `POST /v1/findings/{id}/{action}` |
 | Browse, verify and export the ledger | Ledger → filters, **Verify chain**, **Export JSONL** | `agentgov ledger tail --agent A`, `ledger verify`, `ledger export` | `GET /v1/ledger`, `/v1/ledger/verify`, `/v1/ledger/export` |
+| Open the trace of a gateway decision | Ledger or an agent's Recent activity → **Open trace** | `agentgov ledger tail --traces` | `trace_url` on `GET /v1/ledger` entries (set `AGENTGOV_TRACE_URL`) |
 | Create, review and revoke API keys | Access → **Create API key**, **Revoke** | `agentgov apikeys create\|list\|revoke` | `POST`/`GET /v1/apikeys`, `DELETE /v1/apikeys/{id}` |
 | See who has signed in, with which roles | Access → People | `agentgov access list`, `agentgov access sessions` | `GET /v1/access` |
 | Sign someone out | Access → People → **Sign out** | `agentgov access sign-out PERSON`, `agentgov access end-session ID` | `POST /v1/access/people/{subject}/sign-out`, `DELETE /v1/access/sessions/{id}` |

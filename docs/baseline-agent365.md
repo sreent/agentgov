@@ -66,7 +66,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Overview dashboard | ✅ | Admin UI overview: inventory, risk, approvals, findings, 14-day activity |
 | Agent map (agents, users, tools) | ✅ | `/v1/graph` and the UI map: people → agents → tool servers, with call volumes |
 | Telemetry via OpenTelemetry (invoke_agent / execute_tool / chat spans) | ✅ | **OTel Collector** → control plane; the same GenAI semantic conventions, so Agent 365-instrumented agents can report here |
-| Trace exploration | ✅ | Optional **Langfuse** (`deploy/compose/docker-compose.langfuse.yml`): the collector sends it every agent and gateway trace |
+| Trace exploration | ✅ | Optional **Langfuse** (`deploy/compose/docker-compose.langfuse.yml`): the collector sends it every agent and gateway trace, and each gateway decision in the ledger links to its trace |
 | Audit of agent activity | ✅ | Hash-chained evidence ledger with verification and JSONL export |
 
 ### Interoperability

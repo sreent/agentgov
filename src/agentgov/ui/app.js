@@ -3185,6 +3185,12 @@ const LEDGER_TYPES = [
 const LEDGER_DECISIONS = [['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval']];
 const PAGE_SIZE = 100;
 
+// The trace viewer (Langfuse, Jaeger, ...) is another app: open it in a new tab.
+function traceLink(e) {
+  return h('a', { class: 'trace-link', href: e.trace_url, target: '_blank', rel: 'noopener noreferrer', title: `Trace ${e.trace_id}` },
+    'Open trace', icon('external'), h('span', { class: 'sr-only' }, ' (opens in a new tab)'));
+}
+
 function ledgerDetail(e) {
   return h('div', { class: 'stack', style: 'gap:10px; padding: 4px 0 6px' },
     facts([
@@ -3192,7 +3198,7 @@ function ledgerDetail(e) {
       ['Time', timeEl(e.ts, { absolute: true })],
       ['Severity', humanize(e.severity)],
       ['Action', e.action ? h('code', {}, e.action) : null],
-      e.trace_id ? ['Trace ID', h('code', {}, e.trace_id)] : null,
+      e.trace_id ? ['Trace', h('span', {}, h('code', {}, e.trace_id), e.trace_url ? [' ', traceLink(e)] : null)] : null,
       ['Hash', h('code', { class: 'hash break' }, e.hash)],
       ['Previous hash', h('code', { class: 'hash break' }, e.prev_hash)],
     ]),
@@ -3219,7 +3225,7 @@ function ledgerRows(entries, { compact = false } = {}) {
     const actorIsAgent = e.agent_name && e.actor === `agent:${e.agent_name}`;
     const event = h('td', { 'data-label': 'Event', class: 'break' },
       h('span', { class: 'ledger-type' }, e.severity === 'warning' ? h('span', { class: 'sev-dot', title: 'Warning' }) : null, e.type),
-      e.resource ? h('div', { class: 'cell-sub' }, h('code', {}, e.resource)) : null,
+      e.resource ? h('div', { class: 'cell-sub' }, h('code', {}, e.resource), e.trace_url ? [' · ', traceLink(e)] : null) : null,
       compact && e.reason ? h('div', { class: 'cell-sub clamp-2', title: e.reason }, e.reason) : null);
     const row = h('tr', {},
       h('td', { 'data-label': 'Seq', class: 'nowrap' }, toggle),

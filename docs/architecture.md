@@ -49,7 +49,7 @@ flowchart LR
 | [OPA](https://www.openpolicyagent.org) 1.21 | Policy decision point; evaluates the Rego library against registry data | Conditional Access |
 | [agentgateway](https://agentgateway.dev) 1.6 | MCP gateway and policy enforcement point; validates tokens, calls the processor, routes to MCP servers | Agent 365 tooling gateway |
 | [Presidio](https://github.com/data-privacy-stack/presidio) | Personal-data detection | Purview classifiers |
-| [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) | Receives agent and gateway traces, forwards GenAI spans to the control plane (and optionally Langfuse) | Agent 365 observability |
+| [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) | Receives agent and gateway traces, forwards GenAI spans to the control plane (and optionally Langfuse); gateway decisions in the ledger carry the trace ID, so the UI links each one to its trace | Agent 365 observability |
 | [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (optional) | In-process enforcement inside agent frameworks, querying the same OPA | — |
 
 ## The path of a tool call

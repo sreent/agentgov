@@ -81,6 +81,15 @@ Langfuse uses its own `langfuse` database on the stack's PostgreSQL server. Sign
 `LANGFUSE_ADMIN_*` values from `.env`). The organisation, the *Agents* project and its API
 keys are created on first start.
 
+Every decision the gateway records in the evidence ledger carries the W3C trace ID of the
+call, which agentgateway passes to the governance processor. With this override the
+admin UI's ledger and agent pages link each decision to its trace in Langfuse (**Open
+trace**), and `agentgov ledger tail --traces` prints the links. The override sets
+`AGENTGOV_TRACE_URL` on the control plane; to link to another trace viewer instead, set it
+to that viewer's trace URL with `{trace_id}` in place of the ID, for example
+`http://jaeger:16686/trace/{trace_id}`. When agents propagate their own trace context to
+the gateway, the trace contains the agent's spans as well as the gateway's.
+
 Add `-f docker-compose.langfuse.yml` to every later `docker compose` command for this
 stack (`ps`, `logs`, `down`), or set
 `COMPOSE_FILE=docker-compose.yml:docker-compose.langfuse.yml` in `.env`.

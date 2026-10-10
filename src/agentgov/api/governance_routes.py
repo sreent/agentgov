@@ -146,7 +146,8 @@ def list_ledger(
             stmt = stmt.where(LedgerEntry.decision == decision)
         if before_seq:
             stmt = stmt.where(LedgerEntry.seq < before_seq)
-        return [ledger.to_dict(e) for e in s.scalars(stmt)]
+        trace_url = _rt(request).settings.trace_url
+        return [ledger.with_trace_link(ledger.to_dict(e), trace_url) for e in s.scalars(stmt)]
 
 
 @router.get("/ledger/verify", tags=["ledger"])
@@ -262,7 +263,9 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
                 {"id": a.id, "name": a.name, "risk_score": a.risk_score, "risk_level": a.risk_level}
                 for a in risky[:5]
             ],
-            "recent_blocks": [ledger.to_dict(e) for e in recent],
+            "recent_blocks": [
+                ledger.with_trace_link(ledger.to_dict(e), rt.settings.trace_url) for e in recent
+            ],
             "ledger": head,
             "opa": {
                 "last_status_at": rt.bundles.last_status_at,

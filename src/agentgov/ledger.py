@@ -194,6 +194,13 @@ class IntegrityMonitor:
             return dict(result)
 
 
+def with_trace_link(entry: dict[str, Any], trace_url: str | None) -> dict[str, Any]:
+    """Add ``trace_url`` to an entry recorded with a trace ID, when a viewer is configured."""
+    if trace_url and entry.get("trace_id"):
+        entry["trace_url"] = trace_url.replace("{trace_id}", entry["trace_id"])
+    return entry
+
+
 def to_dict(entry: LedgerEntry) -> dict[str, Any]:
     data = _payload(entry)
     data["prev_hash"] = entry.prev_hash
