@@ -366,7 +366,8 @@ def delete_policy(
 
 
 @router.get("/apikeys", tags=["apikeys"])
-def list_apikeys(request: Request, _: Principal = Depends(admin)) -> list[dict[str, Any]]:
+def list_apikeys(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+    """Every key's name, role, prefix and use (never the key): readable for access reviews."""
     with _rt(request).db.session() as s:
         return [apikeys.to_dict(k) for k in apikeys.list_all(s)]
 

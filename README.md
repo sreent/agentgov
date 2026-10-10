@@ -120,7 +120,8 @@ Then look around:
   `dev-admin-token`
 * API reference: <http://localhost:8000/docs>
 * CLI: `agentgov agents list`, `agentgov findings`, `agentgov approvals list`,
-  `agentgov ledger verify`
+  `agentgov ledger verify`. The CLI can do everything the UI can
+  ([Administration](docs/administration.md) maps one to the other)
 * Keycloak: <http://localhost:8180> (`admin` / `admin`), realm `agentgov`, which has one
   client per agent
 
@@ -131,7 +132,9 @@ For trace exploration, add Langfuse with
 ## Governance as code
 
 Blueprints, tool servers, agents and policies are declarative manifests, applied with
-`agentgov apply -f <dir>` or through the API:
+`agentgov apply -f <dir>`, the UI's **Import manifests** or the API. They can also be
+created and edited one at a time in the admin UI or with the CLI, and **Export manifests**
+(`agentgov export`) writes everything back out as YAML:
 
 ```yaml
 apiVersion: agentgov/v1alpha1
@@ -213,6 +216,7 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 
 * [Agent 365 baseline and parity matrix](docs/baseline-agent365.md)
 * [Architecture](docs/architecture.md)
+* [Administration](docs/administration.md): the same tasks in the admin UI, the CLI and the API
 * [Policies](docs/policies.md)
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)
