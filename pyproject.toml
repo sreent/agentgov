@@ -52,7 +52,7 @@ otlp-protobuf = ["opentelemetry-proto>=1.30"]
 demo = ["mcp>=2.3,<3"]
 dev = [
   "pytest>=8.0",
-  "ruff>=0.6",
+  "ruff==0.17.0",
   "jsonschema>=4.22",
   "grpcio-tools>=1.84",
   "opentelemetry-proto>=1.30",

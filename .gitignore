@@ -28,3 +28,6 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# Local CI (scripts/ci.sh --matrix)
+.venv-ci/

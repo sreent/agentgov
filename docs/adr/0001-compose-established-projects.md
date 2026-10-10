@@ -25,5 +25,5 @@ the other components in sync with it, a governance processor for agentgateway's
   stateless MCP revision) and release cadence.
 * Operators run more processes; the reference deployment is a Docker Compose stack, with
   Kubernetes packaging on the roadmap.
-* Version compatibility across components must be tested; CI validates generated
-  agentgateway configuration with the real binary and evaluates the bundle with real OPA.
+* Version compatibility across components must be tested; the checks validate generated
+  agentgateway configuration with the real binary and evaluate the bundle with real OPA.

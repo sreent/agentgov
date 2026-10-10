@@ -1,9 +1,8 @@
+# Manual only (Actions -> ci -> Run workflow), so pushes and pull requests use
+# no Actions minutes. The same checks run locally with scripts/ci.sh.
 name: ci
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -21,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      - run: pip install "ruff==0.17.0"
       - run: ruff check src tests examples
       - run: ruff format --check src tests examples
       - uses: open-policy-agent/setup-opa@v2
