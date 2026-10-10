@@ -36,6 +36,36 @@ python examples/agents/demo_agent.py
 PostgreSQL, Presidio, the processor and the demo MCP server are only reachable inside
 the Compose network. The MCP server in particular is only reachable through the gateway.
 
+## Signing in
+
+The admin UI at <http://localhost:8000/ui> offers single sign-on through Keycloak. The
+realm comes with three demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (default
+`dev-password`):
+
+| User | Realm role | What they can do |
+|---|---|---|
+| `admin` | `agentgov-admin` | Everything |
+| `alice` | `agentgov-approver` | Decide approval requests and findings; attest the agents they sponsor (the demo's `support-bot`) |
+| `audrey` | `agentgov-auditor` | See everything, change nothing |
+
+People without an `agentgov-*` role are turned away. Sign-ins, sign-outs and refusals
+are recorded in the evidence ledger (`admin.login`, `admin.logout`,
+`admin.login_denied`). Signing out also ends the Keycloak session, and a session lasts
+at most `AGENTGOV_SESSION_HOURS` (default 8).
+
+To sign in your own people, connect your directory to the realm as an identity provider
+(OIDC or SAML) or through user federation (LDAP, Active Directory), and give their groups
+the `agentgov-*` realm roles, then delete the demo users. If the control plane is served
+from another address, set `AGENTGOV_PUBLIC_URL` and update the `agentgov-admin` client's
+redirect URI (`<public URL>/auth/callback`) and post-logout redirect URI
+(`<public URL>/ui/`) in Keycloak. Another OIDC provider can be used directly instead of
+Keycloak: set `AGENTGOV_OIDC_ISSUER`, its endpoints and the claim that carries roles (see
+`src/agentgov/config.py`).
+
+API tokens still work next to single sign-on: the CLI uses them, the UI accepts one on
+its sign-in page, and the bootstrap token (`AGENTGOV_ADMIN_TOKEN`, default
+`dev-admin-token`) is the way in when single sign-on is unavailable.
+
 ## Optional: Langfuse for trace exploration
 
 ```bash
@@ -59,7 +89,7 @@ stack (`ps`, `logs`, `down`), or set
 |---|---|
 | `docker-compose.yml` | Services and their wiring; `AGENTGOV_*` variables are documented in `src/agentgov/config.py` |
 | `.env.example` | Every secret the stack uses |
-| `keycloak/agentgov-realm.json` | Realm with the control plane's provisioning client (imported on first start) |
+| `keycloak/agentgov-realm.json` | Realm with the control plane's provisioning client, the `agentgov-admin` sign-in client, the AgentGov roles and the demo users (imported on first start) |
 | `opa/config.yaml` | OPA bundle, decision log and status services (all served by the control plane) |
 | `otel/collector.yaml` | OTLP in; spans to the control plane for discovery and activity |
 | `otel/langfuse.yaml` | Merged over the collector config by the Langfuse override |
@@ -87,3 +117,9 @@ docker compose down -v      # removes all data, including Keycloak clients and t
   (`agentgov findings`).
 * **Keycloak starts slowly**: the first start imports the realm and can take a minute;
   the control plane waits for it.
+* **Single sign-on stops at Keycloak with "Invalid parameter: redirect_uri", or the UI
+  says the identity provider could not complete the sign-in**: Keycloak imports the realm
+  only on first start, so later changes to `AGENTGOV_PUBLIC_URL` or
+  `AGENTGOV_OIDC_CLIENT_SECRET` must also be made on the `agentgov-admin` client in
+  Keycloak (or start over with `docker compose down -v`). The control plane's log names
+  the cause.

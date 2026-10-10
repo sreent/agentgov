@@ -38,7 +38,7 @@ policy processor for the gateway, and a tamper-evident evidence ledger.
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
 | **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery | AgentGov control plane |
-| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call using live registry context; risk-based blocking; a kill switch that applies within a second | Keycloak, OPA |
+| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call using live registry context; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
 | **Security** | PII redaction, secret blocking, prompt-injection and tool-poisoning defences, definition-drift detection, human approval for destructive tools, hash-chained evidence ledger | Presidio, OPA, AgentGov processor |
@@ -75,6 +75,8 @@ flowchart LR
 5. Agents and the gateway send OpenTelemetry traces (GenAI semantic conventions). The
    control plane uses them to record activity and to discover agents that were never
    registered.
+6. People sign in to the admin UI with single sign-on through the same Keycloak, and
+   their roles decide whether they administer agents, approve requests or only audit.
 
 [Architecture](docs/architecture.md) covers the design in detail: sequence diagrams,
 trust boundaries, failure modes and scaling.
@@ -112,7 +114,10 @@ shows each control in turn:
 
 Then look around:
 
-* Admin UI: <http://localhost:8000/ui> (sign in with `dev-admin-token`)
+* Admin UI: <http://localhost:8000/ui>. Choose *Sign in with single sign-on* and use
+  `admin` (administrator), `alice` (approver, and the demo agent's sponsor) or `audrey`
+  (auditor), all with the password `dev-password`; or paste the API token
+  `dev-admin-token`
 * API reference: <http://localhost:8000/docs>
 * CLI: `agentgov agents list`, `agentgov findings`, `agentgov approvals list`,
   `agentgov ledger verify`

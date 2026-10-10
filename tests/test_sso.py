@@ -49,6 +49,7 @@ class FakeProvider:
         jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(self.key.public_key()))
         self.jwks = {"keys": [{**jwk, "kid": "k1", "use": "sig", "alg": "RS256"}]}
         self.codes: dict[str, dict[str, Any]] = {}
+        self.issuer = ISSUER
 
     def authorize(self, url: str, **user: Any) -> tuple[str, str]:
         """What the provider does after the person signs in: returns ``(state, code)``."""
@@ -63,7 +64,7 @@ class FakeProvider:
 
     def tokens(self, query: dict[str, str], user: dict[str, Any]) -> dict[str, Any]:
         now = int(time.time())
-        base = {"iss": ISSUER, "sub": user.get("sub", "user-1"), "iat": now, "exp": now + 300}
+        base = {"iss": self.issuer, "sub": user.get("sub", "user-1"), "iat": now, "exp": now + 300}
         id_claims = {
             **base,
             "aud": CLIENT_ID,
@@ -83,7 +84,7 @@ class FakeProvider:
         return {"id_token": id_token, "access_token": self.sign(access), "token_type": "Bearer"}
 
     def handle(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/certs"):
+        if request.url.path.endswith(("/certs", "/keys")):
             return httpx.Response(200, json=self.jwks)
         if request.url.path.endswith("/token"):
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
@@ -205,12 +206,50 @@ class TestSignIn:
         events = [e["type"] for e in sso.get("/v1/ledger", headers=ADMIN).json()]
         assert events[:2] == ["admin.logout", "admin.login"]
 
+    def test_the_session_probe_always_answers(self, sso, provider) -> None:
+        assert sso.get("/auth/session").json() == {"signed_in": False}
+        sign_in(sso, provider, roles=["agentgov-auditor"])
+        probe = sso.get("/auth/session").json()
+        assert probe == {"signed_in": True, **sso.get("/v1/me").json()}
+        assert probe["actor"] == "auditor:alice@example.com"
+        # It describes the browser's session, not a bearer token.
+        sso.cookies.clear()
+        assert sso.get("/auth/session", headers=ADMIN).json() == {"signed_in": False}
+
+    def test_other_providers_need_their_endpoints_and_roles_claim(self, tmp_path, provider) -> None:
+        provider.issuer = "https://login.example.com/tenant-1/v2.0"
+        oauth = "https://login.example.com/tenant-1/oauth2/v2.0"
+        settings = Settings(
+            database_url=f"sqlite:///{tmp_path / 'other.db'}",
+            admin_token="test-admin",
+            posture_interval_seconds=0,
+            oidc_issuer=provider.issuer,
+            oidc_client_secret=CLIENT_SECRET,
+            oidc_authorization_endpoint=f"{oauth}/authorize",
+            oidc_token_endpoint=f"{oauth}/token",
+            oidc_jwks_url="https://login.example.com/tenant-1/discovery/v2.0/keys",
+            oidc_end_session_endpoint=f"{oauth}/logout",
+            oidc_roles_claim="roles",
+        )
+        runtime = Runtime(
+            settings, oidc_http=httpx.Client(transport=httpx.MockTransport(provider.handle))
+        )
+        with TestClient(create_app(settings, runtime=runtime, background=False)) as client:
+            start = client.get("/auth/login", follow_redirects=False)
+            assert start.headers["location"].startswith(f"{oauth}/authorize?")
+            resp = sign_in(client, provider, id_claims={"roles": ["agentgov-auditor", "other"]})
+            assert resp.headers["location"] == "/ui/"
+            assert client.get("/v1/me").json()["roles"] == ["auditor"]
+            out = client.post("/auth/logout", headers=CSRF).json()
+            assert out["logout_url"].startswith(f"{oauth}/logout?")
+
     def test_bearer_tokens_still_work(self, sso) -> None:
         assert sso.get("/v1/me", headers=ADMIN).json()["via"] == "token"
 
     def test_disabled_without_a_client_secret(self, client) -> None:
         assert client.get("/auth/login", follow_redirects=False).status_code == 404
         assert client.get("/v1/info").json()["sso"]["enabled"] is False
+        assert client.get("/auth/session").json() == {"signed_in": False}
 
 
 class TestRefusals:

@@ -21,7 +21,7 @@ flowchart LR
       opa[OPA<br/>Rego library]
       presidio[Presidio<br/>PII detection]
     end
-    kc[Keycloak<br/>agent identities]
+    kc[Keycloak<br/>agent identities · admin sign-in]
     otel[OTel Collector]
     agent([AI agent]) -- client credentials --> kc
     agent -- MCP + bearer token --> gw
@@ -30,6 +30,7 @@ flowchart LR
     proc --> presidio
     gw --> mcp[(MCP servers)]
     admin --> ui --> reg
+    admin -. single sign-on .-> kc
     rec -- clients --> kc
     rec -- bundle: policies + registry data --> opa
     rec -- generated config --> gw
@@ -44,7 +45,7 @@ flowchart LR
 |---|---|---|
 | **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients | Microsoft 365 admin center *Agents*, Entra ID Governance |
 | **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server: content inspection, OPA queries, approvals, redaction, decision records | Defender real-time protection, Purview DLP enforcement |
-| [Keycloak](https://www.keycloak.org) 26.8 | One OAuth client per agent; issues short-lived tokens with `agent_id` and the gateway audience | Entra Agent ID |
+| [Keycloak](https://www.keycloak.org) 26.8 | One OAuth client per agent; issues short-lived tokens with `agent_id` and the gateway audience; signs administrators in to the control plane (and can federate an existing directory) | Entra Agent ID, Entra ID sign-in |
 | [OPA](https://www.openpolicyagent.org) 1.21 | Policy decision point; evaluates the Rego library against registry data | Conditional Access |
 | [agentgateway](https://agentgateway.dev) 1.6 | MCP gateway and policy enforcement point; validates tokens, calls the processor, routes to MCP servers | Agent 365 tooling gateway |
 | [Presidio](https://github.com/data-privacy-stack/presidio) | Personal-data detection | Purview classifiers |
@@ -129,7 +130,7 @@ streams the ledger as JSON Lines for a SIEM or for offline verification.
 | Gateway → MCP server | The agent's token is never forwarded (MCP spec: no token passthrough); servers are only reachable through the gateway |
 | Gateway → processor | Internal network, fail-closed (`failureMode: failClosed`); mTLS ⏳ |
 | Components → control plane | Service token on internal endpoints; admin API keys are scoped by role |
-| Admins → control plane | Bootstrap admin token and role-scoped API keys (`admin`, `approver`, `auditor`, `registrar`, `service`); SSO via Keycloak ⏳ |
+| Admins → control plane | Single sign-on: OIDC authorization code flow with PKCE, run by the control plane as a confidential client; the session stays server-side and the browser holds only an HttpOnly, `SameSite=Strict` cookie; writes also need an `X-AgentGov-CSRF` header. Provider roles map to `admin`, `approver`, `auditor` and `registrar`. Automation uses role-scoped API keys; the bootstrap admin token is for break-glass access |
 
 | Failure | Behaviour |
 |---|---|
