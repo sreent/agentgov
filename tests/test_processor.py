@@ -16,7 +16,7 @@ from agentgov.processor.control_plane import DecisionRecorder
 from agentgov.processor.presidio import PresidioError
 from agentgov.processor.proto import ext_mcp_pb2 as pb
 from agentgov.processor.proto import ext_mcp_pb2_grpc as pb_grpc
-from agentgov.processor.server import GovernanceProcessor
+from agentgov.processor.server import GovernanceProcessor, trace_id_of
 
 AGENT = {"id": "agt_1", "name": "bot", "status": "active", "risk_level": "low"}
 
@@ -110,7 +110,7 @@ def call_response(
     )
 
 
-def run(opa, cp=None, presidio=None, settings=None, *, request=None, response=None):
+def run(opa, cp=None, presidio=None, settings=None, *, request=None, response=None, metadata=()):
     """Start a real gRPC server, send one message, return (reply, control_plane)."""
     cp = cp or FakeControlPlane()
 
@@ -127,9 +127,9 @@ def run(opa, cp=None, presidio=None, settings=None, *, request=None, response=No
             async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
                 stub = pb_grpc.ExtMcpStub(channel)
                 reply = await (
-                    stub.CheckRequest(request)
+                    stub.CheckRequest(request, metadata=metadata)
                     if request is not None
-                    else stub.CheckResponse(response)
+                    else stub.CheckResponse(response, metadata=metadata)
                 )
             await asyncio.sleep(0)  # let fire-and-forget tasks run
             await asyncio.gather(*processor._background)
@@ -152,6 +152,15 @@ class TestRequests:
         assert dict(reply.metadata)["agentgov_target"] == "get"
         assert cp.records[0]["effect"] == "allow"
         assert cp.records[0]["resource"] == "crm/get"
+
+    def test_decisions_carry_the_gateways_trace_id(self) -> None:
+        traceparent = (("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),)
+        _, cp = run(FakeOpa(), request=call_request("get", {}), metadata=traceparent)
+        assert cp.records[0]["trace_id"] == "0af7651916cd43dd8448eb211c80319c"
+        _, cp = run(FakeOpa(), response=call_response({"content": []}), metadata=traceparent)
+        assert cp.records[0]["trace_id"] == "0af7651916cd43dd8448eb211c80319c"
+        _, cp = run(FakeOpa(), request=call_request("get", {}))
+        assert cp.records[0]["trace_id"] is None
 
     def test_denied_call_is_rejected_with_reasons(self) -> None:
         reply, cp = run(FakeOpa(deny(["not granted"])), request=call_request("export", {}))
@@ -339,3 +348,18 @@ def test_unexpected_errors_fail_closed(phase) -> None:
     else:
         reply, _ = run(Broken(), response=call_response({"content": []}))
     assert reply.WhichOneof("result") == "error"
+
+
+class TestTraceContext:
+    @staticmethod
+    def header(value: str) -> pb.McpHeader:
+        return pb.McpHeader(key="traceparent", value=value.encode())
+
+    def test_trace_ids_come_from_traceparent(self) -> None:
+        good = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        assert trace_id_of(None, [self.header(good)]) == "4bf92f3577b34da6a3ce929d0e0e4736"
+        assert trace_id_of(None, [self.header(good.upper())]) == "4bf92f3577b34da6a3ce929d0e0e4736"
+        zero = "00-00000000000000000000000000000000-00f067aa0ba902b7-01"
+        for bad in (zero, "garbage", "00-4bf92f35-00f067aa0ba902b7-01"):
+            assert trace_id_of(None, [self.header(bad)]) is None
+        assert trace_id_of(None) is None

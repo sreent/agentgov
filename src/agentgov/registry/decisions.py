@@ -14,6 +14,13 @@ from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings, risk
 
 
+def _trace_id(value: Any) -> str | None:
+    """A W3C trace ID (32 lowercase hex digits), or None."""
+    if isinstance(value, str) and len(value) == 32 and all(c in "0123456789abcdef" for c in value):
+        return value
+    return None
+
+
 def _parse_ts(value: Any) -> datetime:
     if isinstance(value, str):
         try:
@@ -71,6 +78,7 @@ def record_mcp_decisions(
                 "latency_ms": rec.get("latency_ms"),
                 "identity": identity,
             },
+            trace_id=_trace_id(rec.get("trace_id")),
             ts=when,
         )
         if agent is None:

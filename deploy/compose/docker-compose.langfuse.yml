@@ -60,6 +60,11 @@ services:
     volumes:
       - ./otel/langfuse.yaml:/etc/otelcol/langfuse.yaml:ro
 
+  # Ledger entries recorded at the gateway link to their trace in Langfuse.
+  control-plane:
+    environment:
+      AGENTGOV_TRACE_URL: http://localhost:3000/project/agents/traces/{trace_id}
+
   # Creates the "langfuse" database on the stack's PostgreSQL server if missing.
   langfuse-db:
     image: postgres:17-alpine

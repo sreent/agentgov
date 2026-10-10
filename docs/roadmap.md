@@ -16,7 +16,7 @@ and write only the glue.
 | Deployment | **Multi-replica control plane**: fan out bundle and config change notifications across replicas | PostgreSQL `LISTEN` / `NOTIFY` |
 | Admin access | **Back-channel logout**: end administrator sessions as soon as the identity provider ends them, instead of at expiry | OpenID Connect Back-Channel Logout (supported by Keycloak) |
 | Security | **Mutual TLS between components**: the gateway, processor, OPA and control plane authenticate each other instead of relying on network isolation | SPIFFE / SPIRE or cert-manager certificates |
-| Detection | **Prompt-injection classifier**: an optional model-based detector next to the heuristics | An open classifier model served behind a small HTTP API |
+| Detection | **Classifier for tool traffic**: ask the Granite Guardian that already checks [agent instructions](instructions.md) about tool results too (prompt injection), next to the processor's heuristics | IBM Granite Guardian |
 | Security operations | **SIEM integration**: stream ledger entries and findings in a standard schema | OCSF, OpenTelemetry logs |
 
 ## Later
@@ -24,7 +24,8 @@ and write only the glue.
 | Theme | Item | Building block |
 |---|---|---|
 | Registry | **Management rules**: declarative registry rules (for example "block agents without an owner for 14 days") on top of posture findings | OPA |
-| Registry | **Connectors** that import agents from cloud agent platforms and SaaS agent builders into the registry as `discovered` | Platform APIs |
+| Registry | **More platform connectors**: import agents from cloud agent platforms and SaaS agent builders (AWS, Google, Salesforce, Databricks) the way [Microsoft 365 and Copilot Studio](platforms.md) are | Platform APIs |
+| Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
 | Access | **Access packages**: time-bound, requestable bundles of tool grants with approval | — |
 | Interoperability | **A2A governance**: agent-to-agent calls through the gateway with the same identity and policy | agentgateway A2A routes |
 | Policy | **AuthZEN interface** so the decision point can be swapped (for example to Cedar) without touching enforcement points | OpenID AuthZEN |

@@ -6,7 +6,10 @@ import gzip
 import json
 
 import pytest
+from fastapi.testclient import TestClient
 
+from agentgov.api.app import create_app
+from agentgov.config import Settings
 from tests.conftest import ADMIN, SERVICE, seed
 
 
@@ -245,6 +248,27 @@ class TestGovernance:
         assert any(f["type"] == "agent.credential_exfiltration_attempt" for f in found)
         risk = client.get("/v1/agents/support-bot/risk", headers=ADMIN).json()
         assert risk["score"] > 10
+
+    def test_gateway_decisions_link_to_their_trace(self, settings, tmp_path) -> None:
+        settings = settings.with_overrides(trace_url="https://traces.example/t/{trace_id}")
+        with TestClient(create_app(settings, background=False)) as client:
+            agent = seed(client)
+            trace = "4bf92f3577b34da6a3ce929d0e0e4736"
+            records = [
+                {"phase": "request", "resource": "crm/get_customer", "agent": {"id": agent["id"]},
+                 "effect": "allow", "trace_id": trace},
+                {"phase": "request", "resource": "crm/get_customer", "agent": {"id": agent["id"]},
+                 "effect": "allow", "trace_id": "not-a-trace-id"},
+            ]  # fmt: skip
+            client.post("/v1/internal/decisions", json={"records": records}, headers=SERVICE)
+            entries = client.get("/v1/ledger", params={"type": "decision.*"}, headers=ADMIN).json()
+        assert entries[0]["trace_id"] is None and "trace_url" not in entries[0]
+        assert entries[1]["trace_id"] == trace
+        assert entries[1]["trace_url"] == f"https://traces.example/t/{trace}"
+
+    def test_trace_url_needs_a_placeholder(self) -> None:
+        with pytest.raises(ValueError, match="trace_id"):
+            Settings(trace_url="https://traces.example/").validate()
 
     def test_risk_reads_are_read_only_and_refresh_is_for_admins(self, client) -> None:
         seed(client)

@@ -124,6 +124,11 @@ const ICONS = {
   shield: 'M12 3l7.5 3v6c0 4.4-3.2 7.9-7.5 9-4.3-1.1-7.5-4.6-7.5-9V6z',
   'shield-check': 'M12 3l7.5 3v6c0 4.4-3.2 7.9-7.5 9-4.3-1.1-7.5-4.6-7.5-9V6zM9 12l2 2 4-4',
   external: 'M14 4h6v6M20 4l-9 9M18 14v6H4V6h6',
+  plus: 'M12 5v14M5 12h14',
+  edit: 'M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4',
+  upload: 'M12 15V4M7 9l5-5 5 5M5 20h14',
+  access: 'M5 8a4 4 0 1 0 8 0a4 4 0 1 0-8 0M3 21c0-3.3 2.7-6 6-6 1.2 0 2.3.3 3.2.9M17 14a2 2 0 1 0 0 4a2 2 0 1 0 0-4M18.4 15.6L22 12M20.5 13.5l1.5 1.5',
+  platforms: 'M7 19h10.5a4.5 4.5 0 0 0 .5-8.98A6 6 0 0 0 6.34 9.03 5 5 0 0 0 7 19z',
 };
 
 function icon(name, { label, cls } = {}) {
@@ -273,12 +278,15 @@ function friendlyError(status, detail) {
   return d || `The request failed (HTTP ${status}).`;
 }
 
-async function api(path, { method = 'GET', body, raw = false, auth = true, signingIn = false } = {}) {
+async function api(path, { method = 'GET', body, text, contentType = 'text/plain', raw = false, auth = true, signingIn = false } = {}) {
   // Required on writes authenticated by the session cookie (other sites cannot set it).
   const headers = { Accept: 'application/json', 'X-AgentGov-CSRF': '1' };
   if (auth && token) headers.Authorization = `Bearer ${token}`;
   const init = { method, headers, cache: 'no-store' };
-  if (body !== undefined) {
+  if (text !== undefined) {
+    headers['Content-Type'] = contentType;
+    init.body = text;
+  } else if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
@@ -368,6 +376,24 @@ const STATUS = {
     resolved: ['good', 'check-circle', 'Resolved'],
     dismissed: ['neutral', 'minus', 'Dismissed'],
   },
+  apikey: {
+    active: ['good', 'check-circle', 'Active'],
+    revoked: ['neutral', 'ban', 'Revoked'],
+  },
+  person: {
+    signed_in: ['good', 'check-circle', 'Signed in'],
+    signed_out: ['neutral', 'minus', 'Signed out'],
+    refused: ['critical', 'ban', 'Refused'],
+  },
+  sync: {
+    ok: ['good', 'check-circle', 'Succeeded'],
+    failed: ['critical', 'octagon', 'Failed'],
+  },
+  connector: {
+    approved: ['good', 'check-circle', 'Approved'],
+    unapproved: ['serious', 'triangle', 'Not approved'],
+    unchecked: ['neutral', 'minus', 'Not approved'],
+  },
 };
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 const TONE_COLOR = {
@@ -411,6 +437,17 @@ function toast(message, { tone = 'good', timeout } = {}) {
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Dismiss notification', onclick: () => el.remove() }, icon('x')));
   host.append(el);
   setTimeout(() => el.remove(), timeout ?? (tone === 'critical' ? 10000 : 5000));
+}
+
+/** Wrap an async click handler so that a failure shows as a toast instead of being lost. */
+function guarded(fn) {
+  return async (...args) => {
+    try {
+      await fn(...args);
+    } catch (err) {
+      toast(err?.message || String(err), { tone: 'critical' });
+    }
+  };
 }
 
 function copyable(text, label) {
@@ -516,41 +553,95 @@ function observeWidth(el, draw) {
 
 /* ------------------------------------------------------------------ dialog */
 
+// Field types: text (default), textarea, code (monospace textarea), select,
+// checkbox, number; plus layout entries { type: 'section', label } and
+// { type: 'row', fields: [...] } for two fields side by side.
 function dialogField(f, controls) {
+  if (f.type === 'section') return h('h3', { class: 'dialog-section' }, f.label);
+  if (f.type === 'row') return h('div', { class: 'form-row' }, f.fields.map((x) => dialogField(x, controls)));
   const id = `dlg-${f.id}`;
+  const hint = f.hint ? h('p', { class: 'hint', id: `${id}-hint` }, f.hint) : null;
+  if (f.type === 'checkbox') {
+    const box = h('input', { id, name: f.id, type: 'checkbox', checked: Boolean(f.value), 'aria-describedby': hint ? `${id}-hint` : null });
+    controls[f.id] = box;
+    return h('div', { class: 'field' }, h('label', { class: 'check', for: id }, box, f.label), hint);
+  }
   let control;
-  if (f.type === 'textarea') {
-    control = h('textarea', { id, name: f.id, rows: 3, placeholder: f.placeholder || null });
+  let loader = null;
+  if (f.type === 'textarea' || f.type === 'code') {
+    control = h('textarea', {
+      id, name: f.id, rows: f.rows || 3, placeholder: f.placeholder || null,
+      class: f.type === 'code' ? 'code-input' : null, spellcheck: f.type === 'code' ? 'false' : null,
+    });
+    if (f.file) {
+      // Read a local file into the editor; nothing is uploaded until the form is saved.
+      const picker = h('input', { type: 'file', accept: f.file, hidden: true });
+      picker.addEventListener('change', async () => {
+        const file = picker.files?.[0];
+        if (file) control.value = await file.text();
+        picker.value = '';
+        control.focus();
+      });
+      loader = h('div', { class: 'btn-row' }, picker,
+        h('button', { type: 'button', class: 'btn btn--sm', onclick: () => picker.click() }, icon('upload'), `Load a ${f.file} file`));
+    }
   } else if (f.type === 'select') {
     control = h('select', { id, name: f.id },
       f.options.map((o) => h('option', { value: o.value, selected: o.value === (f.value ?? '') }, o.label)));
   } else {
-    control = h('input', { id, name: f.id, type: 'text', autocomplete: 'off', placeholder: f.placeholder || null });
+    control = h('input', {
+      id, name: f.id, type: f.type === 'number' ? 'number' : 'text', autocomplete: 'off',
+      placeholder: f.placeholder || null, min: f.min ?? null, step: f.type === 'number' ? 1 : null,
+      list: f.datalist ? `${id}-list` : null, spellcheck: f.mono ? 'false' : null, class: f.mono ? 'mono' : null,
+    });
   }
   if (f.value != null && f.type !== 'select') control.value = f.value;
-  if (f.hint) control.setAttribute('aria-describedby', `${id}-hint`);
+  if (hint) control.setAttribute('aria-describedby', `${id}-hint`);
   controls[f.id] = control;
   return h('div', { class: 'field' },
     h('label', { for: id }, f.label, f.required ? null : h('span', { class: 'muted' }, ' (optional)')),
     control,
-    f.hint ? h('p', { class: 'hint', id: `${id}-hint` }, f.hint) : null);
+    f.datalist ? h('datalist', { id: `${id}-list` }, f.datalist.map((v) => h('option', { value: v }))) : null,
+    loader, hint);
 }
 
-/** Show a modal confirmation. Resolves to the field values, or null when cancelled. */
-function ask({ title, text, tone = 'primary', iconName = 'info', confirm = 'Confirm', fields = [], extra }) {
+function inputFields(fields) {
+  return fields.flatMap((f) => (f.type === 'row' ? f.fields : f.type === 'section' ? [] : [f]));
+}
+
+/**
+ * Show a modal dialog. Resolves to the field values, or null when cancelled.
+ *
+ * With `submit`, the dialog stays open while `submit(values)` runs: an error
+ * it throws (a refused API call, say) is shown in the dialog so nothing typed
+ * is lost, and the dialog resolves to its result once it succeeds.
+ */
+function ask({
+  title, text, tone = 'primary', iconName = 'info', confirm = 'Confirm', cancel = 'Cancel',
+  fields = [], extra, wide = false, submit, busy = 'Saving…', onReady,
+}) {
   return new Promise((resolve) => {
     const dlg = $('#dialog');
     const opener = document.activeElement;
     const controls = {};
     let settled = false;
+    let working = false;
+    const holdOpen = (event) => { if (working) event.preventDefault(); };
+    // "close" fires asynchronously, so when this dialog replaces one that just
+    // closed, that dialog's close event arrives while this one is open: ignore it.
+    const onClose = () => { if (!dlg.open) finish(null); };
     const finish = (value) => {
       if (settled) return;
       settled = true;
+      dlg.removeEventListener('cancel', holdOpen);
+      dlg.removeEventListener('close', onClose);
       if (dlg.open) dlg.close();
       resolve(value);
       if (opener && opener.isConnected) opener.focus();
     };
     const error = h('p', { class: 'form-error', role: 'alert', hidden: true });
+    const cancelBtn = cancel ? h('button', { type: 'button', class: 'btn', onclick: () => finish(null) }, cancel) : null;
+    const confirmBtn = h('button', { type: 'submit', class: `btn btn--${tone}` }, confirm);
     const form = h('form', { class: 'dialog-form', novalidate: true },
       h('div', { class: 'dialog-head' }, icon(iconName),
         h('div', { class: 'stack', style: 'gap:6px' },
@@ -559,31 +650,92 @@ function ask({ title, text, tone = 'primary', iconName = 'info', confirm = 'Conf
       extra || null,
       fields.map((f) => dialogField(f, controls)),
       error,
-      h('div', { class: 'dialog-actions' },
-        h('button', { type: 'button', class: 'btn', onclick: () => finish(null) }, 'Cancel'),
-        h('button', { type: 'submit', class: `btn btn--${tone}` }, confirm)));
-    form.addEventListener('submit', (event) => {
+      h('div', { class: 'dialog-actions' }, cancelBtn, confirmBtn));
+    const showError = (message, control) => {
+      error.textContent = message;
+      error.hidden = false;
+      if (control) control.focus();
+    };
+    form.addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (working) return;
       const values = {};
-      for (const f of fields) {
-        const value = controls[f.id].value.trim();
-        if (f.required && !value) {
-          error.textContent = `${f.label} is required.`;
-          error.hidden = false;
-          controls[f.id].focus();
-          return;
-        }
+      for (const f of inputFields(fields)) {
+        const control = controls[f.id];
+        if (f.type === 'checkbox') { values[f.id] = control.checked; continue; }
+        const value = f.type === 'code' ? control.value : control.value.trim();
+        if (f.required && !value.trim()) { showError(`${f.label} is required.`, control); return; }
+        if (f.match != null && value !== f.match) { showError(f.mismatch || `${f.label} doesn't match.`, control); return; }
         values[f.id] = value;
       }
-      finish(values);
+      if (!submit) { finish(values); return; }
+      working = true;
+      error.hidden = true;
+      confirmBtn.disabled = true;
+      if (cancelBtn) cancelBtn.disabled = true;
+      confirmBtn.textContent = busy;
+      try {
+        const result = await submit(values);
+        working = false;
+        finish(result ?? values);
+      } catch (err) {
+        working = false;
+        confirmBtn.disabled = false;
+        if (cancelBtn) cancelBtn.disabled = false;
+        confirmBtn.textContent = confirm;
+        showError(err?.message || String(err));
+      }
     });
     dlg.dataset.tone = tone === 'danger' ? 'critical' : 'accent';
+    dlg.classList.toggle('dialog--wide', wide);
     dlg.replaceChildren(form);
-    dlg.addEventListener('close', () => finish(null), { once: true });
+    dlg.addEventListener('close', onClose);
+    dlg.addEventListener('cancel', holdOpen);
     dlg.showModal();
-    (form.querySelector('input, textarea, select') || form.querySelector('[type="submit"]')).focus();
+    if (onReady) onReady(controls);
+    (form.querySelector('input:not([type="file"]), textarea, select') || confirmBtn).focus();
   });
 }
+
+/* ------------------------------------------------------------- form values */
+
+// Lists are typed "a, b" or one per line, labels "key=value", and tool grants
+// "server: tool, tool" with one server per line. The control plane validates
+// everything again; these only turn the text into the API's JSON shapes.
+function parseList(text) {
+  return String(text || '').split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+}
+
+function parseLabels(text) {
+  const out = {};
+  for (const item of parseList(text)) {
+    const eq = item.indexOf('=');
+    if (eq < 1) throw new Error(`Write labels as key=value, separated by commas ("${item}" has no "=").`);
+    out[item.slice(0, eq).trim()] = item.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+function formatLabels(labels) {
+  return Object.entries(labels || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+}
+
+function parseGrants(text) {
+  return String(text || '').split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const colon = line.indexOf(':');
+    if (colon < 1) throw new Error(`Write each grant as "server: tool, tool" ("${line}" has no server).`);
+    const server = line.slice(0, colon).trim();
+    const tools = parseList(line.slice(colon + 1));
+    if (!tools.length) throw new Error(`List the tools granted on ${server}, or * for all of them.`);
+    return { server, tools };
+  });
+}
+
+function formatGrants(grants) {
+  return (grants || []).map((g) => `${g.server}: ${g.tools.join(', ')}`).join('\n');
+}
+
+const orNull = (text) => text || null;
 
 /* ------------------------------------------------------------ nav badges */
 
@@ -627,6 +779,8 @@ const PAGES = [
   { re: /^\/findings$/, nav: 'findings', title: 'Findings', render: renderFindings },
   { re: /^\/policies$/, nav: 'policies', title: 'Policies', render: renderPolicies },
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
+  { re: /^\/access$/, nav: 'access', title: 'Access', render: renderAccess },
+  { re: /^\/platforms$/, nav: 'platforms', title: 'Platforms', render: renderPlatforms },
 ];
 
 let renderSeq = 0;
@@ -1277,6 +1431,7 @@ async function renderAgents({ params }) {
     status: params.get('status') || 'all',
     owner: params.get('owner') || '',
     risk: params.get('risk') || '',
+    source: params.get('source') || '',
     q: params.get('q') || '',
   };
   const load = (q) => api(`v1/agents?include_deleted=true${q ? `&q=${encodeURIComponent(q)}` : ''}`);
@@ -1292,7 +1447,7 @@ async function renderAgents({ params }) {
   });
 
   function sync() {
-    setHashQuiet('/agents', { status: state.status === 'all' ? '' : state.status, owner: state.owner, risk: state.risk, q: state.q });
+    setHashQuiet('/agents', { status: state.status === 'all' ? '' : state.status, owner: state.owner, risk: state.risk, source: state.source, q: state.q });
   }
 
   function apply() {
@@ -1308,19 +1463,21 @@ async function renderAgents({ params }) {
     const extras = [];
     if (state.owner === 'none') extras.push(['Without an owner', () => { state.owner = ''; }]);
     if (state.risk === 'elevated') extras.push(['High or critical risk', () => { state.risk = ''; }]);
+    if (state.source) extras.push([`Runs on ${PLATFORM_SOURCES[state.source] || state.source}`, () => { state.source = ''; }]);
     extraHost.replaceChildren(...extras.map(([label, clear]) => h('span', { class: 'active-filter' }, label,
       h('button', { type: 'button', 'aria-label': `Remove filter: ${label}`, onclick: () => { clear(); apply(); sync(); search.focus(); } }, icon('x')))));
 
     let rows = agents.filter((a) => (state.status === 'all' ? a.status !== 'deleted' : a.status === state.status));
     if (state.owner === 'none') rows = rows.filter((a) => !a.owner && a.status !== 'discovered');
     if (state.risk === 'elevated') rows = rows.filter((a) => ['high', 'critical'].includes(a.risk?.level));
+    if (state.source) rows = rows.filter((a) => a.source === state.source);
     countEl.textContent = plural(rows.length, 'agent');
     tableHost.replaceChildren(rows.length ? agentsTable(rows) : emptyState('No agents match these filters',
       state.q ? `Nothing matches "${state.q}".` : 'Try another status.',
       h('button', {
         type: 'button', class: 'btn btn--sm',
         onclick: async () => {
-          Object.assign(state, { status: 'all', owner: '', risk: '', q: '' });
+          Object.assign(state, { status: 'all', owner: '', risk: '', source: '', q: '' });
           search.value = '';
           agents = await load('');
           apply();
@@ -1353,7 +1510,10 @@ async function renderAgents({ params }) {
     pageHead({
       title: 'Agents',
       sub: 'Every agent identity the control plane knows about: registered, pending review, blocked, and discovered at runtime without registration.',
-      actions: [refreshButton()],
+      actions: [
+        can('admin') ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'register-agent', onclick: guarded(registerAgent) }, icon('plus'), 'Register agent') : null,
+        refreshButton(),
+      ],
     }),
     h('div', { class: 'filters' },
       h('div', { class: 'field' }, h('label', { for: 'agent-search', class: 'sr-only' }, 'Search agents'), search),
@@ -1372,7 +1532,9 @@ function agentsTable(rows) {
         h('td', { 'data-label': 'Status' }, chip('agent', a.status)),
         h('td', { 'data-label': 'Risk' }, riskChip(a.risk)),
         h('td', { 'data-label': 'Owner', class: 'break' }, a.owner || h('span', { class: 'muted' }, a.status === 'discovered' ? 'Unassigned' : 'No owner')),
-        h('td', { 'data-label': 'Blueprint' }, a.blueprint || h('span', { class: 'muted' }, 'None')),
+        h('td', { 'data-label': 'Blueprint' }, a.blueprint || (platformOf(a)
+          ? h('span', { class: 'muted', title: 'Blueprints grant gateway tools; this agent runs on another platform' }, `${platformOf(a)} agent`)
+          : h('span', { class: 'muted' }, 'None'))),
         h('td', { 'data-label': 'Last seen', class: 'nowrap' }, timeEl(a.last_seen_at, { empty: 'Never' })));
       tr.addEventListener('click', (e) => {
         if (e.target.closest('a, button') || getSelection().toString()) return;
@@ -1417,6 +1579,24 @@ const LIFECYCLE = {
     done: (n) => `Adopted ${n}. It is pending review.`,
   },
 };
+// Blocking or deleting a platform agent changes AgentGov's registry, not the platform.
+const PLATFORM_LIFECYCLE = {
+  approve: (p) => ({ text: `The agent becomes active in AgentGov's registry, with an owner, sponsors and periodic review. It runs in ${p} either way. Activation needs at least one sponsor.` }),
+  block: (p) => ({
+    label: 'Block', confirm: 'Block in AgentGov',
+    text: `This marks the agent as blocked in AgentGov's registry and ledger. It does not stop the agent in ${p}: block it in ${p}'s admin center too.`,
+    done: (n) => `Blocked ${n} in AgentGov. Block it in ${p} too.`,
+  }),
+  unblock: (p) => ({ text: `The agent is no longer marked as blocked in AgentGov. This doesn't change ${p}.` }),
+  delete: (p) => ({ text: `The agent leaves AgentGov's inventory but stays in ${p}. Deleted agents can be restored.` }),
+  adopt: (p) => ({ text: `Adopting brings this ${p} agent under governance as a pending registration. Give it an owner and at least one sponsor, then approve it.` }),
+};
+
+function lifecycleSpec(a, action) {
+  const p = platformOf(a);
+  return p && PLATFORM_LIFECYCLE[action] ? { ...LIFECYCLE[action], ...PLATFORM_LIFECYCLE[action](p) } : LIFECYCLE[action];
+}
+
 const ACTIONS_BY_STATUS = {
   pending: ['approve', 'block', 'delete'],
   active: ['block', 'delete'],
@@ -1429,14 +1609,19 @@ const ATTESTABLE = new Set(['active', 'blocked', 'pending']);
 async function renderAgent({ match }) {
   const ref = decodeURIComponent(match[1]);
   const agent = await api(`v1/agents/${encodeURIComponent(ref)}`);
-  const [entries, openFindings] = await Promise.all([
+  const [entries, openFindings, instructions] = await Promise.all([
     api(`v1/ledger?agent=${encodeURIComponent(agent.id)}&limit=12`).catch((e) => e),
     api(`v1/findings?status=open&agent=${encodeURIComponent(agent.id)}`).catch((e) => e),
+    api(`v1/agents/${encodeURIComponent(agent.id)}/instructions`).catch((e) => e),
   ]);
+  // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
+  const views = agent.platforms || [];
+  const main = views.length ? views.map((v) => platformCard(agent, v)) : [permissionsCard(agent)];
   return h('div', { class: 'page', 'data-title': agent.name },
     agentHeader(agent),
     h('div', { class: 'detail-grid' },
-      h('div', { class: 'stack' }, permissionsCard(agent), agentLedgerCard(agent, entries), agentCardCard(agent)),
+      h('div', { class: 'stack' }, main, instructionsCard(agent, instructions), agentLedgerCard(agent, entries),
+        views.length ? null : agentCardCard(agent)),
       h('div', { class: 'stack' }, riskCard(agent), peopleCard(agent), attestationCard(agent), identityCard(agent),
         agentFindingsCard(openFindings))));
 }
@@ -1461,7 +1646,7 @@ function mayAttest(a) {
 
 function agentToolbar(a) {
   const buttons = (can('admin') ? ACTIONS_BY_STATUS[a.status] || [] : []).map((action) => {
-    const spec = LIFECYCLE[action];
+    const spec = lifecycleSpec(a, action);
     return h('button', {
       type: 'button', class: `btn ${spec.cls}`, 'data-focus-key': `lifecycle-${action}`,
       onclick: () => runLifecycle(a, action),
@@ -1470,23 +1655,32 @@ function agentToolbar(a) {
   if (mayAttest(a)) {
     buttons.push(h('button', { type: 'button', class: 'btn', 'data-focus-key': 'attest', onclick: () => runAttest(a) }, icon('shield-check'), 'Attest'));
   }
+  if (can('admin') && a.status !== 'deleted') {
+    buttons.unshift(h('button', { type: 'button', class: 'btn', 'data-focus-key': 'edit-agent', onclick: guarded(() => editAgent(a)) }, icon('edit'), 'Edit'));
+  }
+  if (can('admin') && a.status === 'deleted') {
+    buttons.push(h('button', { type: 'button', class: 'btn btn--danger-quiet', 'data-focus-key': 'purge-agent', onclick: () => purgeAgent(a) }, icon('trash'), 'Delete permanently'));
+  }
   if (!buttons.length) return null;
   return h('div', { class: 'toolbar', role: 'group', 'aria-label': 'Agent actions' }, buttons);
 }
 
 async function runLifecycle(a, action) {
-  const spec = LIFECYCLE[action];
+  const spec = lifecycleSpec(a, action);
   const fields = [];
   if (action === 'adopt') {
-    const blueprints = await api('v1/blueprints').catch(() => []);
     fields.push(
       { id: 'owner', label: 'Owner', placeholder: 'Team or person accountable for the agent', value: a.owner || '' },
       { id: 'sponsors', label: 'Sponsors', placeholder: 'alice@example.com, bob@example.com', value: (a.sponsors || []).join(', '), hint: 'Separate people with commas. Approval needs at least one sponsor.' },
-      {
+    );
+    // Blueprints grant gateway tools, which agents on other platforms don't use.
+    if (!platformOf(a)) {
+      const blueprints = await api('v1/blueprints').catch(() => []);
+      fields.push({
         id: 'blueprint', label: 'Blueprint', type: 'select', value: a.blueprint || '',
         options: [{ value: '', label: 'No blueprint' }, ...blueprints.map((b) => ({ value: b.name, label: `${b.name} (${b.risk_tier} risk tier)` }))],
-      },
-    );
+      });
+    }
   }
   fields.push({ id: 'reason', label: 'Reason', type: 'textarea', hint: 'Recorded in the evidence ledger.' });
   const values = await ask({
@@ -1541,6 +1735,132 @@ async function recalcRisk(a) {
   }
 }
 
+const RISK_TIERS = ['minimal', 'low', 'medium', 'high', 'critical'];
+const NAME_HINT = 'Lowercase letters, digits and hyphens, starting and ending with a letter or digit.';
+
+/** Register an agent (no `a`) or edit one. Resolves to the saved agent, or null. */
+async function agentForm(a) {
+  const blueprints = await api('v1/blueprints');
+  const editing = Boolean(a);
+  const tiers = RISK_TIERS.map((t) => ({ value: t, label: humanize(t) }));
+  const fields = [
+    editing ? null : {
+      id: 'name', label: 'Name', required: true, mono: true, placeholder: 'support-bot',
+      hint: `${NAME_HINT} The agent gets the OAuth client agent-<name>.`,
+    },
+    { id: 'description', label: 'Description', type: 'textarea', value: a?.description || '' },
+    { type: 'section', label: 'Accountability' },
+    { type: 'row', fields: [
+      { id: 'owner', label: 'Owner', value: a?.owner || '', placeholder: 'Team or person' },
+      { id: 'environment', label: 'Environment', value: a?.environment || '', placeholder: 'prod', datalist: ['prod', 'staging', 'dev'] },
+    ] },
+    {
+      id: 'sponsors', label: 'Sponsors', value: (a?.sponsors || []).join(', '), placeholder: 'alice@example.com',
+      hint: 'People who vouch for the agent, separated by commas. Approval needs at least one unless the blueprint waives it.',
+    },
+    { type: 'section', label: 'Access' },
+    {
+      id: 'blueprint', label: 'Blueprint', type: 'select', value: a?.blueprint || '',
+      options: [{ value: '', label: 'No blueprint' }, ...blueprints.map((b) => ({ value: b.name, label: `${b.name} (${b.risk_tier} risk tier)` }))],
+      hint: "The agent gets the blueprint's tool grants, sponsor rule and review period.",
+    },
+    {
+      id: 'permissions', label: 'Extra tool grants', type: 'code', rows: 3, value: formatGrants(a?.permissions), placeholder: 'crm: search_customers, get_*',
+      hint: 'Added to the blueprint\'s grants. One server per line; tool names can use * wildcards, and * alone means every tool.',
+    },
+    {
+      id: 'risk_tier', label: 'Declared risk tier', type: 'select', value: a?.risk_tier || '',
+      options: editing ? tiers : [{ value: '', label: "The blueprint's tier (medium without one)" }, ...tiers],
+    },
+    { type: 'section', label: 'Details' },
+    { type: 'row', fields: [
+      { id: 'framework', label: 'Framework', value: a?.framework || '' },
+      { id: 'platform', label: 'Platform', value: a?.platform || '' },
+    ] },
+    { id: 'models', label: 'Models', value: (a?.models || []).join(', '), hint: 'Separated by commas.' },
+    { id: 'labels', label: 'Labels', value: formatLabels(a?.labels), placeholder: 'team=cx, cost-center=42', mono: true },
+    editing ? null : { id: 'approve', label: 'Approve now', type: 'checkbox', hint: 'Otherwise the agent waits in Pending review until an admin approves it.' },
+  ].filter(Boolean);
+  return ask({
+    title: editing ? `Edit ${a.name}` : 'Register an agent',
+    text: editing
+      ? 'Changes are recorded in the evidence ledger, and the gateway enforces them as soon as OPA loads the updated policy bundle.'
+      : 'Approved agents get their own OAuth client in Keycloak and can call the tools they are granted.',
+    iconName: editing ? 'edit' : 'agents', confirm: editing ? 'Save changes' : 'Register agent', fields,
+    submit: async (v) => {
+      const body = {
+        description: v.description,
+        owner: orNull(v.owner),
+        environment: orNull(v.environment),
+        sponsors: parseList(v.sponsors),
+        blueprint: v.blueprint || null,
+        permissions: parseGrants(v.permissions),
+        framework: orNull(v.framework),
+        platform: orNull(v.platform),
+        models: parseList(v.models),
+        labels: parseLabels(v.labels),
+      };
+      // Left unchanged, the tier follows the blueprint (as the API does).
+      if (v.risk_tier && v.risk_tier !== a?.risk_tier) body.risk_tier = v.risk_tier;
+      if (editing) return api(`v1/agents/${encodeURIComponent(a.id)}`, { method: 'PATCH', body });
+      return api('v1/agents', { method: 'POST', body: { name: v.name, ...body, approve: v.approve } });
+    },
+  });
+}
+
+async function registerAgent() {
+  const created = await agentForm(null);
+  if (!created) return;
+  toast(`Registered ${created.name}. ${created.status === 'active' ? 'It is active.' : 'It is pending review.'}`);
+  refreshBadges();
+  location.hash = agentHref(created.id);
+}
+
+async function editAgent(a) {
+  const saved = await agentForm(a);
+  if (!saved) return;
+  toast(`Saved ${saved.name}.`);
+  await refresh();
+}
+
+async function purgeAgent(a) {
+  const done = await ask({
+    title: `Delete ${a.name} permanently?`,
+    text: 'The agent and its OAuth client are removed and cannot be restored. Its ledger entries are kept.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete permanently', busy: 'Deleting…',
+    fields: [{ id: 'confirm_name', label: `Type ${a.name} to confirm`, required: true, mono: true, match: a.name, mismatch: `Type ${a.name} exactly to confirm.` }],
+    submit: () => api(`v1/agents/${encodeURIComponent(a.id)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted ${a.name} permanently.`);
+  location.hash = '#/agents';
+}
+
+/** Show the agent's OAuth client credentials, after issuing a new secret if `rotate`. */
+async function agentCredentials(a, rotate) {
+  const creds = await ask({
+    title: rotate ? `Rotate the client secret of ${a.name}?` : `Show the credentials of ${a.name}?`,
+    text: rotate
+      ? 'Keycloak issues a new secret and the current one stops working at once, so update the agent straight away. The rotation is recorded in the evidence ledger.'
+      : 'The client secret is shown in the next dialog. Viewing it is recorded in the evidence ledger.',
+    tone: rotate ? 'danger' : 'primary', iconName: 'key', confirm: rotate ? 'Rotate secret' : 'Show credentials',
+    busy: rotate ? 'Rotating…' : 'Loading…',
+    submit: () => api(`v1/agents/${encodeURIComponent(a.id)}/credentials`, { method: 'POST', body: { rotate } }),
+  });
+  if (!creds) return;
+  await ask({
+    title: `${rotate ? 'New credentials' : 'Credentials'} for ${a.name}`,
+    text: 'The agent exchanges these for 5-minute access tokens with the client credentials grant. Keep the secret in a secret store, not in code.',
+    iconName: 'key', confirm: 'Done', cancel: null, wide: true,
+    extra: facts([
+      ['Client ID', copyable(creds.client_id, 'client ID')],
+      ['Client secret', copyable(creds.client_secret, 'client secret')],
+      ['Token endpoint', copyable(creds.token_endpoint, 'token endpoint')],
+      ['Audience', copyable(creds.audience, 'audience')],
+    ]),
+  });
+}
+
 function permissionsCard(a) {
   const effective = a.effective_permissions || [];
   const own = new Map((a.permissions || []).map((g) => [g.server, new Set(g.tools)]));
@@ -1571,9 +1891,10 @@ function permissionsCard(a) {
 function riskCard(a) {
   const risk = a.risk || {};
   const tone = toneOf('risk', risk.level);
+  const platform = platformOf(a);
   return card({
     title: 'Risk',
-    sub: 'Posture factors plus runtime signals from the last 24 hours',
+    sub: platform ? `Posture, instructions, and how ${platform} has it set up` : 'Posture, instructions, and runtime signals from the last 24 hours',
     actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'recalc', onclick: () => recalcRisk(a) }, icon('refresh'), 'Recalculate')] : null,
     body: [
       h('div', { class: 'risk-head' },
@@ -1585,7 +1906,9 @@ function riskCard(a) {
           h('span', {}, f.factor, f.detail ? h('span', { class: 'muted' }, ` · ${f.detail}`) : null),
           h('span', { class: 'factor-points' }, `+${f.points}`))))
         : h('p', { class: 'muted small' }, 'No risk factors.'),
-      h('p', { class: 'hint' }, 'Levels: 25 medium, 50 high, 75 critical. Policy blocks agents at critical risk.'),
+      h('p', { class: 'hint' }, platform
+        ? `Levels: 25 medium, 50 high, 75 critical. High and critical risk raise an alert; ${platform} keeps running the agent.`
+        : 'Levels: 25 medium, 50 high, 75 critical. Policy blocks agents at critical risk.'),
     ],
   });
 }
@@ -1638,15 +1961,24 @@ function identityCard(a) {
   const id = a.identity || {};
   const labels = Object.entries(a.labels || {});
   const external = Object.entries(a.external_ids || {});
+  // Keycloak only issues secrets to active agents.
+  const credentialActions = can('admin') && a.status === 'active' && id.client_id ? [
+    h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'show-credentials', onclick: guarded(() => agentCredentials(a, false)) }, icon('key'), 'Show secret'),
+    h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': 'rotate-credentials', onclick: guarded(() => agentCredentials(a, true)) }, icon('refresh'), 'Rotate'),
+  ] : null;
+  const platform = platformOf(a);
+  let noClient = a.status === 'discovered' ? 'Not issued (unmanaged)' : 'Not issued';
+  if (platform) noClient = "Not needed: it doesn't use the gateway";
   return card({
     title: 'Identity',
-    sub: 'The OAuth client the gateway authenticates this agent with',
+    sub: platform ? `Runs on ${platform}, outside AgentGov's gateway` : 'The OAuth client the gateway authenticates this agent with',
+    actions: credentialActions,
     body: [
       id.error ? callout('critical', 'octagon', h('strong', {}, 'Identity out of sync. '), id.error) : null,
       facts([
-        ['Provider', humanize(id.provider || 'none')],
-        ['Client ID', id.client_id ? copyable(id.client_id, 'client ID') : h('span', { class: 'muted' }, a.status === 'discovered' ? 'Not issued (unmanaged)' : 'Not issued')],
-        ['Synced', id.synced_at ? timeEl(id.synced_at) : h('span', { class: 'muted' }, 'Not synced yet')],
+        platform ? null : ['Provider', humanize(id.provider || 'none')],
+        ['Client ID', id.client_id ? copyable(id.client_id, 'client ID') : h('span', { class: 'muted' }, noClient)],
+        platform ? null : ['Synced', id.synced_at ? timeEl(id.synced_at) : h('span', { class: 'muted' }, 'Not synced yet')],
         ['Agent ID', copyable(a.id, 'agent ID')],
         ['Source', a.source],
         ['Framework', a.framework],
@@ -1693,6 +2025,102 @@ function agentLedgerCard(a, entries) {
     actions: [h('a', { class: 'btn btn--sm btn--ghost', href: `#/ledger?agent=${encodeURIComponent(a.name)}` }, 'Open in ledger', icon('arrow'))],
     body, flush: !(entries instanceof Error) && entries.length > 0,
   });
+}
+
+/* ------------------------------------------------------------ instructions */
+
+const INSTRUCTION_SOURCES = {
+  registered: 'Registered', telemetry: 'Reported in telemetry', 'microsoft-365': 'From Microsoft 365',
+};
+
+function classifierLine(c, settings) {
+  if (!settings?.enabled) return h('p', { class: 'hint' }, 'Checked by AgentGov\'s rules. No classifier is configured.');
+  const model = c.model || settings.model;
+  if (c.state === 'pending') return h('p', { class: 'hint' }, icon('clock'), ` The classifier (${model}) is still checking these instructions.`);
+  if (c.state === 'error') return callout('warning', 'triangle', `The classifier (${model}) failed: ${c.error}`);
+  if (c.state === 'done') {
+    const flagged = Object.entries(c.verdicts || {}).filter(([, v]) => v === 'yes').map(([k]) => humanize(k));
+    return h('p', { class: 'hint' }, `Checked by AgentGov's rules and the classifier (${model})${flagged.length ? `, which flagged ${flagged.join(', ')}` : ', which flagged nothing'}.`);
+  }
+  return h('p', { class: 'hint' }, 'Checked by AgentGov\'s rules; the classifier hasn\'t checked them yet.');
+}
+
+function issueList(issues) {
+  if (!issues.length) return h('p', { class: 'tone-text-good small' }, icon('check-circle'), ' No problems found.');
+  return h('ul', { class: 'issue-list', role: 'list' }, issues.map((i) => h('li', {},
+    h('div', { class: 'issue-head' }, chip('severity', i.severity), h('strong', {}, i.title),
+      i.detector === 'classifier' ? plainChip('Classifier', { title: 'Judged by the classifier' }) : null),
+    i.excerpt ? h('q', { class: 'issue-excerpt' }, i.excerpt) : null)));
+}
+
+function instructionsCard(a, view) {
+  if (view instanceof Error) {
+    return card({ title: 'Instructions', body: callout('critical', 'alert-circle', `The instructions couldn't be loaded. ${view.message}`) });
+  }
+  const sources = view.sources || [];
+  const admin = can('admin') && a.status !== 'deleted';
+  const actions = admin ? [
+    sources.length ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'rescan-instructions', onclick: guarded(() => rescanInstructions(a)) }, icon('refresh'), 'Rescan') : null,
+    sources.some((x) => x.source === 'registered') ? null
+      : h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'add-instructions', onclick: guarded(() => editInstructions(a, null)) }, icon('plus'), 'Add instructions'),
+  ].filter(Boolean) : null;
+  const body = sources.length ? sources.map((x) => h('div', { class: 'instructions-source' },
+    h('div', { class: 'instructions-head' },
+      h('div', {}, h('strong', {}, INSTRUCTION_SOURCES[x.source] || x.source_name),
+        h('div', { class: 'cell-sub' }, `From ${x.reported_by}, changed `, timeEl(x.updated_at))),
+      admin ? h('div', { class: 'btn-row' },
+        x.source === 'registered' ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'edit-instructions', onclick: guarded(() => editInstructions(a, x)) }, icon('edit'), 'Edit') : null,
+        h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `forget-${x.source}`, onclick: guarded(() => forgetInstructions(a, x)) }, icon('trash'), 'Forget')) : null),
+    issueList(x.issues || []),
+    classifierLine(x.classifier || {}, view.classifier),
+    h('details', { class: 'disclosure' }, h('summary', {}, icon('chevron'), 'Show the instructions'),
+      h('pre', { class: 'kv-pre instructions-text', tabindex: '0' }, x.text),
+      x.truncated ? h('p', { class: 'hint' }, 'Only the beginning is kept.') : null)))
+    : emptyState('No instructions known',
+      "Agents that capture message content report them in telemetry (gen_ai.system_instructions), Microsoft 365 reports declarative agents' instructions, and they can be added here or in a manifest.");
+  return card({
+    title: 'Instructions',
+    sub: 'What the agent is told to do (its system prompt), checked for harmful or malicious content. Credentials in it are redacted.',
+    actions,
+    body,
+  });
+}
+
+async function editInstructions(a, current) {
+  const saved = await ask({
+    title: current ? `Edit ${a.name}'s instructions` : `Add instructions for ${a.name}`,
+    text: 'The instructions are checked as soon as they are saved, and the result is recorded in the evidence ledger. Credentials in them are redacted before they are stored.',
+    iconName: 'edit', confirm: 'Save and check', busy: 'Checking…', wide: true,
+    fields: [{ id: 'text', label: 'Instructions', type: 'code', rows: 14, required: true, file: '.txt,.md', value: current?.text || '', placeholder: 'You are the Contoso IT helpdesk assistant. …' }],
+    submit: (v) => api(`v1/agents/${encodeURIComponent(a.id)}/instructions`, { method: 'PUT', body: { text: v.text } }),
+  });
+  if (!saved) return;
+  const n = (saved.issues || []).length;
+  toast(n ? `Saved. ${plural(n, 'problem')} found in the instructions.` : 'Saved. No problems found.', { tone: n ? 'warning' : 'good' });
+  refreshBadges();
+  await refresh();
+}
+
+async function forgetInstructions(a, x) {
+  const done = await ask({
+    title: `Forget ${(INSTRUCTION_SOURCES[x.source] || x.source).toLowerCase()} instructions?`,
+    text: x.source === 'registered'
+      ? 'The registered instructions are removed. A finding about them is resolved.'
+      : 'AgentGov forgets this copy. If the source reports the instructions again, they come back and are checked again.',
+    tone: 'danger', iconName: 'trash', confirm: 'Forget', busy: 'Forgetting…',
+    submit: () => api(`v1/agents/${encodeURIComponent(a.id)}/instructions?source=${encodeURIComponent(x.source)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Forgot ${a.name}'s ${x.source} instructions.`);
+  refreshBadges();
+  await refresh();
+}
+
+async function rescanInstructions(a) {
+  const out = await api(`v1/agents/${encodeURIComponent(a.id)}/instructions/rescan`, { method: 'POST' });
+  toast(`Checked ${plural(out.rescanned, 'set')} of instructions again.`);
+  refreshBadges();
+  await refresh();
 }
 
 function agentFindingsCard(list) {
@@ -2194,11 +2622,77 @@ async function renderToolservers() {
     pageHead({
       title: 'Tool servers',
       sub: 'MCP servers published through the gateway. AgentGov fingerprints every tool definition when it is first seen and quarantines tools that change or carry hidden instructions.',
-      actions: [refreshButton()],
+      actions: [
+        can('admin') ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'register-server', onclick: guarded(registerToolserver) }, icon('plus'), 'Register tool server') : null,
+        refreshButton(),
+      ],
     }),
     servers.length
       ? h('div', { class: 'stack' }, servers.map(serverCard))
-      : h('section', { class: 'card' }, emptyState('No tool servers registered', 'Register an MCP server with POST /v1/toolservers or a ToolServer manifest.')));
+      : h('section', { class: 'card' }, emptyState('No tool servers registered',
+        can('admin') ? 'Register an MCP server to publish it through the gateway.' : 'An admin registers MCP servers here, with the CLI or with a ToolServer manifest.')));
+}
+
+const TRUST_LEVELS = [['unverified', 'Unverified'], ['verified', 'Verified']];
+const CLASSIFICATIONS = [['public', 'Public'], ['internal', 'Internal'], ['confidential', 'Confidential'], ['restricted', 'Restricted']];
+
+/** Register a tool server (no `ts`) or edit one. Resolves to the saved server, or null. */
+function toolserverForm(ts) {
+  const editing = Boolean(ts);
+  const options = (pairs) => pairs.map(([value, label]) => ({ value, label }));
+  return ask({
+    title: editing ? `Edit ${ts.name}` : 'Register a tool server',
+    text: editing
+      ? 'Changes are recorded in the evidence ledger. A new upstream URL takes effect when the gateway reloads its generated configuration.'
+      : 'The server is published through the gateway at /mcp/<name>, and agents whose grants cover it can call its tools.',
+    iconName: editing ? 'edit' : 'toolservers', confirm: editing ? 'Save changes' : 'Register server',
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'crm', hint: `${NAME_HINT} It becomes the gateway path /mcp/<name>.` },
+      { id: 'url', label: 'Upstream URL', required: true, mono: true, value: ts?.url || '', placeholder: 'http://crm-mcp:8000/mcp', hint: 'The streamable HTTP MCP endpoint. Agents never call it directly, only through the gateway.' },
+      { id: 'description', label: 'Description', type: 'textarea', value: ts?.description || '' },
+      { id: 'owner', label: 'Owner', value: ts?.owner || '', placeholder: 'Team or person' },
+      { type: 'row', fields: [
+        { id: 'trust_level', label: 'Trust level', type: 'select', value: ts?.trust_level || 'unverified', options: options(TRUST_LEVELS) },
+        { id: 'data_classification', label: 'Data classification', type: 'select', value: ts?.data_classification || 'internal', options: options(CLASSIFICATIONS) },
+      ] },
+      { id: 'labels', label: 'Labels', value: formatLabels(ts?.labels), placeholder: 'team=cx', mono: true },
+    ].filter(Boolean),
+    submit: (v) => {
+      const body = {
+        url: v.url, description: v.description, owner: orNull(v.owner),
+        trust_level: v.trust_level, data_classification: v.data_classification, labels: parseLabels(v.labels),
+      };
+      if (editing) return api(`v1/toolservers/${encodeURIComponent(ts.name)}`, { method: 'PATCH', body });
+      return api('v1/toolservers', { method: 'POST', body: { name: v.name, ...body } });
+    },
+  });
+}
+
+async function registerToolserver() {
+  const created = await toolserverForm(null);
+  if (!created) return;
+  toast(`Registered ${created.name}. Agents reach it at ${created.gateway_url || `/mcp/${created.name}`}.`);
+  await refresh();
+}
+
+async function editToolserver(ts) {
+  const saved = await toolserverForm(ts);
+  if (!saved) return;
+  toast(`Saved ${saved.name}.`);
+  await refresh();
+}
+
+async function deleteToolserver(ts) {
+  const done = await ask({
+    title: `Delete ${ts.name}?`,
+    text: 'The gateway stops publishing the server and its tool catalog is discarded. Grants that name it stay in blueprints and agents but match nothing. To stop calls but keep the catalog, block the server instead.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete server', busy: 'Deleting…',
+    fields: [{ id: 'confirm_name', label: `Type ${ts.name} to confirm`, required: true, mono: true, match: ts.name, mismatch: `Type ${ts.name} exactly to confirm.` }],
+    submit: () => api(`v1/toolservers/${encodeURIComponent(ts.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted ${ts.name}.`);
+  await refresh();
 }
 
 function serverCard(ts) {
@@ -2225,8 +2719,10 @@ function serverCard(ts) {
   const actions = [];
   if (can('admin')) {
     if (ts.status === 'pending') actions.push(h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': `ts-approve-${ts.name}`, onclick: () => serverAction(ts, 'approve') }, icon('check'), 'Approve'));
+    actions.push(h('button', { type: 'button', class: 'btn', 'data-focus-key': `ts-edit-${ts.name}`, onclick: guarded(() => editToolserver(ts)) }, icon('edit'), 'Edit'));
     if (ts.status === 'blocked') actions.push(h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': `ts-unblock-${ts.name}`, onclick: () => serverAction(ts, 'unblock') }, icon('undo'), 'Unblock'));
     else actions.push(h('button', { type: 'button', class: 'btn btn--danger-quiet', 'data-focus-key': `ts-block-${ts.name}`, onclick: () => serverAction(ts, 'block') }, icon('power'), 'Block server'));
+    actions.push(h('button', { type: 'button', class: 'btn btn--danger-quiet', 'data-focus-key': `ts-delete-${ts.name}`, onclick: () => deleteToolserver(ts) }, icon('trash'), 'Delete'));
   }
   const headingId = nextId('server');
   const trustChip = ts.trust_level === 'verified'
@@ -2473,26 +2969,186 @@ async function renderPolicies() {
       exportBtn.disabled = false;
     }
   });
+  const admin = can('admin');
+  const sectionAction = (label, focusKey, onclick) => (admin
+    ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': focusKey, onclick: guarded(onclick) }, icon('plus'), label)
+    : null);
   return h('div', { class: 'page' },
     pageHead({
       title: 'Policies',
       sub: 'Blueprints decide what each class of agent may call. Organisation Rego policies add rules on top of the built-in library, and OPA enforces both at the gateway.',
-      actions: [exportBtn, refreshButton()],
+      actions: [
+        admin ? h('button', { type: 'button', class: 'btn', 'data-focus-key': 'import-yaml', onclick: guarded(importManifests) }, icon('upload'), 'Import manifests') : null,
+        exportBtn, refreshButton(),
+      ],
     }),
     h('div', { class: 'policy-layout' },
       h('div', { class: 'stack' },
         h('section', { class: 'stack', 'aria-labelledby': 'bp-title' },
-          h('div', { class: 'section-title' }, h('h2', { id: 'bp-title' }, 'Blueprints'), h('p', {}, 'IT-approved templates: permissions, risk tier, sponsor and review rules')),
+          h('div', { class: 'section-title' },
+            h('div', {}, h('h2', { id: 'bp-title' }, 'Blueprints'), h('p', {}, 'IT-approved templates: permissions, risk tier, sponsor and review rules')),
+            sectionAction('New blueprint', 'new-blueprint', () => blueprintFormFlow(null, servers))),
           blueprints.length
-            ? h('div', { class: 'bp-grid' }, blueprints.map((b) => blueprintCard(b, usage[b.name] || 0)))
-            : h('section', { class: 'card' }, emptyState('No blueprints yet', 'Create one with POST /v1/blueprints or a Blueprint manifest.'))),
+            ? h('div', { class: 'bp-grid' }, blueprints.map((b) => blueprintCard(b, usage[b.name] || 0, servers)))
+            : h('section', { class: 'card' }, emptyState('No blueprints yet', admin ? 'Create one to give a class of agents its tools.' : 'An admin creates blueprints here, with the CLI or with a Blueprint manifest.'))),
         h('section', { class: 'stack', 'aria-labelledby': 'rego-title' },
-          h('div', { class: 'section-title' }, h('h2', { id: 'rego-title' }, 'Organisation policies'),
-            h('p', {}, 'Rego modules under agentgov.custom that can add denials, approval requirements and redactions')),
+          h('div', { class: 'section-title' },
+            h('div', {}, h('h2', { id: 'rego-title' }, 'Organisation policies'),
+              h('p', {}, 'Rego modules under agentgov.custom that can add denials, approval requirements and redactions')),
+            sectionAction('Add policy', 'new-policy', () => policyFormFlow(null))),
           policies.length
             ? policies.map(policyCard)
             : h('section', { class: 'card' }, emptyState('No organisation policies', 'Only the built-in library (package agentgov.mcp) is enforced.')))),
       whatIfCard(agents, servers)));
+}
+
+/** Create a blueprint (no `b`) or edit one. */
+async function blueprintFormFlow(b, servers) {
+  const editing = Boolean(b);
+  const saved = await ask({
+    title: editing ? `Edit blueprint ${b.name}` : 'New blueprint',
+    text: editing
+      ? 'Every agent on this blueprint gets the change as soon as OPA loads the updated policy bundle.'
+      : 'A blueprint grants tools to every agent that uses it and sets their sponsor and review rules.',
+    iconName: editing ? 'edit' : 'policies', confirm: editing ? 'Save changes' : 'Create blueprint',
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'customer-support', hint: NAME_HINT },
+      { id: 'description', label: 'Description', type: 'textarea', value: b?.description || '' },
+      {
+        id: 'permissions', label: 'Tool grants', type: 'code', rows: 4, value: formatGrants(b?.permissions), placeholder: 'crm: search_customers, get_*',
+        hint: `One server per line; tool names can use * wildcards, and * alone means every tool.${servers.length ? ` Registered servers: ${servers.map((ts) => ts.name).join(', ')}.` : ''}`,
+      },
+      { type: 'row', fields: [
+        { id: 'risk_tier', label: 'Risk tier', type: 'select', value: b?.risk_tier || 'medium', options: RISK_TIERS.map((t) => ({ value: t, label: humanize(t) })) },
+        { id: 'attestation_days', label: 'Review every (days)', type: 'number', min: 1, value: b ? (b.attestation_days ?? '') : '90', hint: 'Empty: no periodic review.' },
+      ] },
+      { id: 'require_sponsor', label: 'Require a sponsor before activation', type: 'checkbox', value: b ? b.require_sponsor : true },
+      { id: 'labels', label: 'Labels', value: formatLabels(b?.labels), placeholder: 'data=customer', mono: true },
+    ].filter(Boolean),
+    submit: (v) => {
+      const days = v.attestation_days ? Number(v.attestation_days) : null;
+      if (days !== null && !(Number.isInteger(days) && days > 0)) throw new Error('The review period must be a whole number of days, or empty.');
+      const body = {
+        description: v.description, permissions: parseGrants(v.permissions), risk_tier: v.risk_tier,
+        attestation_days: days, require_sponsor: v.require_sponsor, labels: parseLabels(v.labels),
+      };
+      if (editing) return api(`v1/blueprints/${encodeURIComponent(b.name)}`, { method: 'PATCH', body });
+      return api('v1/blueprints', { method: 'POST', body: { name: v.name, ...body } });
+    },
+  });
+  if (!saved) return;
+  toast(editing ? `Saved blueprint ${saved.name}.` : `Created blueprint ${saved.name}.`);
+  await refresh();
+}
+
+async function deleteBlueprint(b) {
+  const done = await ask({
+    title: `Delete blueprint ${b.name}?`,
+    text: 'Blueprints that agents still use cannot be deleted; move those agents to another blueprint first.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete blueprint', busy: 'Deleting…',
+    submit: () => api(`v1/blueprints/${encodeURIComponent(b.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted blueprint ${b.name}.`);
+  await refresh();
+}
+
+// Custom modules must declare `package agentgov.custom.<name>` (hyphens become underscores).
+const policyPackage = (name) => `agentgov.custom.${(name || '<name>').replace(/-/g, '_')}`;
+const POLICY_TEMPLATE = (name) => `# Rules here can add to deny, require_approval and redact. They see the same
+# input as the built-in library; data.agentgov.context has helpers for the
+# calling agent and tool server (see docs/policies.md).
+package ${policyPackage(name)}
+
+deny contains msg if {
+\tinput.phase == "request"
+\tinput.resource.name == "delete_everything"
+\tmsg := "delete_everything is disabled by organisation policy"
+}
+`;
+
+/** Add an organisation policy (no `p`) or replace one's source and settings. */
+async function policyFormFlow(p) {
+  const editing = Boolean(p);
+  const saved = await ask({
+    title: editing ? `Edit policy ${p.name}` : 'Add an organisation policy',
+    text: 'The control plane compiles the module with the built-in library and evaluates it on sample calls before saving. Saved policies reach OPA with the next policy bundle.',
+    iconName: editing ? 'edit' : 'policies', confirm: editing ? 'Save policy' : 'Add policy', busy: 'Checking…', wide: true,
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'prod-verified-only', hint: `${NAME_HINT} The module's package is agentgov.custom.<name>, with hyphens as underscores.` },
+      { id: 'description', label: 'Description', value: p?.description || '' },
+      { id: 'rego', label: 'Rego source', type: 'code', rows: 14, required: true, file: '.rego', value: p ? p.rego : POLICY_TEMPLATE('') },
+      { id: 'enabled', label: 'Enabled', type: 'checkbox', value: p ? p.enabled : true, hint: 'Disabled policies are kept but not sent to OPA.' },
+    ].filter(Boolean),
+    onReady: (controls) => {
+      if (editing) return;
+      // Keep the template's package line in step with the name until the source is edited.
+      const template = () => POLICY_TEMPLATE(controls.name.value.trim());
+      let last = controls.rego.value;
+      controls.name.addEventListener('input', () => {
+        if (controls.rego.value !== last) return;
+        controls.rego.value = template();
+        last = controls.rego.value;
+      });
+    },
+    submit: (v) => {
+      const body = { description: v.description, rego: v.rego, enabled: v.enabled };
+      if (editing) return api(`v1/policies/${encodeURIComponent(p.name)}`, { method: 'PUT', body });
+      return api('v1/policies', { method: 'POST', body: { name: v.name, ...body } });
+    },
+  });
+  if (!saved) return;
+  toast(editing ? `Saved policy ${saved.name} (version ${saved.version}).` : `Added policy ${saved.name}.`);
+  await refresh();
+}
+
+async function togglePolicy(p) {
+  const enable = !p.enabled;
+  const done = await ask({
+    title: `${enable ? 'Enable' : 'Disable'} policy ${p.name}?`,
+    text: enable
+      ? 'The module is checked again, then OPA enforces it with the next policy bundle.'
+      : 'OPA stops enforcing the module with the next policy bundle. Its source is kept.',
+    tone: enable ? 'primary' : 'danger', iconName: enable ? 'check' : 'minus', confirm: enable ? 'Enable policy' : 'Disable policy',
+    busy: enable ? 'Checking…' : 'Saving…',
+    submit: () => api(`v1/policies/${encodeURIComponent(p.name)}`, { method: 'PUT', body: { enabled: enable } }),
+  });
+  if (!done) return;
+  toast(`${enable ? 'Enabled' : 'Disabled'} policy ${p.name}.`);
+  await refresh();
+}
+
+async function deletePolicy(p) {
+  const done = await ask({
+    title: `Delete policy ${p.name}?`,
+    text: 'OPA stops enforcing it with the next policy bundle, and its source is removed. Export the manifests first if you may want it back.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete policy', busy: 'Deleting…',
+    submit: () => api(`v1/policies/${encodeURIComponent(p.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted policy ${p.name}.`);
+  await refresh();
+}
+
+/** Apply YAML manifests: what `agentgov apply -f` sends, from the browser. */
+async function importManifests() {
+  const result = await ask({
+    title: 'Import manifests',
+    text: 'Apply Blueprint, ToolServer, Policy and Agent manifests, as exported from this page or written for `agentgov apply`. Applying is idempotent: unchanged resources are left alone. Policies need their Rego inline under spec.rego.',
+    iconName: 'upload', confirm: 'Apply manifests', busy: 'Applying…', wide: true,
+    fields: [{ id: 'yaml', label: 'Manifests (YAML)', type: 'code', rows: 14, required: true, file: '.yaml,.yml', placeholder: 'apiVersion: agentgov/v1alpha1\nkind: Blueprint\nmetadata:\n  name: customer-support\nspec:\n  …' }],
+    submit: (v) => api('v1/apply', { method: 'POST', text: v.yaml, contentType: 'application/yaml' }),
+  });
+  if (!result?.results) return;
+  const changed = result.results.filter((r) => r.action !== 'unchanged');
+  await ask({
+    title: changed.length ? `Applied ${plural(changed.length, 'change')}` : 'Nothing to change',
+    iconName: 'check-circle', confirm: 'Done', cancel: null,
+    extra: h('ul', { class: 'apply-results', role: 'list' }, result.results.map((r) => h('li', {},
+      h('code', {}, `${r.kind.toLowerCase()}/${r.name}`), plainChip(humanize(r.action), { tone: r.action === 'unchanged' ? null : 'good' })))),
+  });
+  refreshBadges();
+  await refresh();
 }
 
 function permissionList(grants) {
@@ -2502,12 +3158,15 @@ function permissionList(grants) {
     h('div', { class: 'chip-row' }, g.tools.map((t) => plainChip(t, { mono: true }))))));
 }
 
-function blueprintCard(b, used) {
+function blueprintCard(b, used, servers) {
   const labels = Object.entries(b.labels || {});
   return card({
     title: b.name, level: 'h3', id: `bp-${b.id}`,
     sub: b.description,
     actions: [plainChip(`${humanize(b.risk_tier)} risk tier`, { tone: toneOf('risk', b.risk_tier === 'minimal' ? 'low' : b.risk_tier), iconName: statusMeta('risk', b.risk_tier === 'minimal' ? 'low' : b.risk_tier)[1] })],
+    foot: can('admin') ? h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `bp-edit-${b.name}`, onclick: guarded(() => blueprintFormFlow(b, servers)) }, icon('edit'), 'Edit'),
+      h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `bp-delete-${b.name}`, onclick: () => deleteBlueprint(b) }, icon('trash'), 'Delete')) : null,
     body: [
       facts([
         ['Used by', used ? h('a', { href: '#/agents' }, plural(used, 'agent')) : h('span', { class: 'muted' }, 'No agents')],
@@ -2526,6 +3185,10 @@ function policyCard(p) {
     title: p.name, level: 'h3',
     sub: p.description,
     actions: [plainChip(p.enabled ? 'Enabled' : 'Disabled', { tone: p.enabled ? 'good' : null, iconName: p.enabled ? 'check-circle' : 'minus' }), plainChip(`v${p.version}`, { mono: true })],
+    foot: can('admin') ? h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `policy-edit-${p.name}`, onclick: guarded(() => policyFormFlow(p)) }, icon('edit'), 'Edit'),
+      h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `policy-toggle-${p.name}`, onclick: () => togglePolicy(p) }, icon(p.enabled ? 'minus' : 'check'), p.enabled ? 'Disable' : 'Enable'),
+      h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `policy-delete-${p.name}`, onclick: () => deletePolicy(p) }, icon('trash'), 'Delete')) : null,
     body: [
       facts([['Package', h('code', {}, p.package)], ['Updated', timeEl(p.updated_at)]]),
       h('details', { class: 'disclosure' }, h('summary', {}, icon('chevron'), 'View Rego source'),
@@ -2661,9 +3324,16 @@ function whatIfResult(res, input, example) {
 const LEDGER_TYPES = [
   ['', 'All events'], ['decision.*', 'Policy decisions'], ['approval.*', 'Approvals'], ['agent.*', 'Agent lifecycle'],
   ['toolserver.*', 'Tool servers'], ['policy.*', 'Organisation policies'], ['blueprint.*', 'Blueprints'], ['apikey.*', 'API keys'],
+  ['admin.*', 'Sign-ins and sessions'], ['platform.*', 'Platform syncs and imports'], ['connector.*', 'Connector allowlist'],
 ];
 const LEDGER_DECISIONS = [['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval']];
 const PAGE_SIZE = 100;
+
+// The trace viewer (Langfuse, Jaeger, ...) is another app: open it in a new tab.
+function traceLink(e) {
+  return h('a', { class: 'trace-link', href: e.trace_url, target: '_blank', rel: 'noopener noreferrer', title: `Trace ${e.trace_id}` },
+    'Open trace', icon('external'), h('span', { class: 'sr-only' }, ' (opens in a new tab)'));
+}
 
 function ledgerDetail(e) {
   return h('div', { class: 'stack', style: 'gap:10px; padding: 4px 0 6px' },
@@ -2672,7 +3342,7 @@ function ledgerDetail(e) {
       ['Time', timeEl(e.ts, { absolute: true })],
       ['Severity', humanize(e.severity)],
       ['Action', e.action ? h('code', {}, e.action) : null],
-      e.trace_id ? ['Trace ID', h('code', {}, e.trace_id)] : null,
+      e.trace_id ? ['Trace', h('span', {}, h('code', {}, e.trace_id), e.trace_url ? [' ', traceLink(e)] : null)] : null,
       ['Hash', h('code', { class: 'hash break' }, e.hash)],
       ['Previous hash', h('code', { class: 'hash break' }, e.prev_hash)],
     ]),
@@ -2699,7 +3369,7 @@ function ledgerRows(entries, { compact = false } = {}) {
     const actorIsAgent = e.agent_name && e.actor === `agent:${e.agent_name}`;
     const event = h('td', { 'data-label': 'Event', class: 'break' },
       h('span', { class: 'ledger-type' }, e.severity === 'warning' ? h('span', { class: 'sev-dot', title: 'Warning' }) : null, e.type),
-      e.resource ? h('div', { class: 'cell-sub' }, h('code', {}, e.resource)) : null,
+      e.resource ? h('div', { class: 'cell-sub' }, h('code', {}, e.resource), e.trace_url ? [' · ', traceLink(e)] : null) : null,
       compact && e.reason ? h('div', { class: 'cell-sub clamp-2', title: e.reason }, e.reason) : null);
     const row = h('tr', {},
       h('td', { 'data-label': 'Seq', class: 'nowrap' }, toggle),
@@ -2861,6 +3531,406 @@ async function renderLedger({ params }) {
       h('div', { class: 'field', style: 'flex:0 0 auto; align-self:flex-end' }, clearBtn),
       countEl),
     h('section', { class: 'card', 'aria-label': 'Ledger entries' }, tableHost));
+}
+
+/* ------------------------------------------------------------------ access */
+
+const KEY_ROLES = [
+  ['auditor', 'Auditor: reads everything, including the ledger, and changes nothing'],
+  ['approver', 'Approver: reads everything and decides approval requests and findings'],
+  ['registrar', 'Registrar: registers agents and tool servers for review (CI pipelines, developers)'],
+  ['admin', 'Admin: everything'],
+  ['service', 'Service: internal components such as OPA and the governance processor'],
+];
+
+async function renderAccess() {
+  const [view, keys] = await Promise.all([api('v1/access'), api('v1/apikeys')]);
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Access',
+      sub: 'Who and what can use this control plane: people who sign in with single sign-on, and API keys for the CLI, CI pipelines and other automation.',
+      actions: [refreshButton()],
+    }),
+    view.bootstrap_token ? callout('neutral', 'key', h('span', {}, h('strong', {}, 'The bootstrap admin token is set. '),
+      'Anyone who has it is an admin. Keep it for setup and emergencies, and give people and automation their own roles.')) : null,
+    signInsCard(view),
+    apiKeysCard(keys));
+}
+
+function signInsCard(view) {
+  const people = view.people || [];
+  const signedIn = people.filter((p) => p.status === 'signed_in').length;
+  let body;
+  if (!people.length) {
+    body = view.sso_enabled
+      ? emptyState('Nobody has signed in yet', 'People appear here after their first sign-in with single sign-on.')
+      : emptyState('Single sign-on is not set up', 'People sign in with API keys until an identity provider is connected.');
+  } else {
+    body = h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, 'People'),
+      h('thead', {}, h('tr', {}, ['Person', 'Roles', 'Status', 'Last sign-in', 'Sign-ins', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+      h('tbody', {}, people.map((person) => h('tr', {},
+        h('td', { 'data-label': 'Person', class: 'break' }, h('span', { class: 'cell-title' }, person.name),
+          h('div', { class: 'cell-sub', title: 'Subject at the identity provider' }, person.subject)),
+        h('td', { 'data-label': 'Roles' }, person.roles.length
+          ? h('div', { class: 'chip-row' }, person.roles.map((r) => plainChip(humanize(r))))
+          : h('span', { class: 'muted' }, 'None')),
+        h('td', { 'data-label': 'Status' }, chip('person', person.status, { title: person.status === 'refused' ? 'Refused at the last attempt: no AgentGov role' : null }),
+          person.status === 'signed_in'
+            ? h('div', { class: 'cell-sub' }, `${plural(person.active_sessions, 'session')} until `, timeEl(person.session_expires_at, { absolute: true }))
+            : person.status === 'refused' ? h('div', { class: 'cell-sub' }, 'tried ', timeEl(person.last_refused)) : null),
+        h('td', { 'data-label': 'Last sign-in', class: 'nowrap' }, timeEl(person.last_sign_in, { empty: 'Never' })),
+        h('td', { 'data-label': 'Sign-ins', class: 'num' }, fmt(person.sign_ins)),
+        h('td', { 'data-label': '' }, can('admin') && person.active_sessions
+          ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `sign-out-${person.subject}`, onclick: () => signPersonOut(person) }, icon('signout'), 'Sign out')
+          : null))))));
+  }
+  return card({
+    title: 'People',
+    sub: `${plural(signedIn, 'person', 'people')} signed in now. Roles come from the identity provider at each sign-in: to take someone's access away, remove their role there, then sign them out here.`,
+    flush: people.length > 0,
+    body,
+  });
+}
+
+async function signPersonOut(person) {
+  const self = me?.via === 'session' && me?.name === person.name;
+  const done = await ask({
+    title: `Sign ${person.name} out?`,
+    text: `This ends ${plural(person.active_sessions, 'session')}${self ? ', including yours' : ''}. A new sign-in reads their roles from the identity provider again, so it only succeeds if they still have an AgentGov role.`,
+    tone: 'danger', iconName: 'signout', confirm: 'Sign out', busy: 'Signing out…',
+    submit: () => api(`v1/access/people/${encodeURIComponent(person.subject)}/sign-out`, { method: 'POST' }),
+  });
+  if (!done) return;
+  toast(`Signed ${person.name} out (${plural(done.ended, 'session')} ended).`);
+  await refresh();
+}
+
+function apiKeysCard(keys) {
+  const active = keys.filter((k) => !k.revoked_at).length;
+  return card({
+    title: 'API keys',
+    sub: `${plural(active, 'active key')}${keys.length > active ? `, ${fmt(keys.length - active)} revoked` : ''}. Requests made with a key are recorded in the ledger as <role>:<name>.`,
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'create-key', onclick: guarded(createApiKey) }, icon('plus'), 'Create API key')] : null,
+    flush: keys.length > 0,
+    body: keys.length
+      ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+        h('caption', { class: 'sr-only' }, 'API keys'),
+        h('thead', {}, h('tr', {}, ['Name', 'Role', 'Key', 'Created', 'Last used', 'Status', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+        h('tbody', {}, keys.map((k) => h('tr', {},
+          h('td', { 'data-label': 'Name', class: 'break' }, h('span', { class: 'cell-title' }, k.name)),
+          h('td', { 'data-label': 'Role' }, humanize(k.role)),
+          h('td', { 'data-label': 'Key' }, h('code', { title: 'The first characters of the key' }, `${k.prefix}…`)),
+          h('td', { 'data-label': 'Created', class: 'nowrap' }, timeEl(k.created_at)),
+          h('td', { 'data-label': 'Last used', class: 'nowrap' }, timeEl(k.last_used_at, { empty: 'Never' })),
+          h('td', { 'data-label': 'Status' }, chip('apikey', k.revoked_at ? 'revoked' : 'active', { title: k.revoked_at ? `Revoked ${fullFmt.format(new Date(k.revoked_at))}` : null })),
+          h('td', { 'data-label': '' }, !k.revoked_at && can('admin')
+            ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `revoke-${k.id}`, onclick: () => revokeApiKey(k) }, icon('ban'), 'Revoke')
+            : null))))))
+      : emptyState('No API keys', 'Until you create role-scoped keys, the CLI and automation need the bootstrap admin token.'),
+  });
+}
+
+async function createApiKey() {
+  const created = await ask({
+    title: 'Create an API key',
+    text: 'The key is shown once, right after it is created. The control plane keeps only a hash of it.',
+    iconName: 'key', confirm: 'Create key', busy: 'Creating…',
+    fields: [
+      { id: 'name', label: 'Name', required: true, placeholder: 'ci-pipeline', hint: 'Who or what uses the key. Approver keys named after a sponsor can attest that sponsor\'s agents.' },
+      { id: 'role', label: 'Role', type: 'select', value: 'auditor', options: KEY_ROLES.map(([value, label]) => ({ value, label })) },
+    ],
+    submit: (v) => api('v1/apikeys', { method: 'POST', body: { name: v.name, role: v.role } }),
+  });
+  if (!created) return;
+  const base = API_ROOT.href.replace(/\/$/, '');
+  await ask({
+    title: `API key for ${created.name}`,
+    text: "Copy the key now: it can't be shown again. If it is lost, revoke it and create another.",
+    iconName: 'key', confirm: 'Done', cancel: null, wide: true,
+    extra: h('div', { class: 'stack', style: 'gap:12px' },
+      facts([['Key', copyable(created.token, 'API key')], ['Role', humanize(created.role)]]),
+      h('div', { class: 'stack', style: 'gap:6px' }, h('span', { class: 'field-label' }, 'Use it with the CLI'),
+        h('pre', { class: 'kv-pre' }, `export AGENTGOV_URL=${base}\nexport AGENTGOV_TOKEN=${created.token}\nagentgov whoami`))),
+  });
+  await refresh();
+}
+
+async function revokeApiKey(k) {
+  const own = me?.via === 'api_key' && me?.name === k.name && me?.role === k.role;
+  const done = await ask({
+    title: `Revoke ${k.name}?`,
+    text: `Requests made with this key are refused from now on. Revoked keys stay listed for the record.${own ? ' You are signed in with this key, so you will be signed out.' : ''}`,
+    tone: 'danger', iconName: 'ban', confirm: 'Revoke key', busy: 'Revoking…',
+    submit: () => api(`v1/apikeys/${encodeURIComponent(k.id)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Revoked ${k.name}.`);
+  await refresh();
+}
+
+/* --------------------------------------------------------------- platforms */
+
+// Agents built on Microsoft 365 Copilot and Copilot Studio. They never call the
+// gateway, so AgentGov governs what their platform reports about them.
+const PLATFORM_SOURCES = {
+  'platform:microsoft-365': 'Microsoft 365',
+  'platform:copilot-studio': 'Copilot Studio',
+};
+const M365_SETTINGS = 'AGENTGOV_M365_TENANT_ID, AGENTGOV_M365_CLIENT_ID and AGENTGOV_M365_CLIENT_SECRET';
+const INVENTORY_EXPORT = [
+  'az login',
+  `az graph query -q "PowerPlatformResources | where type == 'microsoft.copilotstudio/agents'" --first 1000 -o json > copilot-studio-agents.json`,
+].join('\n');
+const PACKAGE_TYPES = {
+  custom: 'Built by your organisation', shared: 'Shared by a user', external: 'From a partner', microsoft: 'Built by Microsoft',
+};
+const AUDIENCE = { all: 'Everyone', some: 'Some users or groups', none: 'Nobody' };
+
+function platformOf(a) {
+  return PLATFORM_SOURCES[a?.source] || null;
+}
+
+function connectorKey(id) {
+  return String(id || '').trim().replace(/\/+$/, '').split('/').pop();
+}
+
+function syncCounts(c) {
+  const parts = [`${fmt(c.created)} new`, `${fmt(c.updated)} updated`, `${fmt(c.skipped)} skipped`];
+  if (c.findings != null) parts.push(plural(c.findings, 'open finding'));
+  return parts.join(', ');
+}
+
+async function renderPlatforms() {
+  const [view, usage] = await Promise.all([api('v1/platforms'), api('v1/platforms/connectors')]);
+  const sources = Object.fromEntries(view.sources.map((src) => [src.source, src]));
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Platforms',
+      sub: "Agents built on Microsoft 365 Copilot and Copilot Studio. They don't call tools through AgentGov's gateway, so AgentGov governs what their platform reports: who owns them, who they are shared with and which connectors they use.",
+      actions: [refreshButton()],
+    }),
+    callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov reads these platforms; it does not change them. '),
+      "Blocking one of their agents here marks it in AgentGov only. To stop it from being used, block it in the Microsoft 365 admin center or the Power Platform admin center.")),
+    h('div', { class: 'grid-halves' }, m365Card(sources['microsoft-365']), copilotStudioCard(sources['copilot-studio'])),
+    connectorsCard(usage));
+}
+
+function sourceFacts(src, verb) {
+  const last = src.last_sync;
+  return facts([
+    ['Agents', src.agents
+      ? h('a', { href: `#/agents?source=${encodeURIComponent(`platform:${src.source}`)}` }, plural(src.agents, 'agent'))
+      : h('span', { class: 'muted' }, 'None yet')],
+    [`Last ${verb}`, last ? [chip('sync', last.ok ? 'ok' : 'failed'), ' ', timeEl(last.at)] : h('span', { class: 'muted' }, 'Never')],
+    last?.ok ? ['Result', syncCounts(last.counts)] : null,
+  ]);
+}
+
+function m365Card(src) {
+  const last = src.last_sync;
+  const actions = can('admin') && src.configured
+    ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'm365-sync', onclick: (e) => syncMicrosoft365(e.currentTarget) }, icon('refresh'), 'Sync now')]
+    : null;
+  return card({
+    title: 'Microsoft 365',
+    sub: "The organisation's agent catalog, read from Microsoft Graph on a schedule: custom agents, agents users share, and partners' agents.",
+    actions,
+    body: src.configured
+      ? [last && !last.ok ? callout('critical', 'octagon', h('span', {}, h('strong', {}, 'The last sync failed. '), last.message)) : null, sourceFacts(src, 'sync')]
+      : emptyState('Not connected', `To sync, set ${M365_SETTINGS} for a Microsoft Entra app that has the Microsoft Graph application permission CopilotPackages.Read.All. Microsoft requires a Microsoft Agent 365 licence for this API.`),
+  });
+}
+
+async function syncMicrosoft365(button) {
+  button.disabled = true;
+  button.lastChild.textContent = 'Syncing…';
+  try {
+    const counts = await api('v1/platforms/microsoft-365/sync', { method: 'POST' });
+    toast(`Synced the Microsoft 365 catalog: ${syncCounts(counts)}.`);
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+  }
+  refreshBadges();
+  await refresh();
+}
+
+function copilotStudioCard(src) {
+  return card({
+    title: 'Copilot Studio',
+    sub: 'Copilot Studio and Agent Builder agents with the connectors they use, from the Power Platform inventory. Microsoft only lets a signed-in admin read the inventory, so export it and import the file here.',
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'studio-import', onclick: guarded(importCopilotStudio) }, icon('upload'), 'Import inventory')] : null,
+    body: src.last_sync
+      ? sourceFacts(src, 'import')
+      : emptyState('Nothing imported yet', 'Export the inventory as a Power Platform or AI administrator (a reader role is enough), then import the file:',
+        h('pre', { class: 'kv-pre' }, INVENTORY_EXPORT)),
+  });
+}
+
+async function importCopilotStudio() {
+  const result = await ask({
+    title: 'Import Copilot Studio agents',
+    text: 'Load or paste the Power Platform inventory, as JSON. Export it as a Power Platform or AI administrator (a reader role is enough) with the Azure CLI, the Power Platform API or `pac resource-query`. Importing again updates the agents already here.',
+    extra: h('pre', { class: 'kv-pre' }, INVENTORY_EXPORT),
+    iconName: 'upload', confirm: 'Import', busy: 'Importing…', wide: true,
+    fields: [{
+      id: 'json', label: 'Inventory (JSON)', type: 'code', rows: 10, required: true, file: '.json',
+      placeholder: '{"data": [{"name": "…", "type": "microsoft.copilotstudio/agents", "properties": {…}}]}',
+    }],
+    submit: (v) => {
+      try {
+        JSON.parse(v.json);
+      } catch (err) {
+        throw new Error(`That isn't valid JSON: ${err.message}`);
+      }
+      return api('v1/platforms/copilot-studio/import', { method: 'POST', text: v.json, contentType: 'application/json' });
+    },
+  });
+  if (!result) return;
+  toast(`Imported Copilot Studio agents: ${syncCounts(result)}.`);
+  refreshBadges();
+  await refresh();
+}
+
+function connectorsCard(usage) {
+  const rows = usage.connectors || [];
+  const active = usage.allowlist_active;
+  const approved = rows.filter((r) => r.approved).length;
+  const status = (r) => {
+    if (r.approved) return chip('connector', 'approved', { title: [r.approved_by && `Approved by ${r.approved_by}`, r.approved_at && fullFmt.format(new Date(r.approved_at))].filter(Boolean).join(', ') || null });
+    return active ? chip('connector', 'unapproved', { title: 'Agents that use it get a finding' }) : chip('connector', 'unchecked', { title: 'The allowlist is empty, so nothing is flagged yet' });
+  };
+  const listed = (items, max, render) => [
+    ...items.slice(0, max).map(render),
+    items.length > max ? h('span', { class: 'muted small' }, `and ${fmt(items.length - max)} more`) : null,
+  ];
+  return card({
+    title: 'Connectors',
+    sub: active
+      ? 'The Power Platform connectors Copilot Studio agents use. An agent that uses a connector that is not approved gets a high-severity finding.'
+      : 'The Power Platform connectors Copilot Studio agents use. The allowlist is empty, so none is flagged yet: approve the connectors your organisation allows, and agents that use any other connector get a finding.',
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'approve-connector', onclick: guarded(() => approveConnector(null, active)) }, icon('plus'), 'Approve a connector')] : null,
+    flush: rows.length > 0,
+    body: rows.length
+      ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+        h('caption', { class: 'sr-only' }, 'Connectors'),
+        h('thead', {}, h('tr', {}, ['Connector', 'Allowlist', 'Agents', 'Tools', 'Maker connections', ''].map((t) => h('th', { scope: 'col', class: t === 'Maker connections' ? 'num' : null }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+        h('tbody', {}, rows.map((r) => h('tr', {},
+          h('td', { 'data-label': 'Connector', class: 'break' }, h('code', { class: 'cell-title' }, r.connector_id),
+            r.note ? h('div', { class: 'cell-sub' }, r.note) : null),
+          h('td', { 'data-label': 'Allowlist' }, status(r)),
+          h('td', { 'data-label': 'Agents' }, r.agents.length
+            ? h('div', { class: 'chip-row' }, listed(r.agents, 3, (ag) => agentLink(ag.id, ag.name)))
+            : h('span', { class: 'muted' }, 'None')),
+          h('td', { 'data-label': 'Tools' }, r.operations.length
+            ? h('div', { class: 'chip-row' }, listed(r.operations, 3, (op) => plainChip(op, { mono: true })))
+            : h('span', { class: 'muted' }, '—')),
+          h('td', { 'data-label': 'Maker connections', class: 'num' }, r.maker_connections
+            ? h('span', { title: "Tools that run with the maker's credentials for every user" }, fmt(r.maker_connections))
+            : h('span', { class: 'muted' }, '0')),
+          h('td', { 'data-label': '' }, can('admin')
+            ? (r.approved
+              ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `unapprove-${r.connector_id}`, onclick: guarded(() => unapproveConnector(r, approved)) }, icon('ban'), 'Remove approval')
+              : h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `approve-${r.connector_id}`, onclick: guarded(() => approveConnector(r, active)) }, icon('check'), 'Approve'))
+            : null))))))
+      : emptyState('No connectors yet', 'They appear here once Copilot Studio agents are imported. You can approve connectors before that.'),
+  });
+}
+
+async function approveConnector(row, active) {
+  const first = active ? '' : ' This is the first approved connector: from now on, agents that use connectors which are not approved get a finding.';
+  const done = await ask({
+    title: row ? `Approve ${row.connector_id}?` : 'Approve a connector',
+    text: (row ? `Copilot Studio agents may use ${row.connector_id} without a finding.` : 'Add a Power Platform connector to the allowlist.') + first,
+    iconName: 'check', confirm: 'Approve', busy: 'Approving…',
+    fields: [
+      row ? null : { id: 'connector', label: 'Connector ID', required: true, mono: true, placeholder: 'shared_office365', hint: 'As the inventory or the connector reference names it, with or without /providers/Microsoft.PowerApps/apis/.' },
+      { id: 'note', label: 'Note', type: 'textarea', value: row?.note || '', hint: 'Why it is allowed. Shown here and recorded in the evidence ledger.' },
+    ].filter(Boolean),
+    submit: (v) => api(`v1/platforms/connectors/${encodeURIComponent(connectorKey(row ? row.connector_id : v.connector))}/approval`, { method: 'PUT', body: { note: v.note || '' } }),
+  });
+  if (!done) return;
+  toast(`Approved ${done.connector_id}.`);
+  refreshBadges();
+  await refresh();
+}
+
+async function unapproveConnector(row, approvedCount) {
+  const users = row.agents.length ? `${plural(row.agents.length, 'agent')} that use it will get a finding.` : 'No imported agent uses it.';
+  const last = approvedCount === 1 ? ' It is the last approved connector, so the allowlist stops being checked until you approve another.' : '';
+  const done = await ask({
+    title: `Remove ${row.connector_id} from the allowlist?`,
+    text: approvedCount === 1 ? `No connector will be approved.${last}` : users,
+    tone: 'danger', iconName: 'ban', confirm: 'Remove approval', busy: 'Removing…',
+    submit: () => api(`v1/platforms/connectors/${encodeURIComponent(row.connector_id)}/approval`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`${row.connector_id} is no longer approved.`);
+  refreshBadges();
+  await refresh();
+}
+
+/** What Microsoft 365 or Copilot Studio reports about an agent (its page's main card). */
+function platformCard(a, v) {
+  const studio = v.source === 'copilot-studio';
+  const yesNo = (value) => (value == null ? null : value ? 'Yes' : 'No');
+  const notes = [];
+  if (v.in_catalog === false) notes.push(callout('warning', 'triangle', `This agent is no longer in the Microsoft 365 catalog. Delete it here when you no longer need its record.`));
+  if (v.blocked) notes.push(callout('neutral', 'ban', 'Blocked in the Microsoft 365 admin center.'));
+  if (v.quarantined) notes.push(callout('neutral', 'ban', 'Quarantined (blocked) in the Power Platform admin center.'));
+  const rows = studio ? [
+    ['Name in Copilot Studio', v.display_name],
+    ['Created in', v.created_in],
+    ['Authentication', String(v.authentication).toLowerCase() === 'none'
+      ? plainChip('None: anyone can use it', { tone: 'serious', iconName: 'triangle' }) : v.authentication],
+    ['Shared with', v.shared_with_everyone
+      ? plainChip('Everyone in the organisation', { tone: 'warning', iconName: 'alert-circle' })
+      : `${plural(v.viewers?.users ?? 0, 'person', 'people')}, ${plural(v.viewers?.groups ?? 0, 'group')}`],
+    (v.channels || []).length ? ['Channels', h('div', { class: 'chip-row' }, v.channels.map((c) => plainChip(c)))] : null,
+    v.orchestration ? ['Orchestration', v.orchestration] : null,
+    v.model ? ['Model', h('code', {}, v.model)] : null,
+    v.web_search_knowledge != null ? ['Web search for knowledge', yesNo(v.web_search_knowledge)] : null,
+    ['Published', timeEl(v.published_at, { empty: 'Not published (draft)' })],
+    v.owner_id ? ['Owner (Entra object ID)', h('code', {}, v.owner_id)] : null,
+    v.environment_id ? ['Environment', h('code', {}, v.environment_id)] : null,
+    ['Agent ID', copyable(v.external_id, 'Copilot Studio agent ID')],
+    ['Imported', timeEl(v.synced_at)],
+  ] : [
+    ['Name in Microsoft 365', v.display_name],
+    ['Type', PACKAGE_TYPES[v.type] || humanize(v.type)],
+    v.publisher ? ['Publisher', v.publisher] : null,
+    v.built_with ? ['Built with', v.built_with] : null,
+    v.classification ? ['Classification', v.classification] : null,
+    ['Available to', AUDIENCE[v.available_to] || humanize(v.available_to)],
+    ['Deployed to', AUDIENCE[v.deployed_to] || humanize(v.deployed_to)],
+    v.request ? ['Request', `${humanize(v.request.type)} request, ${v.request.status}`] : null,
+    v.version ? ['Version', v.version] : null,
+    ['Package ID', copyable(v.external_id, 'package ID')],
+    ['Changed', timeEl(v.last_modified)],
+    ['Synced', timeEl(v.synced_at)],
+  ];
+  return card({
+    title: v.source_name,
+    sub: studio ? 'As the Power Platform inventory reported it at the last import' : 'As the Microsoft 365 agent catalog reported it at the last sync',
+    body: [...notes, facts(rows), studio ? connectorList(v) : null],
+  });
+}
+
+function connectorList(v) {
+  const connectors = v.connectors || [];
+  return h('div', { class: 'stack', style: 'gap:8px; margin-top:14px' },
+    h('h3', { class: 'dialog-section' }, 'Connectors'),
+    connectors.length ? h('ul', { class: 'perm-list', role: 'list' }, connectors.map((c) => h('li', {},
+      h('span', { class: 'perm-server' }, h('code', {}, c.connector_id), ' ',
+        v.allowlist_active ? chip('connector', c.approved ? 'approved' : 'unapproved') : null),
+      h('div', { class: 'chip-row' }, (c.operations || []).map((op) => plainChip(op.operation_id || '(unnamed)', {
+        mono: true,
+        tone: op.maker_connection ? 'warning' : null,
+        title: [op.used_as, op.maker_connection ? "runs with the maker's connection" : 'runs with the user\'s own connection', op.enabled ? null : 'disabled'].filter(Boolean).join(', '),
+      })))))) : h('p', { class: 'muted small' }, 'No Power Platform connectors.'),
+    connectors.some((c) => (c.operations || []).some((op) => op.maker_connection))
+      ? h('p', { class: 'hint' }, "Highlighted tools run with their maker's connection, so every user reaches data with the maker's access.") : null,
+    v.allowlist_active ? null : h('p', { class: 'hint' }, h('a', { href: '#/platforms' }, 'The connector allowlist'), ' is empty, so connectors are not checked yet.'));
 }
 
 /* -------------------------------------------------------------------- go */

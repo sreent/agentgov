@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
@@ -19,6 +19,7 @@ from agentgov.models import (
     DISCOVERED,
     PENDING,
     Agent,
+    AgentInstructions,
 )
 from agentgov.registry import approvals, blueprints, findings, risk, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
@@ -71,9 +72,12 @@ def list_agents(
     blueprint: str | None = None,
     risk_level: str | None = None,
     q: str | None = None,
+    source: str | None = None,
     include_deleted: bool = False,
 ) -> list[Agent]:
     stmt = select(Agent).order_by(Agent.name)
+    if source:
+        stmt = stmt.where(Agent.source == source)
     if status:
         stmt = stmt.where(Agent.status == status)
     elif not include_deleted:
@@ -243,6 +247,9 @@ def transition(
     )
     if action in ("block", "delete"):
         approvals.cancel_for_agent(session, agent, actor=actor, reason=f"agent {target}")
+    if action == "adopt":
+        # Adopting a discovered agent is the answer to its "unmanaged agent" finding.
+        findings.resolve_key(session, f"agent.unmanaged:{agent.id}", actor=actor)
     mark_changed(session, "agents")
     return agent
 
@@ -272,6 +279,8 @@ def purge(session: Session, agent: Agent, *, actor: str) -> None:
     if agent.status != DELETED:
         raise InvalidTransition("only deleted agents can be purged")
     ledger.append(session, type="agent.purged", actor=actor, agent=agent, severity="warning")
+    # Its instructions go too: the ledger keeps their hashes, not their text.
+    session.execute(delete(AgentInstructions).where(AgentInstructions.agent_id == agent.id))
     session.delete(agent)
     mark_changed(session, "agents")
 
@@ -295,11 +304,15 @@ def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.Ris
                 category=findings.THREAT,
                 title=f"Agent {agent.name} is {result.level} risk (score {result.score})",
                 description="; ".join(f["factor"] for f in result.factors),
-                remediation="Investigate recent decisions in the ledger; block the agent if "
+                remediation="Fix its open findings in the platform it runs on, or block it in "
+                "that platform's admin center."
+                if agent.on_platform
+                else "Investigate recent decisions in the ledger; block the agent if "
                 "the activity is not expected.",
             )
+    # Auto-block is a gateway kill switch: it can't stop an agent on another platform.
     threshold = settings.auto_block_risk_score
-    if threshold and result.score >= threshold and agent.status == ACTIVE:
+    if threshold and result.score >= threshold and agent.status == ACTIVE and not agent.on_platform:
         transition(
             session,
             settings,

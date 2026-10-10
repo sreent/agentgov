@@ -43,14 +43,15 @@ flowchart LR
 
 | Component | Role | Agent 365 analogue |
 |---|---|---|
-| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients | Microsoft 365 admin center *Agents*, Entra ID Governance |
+| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; syncs Microsoft 365's agent catalog and imports Copilot Studio's ([platforms](platforms.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance |
 | **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server: content inspection, OPA queries, approvals, redaction, decision records | Defender real-time protection, Purview DLP enforcement |
 | [Keycloak](https://www.keycloak.org) 26.8 | One OAuth client per agent; issues short-lived tokens with `agent_id` and the gateway audience; signs administrators in to the control plane (and can federate an existing directory) | Entra Agent ID, Entra ID sign-in |
 | [OPA](https://www.openpolicyagent.org) 1.21 | Policy decision point; evaluates the Rego library against registry data | Conditional Access |
 | [agentgateway](https://agentgateway.dev) 1.6 | MCP gateway and policy enforcement point; validates tokens, calls the processor, routes to MCP servers | Agent 365 tooling gateway |
 | [Presidio](https://github.com/data-privacy-stack/presidio) | Personal-data detection | Purview classifiers |
-| [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) | Receives agent and gateway traces, forwards GenAI spans to the control plane (and optionally Langfuse) | Agent 365 observability |
+| [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) | Receives agent and gateway traces, forwards GenAI spans to the control plane (and optionally Langfuse); gateway decisions in the ledger carry the trace ID, so the UI links each one to its trace | Agent 365 observability |
 | [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (optional) | In-process enforcement inside agent frameworks, querying the same OPA | — |
+| [IBM Granite Guardian](https://huggingface.co/ibm-granite/granite-guardian-4.1-8b) (optional) | Judges agents' instructions for harmful or malicious content, next to AgentGov's rules ([instructions](instructions.md)); served by vLLM or llama.cpp | Defender's AI security posture |
 
 ## The path of a tool call
 
@@ -160,7 +161,10 @@ streams the ledger as JSON Lines for a SIEM or for offline verification.
 src/agentgov/
   api/            FastAPI routes (registry, governance, integrations) and auth
   registry/       service layer: agents, blueprints, tool servers, approvals, findings,
-                  risk, posture, discovery, decisions, manifests, API keys
+                  risk, posture, discovery, platforms, instructions, decisions, manifests,
+                  API keys, access
+  platforms/      clients for agent platforms (Microsoft Graph's agent catalog)
+  scanners/       checks on agent instructions: rules and the Granite Guardian client
   identity/       Keycloak admin client and identity reconciler
   opa/            bundle builder and long-poll server, Rego validation, OPA client
   policies/       the Rego library (+ tests) shipped to OPA

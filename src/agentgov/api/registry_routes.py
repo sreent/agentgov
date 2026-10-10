@@ -10,7 +10,15 @@ from agentgov import ledger
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.identity.keycloak import KeycloakError
 from agentgov.models import ACTIVE
-from agentgov.registry import agents, apikeys, blueprints, policies, toolservers
+from agentgov.registry import (
+    agents,
+    apikeys,
+    blueprints,
+    instructions,
+    platforms,
+    policies,
+    toolservers,
+)
 from agentgov.registry.errors import Conflict
 
 router = APIRouter(prefix="/v1")
@@ -33,9 +41,11 @@ def list_agents(
     blueprint: str | None = None,
     risk_level: str | None = None,
     q: str | None = None,
+    source: str | None = None,
     include_deleted: bool = False,
     _: Principal = Depends(read),
 ) -> list[dict[str, Any]]:
+    """``source`` is ``registered``, ``discovered:<how>`` or ``platform:<platform>``."""
     with _rt(request).db.session() as s:
         return [
             agents.to_dict(a)
@@ -45,6 +55,7 @@ def list_agents(
                 blueprint=blueprint,
                 risk_level=risk_level,
                 q=q,
+                source=source,
                 include_deleted=include_deleted,
             )
         ]
@@ -61,15 +72,28 @@ def register_agent(
     rt = _rt(request)
     requested = bool(body.pop("approve", False))
     approve = requested if principal.is_admin else not rt.settings.registration_requires_approval
+    text = body.pop("instructions", None)
     with rt.db.session() as s:
         agent = agents.register(s, rt.settings, body, actor=principal.actor, approve=approve)
+        if text is not None:
+            instructions.report(
+                s,
+                agent,
+                source="registered",
+                text=text,
+                actor=principal.actor,
+                classify=rt.guardian is not None,
+            )
+            agents.refresh_risk(s, rt.settings, agent)
         return agents.to_dict(agent)
 
 
 @router.get("/agents/{ref}", tags=["agents"])
 def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
     with _rt(request).db.session() as s:
-        return agents.to_dict(agents.get(s, ref))
+        agent = agents.get(s, ref)
+        # What Microsoft 365 or Copilot Studio reports, for agents that run there.
+        return {**agents.to_dict(agent), "platforms": platforms.for_agent(s, agent.id)}
 
 
 @router.patch("/agents/{ref}", tags=["agents"])
@@ -366,7 +390,8 @@ def delete_policy(
 
 
 @router.get("/apikeys", tags=["apikeys"])
-def list_apikeys(request: Request, _: Principal = Depends(admin)) -> list[dict[str, Any]]:
+def list_apikeys(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+    """Every key's name, role, prefix and use (never the key): readable for access reviews."""
     with _rt(request).db.session() as s:
         return [apikeys.to_dict(k) for k in apikeys.list_all(s)]
 

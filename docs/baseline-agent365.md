@@ -37,7 +37,8 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Unmanaged / shadow agents | ✅ | Discovery from OpenTelemetry spans, gateway callers (monitor mode) and scanner imports (`/v1/discovery/import`, e.g. the Agent Governance Toolkit's `agent-discovery`) |
 | IT-approved agent blueprints | ✅ | `Blueprint`: permissions, risk tier, sponsor requirement, attestation period, labels |
 | Management rules (e.g. block ownerless agents) | 🟡 | Posture findings + optional auto-block on risk; rule engine ⏳ |
-| Registry sync from AWS, Google, Salesforce, Databricks, … | ⏳ | Connector framework on the roadmap; OTel discovery covers instrumented agents today |
+| Agents built in Microsoft 365 Copilot, Copilot Studio and Agent Builder | ✅ | The Microsoft 365 agent catalog synced from Microsoft Graph, and the Copilot Studio inventory imported from the Power Platform inventory ([platforms](platforms.md)) |
+| Registry sync from AWS, Google, Salesforce, Databricks, … | ⏳ | More platform connectors on the roadmap; OTel discovery covers instrumented agents today |
 | Agent store / catalog for end users | ➖ | AgentGov governs agents; it is not a distribution channel |
 | A2A-shaped agent records (agent cards) | ✅ | Agents carry an A2A v1.0 `agent_card` |
 
@@ -66,7 +67,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Overview dashboard | ✅ | Admin UI overview: inventory, risk, approvals, findings, 14-day activity |
 | Agent map (agents, users, tools) | ✅ | `/v1/graph` and the UI map: people → agents → tool servers, with call volumes |
 | Telemetry via OpenTelemetry (invoke_agent / execute_tool / chat spans) | ✅ | **OTel Collector** → control plane; the same GenAI semantic conventions, so Agent 365-instrumented agents can report here |
-| Trace exploration | ✅ | Optional **Langfuse** (`deploy/compose/docker-compose.langfuse.yml`): the collector sends it every agent and gateway trace |
+| Trace exploration | ✅ | Optional **Langfuse** (`deploy/compose/docker-compose.langfuse.yml`): the collector sends it every agent and gateway trace, and each gateway decision in the ledger links to its trace |
 | Audit of agent activity | ✅ | Hash-chained evidence ledger with verification and JSONL export |
 
 ### Interoperability
@@ -92,6 +93,8 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Tool poisoning and definition drift | ✅ | Poisoned tools hidden; changed definitions refused until re-approved |
 | DLP / sensitivity of personal data | ✅ | **Presidio** detects PII; policy redacts it from results and from calls to unverified servers |
 | Posture assessment and recommendations | ✅ | Findings with remediation (ownerless, no sponsor, expired attestation, stale, broad grants, unverified servers, identity drift) |
+| Harmful or malicious agent instructions | ✅ | Agents' system prompts (registered, reported in telemetry, or read from Microsoft 365) are checked by rules and optionally by **IBM Granite Guardian**; problems become findings and add to the risk score ([instructions](instructions.md)) |
+| Connectors used by Copilot Studio agents; risky agent settings | 🟡 | Connector allowlist with findings for agents that use other connectors, publish without authentication, use their maker's connections or are shared with everyone; enforcement stays with Power Platform data policies |
 | Human approval for sensitive actions | ✅ | Destructive tools (and any policy you write) route to an approver; single-use approvals |
 | Alerts / incidents | 🟡 | Findings + webhook alerts; SIEM integration ⏳ |
 | Insider risk, eDiscovery, retention policies | ➖ / ⏳ | Ledger export provides evidence; retention policy ⏳ |

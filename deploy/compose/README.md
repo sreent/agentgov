@@ -51,7 +51,9 @@ realm comes with three demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (d
 People without an `agentgov-*` role are turned away. Sign-ins, sign-outs and refusals
 are recorded in the evidence ledger (`admin.login`, `admin.logout`,
 `admin.login_denied`). Signing out also ends the Keycloak session, and a session lasts
-at most `AGENTGOV_SESSION_HOURS` (default 8).
+at most `AGENTGOV_SESSION_HOURS` (default 8). The UI's **Access** page lists everyone who
+has signed in, with their roles and open sessions, and admins can sign a person out there
+(`agentgov access sign-out`), which is recorded as `admin.session_ended`.
 
 To sign in your own people, connect your directory to the realm as an identity provider
 (OIDC or SAML) or through user federation (LDAP, Active Directory), and give their groups
@@ -79,9 +81,43 @@ Langfuse uses its own `langfuse` database on the stack's PostgreSQL server. Sign
 `LANGFUSE_ADMIN_*` values from `.env`). The organisation, the *Agents* project and its API
 keys are created on first start.
 
+Every decision the gateway records in the evidence ledger carries the W3C trace ID of the
+call, which agentgateway passes to the governance processor. With this override the
+admin UI's ledger and agent pages link each decision to its trace in Langfuse (**Open
+trace**), and `agentgov ledger tail --traces` prints the links. The override sets
+`AGENTGOV_TRACE_URL` on the control plane; to link to another trace viewer instead, set it
+to that viewer's trace URL with `{trace_id}` in place of the ID, for example
+`http://jaeger:16686/trace/{trace_id}`. When agents propagate their own trace context to
+the gateway, the trace contains the agent's spans as well as the gateway's.
+
 Add `-f docker-compose.langfuse.yml` to every later `docker compose` command for this
 stack (`ps`, `logs`, `down`), or set
 `COMPOSE_FILE=docker-compose.yml:docker-compose.langfuse.yml` in `.env`.
+
+## Optional: a classifier for agent instructions
+
+AgentGov checks every agent's instructions (its system prompt) with its own rules. To
+add IBM Granite Guardian as a second opinion, add the override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.guardian.yml up -d
+```
+
+It runs Granite Guardian 4.1 on llama.cpp's server, on the CPU. The first start
+downloads the model (about 5 GB). Checks run in the background and take a few seconds
+per criterion; with a GPU, serve the model with vLLM instead and set
+`AGENTGOV_GUARDIAN_URL`. [Agent instructions](../../docs/instructions.md) has the details.
+
+## Optional: Microsoft 365 and Copilot Studio agents
+
+To bring the organisation's Microsoft 365 agent catalog into the registry, set
+`AGENTGOV_M365_TENANT_ID`, `AGENTGOV_M365_CLIENT_ID` and `AGENTGOV_M365_CLIENT_SECRET`
+in `.env` for a Microsoft Entra app with the Microsoft Graph application permission
+`CopilotPackages.Read.All`, then run `docker compose up -d` again. The control plane
+syncs at start-up and every hour. Copilot Studio agents and their connectors are
+imported from a Power Platform inventory export on the **Platforms** page, and need no
+configuration. [Agents on Microsoft 365 and Copilot Studio](../../docs/platforms.md) has
+the details.
 
 ## Configuration
 

@@ -1,0 +1,41 @@
+# Optional: IBM Granite Guardian (Apache-2.0) checks agent instructions for
+# harmful and malicious content, next to AgentGov's own rules
+# (see docs/instructions.md).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.guardian.yml up -d
+#
+# llama.cpp's server runs the model on the CPU. The first start downloads it
+# (about 5 GB) into the guardian-models volume, and each check takes a few
+# seconds per criterion, in the background. With a GPU, serve the model with
+# vLLM instead (`vllm serve ibm-granite/granite-guardian-4.1-8b`) and point
+# AGENTGOV_GUARDIAN_URL at it.
+
+services:
+  guardian:
+    image: ghcr.io/ggml-org/llama.cpp:server-b11541@sha256:bf3da52e92c083472b3d1c9f9da081f423ab9def95a87ec4bba51940382d75fd
+    command:
+      - -hf
+      - ibm-granite/granite-guardian-4.1-8b-GGUF:Q4_K_M
+      - --ctx-size
+      - "8192"
+      - --parallel
+      - "1"
+      - --jinja
+    environment:
+      LLAMA_CACHE: /models
+    volumes:
+      - guardian-models:/models
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 360 # the first start downloads the model
+
+  control-plane:
+    environment:
+      AGENTGOV_GUARDIAN_URL: http://guardian:8080/v1
+      AGENTGOV_GUARDIAN_MODEL: ibm-granite/granite-guardian-4.1-8b
+
+volumes:
+  guardian-models:
