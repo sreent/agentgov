@@ -23,6 +23,7 @@ from starlette.types import Scope
 from agentgov import __version__
 from agentgov.api import (
     access_routes,
+    copilot_studio_routes,
     governance_routes,
     instruction_routes,
     integration_routes,
@@ -132,6 +133,8 @@ def create_app(
             "sso": {"enabled": settings.sso_enabled, "login_url": "/auth/login"},
             # Signed-in administrators can act in Microsoft 365 through AgentGov.
             "microsoft_admin_actions": settings.microsoft_admin_actions,
+            # Copilot Studio asks AgentGov about each tool call: off, monitor or enforce.
+            "copilot_studio_threat_detection": settings.copilot_studio_threat_detection,
         }
 
     @app.get("/v1/me", tags=["system"])
@@ -147,6 +150,7 @@ def create_app(
     app.include_router(platform_routes.router)
     app.include_router(platform_routes.agent_router)
     app.include_router(instruction_routes.router)
+    app.include_router(copilot_studio_routes.router)
 
     ui_dir = Path(str(resources.files("agentgov") / "ui"))
     if (ui_dir / "index.html").exists():

@@ -29,6 +29,7 @@ SIGNAL_WEIGHTS: dict[str, tuple[int, int]] = {
     "approval_denied": (5, 15),
     "tool_poisoning_exposure": (10, 20),
     "unregistered_activity": (10, 20),
+    "jailbreak_attempt": (5, 20),
 }
 
 # An open "unsafe instructions" finding, by its severity.
@@ -40,6 +41,8 @@ FINDING_WEIGHTS: dict[str, tuple[str, int]] = {
     "platform.unapproved_connector": ("Uses connectors that are not approved", 20),
     "platform.maker_credentials": ("Tools run with the maker's connections", 10),
     "platform.shared_with_everyone": ("Shared with the whole organisation", 10),
+    "defender.alert": ("Open Microsoft Defender alerts", 20),
+    "entra.disabled_by_microsoft": ("Entra agent identity disabled by Microsoft", 25),
 }
 
 SIGNAL_LABELS = {
@@ -49,6 +52,7 @@ SIGNAL_LABELS = {
     "approval_denied": "Approvals denied by reviewers",
     "tool_poisoning_exposure": "Exposure to poisoned tool definitions",
     "unregistered_activity": "Activity while unregistered",
+    "jailbreak_attempt": "Jailbreak attempts in conversations (Microsoft Purview)",
 }
 
 

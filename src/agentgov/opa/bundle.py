@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.db import Database
-from agentgov.models import DELETED, Agent, Blueprint, Policy, ToolServer
+from agentgov.models import DELETED, Agent, ApprovedConnector, Blueprint, Policy, ToolServer
 from agentgov.registry import agents as agents_svc
 
 log = logging.getLogger(__name__)
@@ -115,7 +115,15 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
         }
         for bp in session.scalars(select(Blueprint))
     }
-    return {"agents": agents, "clients": clients, "toolservers": servers, "blueprints": blueprints}
+    # The connector allowlist for Copilot Studio agents (enforced through threat detection).
+    approved = {c.connector_id: True for c in session.scalars(select(ApprovedConnector))}
+    return {
+        "agents": agents,
+        "clients": clients,
+        "toolservers": servers,
+        "blueprints": blueprints,
+        "connector_allowlist": {"active": bool(approved), "approved": approved},
+    }
 
 
 def custom_modules(session: Session) -> dict[str, str]:

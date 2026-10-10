@@ -12,6 +12,11 @@ agent_id := id if {
 	registry.agents[id]
 } else := id if {
 	id := registry.clients[input.agent.client_id]
+} else := id if {
+	# Copilot Studio's tool calls: the control plane has already matched the agent.
+	input.platform == "copilot-studio"
+	id := input.agent.id
+	registry.agents[id]
 }
 
 agent := registry.agents[agent_id]

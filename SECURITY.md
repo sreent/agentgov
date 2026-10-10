@@ -37,6 +37,9 @@ Examples of issues we especially want to hear about:
 * Denial of service through crafted input (for example super-linear scanning).
 * Ways to hide what the agent-instruction rules are meant to catch (see
   [Agent instructions](docs/instructions.md)), or to make them flag safe text at will.
+* A call to the Copilot Studio threat-detection endpoint that AgentGov accepts without a
+  token Microsoft Entra ID issued to an allowed caller, or a Copilot Studio tool call it
+  allows in `enforce` mode when policy should deny it.
 
 ## Supported versions
 
@@ -62,8 +65,21 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   Use `monitor` only for discovery and only where that is acceptable.
 * Back up PostgreSQL, export the ledger regularly (`GET /v1/ledger/export`) and store the
   exports somewhere the platform cannot modify.
-* If you sync the Microsoft 365 agent catalog, give the Entra app only
-  `CopilotPackages.Read.All`, and rotate its client secret like any other credential.
+* If you connect AgentGov's app registration to Microsoft, grant it only the application
+  permissions of the [connections](docs/microsoft-connections.md) you use
+  (`CopilotPackages.Read.All`, `AgentIdentity.Read.All`, `AuditLogsQuery.Read.All`,
+  `SecurityAlert.Read.All`), all of them read-only, and rotate its client secret like
+  any other credential. `AuditLogsQuery.Read.All` can read the tenant's whole audit
+  log, even though AgentGov asks only for agents' records.
+* Copilot Studio threat detection needs `<AGENTGOV_PUBLIC_URL>/integrations/copilot-studio`
+  to be reachable from Microsoft's cloud. AgentGov accepts a call there only with a token
+  that Microsoft Entra ID signed for your tenant and AgentGov's API, issued to an app in
+  `AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS`. If you can, publish only that path to the
+  internet and keep the rest of the control plane private.
+* Pushing the connector allowlist into Power Platform blocks every other connector for
+  every app, flow and agent in the environments it applies to. It takes an AgentGov admin
+  signed in through Entra ID who also holds Microsoft's Power Platform administrator
+  role, and AgentGov shows what it would do first.
 * If admins sign in through Entra ID with `AGENTGOV_MICROSOFT_ADMIN_ACTIONS` on, the
   control plane holds each signed-in admin's Microsoft refresh token in memory (never on
   disk) for as long as the session lasts. Give the app registration only the delegated
@@ -86,7 +102,16 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   reason to review, and its absence as no proof of safety.
 * Agents on Microsoft 365 and Copilot Studio are read, not controlled: blocking one in
   AgentGov does not stop it. Block it in Microsoft's admin centers too, or have an admin
-  signed in through Entra ID quarantine or block it from AgentGov.
+  signed in through Entra ID quarantine or block it from AgentGov. With Copilot Studio
+  threat detection enforcing, a blocked Copilot Studio agent can't call tools, but it
+  can still answer from its instructions and knowledge.
+* Copilot Studio waits less than a second for threat detection's answer. If AgentGov
+  doesn't answer in time, the tool runs, unless the environment is set to block when
+  the provider fails. Microsoft asks only about agents that use generative
+  orchestration.
+* What AgentGov reads from Microsoft (Entra Agent ID, the Purview audit log, Defender) is
+  as current as the last sync, an hour apart by default; audit records arrive about two
+  hours late.
 * The CLI's sign-in brings the browser back to a loopback port (`127.0.0.1`) with a
   one-time code. The code is useless without the PKCE verifier that only the CLI holds,
   and it works once, but another program on the same computer could see it in transit.

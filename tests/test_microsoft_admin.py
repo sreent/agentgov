@@ -14,11 +14,13 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from agentgov import cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.registry import platforms
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
+from tests.test_cli import _Shared, runner
 from tests.test_platforms import bot, connector
 from tests.test_sso import (
     CLIENT_ID,
@@ -86,10 +88,74 @@ class FakeEntra(FakeProvider):
         return super().handle(request)
 
 
-class FakeMicrosoftApis:
-    """The Power Platform API (quarantine, inventory) and Graph's package block."""
+class FakeConnectorPolicies:
+    """Power Platform's environment groups and rule-based (connector) policies."""
 
     def __init__(self) -> None:
+        self.groups = [
+            {"id": "grp-agents", "displayName": "Copilot Studio agents"},
+            {"id": "grp-finance", "displayName": "Finance"},
+        ]
+        self.policies: dict[str, dict[str, Any]] = {
+            "pol-finance": {
+                "id": "pol-finance",
+                "name": "Finance baseline",
+                "ruleSets": [
+                    {"id": "ConnectorManagement", "version": "1.0", "inputs": {}},
+                ],
+            }
+        }
+        # scope id -> policy ids applied to it
+        self.assignments: dict[str, list[str]] = {"grp-finance": ["pol-finance"]}
+        self.saved: list[tuple[str, dict[str, Any]]] = []
+        self.fail_assign = False
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        if path == "/environmentmanagement/environmentGroups":
+            return httpx.Response(200, json={"value": self.groups})
+        if path == "/governance/ruleBasedPolicies" and method == "GET":
+            return httpx.Response(200, json={"value": list(self.policies.values())})
+        if path == "/governance/ruleBasedPolicies" and method == "POST":
+            body = json.loads(request.content)
+            policy = {**body, "id": f"pol-{len(self.policies) + 1}", "tenantId": TENANT}
+            self.policies[policy["id"]] = policy
+            self.saved.append(("POST", body))
+            return httpx.Response(200, json=policy)
+        parts = path.split("/")
+        if method == "PATCH" and len(parts) == 4:
+            body = json.loads(request.content)
+            self.policies[parts[3]] = {**self.policies[parts[3]], **body}
+            self.saved.append(("PATCH", body))
+            return httpx.Response(200, json=self.policies[parts[3]])
+        if method == "GET" and path.endswith("/assignments"):
+            assert request.url.params["includeRuleSetCounts"] == "true"
+            scope_id = parts[4]
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {"policyId": p, "resourceId": scope_id, "ruleSetCount": 1}
+                        for p in self.assignments.get(scope_id, [])
+                    ]
+                },
+            )
+        if method == "POST" and path.endswith("/assignments"):
+            if self.fail_assign:
+                return httpx.Response(
+                    403, json={"error": {"code": "Forbidden", "message": "Not an admin."}}
+                )
+            self.assignments.setdefault(parts[5], []).append(parts[3])
+            return httpx.Response(201, json={"policyId": parts[3], "resourceId": parts[5]})
+        return httpx.Response(404)
+
+
+class FakeMicrosoftApis:
+    """The Power Platform API (quarantine, inventory, connector policies) and Graph's
+    package block."""
+
+    def __init__(self) -> None:
+        self.policies = FakeConnectorPolicies()
         self.calls: list[tuple[str, str]] = []
         self.status = 200
         self.rows = [
@@ -104,6 +170,10 @@ class FakeMicrosoftApis:
         expected = {POWER_PLATFORM: POWER_PLATFORM, GRAPH: GRAPH}[host]
         assert request.headers["authorization"] == f"Bearer token-for:{expected}"
         self.calls.append((request.method, url))
+        path = request.url.path
+        if path.startswith(("/governance/", "/environmentmanagement/")):
+            assert request.url.params["api-version"] == "2024-10-01"
+            return self.policies.handle(request)
         if self.status != 200:
             return httpx.Response(
                 self.status,
@@ -364,3 +434,136 @@ class TestInventorySync:
         entra_client.post("/v1/platforms/copilot-studio/sync", headers=CSRF).raise_for_status()
         view = entra_client.get("/v1/agents/sales-helper", headers=ADMIN).json()["platforms"][0]
         assert view["quarantined"] is False
+
+
+class TestConnectorPolicy:
+    def approve(self, client: TestClient, *connectors: str) -> None:
+        for connector_id in connectors:
+            client.put(
+                f"/v1/platforms/connectors/{connector_id}/approval", json={}, headers=ADMIN
+            ).raise_for_status()
+
+    def test_preview_shows_what_a_push_would_do(self, entra_client, entra, apis) -> None:
+        entra_client.post(
+            "/v1/platforms/copilot-studio/import",
+            json=[
+                bot("bot-sales", "Sales Helper", connectors=[connector("shared_sql", "Query")]),
+                bot("bot-mail", "Mailer", connectors=[connector("shared_office365", "Send")]),
+            ],
+            headers=ADMIN,
+        ).raise_for_status()
+        self.approve(entra_client, "shared_office365")
+        admin_signs_in(entra_client, entra)
+        view = entra_client.get("/v1/platforms/connector-policy", headers=CSRF).json()
+        assert view["policy_id"] is None and view["allowlist"] == ["shared_office365"]
+        targets = {t["id"]: t for t in view["targets"]}
+        assert targets["grp-finance"]["other_policies"] == ["Finance baseline"]
+        assert targets["grp-agents"]["other_policies"] == []
+        assert targets["env-sales"]["agents"] == 2 and targets["env-sales"]["scope"] == (
+            "environment"
+        )
+        assert view["agents_losing_connectors"] == [
+            {
+                "agent_id": view["agents_losing_connectors"][0]["agent_id"],
+                "name": "Sales Helper",
+                "environment_id": "env-sales",
+                "connectors": ["shared_sql"],
+            }
+        ]
+
+    def test_push_creates_and_applies_the_policy(self, entra_client, entra, apis) -> None:
+        self.approve(entra_client, "shared_office365", "shared_sharepointonline")
+        admin_signs_in(entra_client, entra)
+        resp = entra_client.post(
+            "/v1/platforms/connector-policy",
+            json={"targets": [{"scope": "group", "id": "grp-agents"}]},
+            headers=CSRF,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["targets"] == [{"scope": "group", "id": "grp-agents"}]
+        [(method, body)] = apis.policies.saved
+        assert method == "POST" and body["name"] == "AgentGov connector allowlist"
+        allowed = body["ruleSets"][0]["inputs"]["AllowedConnectorList"]
+        assert [a["AllowedConnector"] for a in allowed] == [
+            "/providers/Microsoft.PowerApps/apis/shared_office365",
+            "/providers/Microsoft.PowerApps/apis/shared_sharepointonline",
+        ]
+        assert apis.policies.assignments["grp-agents"] == [resp.json()["policy_id"]]
+        entry = entra_client.get(
+            "/v1/ledger", params={"type": "connector_policy.pushed"}, headers=ADMIN
+        ).json()[0]
+        assert entry["actor"] == "admin:alice@example.com"
+        state = {
+            c["key"]: c
+            for c in entra_client.get("/v1/platforms", headers=ADMIN).json()["connections"]
+        }
+        assert state["connector-policies"]["status"] == "ok"
+
+        # Approving another connector puts Power Platform's copy out of date...
+        self.approve(entra_client, "shared_teams")
+        connections = entra_client.get("/v1/platforms", headers=ADMIN).json()["connections"]
+        assert {c["key"]: c["status"] for c in connections}["connector-policies"] == "out_of_date"
+        # ...and pushing again updates the same policy, keeping its rule set's version.
+        entra_client.post(
+            "/v1/platforms/connector-policy",
+            json={"targets": [{"scope": "group", "id": "grp-agents"}]},
+            headers=CSRF,
+        ).raise_for_status()
+        method, body = apis.policies.saved[-1]
+        assert method == "PATCH" and len(body["ruleSets"][0]["inputs"]["AllowedConnectorList"]) == 3
+        assert apis.policies.assignments["grp-agents"] == [resp.json()["policy_id"]]  # once
+
+    def test_another_policy_is_never_replaced(self, entra_client, entra, apis) -> None:
+        self.approve(entra_client, "shared_office365")
+        admin_signs_in(entra_client, entra)
+        resp = entra_client.post(
+            "/v1/platforms/connector-policy",
+            json={"targets": [{"scope": "group", "id": "grp-finance"}]},
+            headers=CSRF,
+        )
+        assert resp.status_code == 409 and "Finance baseline" in resp.json()["detail"]
+        assert apis.policies.saved == []
+
+    def test_an_empty_allowlist_is_never_pushed(self, entra_client, entra, apis) -> None:
+        admin_signs_in(entra_client, entra)
+        resp = entra_client.post(
+            "/v1/platforms/connector-policy",
+            json={"targets": [{"scope": "group", "id": "grp-agents"}]},
+            headers=CSRF,
+        )
+        assert resp.status_code == 409 and "block every connector" in resp.json()["detail"]
+
+    def test_a_partial_push_is_still_recorded(self, entra_client, entra, apis) -> None:
+        self.approve(entra_client, "shared_office365")
+        admin_signs_in(entra_client, entra)
+        apis.policies.fail_assign = True
+        resp = entra_client.post(
+            "/v1/platforms/connector-policy",
+            json={"targets": [{"scope": "group", "id": "grp-agents"}]},
+            headers=CSRF,
+        )
+        assert resp.status_code == 502 and "Not an admin" in resp.json()["detail"]
+        entry = entra_client.get(
+            "/v1/ledger", params={"type": "connector_policy.pushed"}, headers=ADMIN
+        ).json()[0]
+        assert entry["details"]["targets"] == []  # the policy was saved, applied nowhere
+
+    def test_needs_a_microsoft_sign_in(self, entra_client) -> None:
+        resp = entra_client.get("/v1/platforms/connector-policy", headers=ADMIN)
+        assert resp.status_code == 409
+
+    def test_from_the_cli(self, entra_client, entra, apis, monkeypatch) -> None:
+        self.approve(entra_client, "shared_office365")
+        session = cli_session(entra_client, entra, sub="aad-alice", roles=["agentgov-admin"])
+        monkeypatch.setattr(cli, "_client", lambda: _Shared(entra_client, session["token"]))
+        preview = runner.invoke(cli.app, ["platforms", "connector-policy"])
+        assert preview.exit_code == 0, preview.output
+        assert "taken by Finance baseline" in preview.output
+        assert "allowlist: shared_office365" in preview.output
+        refused = runner.invoke(cli.app, ["platforms", "push-connector-policy", "--yes"])
+        assert refused.exit_code == 2
+        pushed = runner.invoke(
+            cli.app, ["platforms", "push-connector-policy", "--group", "grp-agents", "--yes"]
+        )
+        assert pushed.exit_code == 0, pushed.output
+        assert "allows shared_office365 in group grp-agents" in pushed.output

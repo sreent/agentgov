@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from typing import Any
 
 UNKNOWN_AGENT_MODES = ("reject", "monitor")
+THREAT_DETECTION_MODES = ("off", "monitor", "enforce")
+_GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 M365_PACKAGE_TYPES = ("custom", "shared", "external", "microsoft")
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
@@ -115,6 +117,24 @@ class Settings:
     entra_login_url: str = "https://login.microsoftonline.com"
     power_platform_url: str = "https://api.powerplatform.com"
 
+    # --- Copilot Studio threat detection (optional) -------------------------------
+    # Copilot Studio asks AgentGov before each tool call its agents make, once a
+    # Power Platform admin connects AgentGov to an environment
+    # (docs/microsoft-connections.md):
+    # "off", "monitor" (decide and record, never block) or "enforce".
+    copilot_studio_threat_detection: str = "off"
+    # The app registrations that may call (the one connected to Copilot Studio),
+    # comma-separated application (client) IDs.
+    copilot_studio_caller_app_ids: str = ""
+    # Accepted token audiences, comma-separated: AgentGov's API's application ID URI
+    # (by default the origin of AGENTGOV_PUBLIC_URL) and, for v2.0 tokens, its client ID.
+    copilot_studio_audiences: str = ""
+    # The tenant ID (a GUID) whose apps may call. By default the tenant of
+    # AGENTGOV_M365_TENANT_ID or of sign-in through Entra ID, when that is a GUID.
+    copilot_studio_tenant_id: str | None = None
+    # The answer when AgentGov cannot decide in time (enforce mode): "block" or "allow".
+    copilot_studio_on_error: str = "block"
+
     # --- Instruction classifier (optional) ----------------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
     # Ollama), e.g. http://guardian:8000/v1. Without it, agent instructions are
@@ -210,9 +230,52 @@ class Settings:
                 "AGENTGOV_MICROSOFT_ADMIN_ACTIONS needs single sign-on through Microsoft Entra "
                 "ID: set AGENTGOV_OIDC_ISSUER and AGENTGOV_OIDC_CLIENT_SECRET"
             )
+        if self.copilot_studio_threat_detection not in THREAT_DETECTION_MODES:
+            raise ValueError(
+                f"AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION must be one of {THREAT_DETECTION_MODES}"
+            )
+        if self.copilot_studio_on_error not in ("block", "allow"):
+            raise ValueError("AGENTGOV_COPILOT_STUDIO_ON_ERROR must be 'block' or 'allow'")
+        if self.copilot_studio_tenant_id and not _GUID.match(self.copilot_studio_tenant_id):
+            raise ValueError("AGENTGOV_COPILOT_STUDIO_TENANT_ID must be the tenant ID (a GUID)")
+        if self.copilot_studio_threat_detection != "off":
+            if not self.copilot_studio_callers():
+                raise ValueError(
+                    "Copilot Studio threat detection needs AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS: "
+                    "the app registration connected to Copilot Studio"
+                )
+            if not self.copilot_studio_tenant():
+                raise ValueError(
+                    "Copilot Studio threat detection needs the tenant ID (a GUID): set "
+                    "AGENTGOV_COPILOT_STUDIO_TENANT_ID"
+                )
+            if self.copilot_studio_threat_detection == "enforce" and not self.opa_url:
+                raise ValueError("enforcing Copilot Studio threat detection needs AGENTGOV_OPA_URL")
         self.m365_types()  # raises on unknown package types
         self.guardian_criteria_list()  # raises on unknown criteria
         self.pii_thresholds()  # raises on malformed entries
+
+    def copilot_studio_callers(self) -> list[str]:
+        return [a.strip() for a in self.copilot_studio_caller_app_ids.split(",") if a.strip()]
+
+    def copilot_studio_tenant(self) -> str | None:
+        """The tenant whose apps may call threat detection (a GUID), if known."""
+        entra = ENTRA_ISSUER.match((self.oidc_issuer or "").rstrip("/"))
+        for candidate in (
+            self.copilot_studio_tenant_id,
+            self.m365_tenant_id,
+            entra["tenant"] if entra else None,
+        ):
+            if candidate and _GUID.match(candidate):
+                return candidate.lower()
+        return None
+
+    def copilot_studio_token_audiences(self) -> list[str]:
+        configured = [a.strip() for a in self.copilot_studio_audiences.split(",") if a.strip()]
+        if configured:
+            return configured
+        scheme, _, rest = self.public_url.partition("://")
+        return [f"{scheme}://{rest.split('/', 1)[0]}"]
 
     def m365_types(self) -> set[str]:
         types = {t.strip().lower() for t in self.m365_package_types.split(",") if t.strip()}

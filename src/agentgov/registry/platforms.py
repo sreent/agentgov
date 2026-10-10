@@ -7,13 +7,16 @@ a registry agent (``discovered`` until someone adopts it, with source
 ``platform:<source>``) plus a :class:`PlatformAgent` record of the platform's
 view, refreshed on every sync.
 
-Two sources feed it:
+Three sources feed it:
 
 * ``microsoft-365``: the Microsoft 365 agent catalog, synced from Microsoft
   Graph with an app-only token (``agentgov.platforms.microsoft``).
 * ``copilot-studio``: the Power Platform inventory of Copilot Studio agents.
-  Microsoft only lets a signed-in user query it, so an admin exports it
-  (``pac resource-query`` or the Power Platform API) and imports the JSON.
+  Microsoft only lets a signed-in user query it, so it is synced as the
+  signed-in admin, or an admin exports it and imports the JSON.
+* ``entra-agent-id``: the tenant's Microsoft Entra agent identities, linked to
+  the agents the other sources report (by Entra agent ID); identities no other
+  source reports are discovered agents of their own.
 
 Copilot Studio agents are checked against the connector allowlist and for
 risky settings; each check is a finding that resolves itself once fixed.
@@ -46,7 +49,13 @@ from agentgov.registry import discovery, findings
 from agentgov.registry import instructions as instructions_svc
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
-SOURCES = {"microsoft-365": "Microsoft 365", "copilot-studio": "Copilot Studio"}
+SOURCES = {
+    "microsoft-365": "Microsoft 365",
+    "copilot-studio": "Copilot Studio",
+    "entra-agent-id": "Microsoft Entra Agent ID",
+}
+# The agent identity blueprint Copilot Studio creates its agents' identities from.
+COPILOT_STUDIO_BLUEPRINT = "25664c89-cea5-4ab6-b924-a54fd8a19ae0"
 FINDING_TYPES = {
     "platform.unapproved_connector",
     "platform.no_authentication",
@@ -341,6 +350,8 @@ def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict
                 "IsWebSearchEnabledForKnowledge", props.get("isWebSearchEnabledForKnowledge")
             ),
             "entra_agent_id": props.get("entraAgentId"),
+            "entra_app_id": props.get("entraAppId"),
+            "schema_name": props.get("schemaName"),
             "connectors": _connectors(props),
         }
         external_ids = {"copilot_studio_agent_id": agent_id}
@@ -368,6 +379,88 @@ def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict
 # ------------------------------------------------------------------ allowlist
 
 
+def record_agent_identities(
+    session: Session, identities: list[dict[str, Any]], *, actor: str | None = None
+) -> dict[str, int]:
+    """Store the tenant's Entra agent identities (Graph ``agentIdentity`` objects)."""
+    counts = {"created": 0, "updated": 0, "skipped": 0, "linked": 0}
+    index = _entra_index(session)
+    seen: set[str] = set()
+    present: set[str] = set()
+    for identity in identities:
+        identity_id = identity.get("id")
+        if not isinstance(identity_id, str) or not identity_id:
+            counts["skipped"] += 1
+            continue
+        key = f"entra-agent-id:{identity_id}"
+        seen.add(key)
+        blueprint = identity.get("agentIdentityBlueprintId")
+        from_studio = str(blueprint).lower() == COPILOT_STUDIO_BLUEPRINT
+        disabled_by_microsoft = identity.get("disabledByMicrosoftStatus") not in (
+            None,
+            "",
+            "NotDisabled",
+        )
+        details = {
+            # An agent identity's object ID and app ID are the same.
+            "entra_agent_id": identity_id,
+            "enabled": identity.get("accountEnabled"),
+            "blueprint_id": blueprint,
+            "blueprint": "Copilot Studio" if from_studio else None,
+            "created_by_app_id": identity.get("createdByAppId"),
+            "created_at": identity.get("createdDateTime"),
+            "disabled_by_microsoft": identity.get("disabledByMicrosoftStatus")
+            if disabled_by_microsoft
+            else None,
+            "tags": identity.get("tags") or [],
+            "in_directory": True,
+        }
+        agent, created = upsert(
+            session,
+            source="entra-agent-id",
+            external_id=identity_id,
+            name=str(identity.get("displayName") or identity_id),
+            platform="Copilot Studio" if from_studio else "Microsoft Entra Agent ID",
+            details=details,
+            external_ids={"entra_agent_id": identity_id},
+            entra_index=index,
+        )
+        counts["created" if created else "updated"] += 1
+        if disabled_by_microsoft:
+            finding, _ = findings.raise_finding(
+                session,
+                type="entra.disabled_by_microsoft",
+                severity="high",
+                subject=agent.id,
+                agent_id=agent.id,
+                category=findings.THREAT,
+                title=f"Microsoft disabled {agent.name}'s Entra agent identity",
+                description="Microsoft Entra ID reports the identity as "
+                f"{identity.get('disabledByMicrosoftStatus')}, so the agent cannot sign in.",
+                remediation="Find out from Microsoft why the agent was disabled, and block it "
+                "here until that is resolved.",
+            )
+            present.add(finding.key)
+    findings.resolve_absent(
+        session, types={"entra.disabled_by_microsoft"}, present_keys=present, actor=SYSTEM_ACTOR
+    )
+    # Identities deleted from Entra stay in the registry, marked as gone.
+    others = set(
+        session.scalars(
+            select(PlatformAgent.agent_id).where(PlatformAgent.source != "entra-agent-id")
+        )
+    )
+    for record in session.scalars(
+        select(PlatformAgent).where(PlatformAgent.source == "entra-agent-id")
+    ):
+        if record.id not in seen and (record.data or {}).get("in_directory", True):
+            record.data = {**(record.data or {}), "in_directory": False}
+        # Linked: the identity of an agent that another source reports too.
+        counts["linked"] += 1 if record.id in seen and record.agent_id in others else 0
+    set_sync(session, "entra-agent-id", ok=True, counts=counts, actor=actor)
+    return counts
+
+
 def approved_connectors(session: Session) -> list[ApprovedConnector]:
     return list(session.scalars(select(ApprovedConnector).order_by(ApprovedConnector.connector_id)))
 
@@ -382,6 +475,7 @@ def approve_connector(session: Session, connector_id: str, *, note: str, actor: 
         return
     session.add(ApprovedConnector(connector_id=key, note=note or "", added_by=actor))
     session.flush()
+    mark_changed(session, "connectors")  # OPA enforces the allowlist through threat detection
     ledger.append(
         session,
         type="connector.approved",
@@ -399,6 +493,7 @@ def remove_approval(session: Session, connector_id: str, *, actor: str) -> None:
         raise NotFound(f"connector {key!r} is not on the allowlist")
     session.delete(existing)
     session.flush()
+    mark_changed(session, "connectors")
     ledger.append(
         session,
         type="connector.approval_removed",
@@ -571,7 +666,7 @@ def set_sync(
     if actor:
         ledger.append(
             session,
-            type="platform.synced" if source == "microsoft-365" else "platform.imported",
+            type="platform.imported" if source == "copilot-studio" else "platform.synced",
             actor=actor,
             severity="info" if ok else "warning",
             resource=f"platform/{source}",
@@ -596,8 +691,8 @@ def overview(session: Session, *, m365_configured: bool) -> dict[str, Any]:
             {
                 "source": source,
                 "name": name,
-                "mode": "sync" if source == "microsoft-365" else "import",
-                "configured": m365_configured if source == "microsoft-365" else True,
+                "mode": "import" if source == "copilot-studio" else "sync",
+                "configured": True if source == "copilot-studio" else m365_configured,
                 "agents": agents.get(source, 0),
                 "last_sync": {
                     "at": ids.isoformat(sync.synced_at),

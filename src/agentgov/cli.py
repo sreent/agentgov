@@ -1385,7 +1385,7 @@ def _synced(source: str, verb: str, counts: dict[str, int]) -> None:
 
 @platforms_app.command("status")
 def platforms_status() -> None:
-    """Each source of platform agents and how its last sync or import went."""
+    """Each source of platform agents, and each optional Microsoft connection."""
     view = _call("GET", "/v1/platforms")
     rows = []
     for src in view["sources"]:
@@ -1395,21 +1395,127 @@ def platforms_status() -> None:
             state = "ok" if last["ok"] else f"failed: {last['message']}"
         rows.append({**src, "last_sync": last.get("at"), "state": state})
     _table(rows, ["source", "mode", "agents", "last_sync", "state"])
+    typer.echo()
+    links = []
+    for c in view.get("connections", []):
+        last = c.get("last_run") or {}
+        note = ""
+        if c["status"] == "missing_permission":
+            note = f"grant {c['permission']}"
+        elif c["status"] in ("off", "import"):
+            note = "needs " + ", ".join(c["needs"])
+        elif last and not last.get("ok"):
+            note = last.get("message", "")
+        links.append({**c, "last_run": last.get("at"), "note": note})
+    _table(links, ["key", "status", "last_run", "note"])
+    detection = view.get("threat_detection") or {}
+    if detection.get("mode", "off") != "off":
+        typer.echo(
+            f"\nthreat detection ({detection['mode']}): {detection.get('calls') or 0} tool calls, "
+            f"{detection.get('blocked') or 0} blocked, "
+            f"{detection.get('would_block') or 0} would have been blocked"
+        )
+
+
+SYNC_SOURCES = ("microsoft-365", "copilot-studio", "entra-agent-id", "purview-audit", "defender")
+
+
+def _sync_summary(source: str, c: dict[str, Any]) -> str:
+    if source == "entra-agent-id":
+        return f"{c['created']} new, {c['updated']} updated, {c['linked']} linked to agents"
+    if source == "purview-audit":
+        return (
+            f"{c['interactions']} interactions, {c['maker_events']} maker changes, "
+            f"{c['searching']} searches running"
+        )
+    if source == "defender":
+        return f"{c['alerts']} agent alerts, {c['matched']} matched, {c['resolved']} resolved"
+    return f"{c['created']} new, {c['updated']} updated, {c['skipped']} skipped"
 
 
 @platforms_app.command("sync")
 def platforms_sync(
     source: str = typer.Argument(
-        "microsoft-365",
-        help="microsoft-365 (as AgentGov's app), or copilot-studio (as you, after "
-        "`agentgov login` through Microsoft Entra ID).",
+        "all",
+        help="all (every connection AgentGov's app may use), microsoft-365, entra-agent-id, "
+        "purview-audit, defender, or copilot-studio (as you, after `agentgov login` through "
+        "Microsoft Entra ID).",
     ),
 ) -> None:
-    """Read a platform's agents now (the Microsoft 365 catalog is also read on a schedule)."""
-    if source not in ("microsoft-365", "copilot-studio"):
-        _fail("the source is microsoft-365 or copilot-studio")
+    """Sync now (AgentGov's app connections also sync on a schedule)."""
+    if source == "all":
+        results = _call("POST", "/v1/platforms/sync", timeout=LONG_TIMEOUT)
+        failed = False
+        for key, outcome in results.items():
+            if "error" in outcome:
+                failed = True
+                _done("platform", key, f"failed: {outcome['error']}")
+            elif "lacks_permission" in outcome:
+                _done("platform", key, f"skipped (the app lacks {outcome['lacks_permission']})")
+            else:
+                _done("platform", key, f"synced ({_sync_summary(key, outcome)})")
+        if failed:
+            raise typer.Exit(1)
+        return
+    if source not in SYNC_SOURCES:
+        _fail(f"the source is all or one of {', '.join(SYNC_SOURCES)}")
     counts = _call("POST", f"/v1/platforms/{source}/sync", timeout=LONG_TIMEOUT)
-    _synced(source, "synced", counts)
+    if source in ("microsoft-365", "copilot-studio"):
+        _synced(source, "synced", counts)
+    else:
+        _done("platform", source, f"synced ({_sync_summary(source, counts)})")
+
+
+@platforms_app.command("connector-policy")
+def platforms_connector_policy() -> None:
+    """What pushing the connector allowlist into Power Platform would do (as you)."""
+    view = _call("GET", "/v1/platforms/connector-policy", timeout=LONG_TIMEOUT)
+    typer.echo(f"policy:    {view['policy_name']} ({view['policy_id'] or 'not created yet'})")
+    typer.echo(f"allowlist: {', '.join(view['allowlist']) or '(empty: nothing can be pushed)'}")
+    if view.get("out_of_date"):
+        typer.echo(f"in Power Platform now: {', '.join(view['in_power_platform'] or [])}")
+    typer.echo()
+    rows = [
+        {
+            **t,
+            "state": "applied"
+            if t["applied"]
+            else ("taken by " + ", ".join(t["other_policies"]) if t["other_policies"] else "free"),
+        }
+        for t in view["targets"]
+    ]
+    _table(rows, ["scope", "id", "name", "state"])
+    for agent in view["agents_losing_connectors"]:
+        typer.echo(f"agent/{agent['name']} would lose: {', '.join(agent['connectors'])}")
+
+
+@platforms_app.command("push-connector-policy")
+def platforms_push_connector_policy(
+    group: list[str] | None = typer.Option(None, "--group", help="Environment group ID."),
+    environment: list[str] | None = typer.Option(None, "--environment", help="Environment ID."),
+    yes: bool = YES,
+) -> None:
+    """Make Power Platform allow only the approved connectors in these groups and
+    environments, as you. Every other connector is blocked there, for apps and flows too."""
+    targets = [{"scope": "group", "id": g} for g in _split(group)] + [
+        {"scope": "environment", "id": e} for e in _split(environment)
+    ]
+    if not targets:
+        _fail("name a --group or an --environment (see `agentgov platforms connector-policy`)")
+    _confirm(
+        "Power Platform will block every connector that isn't on the allowlist there, for apps "
+        "and flows as well as agents. Push?",
+        yes,
+    )
+    out = _call(
+        "POST", "/v1/platforms/connector-policy", json={"targets": targets}, timeout=LONG_TIMEOUT
+    )
+    _done(
+        "policy",
+        out["policy_id"],
+        f"allows {', '.join(out['connectors'])} in "
+        + ", ".join(f"{t['scope']} {t['id']}" for t in out["targets"]),
+    )
 
 
 @platforms_app.command("import")
