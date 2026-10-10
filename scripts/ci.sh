@@ -132,6 +132,15 @@ ensure_docker() {
   return 1
 }
 
+# first_line <command...>: the command's first line of output. Piping into `head -1`
+# instead races: head exits early, the command dies of a broken pipe, and pipefail
+# turns that into a failure.
+first_line() {
+  local out
+  out=$("$@") || return
+  printf '%s\n' "${out%%$'\n'*}"
+}
+
 # docker_build <tag> <context>: builds through the HTTPS proxy and its CA, if any.
 docker_build() {
   local args=() proxy=${HTTPS_PROXY:-${https_proxy:-}}
@@ -180,7 +189,7 @@ matrix_tests() {
 image_smoke() {
   docker_build agentgov:ci . &&
     docker run --rm agentgov:ci version &&
-    docker run --rm --entrypoint opa agentgov:ci version | head -1
+    first_line docker run --rm --entrypoint opa agentgov:ci version
 }
 
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -228,7 +237,7 @@ heading "Toolchain"
 setup_python .venv "${PYTHON:-python3}" || { echo "${red}Python setup failed${reset}"; exit 1; }
 export PATH="$ROOT/.venv/bin:$PATH"
 setup_opa || { echo "${red}opa setup failed${reset}"; exit 1; }
-echo "$(python --version), $(opa version | head -1), ruff $(ruff --version | cut -d' ' -f2)"
+echo "$(python --version), $(first_line opa version), ruff $(ruff --version | cut -d' ' -f2)"
 [ "$setup_only" = 1 ] && exit 0
 
 # Docker is started when a step needs it; tests use it only if it is already up.
