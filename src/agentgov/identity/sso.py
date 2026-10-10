@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import secrets
 import threading
 import time
@@ -28,11 +29,13 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.models import AdminSession, LoginState
+from agentgov.models import AdminSession, CliLogin, LoginState
 
 # AgentGov roles a person can hold through single sign-on, most privileged first.
 SSO_ROLES = ("admin", "approver", "auditor", "registrar")
 LOGIN_TTL = timedelta(minutes=10)
+# How long the CLI has to collect its session once the person has signed in.
+CLI_CODE_TTL = timedelta(minutes=2)
 # Asymmetric algorithms only: a token "signed" with HS256 and the public key must fail.
 SIGNING_ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384"]
 JWKS_REFETCH_SECONDS = 30
@@ -60,6 +63,11 @@ def _b64url(data: bytes) -> str:
 
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def pkce_challenge(verifier: str) -> str:
+    """The S256 code challenge for a PKCE code verifier (RFC 7636)."""
+    return _b64url(hashlib.sha256(verifier.encode()).digest())
 
 
 def roles_from_claims(claims: dict[str, Any], path: str, prefix: str) -> list[str]:
@@ -102,15 +110,22 @@ class OIDCClient:
     def redirect_uri(self) -> str:
         return self.settings.public_url.rstrip("/") + "/auth/callback"
 
+    @property
+    def scopes(self) -> str:
+        scopes = self.settings.oidc_scopes.split()
+        if self.settings.microsoft_admin_actions and "offline_access" not in scopes:
+            scopes.append("offline_access")  # a refresh token, to act as the admin
+        return " ".join(scopes)
+
     def authorization_url(self, state: str, nonce: str, code_verifier: str) -> str:
         query = {
             "response_type": "code",
             "client_id": self.settings.oidc_client_id,
             "redirect_uri": self.redirect_uri,
-            "scope": self.settings.oidc_scopes,
+            "scope": self.scopes,
             "state": state,
             "nonce": nonce,
-            "code_challenge": _b64url(hashlib.sha256(code_verifier.encode()).digest()),
+            "code_challenge": pkce_challenge(code_verifier),
             "code_challenge_method": "S256",
         }
         return f"{self.endpoints['authorization_endpoint']}?{urlencode(query)}"
@@ -229,19 +244,32 @@ class OIDCClient:
 def purge_expired(session: Session) -> None:
     now = ids.utcnow()
     session.execute(delete(LoginState).where(LoginState.expires_at < now))
+    session.execute(delete(CliLogin).where(CliLogin.expires_at < now))
     session.execute(delete(AdminSession).where(AdminSession.expires_at < now))
 
 
-def begin_login(session: Session, client: OIDCClient) -> tuple[str, str]:
-    """Record a new sign-in attempt; returns ``(state, authorization_url)``."""
+def begin_login(
+    session: Session,
+    client: OIDCClient,
+    *,
+    cli_port: int | None = None,
+    cli_challenge: str | None = None,
+) -> tuple[str, str]:
+    """Record a new sign-in attempt; returns ``(state, authorization_url)``.
+
+    ``cli_port`` and ``cli_challenge`` mark a sign-in for ``agentgov login``: the
+    browser goes back to the CLI on that loopback port, and the CLI must present
+    the verifier for that PKCE challenge to collect its session.
+    """
     purge_expired(session)
     state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
-    session.add(
-        LoginState(
-            state=state, nonce=nonce, code_verifier=verifier, expires_at=ids.utcnow() + LOGIN_TTL
+    expires_at = ids.utcnow() + LOGIN_TTL
+    session.add(LoginState(state=state, nonce=nonce, code_verifier=verifier, expires_at=expires_at))
+    if cli_port is not None and cli_challenge is not None:
+        session.add(
+            CliLogin(state=state, port=cli_port, challenge=cli_challenge, expires_at=expires_at)
         )
-    )
     return state, client.authorization_url(state, nonce, verifier)
 
 
@@ -254,8 +282,53 @@ def consume_login(session: Session, state: str) -> tuple[str, str]:
     return login.nonce, login.code_verifier
 
 
-def start_session(session: Session, settings: Settings, who: Identity) -> str:
-    """Create the session for a signed-in person; returns the cookie token."""
+def cli_port(session: Session, state: str) -> int | None:
+    """The CLI's loopback port, if ``agentgov login`` started this sign-in."""
+    login = session.get(CliLogin, state)
+    return login.port if login is not None else None
+
+
+def cli_signed_in(session: Session, state: str, who: Identity) -> str:
+    """The person signed in for the CLI: keep who they are; returns the one-time code."""
+    login = session.get(CliLogin, state)
+    if login is None:
+        raise SSOError("expired", "sign-in expired or was already completed")
+    code = secrets.token_urlsafe(32)
+    login.code_hash = token_hash(code)
+    login.identity = {
+        "subject": who.subject,
+        "name": who.name,
+        "roles": who.roles,
+        "id_token": who.id_token,
+    }
+    login.expires_at = ids.utcnow() + CLI_CODE_TTL
+    return code
+
+
+def collect_cli_login(
+    session: Session, code: str, verifier: str
+) -> tuple[str | None, Identity | None]:
+    """Who signed in for a one-time code, if ``verifier`` matches its PKCE challenge.
+
+    Returns the sign-in's state (``None`` for an unknown code) and who signed in
+    (``None`` unless the code is current and the verifier right). Each code works
+    once: it is used up even when the verifier is wrong.
+    """
+    login = session.scalar(select(CliLogin).where(CliLogin.code_hash == token_hash(code)))
+    if login is None:
+        return None, None
+    session.delete(login)
+    if login.identity is None or login.expires_at < ids.utcnow():
+        return login.state, None
+    if not hmac.compare_digest(pkce_challenge(verifier), login.challenge):
+        return login.state, None
+    return login.state, Identity(**login.identity)
+
+
+def start_session(
+    session: Session, settings: Settings, who: Identity, *, client: str = "browser"
+) -> tuple[str, AdminSession]:
+    """Create the session for a signed-in person; returns its token and record."""
     token = secrets.token_urlsafe(32)
     record = AdminSession(
         id=ids.new_id(ids.SESSION),
@@ -271,9 +344,14 @@ def start_session(session: Session, settings: Settings, who: Identity) -> str:
         session,
         type="admin.login",
         actor=f"sso:{who.name}",
-        details={"roles": who.roles, "subject": who.subject, "session_id": record.id},
+        details={
+            "roles": who.roles,
+            "subject": who.subject,
+            "session_id": record.id,
+            "client": client,
+        },
     )
-    return token
+    return token, record
 
 
 def record_denied(session: Session, who: Identity) -> None:

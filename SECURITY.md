@@ -64,6 +64,16 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   exports somewhere the platform cannot modify.
 * If you sync the Microsoft 365 agent catalog, give the Entra app only
   `CopilotPackages.Read.All`, and rotate its client secret like any other credential.
+* If admins sign in through Entra ID with `AGENTGOV_MICROSOFT_ADMIN_ACTIONS` on, the
+  control plane holds each signed-in admin's Microsoft refresh token in memory (never on
+  disk) for as long as the session lasts. Give the app registration only the delegated
+  permissions in [docs/platforms.md](docs/platforms.md#setting-it-up), and treat the
+  control plane's host and memory, and the app's client secret, as Microsoft admin
+  credentials.
+* `agentgov login` saves the CLI's session token in the user's agentgov config directory,
+  readable only by that user. It is a bearer credential with the person's roles until it
+  expires: run `agentgov logout` on shared machines, and end lost sessions on the Access
+  page.
 * If you run the instruction classifier, keep it on the private network: it receives
   agents' instructions (with credentials already redacted).
 
@@ -75,7 +85,11 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   reworded or obfuscated instructions and can flag legitimate ones; treat a finding as a
   reason to review, and its absence as no proof of safety.
 * Agents on Microsoft 365 and Copilot Studio are read, not controlled: blocking one in
-  AgentGov does not stop it. Block it in Microsoft's admin centers too.
+  AgentGov does not stop it. Block it in Microsoft's admin centers too, or have an admin
+  signed in through Entra ID quarantine or block it from AgentGov.
+* The CLI's sign-in brings the browser back to a loopback port (`127.0.0.1`) with a
+  one-time code. The code is useless without the PKCE verifier that only the CLI holds,
+  and it works once, but another program on the same computer could see it in transit.
 * Personal-data detection is as good as Presidio's recognizers for your languages and
   data, and the configured confidence thresholds.
 * AgentGov governs tool traffic that goes through the gateway (and, with the Agent

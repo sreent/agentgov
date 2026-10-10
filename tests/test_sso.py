@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import stat
 import time
 from collections.abc import Iterator
 from datetime import timedelta
@@ -26,7 +27,7 @@ from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.identity.sso import display_name, roles_from_claims
-from agentgov.models import AdminSession
+from agentgov.models import AdminSession, CliLogin
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
 from tests.test_cli import _Shared, runner
@@ -142,6 +143,47 @@ def sign_in(client: TestClient, provider: FakeProvider, **user: Any) -> httpx.Re
 def error_code(resp: httpx.Response) -> str | None:
     assert resp.status_code == 302
     return parse_qs(urlsplit(resp.headers["location"]).query).get("sso_error", [None])[0]
+
+
+CLI_PORT = 8765
+
+
+def cli_start(client: TestClient, verifier: str) -> httpx.Response:
+    challenge = _b64url(hashlib.sha256(verifier.encode()).digest())
+    params = {"cli_port": CLI_PORT, "cli_challenge": challenge}
+    return client.get("/auth/login", params=params, follow_redirects=False)
+
+
+def cli_sign_in(
+    client: TestClient, provider: FakeProvider, **user: Any
+) -> tuple[str, httpx.Response]:
+    """The browser half of `agentgov login`: the verifier, and where the browser went next."""
+    verifier = secrets.token_urlsafe(64)
+    start = cli_start(client, verifier)
+    assert start.status_code == 302, start.text
+    state, code = provider.authorize(start.headers["location"], **user)
+    back = client.get(
+        "/auth/callback", params={"state": state, "code": code}, follow_redirects=False
+    )
+    return verifier, back
+
+
+def at_the_cli(resp: httpx.Response) -> dict[str, str]:
+    """The query the browser took back to the CLI's loopback listener."""
+    target = urlsplit(resp.headers["location"])
+    assert resp.status_code == 302
+    assert f"{target.scheme}://{target.netloc}{target.path}" == (
+        f"http://127.0.0.1:{CLI_PORT}/callback"
+    )
+    return {k: v[0] for k, v in parse_qs(target.query).items()}
+
+
+def cli_session(client: TestClient, provider: FakeProvider, **user: Any) -> dict[str, Any]:
+    verifier, back = cli_sign_in(client, provider, **user)
+    code = at_the_cli(back)["code"]
+    resp = client.post("/auth/cli/token", json={"code": code, "verifier": verifier})
+    assert resp.status_code == 200, resp.text
+    return resp.json()
 
 
 class TestSignIn:
@@ -413,6 +455,179 @@ class TestAccess:
     def test_available_without_single_sign_on(self, client) -> None:
         view = client.get("/v1/access", headers=ADMIN).json()
         assert view == {"sso_enabled": False, "bootstrap_token": True, "people": [], "sessions": []}
+
+
+class TestCliSignIn:
+    def test_the_cli_gets_a_session_of_its_own(self, sso, provider) -> None:
+        verifier, back = cli_sign_in(sso, provider, roles=["agentgov-admin"])
+        code = at_the_cli(back)["code"]
+        assert "agentgov_session" not in sso.cookies  # the browser itself stays signed out
+        resp = sso.post("/auth/cli/token", json={"code": code, "verifier": verifier})
+        session = resp.json()
+        assert (session["name"], session["roles"], session["microsoft"]) == (
+            "alice@example.com",
+            ["admin"],
+            False,
+        )
+        bearer = {"Authorization": f"Bearer {session['token']}"}
+        me = sso.get("/v1/me", headers=bearer).json()
+        assert (me["actor"], me["via"]) == ("admin:alice@example.com", "session")
+        # Browsers never send a bearer token by themselves: no CSRF header needed.
+        assert sso.post("/v1/findings/fnd_missing/resolve", headers=bearer).status_code == 404
+        login = sso.get("/v1/ledger", params={"type": "admin.login"}, headers=ADMIN).json()
+        assert login[0]["details"]["client"] == "cli"
+        again = sso.post("/auth/cli/token", json={"code": code, "verifier": verifier})
+        assert again.status_code == 400  # each code works once
+
+        assert sso.post("/auth/logout", headers=bearer).status_code == 200
+        assert sso.get("/v1/me", headers=bearer).status_code == 401
+
+    def test_only_the_program_that_started_it(self, sso, provider) -> None:
+        verifier, back = cli_sign_in(sso, provider, roles=["agentgov-admin"])
+        code = at_the_cli(back)["code"]
+        guess = {"code": code, "verifier": secrets.token_urlsafe(64)}
+        assert sso.post("/auth/cli/token", json=guess).status_code == 400
+        # A wrong verifier uses the code up.
+        right = {"code": code, "verifier": verifier}
+        assert sso.post("/auth/cli/token", json=right).status_code == 400
+        assert sso.get("/v1/access", headers=ADMIN).json()["sessions"] == []
+
+    def test_the_code_expires(self, sso, provider) -> None:
+        verifier, back = cli_sign_in(sso, provider, roles=["agentgov-admin"])
+        with sso.app.state.rt.db.session() as s:
+            s.execute(update(CliLogin).values(expires_at=ids.utcnow() - timedelta(seconds=1)))
+        code = at_the_cli(back)["code"]
+        resp = sso.post("/auth/cli/token", json={"code": code, "verifier": verifier})
+        assert resp.status_code == 400 and "expired" in resp.json()["detail"]
+
+    def test_failures_go_back_to_the_cli(self, sso, provider) -> None:
+        _, back = cli_sign_in(sso, provider, roles=["offline"])
+        assert at_the_cli(back) == {"error": "no_role"}
+
+        start = cli_start(sso, secrets.token_urlsafe(64))
+        state, _ = provider.authorize(start.headers["location"])
+        params = {"state": state, "error": "access_denied"}
+        refused = sso.get("/auth/callback", params=params, follow_redirects=False)
+        assert at_the_cli(refused) == {"error": "provider"}
+
+        # A callback this browser didn't start goes to the admin UI, never to a CLI.
+        start = cli_start(sso, secrets.token_urlsafe(64))
+        state, code = provider.authorize(start.headers["location"], roles=["agentgov-admin"])
+        sso.cookies.clear()
+        params = {"state": state, "code": code}
+        forged = sso.get("/auth/callback", params=params, follow_redirects=False)
+        assert error_code(forged) == "state"
+
+    def test_the_cli_parameters_are_checked(self, sso) -> None:
+        challenge = _b64url(hashlib.sha256(b"verifier").digest())
+        for params in (
+            {"cli_port": 80, "cli_challenge": challenge},  # not a port a CLI can listen on
+            {"cli_port": CLI_PORT, "cli_challenge": "not-a-challenge"},
+        ):
+            assert sso.get("/auth/login", params=params, follow_redirects=False).status_code == 422
+        alone = sso.get("/auth/login", params={"cli_port": CLI_PORT}, follow_redirects=False)
+        assert alone.status_code == 400
+
+
+class _AsConfigured:
+    """Stands in for ``cli._client()``: the test's client, with the token the CLI would send."""
+
+    def __init__(self, client: TestClient) -> None:
+        self.client = client
+
+    def __enter__(self) -> TestClient:
+        token = cli._token(cli._url())
+        if token:
+            self.client.headers["Authorization"] = f"Bearer {token}"
+        return self.client
+
+    def __exit__(self, *exc: object) -> None:
+        self.client.headers.pop("Authorization", None)
+
+
+@pytest.fixture
+def sessions_file(sso: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """The CLI pointed at the test's control plane, with its own config directory."""
+    monkeypatch.setenv("AGENTGOV_URL", "http://testserver")
+    monkeypatch.setenv("AGENTGOV_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("AGENTGOV_TOKEN", raising=False)
+    monkeypatch.delenv("AGENTGOV_ADMIN_TOKEN", raising=False)
+    monkeypatch.setattr(cli, "_client", lambda: _AsConfigured(sso))
+    return tmp_path / "config" / "sessions.json"
+
+
+def a_browser(client: TestClient, provider: FakeProvider, pages: list[str], **user: Any) -> Any:
+    """Stands in for ``webbrowser.open``: sign in, then go back to the CLI's real listener."""
+
+    def open_(url: str) -> bool:
+        start = client.get(url, follow_redirects=False)
+        state, code = provider.authorize(start.headers["location"], **user)
+        params = {"state": state, "code": code}
+        back = client.get("/auth/callback", params=params, follow_redirects=False)
+        pages.append(httpx.get(back.headers["location"], trust_env=False).text)
+        return True
+
+    return open_
+
+
+class TestCliLogin:
+    def test_login_whoami_logout(self, sso, provider, sessions_file, monkeypatch) -> None:
+        pages: list[str] = []
+        browser = a_browser(sso, provider, pages, roles=["agentgov-admin"])
+        monkeypatch.setattr(cli.webbrowser, "open", browser)
+        result = runner.invoke(cli.app, ["login"])
+        assert result.exit_code == 0, result.output
+        assert "Signed in to http://testserver as alice@example.com (admin) until" in result.output
+        assert "signed in to the AgentGov command line as alice@example.com" in pages[0]
+        assert stat.S_IMODE(sessions_file.stat().st_mode) == 0o600
+
+        me = runner.invoke(cli.app, ["whoami"])
+        assert json.loads(me.output)["actor"] == "admin:alice@example.com"
+        assert json.loads(me.output)["via"] == "session"
+
+        out = runner.invoke(cli.app, ["logout"])
+        assert out.output.strip() == "Signed out of http://testserver."
+        assert json.loads(sessions_file.read_text()) == {}
+        assert sso.get("/v1/access", headers=ADMIN).json()["sessions"] == []
+        signed_out = runner.invoke(cli.app, ["whoami"])
+        assert signed_out.exit_code == 1 and "agentgov login" in signed_out.output
+        again = runner.invoke(cli.app, ["logout"])
+        assert again.output.strip() == "Not signed in to http://testserver."
+
+    def test_a_refused_sign_in_is_reported(self, sso, provider, sessions_file, monkeypatch):
+        pages: list[str] = []
+        monkeypatch.setattr(cli.webbrowser, "open", a_browser(sso, provider, pages, roles=[]))
+        result = runner.invoke(cli.app, ["login"])
+        assert result.exit_code == 2
+        assert "sign-in failed: you signed in, but your account has no AgentGov role" in (
+            result.output
+        )
+        assert "Sign-in failed" in pages[0]
+        assert not sessions_file.exists()
+
+    def test_without_a_browser_it_prints_the_link(self, sso, sessions_file, monkeypatch) -> None:
+        monkeypatch.setattr(cli.webbrowser, "open", lambda url: pytest.fail("opened a browser"))
+        monkeypatch.setattr(cli, "LOGIN_WAIT_SECONDS", 0.2)
+        result = runner.invoke(cli.app, ["login", "--no-browser"])
+        assert result.exit_code == 2
+        assert "http://testserver/auth/login?cli_port=" in result.output
+        assert "timed out waiting for you to sign in" in result.output
+
+    def test_an_environment_token_comes_first(
+        self, sso, provider, sessions_file, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("AGENTGOV_ADMIN_TOKEN", "test-admin")
+        browser = a_browser(sso, provider, [], roles=["agentgov-auditor"])
+        monkeypatch.setattr(cli.webbrowser, "open", browser)
+        result = runner.invoke(cli.app, ["login"])
+        assert result.exit_code == 0, result.output
+        assert "unset it to use this sign-in" in result.output
+        assert json.loads(runner.invoke(cli.app, ["whoami"]).output)["via"] == "token"
+
+    def test_needs_single_sign_on(self, client, monkeypatch) -> None:
+        monkeypatch.setattr(cli, "_client", lambda: _Shared(client, "test-admin"))
+        result = runner.invoke(cli.app, ["login"])
+        assert result.exit_code == 2 and "has no single sign-on" in result.output
 
 
 class TestClaims:

@@ -10,7 +10,8 @@ trust: Keycloak, Open Policy Agent, agentgateway, Presidio and OpenTelemetry.
 
 AgentGov uses [Microsoft Agent 365](https://learn.microsoft.com/en-us/microsoft-agent-365/overview)
 as its functional baseline. The [parity matrix](docs/baseline-agent365.md) shows each
-Agent 365 capability next to its AgentGov equivalent.
+Agent 365 capability next to its AgentGov equivalent. You don't need Agent 365 to run
+AgentGov ([why](#do-i-need-agent-365)).
 
 > **Status: alpha.** The reference deployment runs end to end; `scripts/ci.sh --e2e` exercises it.
 > APIs and manifests may change before 1.0.
@@ -32,6 +33,27 @@ decisions, MCP enforcement, PII detection and telemetry are all handled by estab
 projects. The code in this repository is the part none of them provides: the agent
 registry and its lifecycle, the reconcilers that keep those projects in sync with it, a
 policy processor for the gateway, and a tamper-evident evidence ledger.
+
+## Do I need Agent 365?
+
+No. AgentGov runs on its own open-source stack and needs no Microsoft account or
+licence. Agent 365 is the yardstick it is measured against, because it is the most
+complete published description of what governing agents involves.
+
+Whether AgentGov replaces Agent 365 depends on where your agents run:
+
+| Your agents | What AgentGov does |
+|---|---|
+| Built and run by you, with any framework or cloud, calling tools over MCP | The whole job: registry, an identity per agent, policy on every tool call, data protection, approvals, a kill switch and an audit trail. For these agents it is an alternative to Agent 365, and the option for organisations that don't use Microsoft 365 |
+| Built in Microsoft 365 Copilot, Copilot Studio or Agent Builder | Works alongside Microsoft's admin centers. These agents don't pass through AgentGov's gateway, so only Microsoft can block them or apply data-loss rules to them. AgentGov lists them, checks their connectors and instructions, and keeps them in the same registry and audit trail as your other agents. Admins who sign in through Microsoft Entra ID can also have AgentGov quarantine or block them, which Microsoft then does as that admin |
+
+Agent 365 matters in two optional places: syncing the Microsoft 365 agent catalog and
+blocking Microsoft 365 agents from AgentGov, because Microsoft only opens those APIs to
+tenants with an Agent 365 licence. Without one, leave them off. Everything else works,
+including Copilot Studio agents: importing or syncing them needs only a Microsoft Entra
+role that can read the Power Platform inventory, such as Power Platform administrator or
+AI reader, and quarantining them needs the AI administrator or Power Platform
+administrator role ([details](docs/platforms.md)).
 
 ## Capabilities
 
@@ -220,7 +242,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Architecture](docs/architecture.md)
 * [Administration](docs/administration.md): the same tasks in the admin UI, the CLI and the API
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
-  Copilot Studio inventory and the connector allowlist
+  Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
+  as the signed-in admin
 * [Agent instructions](docs/instructions.md): checking agents' system prompts for harmful
   or malicious content
 * [Policies](docs/policies.md)

@@ -204,6 +204,24 @@ class LoginState(Base):
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
 
 
+class CliLogin(Base):
+    """A sign-in for the command line (``agentgov login``), used once and short-lived.
+
+    The CLI listens on a loopback port and proves with PKCE that it started the
+    sign-in. Once the person has signed in, who they are waits here, under the
+    hash of a one-time code, until the CLI collects its session.
+    """
+
+    __tablename__ = "cli_logins"
+
+    state: Mapped[str] = mapped_column(String(64), primary_key=True)
+    port: Mapped[int] = mapped_column(Integer)
+    challenge: Mapped[str] = mapped_column(String(64))
+    code_hash: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    identity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+
+
 class PlatformAgent(Base):
     """An agent as the platform that runs it reports it (Microsoft 365, Copilot Studio).
 

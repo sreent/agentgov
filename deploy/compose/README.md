@@ -62,11 +62,13 @@ from another address, set `AGENTGOV_PUBLIC_URL` and update the `agentgov-admin` 
 redirect URI (`<public URL>/auth/callback`) and post-logout redirect URI
 (`<public URL>/ui/`) in Keycloak. Another OIDC provider can be used directly instead of
 Keycloak: set `AGENTGOV_OIDC_ISSUER`, its endpoints and the claim that carries roles (see
-`src/agentgov/config.py`).
+`src/agentgov/config.py`). For Microsoft Entra ID, AgentGov knows the endpoints;
+[Setting it up](../../docs/platforms.md#setting-it-up) has the steps.
 
-API tokens still work next to single sign-on: the CLI uses them, the UI accepts one on
-its sign-in page, and the bootstrap token (`AGENTGOV_ADMIN_TOKEN`, default
-`dev-admin-token`) is the way in when single sign-on is unavailable.
+The CLI signs in the same way with `agentgov login`. API tokens still work next to
+single sign-on: scripts and the CLI can use them, the UI accepts one on its sign-in page,
+and the bootstrap token (`AGENTGOV_ADMIN_TOKEN`, default `dev-admin-token`) is the way in
+when single sign-on is unavailable.
 
 ## Optional: Langfuse for trace exploration
 
@@ -116,8 +118,10 @@ in `.env` for a Microsoft Entra app with the Microsoft Graph application permiss
 `CopilotPackages.Read.All`, then run `docker compose up -d` again. The control plane
 syncs at start-up and every hour. Copilot Studio agents and their connectors are
 imported from a Power Platform inventory export on the **Platforms** page, and need no
-configuration. [Agents on Microsoft 365 and Copilot Studio](../../docs/platforms.md) has
-the details.
+configuration. If admins sign in through Microsoft Entra ID instead of Keycloak (see
+`.env.example`), they can also sync the Copilot Studio inventory, quarantine Copilot
+Studio agents and block Microsoft 365 agents from AgentGov.
+[Agents on Microsoft 365 and Copilot Studio](../../docs/platforms.md) has the details.
 
 ## Configuration
 

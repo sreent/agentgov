@@ -130,6 +130,8 @@ def create_app(
             "opa": bool(settings.opa_url),
             "unknown_agent_mode": settings.unknown_agent_mode,
             "sso": {"enabled": settings.sso_enabled, "login_url": "/auth/login"},
+            # Signed-in administrators can act in Microsoft 365 through AgentGov.
+            "microsoft_admin_actions": settings.microsoft_admin_actions,
         }
 
     @app.get("/v1/me", tags=["system"])
@@ -143,6 +145,7 @@ def create_app(
     app.include_router(sso_routes.router)
     app.include_router(access_routes.router)
     app.include_router(platform_routes.router)
+    app.include_router(platform_routes.agent_router)
     app.include_router(instruction_routes.router)
 
     ui_dir = Path(str(resources.files("agentgov") / "ui"))

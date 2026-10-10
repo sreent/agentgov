@@ -32,8 +32,12 @@ def end_session(
     request: Request, session_id: str, principal: Principal = Depends(admin)
 ) -> dict[str, int]:
     """End one session. The person signs in again, which re-reads their roles."""
-    with request.app.state.rt.db.session() as s:
-        return {"ended": access.end_session(s, session_id, actor=principal.actor)}
+    rt = request.app.state.rt
+    with rt.db.session() as s:
+        ended = access.end_session(s, session_id, actor=principal.actor)
+    if rt.delegations is not None:
+        rt.delegations.forget(session_id)
+    return {"ended": ended}
 
 
 @router.post("/people/{subject:path}/sign-out")
@@ -41,5 +45,10 @@ def sign_out(
     request: Request, subject: str, principal: Principal = Depends(admin)
 ) -> dict[str, int]:
     """End every session of one person (by the identity provider's subject)."""
-    with request.app.state.rt.db.session() as s:
-        return {"ended": access.sign_out(s, subject, actor=principal.actor)}
+    rt = request.app.state.rt
+    with rt.db.session() as s:
+        ended_ids = access.session_ids(s, subject)
+        ended = access.sign_out(s, subject, actor=principal.actor)
+    if rt.delegations is not None:
+        rt.delegations.forget(*ended_ids)
+    return {"ended": ended}

@@ -14,11 +14,13 @@ from agentgov import ledger
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.gateway import GatewayConfigWriter
+from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
 from agentgov.opa.bundle import BundleServer
 from agentgov.platforms.microsoft import (
     Microsoft365Catalog,
+    MicrosoftAdmin,
     PlatformError,
     declarative_instructions,
     is_declarative,
@@ -98,6 +100,7 @@ class Runtime:
         oidc_http: httpx.Client | None = None,
         m365_http: httpx.Client | None = None,
         guardian_http: httpx.Client | None = None,
+        microsoft_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
         self.db = Database(settings.database_url, on_commit=self._on_commit)
@@ -107,6 +110,12 @@ class Runtime:
         self.ledger_integrity = ledger.IntegrityMonitor()
         # Administrator single sign-on (OIDC), when a client secret is configured.
         self.sso = OIDCClient(settings, http=oidc_http) if settings.sso_enabled else None
+        # Acting as the signed-in administrator in Microsoft 365 and Power Platform.
+        self.delegations: Delegations | None = None
+        self.microsoft_admin: MicrosoftAdmin | None = None
+        if settings.microsoft_admin_actions:
+            self.delegations = Delegations(settings, http=oidc_http)
+            self.microsoft_admin = MicrosoftAdmin(settings, http=microsoft_http)
         self.identity: IdentityReconciler | None = None
         if settings.keycloak_enabled:
             admin = KeycloakAdmin(

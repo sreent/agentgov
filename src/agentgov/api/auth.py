@@ -1,8 +1,9 @@
 """Authentication and role checks for the control plane API.
 
 Callers authenticate with a bearer token (the bootstrap admin token, the
-internal service token or an API key) or, for people signed in through single
-sign-on, with the session cookie set by ``/auth/callback``.
+internal service token, an API key, or the session token ``agentgov login``
+gets) or, for people signed in through single sign-on in a browser, with the
+session cookie set by ``/auth/callback``.
 """
 
 from __future__ import annotations
@@ -35,6 +36,10 @@ class Principal:
     roles: frozenset[str] = frozenset()
     # "token" (bootstrap/service), "api_key" or "session" (single sign-on).
     via: str = "token"
+    # For single sign-on: the session, and whether AgentGov holds a Microsoft
+    # sign-in for it (to act as this person in Microsoft 365 and Power Platform).
+    session_id: str | None = None
+    microsoft: bool = False
 
     def __post_init__(self) -> None:
         if not self.roles:
@@ -55,10 +60,11 @@ class Principal:
             "roles": sorted(self.roles),
             "actor": self.actor,
             "via": self.via,
+            "microsoft": self.microsoft,
         }
 
 
-def _bearer(request: Request) -> str | None:
+def bearer_token(request: Request) -> str | None:
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or not token:
@@ -69,7 +75,7 @@ def _bearer(request: Request) -> str | None:
 def authenticate(request: Request) -> Principal | None:
     rt = request.app.state.rt
     settings = rt.settings
-    token = _bearer(request)
+    token = bearer_token(request)
     if token:
         if settings.admin_token and hmac.compare_digest(token, settings.admin_token):
             return Principal("bootstrap", "admin")
@@ -79,7 +85,9 @@ def authenticate(request: Request) -> Principal | None:
             key = apikeys.authenticate(session, token)
             if key is not None:
                 return Principal(key.name, key.role, via="api_key")
-        return None
+        # A session token from `agentgov login`. Browsers never send these by
+        # themselves, so they need no CSRF header.
+        return _signed_in(rt, token)
     if not request.cookies.get(SESSION_COOKIE) or not settings.sso_enabled:
         return None
     if request.method not in SAFE_METHODS and request.headers.get(CSRF_HEADER) != "1":
@@ -89,16 +97,26 @@ def authenticate(request: Request) -> Principal | None:
 
 def session_principal(request: Request) -> Principal | None:
     """The person signed in through single sign-on, from the session cookie."""
-    rt = request.app.state.rt
-    cookie = request.cookies.get(SESSION_COOKIE)
-    if not cookie or not rt.settings.sso_enabled:
+    return _signed_in(request.app.state.rt, request.cookies.get(SESSION_COOKIE))
+
+
+def _signed_in(rt: Any, token: str | None) -> Principal | None:
+    if not token or not rt.settings.sso_enabled:
         return None
     with rt.db.session() as session:
-        record = sso.lookup(session, cookie)
+        record = sso.lookup(session, token)
         roles = [r for r in sso.SSO_ROLES if record is not None and r in (record.roles or [])]
         if not roles:
             return None
-        return Principal(record.name, roles[0], frozenset(roles), via="session")
+        delegations = getattr(rt, "delegations", None)
+        return Principal(
+            record.name,
+            roles[0],
+            frozenset(roles),
+            via="session",
+            session_id=record.id,
+            microsoft=delegations is not None and delegations.has(record.id),
+        )
 
 
 def require(*roles: str) -> Callable[[Request], Principal]:
