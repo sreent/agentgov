@@ -194,7 +194,7 @@ what-if evaluation.
 | [Keycloak](https://www.keycloak.org) | 26.8.0 | Apache-2.0 | Agent identities and tokens |
 | [Open Policy Agent](https://www.openpolicyagent.org) | 1.21.1 | Apache-2.0 | Policy decision point |
 | [agentgateway](https://agentgateway.dev) | 1.6.0 | Apache-2.0 | MCP gateway, policy enforcement point |
-| [Presidio](https://github.com/microsoft/presidio) analyzer | 2.2.362 | MIT | Personal-data detection |
+| [Presidio](https://github.com/data-privacy-stack/presidio) analyzer | 2.2.364 | MIT | Personal-data detection |
 | [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) (contrib) | 0.162.0 | Apache-2.0 | Trace ingestion and routing |
 | [PostgreSQL](https://www.postgresql.org) | 17 | PostgreSQL | Registry, Keycloak and Langfuse storage |
 | [Langfuse](https://langfuse.com) (optional) | 4.56.0 | MIT (core) | Trace exploration |
