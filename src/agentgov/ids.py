@@ -15,6 +15,7 @@ API_KEY = "key"
 APPROVAL = "apr"
 FINDING = "fnd"
 EVENT = "evt"
+SESSION = "ses"
 SIGNAL = "sig"
 
 

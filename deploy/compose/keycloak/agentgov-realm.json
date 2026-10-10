@@ -19,6 +19,30 @@
       "directAccessGrantsEnabled": false,
       "clientAuthenticatorType": "client-secret",
       "secret": "${AGENTGOV_KEYCLOAK_CLIENT_SECRET}"
+    },
+    {
+      "clientId": "agentgov-admin",
+      "name": "AgentGov admin console",
+      "description": "Single sign-on for AgentGov administrators (the control plane is the client).",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${AGENTGOV_OIDC_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "redirectUris": [
+        "http://localhost:8000/auth/callback"
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8000/ui/"
+      }
     }
   ],
   "users": [
@@ -27,8 +51,86 @@
       "enabled": true,
       "serviceAccountClientId": "agentgov-control-plane",
       "clientRoles": {
-        "realm-management": ["manage-clients", "view-clients", "query-clients"]
+        "realm-management": [
+          "manage-clients",
+          "view-clients",
+          "query-clients"
+        ]
       }
+    },
+    {
+      "username": "admin",
+      "email": "admin@example.com",
+      "emailVerified": true,
+      "firstName": "Ada",
+      "lastName": "Admin",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${AGENTGOV_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agentgov-admin"
+      ]
+    },
+    {
+      "username": "alice",
+      "email": "alice@example.com",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Approver",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${AGENTGOV_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agentgov-approver"
+      ]
+    },
+    {
+      "username": "audrey",
+      "email": "audrey@example.com",
+      "emailVerified": true,
+      "firstName": "Audrey",
+      "lastName": "Auditor",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${AGENTGOV_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agentgov-auditor"
+      ]
     }
-  ]
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "agentgov-admin",
+        "description": "AgentGov: full administration"
+      },
+      {
+        "name": "agentgov-approver",
+        "description": "AgentGov: decide approvals and findings, attest sponsored agents"
+      },
+      {
+        "name": "agentgov-auditor",
+        "description": "AgentGov: read-only, including the evidence ledger"
+      },
+      {
+        "name": "agentgov-registrar",
+        "description": "AgentGov: submit agents and tool servers for review"
+      }
+    ]
+  }
 }

@@ -15,6 +15,7 @@ from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.gateway import GatewayConfigWriter
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
+from agentgov.identity.sso import OIDCClient
 from agentgov.opa.bundle import BundleServer
 from agentgov.registry import posture
 
@@ -79,13 +80,21 @@ class AlertSink:
 
 
 class Runtime:
-    def __init__(self, settings: Settings, *, keycloak_http: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        keycloak_http: httpx.Client | None = None,
+        oidc_http: httpx.Client | None = None,
+    ) -> None:
         self.settings = settings
         self.db = Database(settings.database_url, on_commit=self._on_commit)
         self.bundles = BundleServer(self.db)
         self.gateway = GatewayConfigWriter(self.db, settings)
         self.alerts = AlertSink(settings.alert_webhook_url)
         self.ledger_integrity = ledger.IntegrityMonitor()
+        # Administrator single sign-on (OIDC), when a client secret is configured.
+        self.sso = OIDCClient(settings, http=oidc_http) if settings.sso_enabled else None
         self.identity: IdentityReconciler | None = None
         if settings.keycloak_enabled:
             admin = KeycloakAdmin(

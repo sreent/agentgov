@@ -53,10 +53,15 @@ class TestAuth:
 
     def test_whoami(self, client) -> None:
         me = client.get("/v1/me", headers=ADMIN).json()
-        assert me == {"name": "bootstrap", "role": "admin", "actor": "admin:bootstrap"}
-        assert client.get("/v1/me", headers=key(client, "registrar", "ci")).json()["actor"] == (
-            "registrar:ci"
-        )
+        assert me == {
+            "name": "bootstrap",
+            "role": "admin",
+            "roles": ["admin"],
+            "actor": "admin:bootstrap",
+            "via": "token",
+        }
+        ci = client.get("/v1/me", headers=key(client, "registrar", "ci")).json()
+        assert (ci["actor"], ci["via"]) == ("registrar:ci", "api_key")
         assert client.get("/v1/me").status_code == 401
 
     def test_validation_errors_use_the_common_error_shape(self, client) -> None:
