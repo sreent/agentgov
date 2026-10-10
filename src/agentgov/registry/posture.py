@@ -17,7 +17,7 @@ from agentgov import ids
 from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, ToolServer
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import findings, validation
+from agentgov.registry import findings, platforms, validation
 
 POSTURE_TYPES = {
     "agent.no_owner",
@@ -42,9 +42,14 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
         )
         present.add(f"{type_}:{subject}")
 
+    # Copilot Studio checks (connector allowlist, sharing) first: they count towards risk.
+    platform_findings = platforms.evaluate(session)
     agents = session.scalars(select(Agent).where(Agent.status != DELETED)).unique().all()
     for agent in agents:
         managed = agent.status in (ACTIVE, PENDING, BLOCKED)
+        # Agents run by another platform (Microsoft 365, Copilot Studio) never call
+        # tools through the gateway: grants, blueprints and activity don't apply.
+        on_gateway = not agent.on_platform
         if managed and not agent.owner:
             flag(
                 "agent.no_owner",
@@ -79,7 +84,7 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
             )
         stale_cutoff = now - timedelta(days=settings.stale_agent_days)
         last = agent.last_seen_at or agent.created_at
-        if agent.status == ACTIVE and last < stale_cutoff:
+        if on_gateway and agent.status == ACTIVE and last < stale_cutoff:
             flag(
                 "agent.stale",
                 agent.id,
@@ -88,7 +93,7 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
                 agent_id=agent.id,
                 remediation="Delete agents that are no longer used.",
             )
-        if managed and validation.is_broad(agents_svc.effective_grants(agent)):
+        if on_gateway and managed and validation.is_broad(agents_svc.effective_grants(agent)):
             flag(
                 "agent.broad_permissions",
                 agent.id,
@@ -97,7 +102,7 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
                 agent_id=agent.id,
                 remediation="Replace the */* grant with the tools the agent needs.",
             )
-        if managed and agent.blueprint_id is None:
+        if on_gateway and managed and agent.blueprint_id is None:
             flag(
                 "agent.no_blueprint",
                 agent.id,
@@ -139,4 +144,5 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
         "checked_agents": len(agents),
         "open_posture_findings": len(present),
         "resolved": resolved,
+        "open_platform_findings": platform_findings,
     }

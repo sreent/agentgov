@@ -43,7 +43,7 @@ flowchart LR
 
 | Component | Role | Agent 365 analogue |
 |---|---|---|
-| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients | Microsoft 365 admin center *Agents*, Entra ID Governance |
+| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; syncs Microsoft 365's agent catalog and imports Copilot Studio's ([platforms](platforms.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance |
 | **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server: content inspection, OPA queries, approvals, redaction, decision records | Defender real-time protection, Purview DLP enforcement |
 | [Keycloak](https://www.keycloak.org) 26.8 | One OAuth client per agent; issues short-lived tokens with `agent_id` and the gateway audience; signs administrators in to the control plane (and can federate an existing directory) | Entra Agent ID, Entra ID sign-in |
 | [OPA](https://www.openpolicyagent.org) 1.21 | Policy decision point; evaluates the Rego library against registry data | Conditional Access |
@@ -160,7 +160,8 @@ streams the ledger as JSON Lines for a SIEM or for offline verification.
 src/agentgov/
   api/            FastAPI routes (registry, governance, integrations) and auth
   registry/       service layer: agents, blueprints, tool servers, approvals, findings,
-                  risk, posture, discovery, decisions, manifests, API keys
+                  risk, posture, discovery, platforms, decisions, manifests, API keys, access
+  platforms/      clients for agent platforms (Microsoft Graph's agent catalog)
   identity/       Keycloak admin client and identity reconciler
   opa/            bundle builder and long-poll server, Rego validation, OPA client
   policies/       the Rego library (+ tests) shipped to OPA

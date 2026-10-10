@@ -74,7 +74,13 @@ def raise_finding(
     return finding, reopened
 
 
-def resolve_absent(session: Session, *, types: set[str], present_keys: set[str]) -> int:
+def resolve_absent(
+    session: Session,
+    *,
+    types: set[str],
+    present_keys: set[str],
+    actor: str = "system:posture-scan",
+) -> int:
     """Auto-resolve open posture findings whose condition no longer holds."""
     count = 0
     open_findings = session.scalars(
@@ -84,9 +90,16 @@ def resolve_absent(session: Session, *, types: set[str], present_keys: set[str])
         if finding.key not in present_keys:
             finding.status = "resolved"
             finding.resolved_at = ids.utcnow()
-            finding.resolved_by = "system:posture-scan"
+            finding.resolved_by = actor
             count += 1
     return count
+
+
+def resolve_key(session: Session, key: str, *, actor: str) -> None:
+    """Resolve the open finding ``key`` (``type:subject``), if there is one."""
+    finding = session.scalar(select(Finding).where(Finding.key == key))
+    if finding is not None and finding.status == "open":
+        set_status(session, finding.id, "resolved", actor)
 
 
 def set_status(session: Session, finding_id: str, status: str, actor: str) -> Finding:

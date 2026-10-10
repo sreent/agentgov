@@ -10,7 +10,7 @@ from agentgov import ledger
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.identity.keycloak import KeycloakError
 from agentgov.models import ACTIVE
-from agentgov.registry import agents, apikeys, blueprints, policies, toolservers
+from agentgov.registry import agents, apikeys, blueprints, platforms, policies, toolservers
 from agentgov.registry.errors import Conflict
 
 router = APIRouter(prefix="/v1")
@@ -33,9 +33,11 @@ def list_agents(
     blueprint: str | None = None,
     risk_level: str | None = None,
     q: str | None = None,
+    source: str | None = None,
     include_deleted: bool = False,
     _: Principal = Depends(read),
 ) -> list[dict[str, Any]]:
+    """``source`` is ``registered``, ``discovered:<how>`` or ``platform:<platform>``."""
     with _rt(request).db.session() as s:
         return [
             agents.to_dict(a)
@@ -45,6 +47,7 @@ def list_agents(
                 blueprint=blueprint,
                 risk_level=risk_level,
                 q=q,
+                source=source,
                 include_deleted=include_deleted,
             )
         ]
@@ -69,7 +72,9 @@ def register_agent(
 @router.get("/agents/{ref}", tags=["agents"])
 def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
     with _rt(request).db.session() as s:
-        return agents.to_dict(agents.get(s, ref))
+        agent = agents.get(s, ref)
+        # What Microsoft 365 or Copilot Studio reports, for agents that run there.
+        return {**agents.to_dict(agent), "platforms": platforms.for_agent(s, agent.id)}
 
 
 @router.patch("/agents/{ref}", tags=["agents"])

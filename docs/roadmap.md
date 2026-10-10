@@ -24,7 +24,8 @@ and write only the glue.
 | Theme | Item | Building block |
 |---|---|---|
 | Registry | **Management rules**: declarative registry rules (for example "block agents without an owner for 14 days") on top of posture findings | OPA |
-| Registry | **Connectors** that import agents from cloud agent platforms and SaaS agent builders into the registry as `discovered` | Platform APIs |
+| Registry | **More platform connectors**: import agents from cloud agent platforms and SaaS agent builders (AWS, Google, Salesforce, Databricks) the way [Microsoft 365 and Copilot Studio](platforms.md) are | Platform APIs |
+| Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
 | Access | **Access packages**: time-bound, requestable bundles of tool grants with approval | — |
 | Interoperability | **A2A governance**: agent-to-agent calls through the gateway with the same identity and policy | agentgateway A2A routes |
 | Policy | **AuthZEN interface** so the decision point can be swapped (for example to Cedar) without touching enforcement points | OpenID AuthZEN |

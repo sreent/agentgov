@@ -94,6 +94,17 @@ Add `-f docker-compose.langfuse.yml` to every later `docker compose` command for
 stack (`ps`, `logs`, `down`), or set
 `COMPOSE_FILE=docker-compose.yml:docker-compose.langfuse.yml` in `.env`.
 
+## Optional: Microsoft 365 and Copilot Studio agents
+
+To bring the organisation's Microsoft 365 agent catalog into the registry, set
+`AGENTGOV_M365_TENANT_ID`, `AGENTGOV_M365_CLIENT_ID` and `AGENTGOV_M365_CLIENT_SECRET`
+in `.env` for a Microsoft Entra app with the Microsoft Graph application permission
+`CopilotPackages.Read.All`, then run `docker compose up -d` again. The control plane
+syncs at start-up and every hour. Copilot Studio agents and their connectors are
+imported from a Power Platform inventory export on the **Platforms** page, and need no
+configuration. [Agents on Microsoft 365 and Copilot Studio](../../docs/platforms.md) has
+the details.
+
 ## Configuration
 
 | File | Purpose |

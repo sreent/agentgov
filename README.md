@@ -37,7 +37,7 @@ policy processor for the gateway, and a tamper-evident evidence ledger.
 
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
-| **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery | AgentGov control plane |
+| **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery; Microsoft 365 and Copilot Studio agents with a connector allowlist | AgentGov control plane |
 | **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call using live registry context; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
@@ -217,6 +217,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Agent 365 baseline and parity matrix](docs/baseline-agent365.md)
 * [Architecture](docs/architecture.md)
 * [Administration](docs/administration.md): the same tasks in the admin UI, the CLI and the API
+* [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
+  Copilot Studio inventory and the connector allowlist
 * [Policies](docs/policies.md)
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)

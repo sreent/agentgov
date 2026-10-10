@@ -23,7 +23,7 @@ for setup and emergencies.
 
 | Role | Can |
 |---|---|
-| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, policies, credentials and API keys |
+| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, policies, credentials, API keys, platform syncs and the connector allowlist |
 | `approver` | Read everything; decide approval requests; resolve, dismiss and reopen findings; attest the agents it sponsors |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers); it cannot read the registry |
@@ -63,6 +63,10 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Create, review and revoke API keys | Access → **Create API key**, **Revoke** | `agentgov apikeys create\|list\|revoke` | `POST`/`GET /v1/apikeys`, `DELETE /v1/apikeys/{id}` |
 | See who has signed in, with which roles | Access → People | `agentgov access list`, `agentgov access sessions` | `GET /v1/access` |
 | Sign someone out | Access → People → **Sign out** | `agentgov access sign-out PERSON`, `agentgov access end-session ID` | `POST /v1/access/people/{subject}/sign-out`, `DELETE /v1/access/sessions/{id}` |
+| Sync the Microsoft 365 agent catalog | Platforms → **Sync now** | `agentgov platforms sync` | `POST /v1/platforms/microsoft-365/sync` |
+| Import Copilot Studio agents | Platforms → **Import inventory** | `agentgov platforms import FILE` | `POST /v1/platforms/copilot-studio/import` |
+| List agents from one platform | Platforms → *n agents* | `agentgov agents list --source platform:copilot-studio` | `GET /v1/agents?source=…` |
+| See the connectors agents use; approve or remove one | Platforms → Connectors | `agentgov platforms connectors`, `approve-connector ID`, `unapprove-connector ID` | `GET /v1/platforms/connectors`, `PUT`/`DELETE /v1/platforms/connectors/{id}/approval` |
 
 Every CLI command has `--help`. Commands that cannot be undone (`purge`, `delete` of
 blueprints, tool servers and policies, `apikeys revoke`) ask for confirmation unless you

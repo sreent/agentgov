@@ -2,7 +2,7 @@
 
 The administration commands are a thin layer over the HTTP API and follow the
 admin UI's pages: agents, blueprints, tool servers, policies, approvals,
-findings, the ledger and access (API keys). Whatever the UI can change, the CLI
+findings, the ledger, access (API keys) and platforms. Whatever the UI can change, the CLI
 can change too, through the same endpoints and with the same role checks.
 """
 
@@ -55,6 +55,11 @@ access_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(access_app, name="access")
+platforms_app = typer.Typer(
+    help="Agents on Microsoft 365 and Copilot Studio, and the connector allowlist.",
+    no_args_is_help=True,
+)
+app.add_typer(platforms_app, name="platforms")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -244,9 +249,14 @@ def overview() -> None:
 
 
 @agents_app.command("list")
-def agents_list(status: str | None = None) -> None:
+def agents_list(
+    status: str | None = None,
+    source: str | None = typer.Option(
+        None, help="registered, discovered:<how>, or platform:microsoft-365|copilot-studio."
+    ),
+) -> None:
     """List agents (all but deleted ones, unless --status is given)."""
-    rows = _call("GET", "/v1/agents", params={"status": status} if status else None)
+    rows = _call("GET", "/v1/agents", params=_given(status=status, source=source))
     for r in rows:
         r["risk"] = f"{r['risk']['level']} ({r['risk']['score']})"
     _table(rows, ["name", "status", "blueprint", "owner", "risk", "last_seen_at"])
@@ -981,6 +991,99 @@ def access_end_session(session_id: str) -> None:
     """End one session (see `agentgov access sessions`)."""
     _call("DELETE", f"/v1/access/sessions/{session_id}")
     _done("session", session_id, "ended")
+
+
+# ----------------------------------------------------------------- platforms
+
+
+def _synced(source: str, verb: str, counts: dict[str, int]) -> None:
+    outcome = f"{counts['created']} new, {counts['updated']} updated, {counts['skipped']} skipped"
+    if "findings" in counts:
+        outcome += f"; {counts['findings']} open findings"
+    _done("platform", source, f"{verb} ({outcome})")
+
+
+@platforms_app.command("status")
+def platforms_status() -> None:
+    """Each source of platform agents and how its last sync or import went."""
+    view = _call("GET", "/v1/platforms")
+    rows = []
+    for src in view["sources"]:
+        last = src["last_sync"] or {}
+        state = "not configured" if not src["configured"] else "never"
+        if last:
+            state = "ok" if last["ok"] else f"failed: {last['message']}"
+        rows.append({**src, "last_sync": last.get("at"), "state": state})
+    _table(rows, ["source", "mode", "agents", "last_sync", "state"])
+
+
+@platforms_app.command("sync")
+def platforms_sync() -> None:
+    """Read the Microsoft 365 agent catalog now (it is also read on a schedule)."""
+    _synced("microsoft-365", "synced", _call("POST", "/v1/platforms/microsoft-365/sync"))
+
+
+@platforms_app.command("import")
+def platforms_import(
+    file: Path = typer.Argument(
+        ..., help="JSON from `pac resource-query` or the Power Platform API."
+    ),
+) -> None:
+    """Import Copilot Studio agents from a Power Platform inventory export."""
+    try:
+        payload = json.loads(file.read_text())
+    except (OSError, ValueError) as exc:
+        _fail(f"cannot read {file}: {exc}")
+    counts = _call("POST", "/v1/platforms/copilot-studio/import", json=payload)
+    _synced("copilot-studio", "imported", counts)
+
+
+@platforms_app.command("connectors")
+def platforms_connectors() -> None:
+    """Connectors Copilot Studio agents use, and whether each is on the allowlist."""
+    view = _call("GET", "/v1/platforms/connectors")
+    if not view["allowlist_active"]:
+        typer.echo(
+            "note: the allowlist is empty, so no connector is flagged yet; "
+            "approve connectors to start checking",
+            err=True,
+        )
+    rows = [
+        {
+            **r,
+            "approved": "yes" if r["approved"] else "no",
+            "agents": len(r["agents"]),
+            "maker": r["maker_connections"],
+        }
+        for r in view["connectors"]
+    ]
+    _table(rows, ["connector_id", "approved", "agents", "maker", "note"])
+
+
+def _connector(connector_id: str) -> str:
+    """``shared_office365``, also given ``/providers/Microsoft.PowerApps/apis/shared_office365``."""
+    return quote(connector_id.strip().rstrip("/").rsplit("/", 1)[-1], safe="")
+
+
+@platforms_app.command("approve-connector")
+def platforms_approve_connector(
+    connector_id: str = typer.Argument(..., help="For example shared_office365."),
+    note: str | None = typer.Option(None, help="Why it is allowed."),
+) -> None:
+    """Put a connector on the allowlist; agents using others get a finding."""
+    out = _call(
+        "PUT",
+        f"/v1/platforms/connectors/{_connector(connector_id)}/approval",
+        json={"note": note or ""},
+    )
+    _done("connector", out["connector_id"], "approved")
+
+
+@platforms_app.command("unapprove-connector")
+def platforms_unapprove_connector(connector_id: str) -> None:
+    """Take a connector off the allowlist."""
+    out = _call("DELETE", f"/v1/platforms/connectors/{_connector(connector_id)}/approval")
+    _done("connector", out["connector_id"], "no longer approved")
 
 
 def main() -> None:

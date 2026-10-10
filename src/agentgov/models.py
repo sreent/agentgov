@@ -117,6 +117,11 @@ class Agent(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
+    @property
+    def on_platform(self) -> bool:
+        """Run by another platform (Microsoft 365, Copilot Studio), not through the gateway."""
+        return (self.source or "").startswith("platform:")
+
 
 class ToolServer(Base):
     __tablename__ = "tool_servers"
@@ -197,6 +202,48 @@ class LoginState(Base):
     nonce: Mapped[str] = mapped_column(String(64))
     code_verifier: Mapped[str] = mapped_column(String(128))
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+
+
+class PlatformAgent(Base):
+    """An agent as the platform that runs it reports it (Microsoft 365, Copilot Studio).
+
+    These agents never call tools through AgentGov's gateway, so AgentGov
+    governs what their platform reports: inventory, ownership, sharing and the
+    connectors they use. ``agent_id`` is their record in the registry.
+    """
+
+    __tablename__ = "platform_agents"
+
+    id: Mapped[str] = mapped_column(String(320), primary_key=True)  # "<source>:<external id>"
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    external_id: Mapped[str] = mapped_column(String(255))
+    agent_id: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class PlatformSync(Base):
+    """The outcome of the latest sync or import from each platform."""
+
+    __tablename__ = "platform_syncs"
+
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    synced_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+    counts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ApprovedConnector(Base):
+    """A Power Platform connector the organisation allows its agents to use."""
+
+    __tablename__ = "approved_connectors"
+
+    connector_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    added_by: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = _created()
 
 
 class ApprovalRequest(Base):

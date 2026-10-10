@@ -17,7 +17,8 @@ from agentgov.gateway import GatewayConfigWriter
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
 from agentgov.opa.bundle import BundleServer
-from agentgov.registry import posture
+from agentgov.platforms.microsoft import Microsoft365Catalog, PlatformError
+from agentgov.registry import platforms, posture
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ class Runtime:
         *,
         keycloak_http: httpx.Client | None = None,
         oidc_http: httpx.Client | None = None,
+        m365_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
         self.db = Database(settings.database_url, on_commit=self._on_commit)
@@ -105,10 +107,20 @@ class Runtime:
                 http=keycloak_http,
             )
             self.identity = IdentityReconciler(self.db, settings, admin)
+        # The Microsoft 365 agent catalog, read with Microsoft Graph (app-only).
+        self.m365 = Microsoft365Catalog(settings, http=m365_http) if settings.m365_enabled else None
+        self._m365_lock = threading.Lock()
         self._gateway_worker = _Worker("gateway-config", self.gateway.sync, 300)
         self._posture_worker = (
             _Worker("posture-scan", self.run_posture_scan, settings.posture_interval_seconds)
             if settings.posture_interval_seconds > 0
+            else None
+        )
+        self._m365_worker = (
+            _Worker(
+                "microsoft-365-sync", self._scheduled_m365_sync, settings.m365_sync_interval_seconds
+            )
+            if self.m365 is not None and settings.m365_sync_interval_seconds > 0
             else None
         )
         self._started = False
@@ -129,6 +141,8 @@ class Runtime:
             self._gateway_worker.start()
         if self._posture_worker is not None:
             self._posture_worker.start()
+        if self._m365_worker is not None:
+            self._m365_worker.start()
         self._started = True
 
     def stop(self) -> None:
@@ -137,6 +151,8 @@ class Runtime:
         self._gateway_worker.stop()
         if self._posture_worker is not None:
             self._posture_worker.stop()
+        if self._m365_worker is not None:
+            self._m365_worker.stop()
         self.db.dispose()
 
     # -- reconciliation triggers -----------------------------------------------
@@ -150,3 +166,29 @@ class Runtime:
     def run_posture_scan(self) -> dict[str, Any]:
         with self.db.session() as session:
             return posture.scan(session, self.settings)
+
+    def sync_microsoft_365(self, *, actor: str | None = None) -> dict[str, int]:
+        """Read the Microsoft 365 agent catalog into the registry; returns the counts."""
+        if self.m365 is None:
+            raise PlatformError("Microsoft 365 sync is not configured")
+        with self._m365_lock:
+            try:
+                packages = self.m365.agents()  # before the transaction: paging can be slow
+            except PlatformError as exc:
+                with self.db.session() as session:
+                    platforms.set_sync(
+                        session, "microsoft-365", ok=False, counts={}, message=str(exc), actor=actor
+                    )
+                raise
+            with self.db.session() as session:
+                counts = platforms.record_microsoft_365(
+                    session, packages, include_types=self.settings.m365_types(), actor=actor
+                )
+                platforms.refresh_risk(session, self.settings)
+                return counts
+
+    def _scheduled_m365_sync(self) -> None:
+        try:
+            self.sync_microsoft_365()
+        except PlatformError as exc:
+            log.warning("Microsoft 365 sync failed: %s", exc)

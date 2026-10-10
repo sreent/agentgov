@@ -398,6 +398,8 @@ table.data .row-detail .break, table.data .row-detail code { overflow-wrap: anyw
 .chip[data-tone="accent"] .ico { color: var(--accent); }
 .chip--plain { background: transparent; border-color: var(--line-strong); padding-left: 8px; }
 .chip--mono { font-family: var(--font-mono); font-weight: 450; padding-left: 8px; }
+/* Long identifiers wrap inside their chip rather than run out of the card. */
+.facts dd .chip--mono { white-space: normal; overflow-wrap: anywhere; }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .stack > .chip, .card-body > .chip, .card-body > .btn, .card-body > a.btn { align-self: flex-start; }
 .risk-score { font-variant-numeric: tabular-nums; color: var(--ink-2); font-weight: 500; }

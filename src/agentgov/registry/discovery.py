@@ -22,12 +22,14 @@ from agentgov.models import DISCOVERED, Agent, AgentActivity
 from agentgov.registry import findings, risk
 
 
-def _slugify(value: str) -> str:
+def slugify(value: str) -> str:
+    """A registry name for something known only by a display name."""
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:50].strip("-")
     return slug or "agent"
 
 
-def _unique_name(session: Session, base: str) -> str:
+def unique_name(session: Session, base: str) -> str:
+    """``base``, or ``base-2``, ``base-3``... if an agent already has that name."""
     name, n = base, 1
     while session.scalar(select(Agent.id).where(Agent.name == name)):
         n += 1
@@ -51,7 +53,7 @@ def find(
         clauses.append(Agent.client_id == client_id)
     if name:
         clauses.append(Agent.name == name)
-        clauses.append(Agent.name == _slugify(name))
+        clauses.append(Agent.name == slugify(name))
     if not clauses:
         return None
     return session.scalars(select(Agent).where(or_(*clauses))).first()
@@ -77,7 +79,7 @@ def observe(
             return None
         agent = Agent(
             id=ids.new_id(ids.AGENT),
-            name=_unique_name(session, _slugify(label)),
+            name=unique_name(session, slugify(label)),
             description=f"Discovered via {source}; not registered.",
             status=DISCOVERED,
             source=f"discovered:{source}",

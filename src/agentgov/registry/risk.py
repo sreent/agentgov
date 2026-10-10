@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids
-from agentgov.models import DISCOVERED, Agent, RiskSignal
+from agentgov.models import DISCOVERED, Agent, Finding, RiskSignal
 from agentgov.registry import validation
 
 TIER_POINTS = {"minimal": 0, "low": 5, "medium": 10, "high": 25, "critical": 40}
@@ -29,6 +29,14 @@ SIGNAL_WEIGHTS: dict[str, tuple[int, int]] = {
     "approval_denied": (5, 15),
     "tool_poisoning_exposure": (10, 20),
     "unregistered_activity": (10, 20),
+}
+
+# Open findings about how an agent on another platform (Copilot Studio) is set up.
+FINDING_WEIGHTS: dict[str, tuple[str, int]] = {
+    "platform.no_authentication": ("Published without user authentication", 25),
+    "platform.unapproved_connector": ("Uses connectors that are not approved", 20),
+    "platform.maker_credentials": ("Tools run with the maker's connections", 10),
+    "platform.shared_with_everyone": ("Shared with the whole organisation", 10),
 }
 
 SIGNAL_LABELS = {
@@ -70,7 +78,10 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
             factors.append({"factor": name, "points": points, "detail": detail})
 
     factor("Declared risk tier", TIER_POINTS.get(agent.risk_tier, 10), agent.risk_tier)
-    if agent.status == DISCOVERED:
+    if agent.status == DISCOVERED and agent.on_platform:
+        # Inventoried by its platform, not seen acting outside governance.
+        factor("Not reviewed in AgentGov yet", 15)
+    elif agent.status == DISCOVERED:
         factor("Unmanaged (discovered, not registered)", 30)
     if not agent.owner:
         factor("No owner", 10)
@@ -92,6 +103,17 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
     for kind, count in rows:
         per, cap = SIGNAL_WEIGHTS.get(kind, (2, 10))
         factor(SIGNAL_LABELS.get(kind, kind), min(cap, per * count), f"{count} in {window_hours}h")
+
+    if agent.on_platform:
+        open_types = session.scalars(
+            select(Finding.type).where(
+                Finding.agent_id == agent.id,
+                Finding.status == "open",
+                Finding.type.in_(FINDING_WEIGHTS),
+            )
+        )
+        for type_ in sorted(set(open_types)):
+            factor(*FINDING_WEIGHTS[type_])
 
     score = min(100, sum(f["points"] for f in factors))
     return RiskResult(score=score, level=level_for(score), factors=factors)

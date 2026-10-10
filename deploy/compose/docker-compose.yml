@@ -87,6 +87,10 @@ services:
       AGENTGOV_GATEWAY_OTLP_ENDPOINT: http://otel-collector:4317
       AGENTGOV_PROCESSOR_ADDRESS: processor:50051
       AGENTGOV_POSTURE_INTERVAL_SECONDS: "60"
+      # Microsoft 365 agent catalog sync (docs/platforms.md). Off while these are empty.
+      AGENTGOV_M365_TENANT_ID: ${AGENTGOV_M365_TENANT_ID:-}
+      AGENTGOV_M365_CLIENT_ID: ${AGENTGOV_M365_CLIENT_ID:-}
+      AGENTGOV_M365_CLIENT_SECRET: ${AGENTGOV_M365_CLIENT_SECRET:-}
     volumes:
       - gateway-config:/gateway
     ports:

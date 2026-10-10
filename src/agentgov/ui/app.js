@@ -128,6 +128,7 @@ const ICONS = {
   edit: 'M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4',
   upload: 'M12 15V4M7 9l5-5 5 5M5 20h14',
   access: 'M5 8a4 4 0 1 0 8 0a4 4 0 1 0-8 0M3 21c0-3.3 2.7-6 6-6 1.2 0 2.3.3 3.2.9M17 14a2 2 0 1 0 0 4a2 2 0 1 0 0-4M18.4 15.6L22 12M20.5 13.5l1.5 1.5',
+  platforms: 'M7 19h10.5a4.5 4.5 0 0 0 .5-8.98A6 6 0 0 0 6.34 9.03 5 5 0 0 0 7 19z',
 };
 
 function icon(name, { label, cls } = {}) {
@@ -383,6 +384,15 @@ const STATUS = {
     signed_in: ['good', 'check-circle', 'Signed in'],
     signed_out: ['neutral', 'minus', 'Signed out'],
     refused: ['critical', 'ban', 'Refused'],
+  },
+  sync: {
+    ok: ['good', 'check-circle', 'Succeeded'],
+    failed: ['critical', 'octagon', 'Failed'],
+  },
+  connector: {
+    approved: ['good', 'check-circle', 'Approved'],
+    unapproved: ['serious', 'triangle', 'Not approved'],
+    unchecked: ['neutral', 'minus', 'Not approved'],
   },
 };
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
@@ -770,6 +780,7 @@ const PAGES = [
   { re: /^\/policies$/, nav: 'policies', title: 'Policies', render: renderPolicies },
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
   { re: /^\/access$/, nav: 'access', title: 'Access', render: renderAccess },
+  { re: /^\/platforms$/, nav: 'platforms', title: 'Platforms', render: renderPlatforms },
 ];
 
 let renderSeq = 0;
@@ -1420,6 +1431,7 @@ async function renderAgents({ params }) {
     status: params.get('status') || 'all',
     owner: params.get('owner') || '',
     risk: params.get('risk') || '',
+    source: params.get('source') || '',
     q: params.get('q') || '',
   };
   const load = (q) => api(`v1/agents?include_deleted=true${q ? `&q=${encodeURIComponent(q)}` : ''}`);
@@ -1435,7 +1447,7 @@ async function renderAgents({ params }) {
   });
 
   function sync() {
-    setHashQuiet('/agents', { status: state.status === 'all' ? '' : state.status, owner: state.owner, risk: state.risk, q: state.q });
+    setHashQuiet('/agents', { status: state.status === 'all' ? '' : state.status, owner: state.owner, risk: state.risk, source: state.source, q: state.q });
   }
 
   function apply() {
@@ -1451,19 +1463,21 @@ async function renderAgents({ params }) {
     const extras = [];
     if (state.owner === 'none') extras.push(['Without an owner', () => { state.owner = ''; }]);
     if (state.risk === 'elevated') extras.push(['High or critical risk', () => { state.risk = ''; }]);
+    if (state.source) extras.push([`Runs on ${PLATFORM_SOURCES[state.source] || state.source}`, () => { state.source = ''; }]);
     extraHost.replaceChildren(...extras.map(([label, clear]) => h('span', { class: 'active-filter' }, label,
       h('button', { type: 'button', 'aria-label': `Remove filter: ${label}`, onclick: () => { clear(); apply(); sync(); search.focus(); } }, icon('x')))));
 
     let rows = agents.filter((a) => (state.status === 'all' ? a.status !== 'deleted' : a.status === state.status));
     if (state.owner === 'none') rows = rows.filter((a) => !a.owner && a.status !== 'discovered');
     if (state.risk === 'elevated') rows = rows.filter((a) => ['high', 'critical'].includes(a.risk?.level));
+    if (state.source) rows = rows.filter((a) => a.source === state.source);
     countEl.textContent = plural(rows.length, 'agent');
     tableHost.replaceChildren(rows.length ? agentsTable(rows) : emptyState('No agents match these filters',
       state.q ? `Nothing matches "${state.q}".` : 'Try another status.',
       h('button', {
         type: 'button', class: 'btn btn--sm',
         onclick: async () => {
-          Object.assign(state, { status: 'all', owner: '', risk: '', q: '' });
+          Object.assign(state, { status: 'all', owner: '', risk: '', source: '', q: '' });
           search.value = '';
           agents = await load('');
           apply();
@@ -1518,7 +1532,9 @@ function agentsTable(rows) {
         h('td', { 'data-label': 'Status' }, chip('agent', a.status)),
         h('td', { 'data-label': 'Risk' }, riskChip(a.risk)),
         h('td', { 'data-label': 'Owner', class: 'break' }, a.owner || h('span', { class: 'muted' }, a.status === 'discovered' ? 'Unassigned' : 'No owner')),
-        h('td', { 'data-label': 'Blueprint' }, a.blueprint || h('span', { class: 'muted' }, 'None')),
+        h('td', { 'data-label': 'Blueprint' }, a.blueprint || (platformOf(a)
+          ? h('span', { class: 'muted', title: 'Blueprints grant gateway tools; this agent runs on another platform' }, `${platformOf(a)} agent`)
+          : h('span', { class: 'muted' }, 'None'))),
         h('td', { 'data-label': 'Last seen', class: 'nowrap' }, timeEl(a.last_seen_at, { empty: 'Never' })));
       tr.addEventListener('click', (e) => {
         if (e.target.closest('a, button') || getSelection().toString()) return;
@@ -1563,6 +1579,24 @@ const LIFECYCLE = {
     done: (n) => `Adopted ${n}. It is pending review.`,
   },
 };
+// Blocking or deleting a platform agent changes AgentGov's registry, not the platform.
+const PLATFORM_LIFECYCLE = {
+  approve: (p) => ({ text: `The agent becomes active in AgentGov's registry, with an owner, sponsors and periodic review. It runs in ${p} either way. Activation needs at least one sponsor.` }),
+  block: (p) => ({
+    label: 'Block', confirm: 'Block in AgentGov',
+    text: `This marks the agent as blocked in AgentGov's registry and ledger. It does not stop the agent in ${p}: block it in ${p}'s admin center too.`,
+    done: (n) => `Blocked ${n} in AgentGov. Block it in ${p} too.`,
+  }),
+  unblock: (p) => ({ text: `The agent is no longer marked as blocked in AgentGov. This doesn't change ${p}.` }),
+  delete: (p) => ({ text: `The agent leaves AgentGov's inventory but stays in ${p}. Deleted agents can be restored.` }),
+  adopt: (p) => ({ text: `Adopting brings this ${p} agent under governance as a pending registration. Give it an owner and at least one sponsor, then approve it.` }),
+};
+
+function lifecycleSpec(a, action) {
+  const p = platformOf(a);
+  return p && PLATFORM_LIFECYCLE[action] ? { ...LIFECYCLE[action], ...PLATFORM_LIFECYCLE[action](p) } : LIFECYCLE[action];
+}
+
 const ACTIONS_BY_STATUS = {
   pending: ['approve', 'block', 'delete'],
   active: ['block', 'delete'],
@@ -1579,10 +1613,13 @@ async function renderAgent({ match }) {
     api(`v1/ledger?agent=${encodeURIComponent(agent.id)}&limit=12`).catch((e) => e),
     api(`v1/findings?status=open&agent=${encodeURIComponent(agent.id)}`).catch((e) => e),
   ]);
+  // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
+  const views = agent.platforms || [];
+  const main = views.length ? views.map((v) => platformCard(agent, v)) : [permissionsCard(agent)];
   return h('div', { class: 'page', 'data-title': agent.name },
     agentHeader(agent),
     h('div', { class: 'detail-grid' },
-      h('div', { class: 'stack' }, permissionsCard(agent), agentLedgerCard(agent, entries), agentCardCard(agent)),
+      h('div', { class: 'stack' }, main, agentLedgerCard(agent, entries), views.length ? null : agentCardCard(agent)),
       h('div', { class: 'stack' }, riskCard(agent), peopleCard(agent), attestationCard(agent), identityCard(agent),
         agentFindingsCard(openFindings))));
 }
@@ -1607,7 +1644,7 @@ function mayAttest(a) {
 
 function agentToolbar(a) {
   const buttons = (can('admin') ? ACTIONS_BY_STATUS[a.status] || [] : []).map((action) => {
-    const spec = LIFECYCLE[action];
+    const spec = lifecycleSpec(a, action);
     return h('button', {
       type: 'button', class: `btn ${spec.cls}`, 'data-focus-key': `lifecycle-${action}`,
       onclick: () => runLifecycle(a, action),
@@ -1627,18 +1664,21 @@ function agentToolbar(a) {
 }
 
 async function runLifecycle(a, action) {
-  const spec = LIFECYCLE[action];
+  const spec = lifecycleSpec(a, action);
   const fields = [];
   if (action === 'adopt') {
-    const blueprints = await api('v1/blueprints').catch(() => []);
     fields.push(
       { id: 'owner', label: 'Owner', placeholder: 'Team or person accountable for the agent', value: a.owner || '' },
       { id: 'sponsors', label: 'Sponsors', placeholder: 'alice@example.com, bob@example.com', value: (a.sponsors || []).join(', '), hint: 'Separate people with commas. Approval needs at least one sponsor.' },
-      {
+    );
+    // Blueprints grant gateway tools, which agents on other platforms don't use.
+    if (!platformOf(a)) {
+      const blueprints = await api('v1/blueprints').catch(() => []);
+      fields.push({
         id: 'blueprint', label: 'Blueprint', type: 'select', value: a.blueprint || '',
         options: [{ value: '', label: 'No blueprint' }, ...blueprints.map((b) => ({ value: b.name, label: `${b.name} (${b.risk_tier} risk tier)` }))],
-      },
-    );
+      });
+    }
   }
   fields.push({ id: 'reason', label: 'Reason', type: 'textarea', hint: 'Recorded in the evidence ledger.' });
   const values = await ask({
@@ -1849,9 +1889,10 @@ function permissionsCard(a) {
 function riskCard(a) {
   const risk = a.risk || {};
   const tone = toneOf('risk', risk.level);
+  const platform = platformOf(a);
   return card({
     title: 'Risk',
-    sub: 'Posture factors plus runtime signals from the last 24 hours',
+    sub: platform ? `Posture factors plus ${platform}'s findings about it` : 'Posture factors plus runtime signals from the last 24 hours',
     actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'recalc', onclick: () => recalcRisk(a) }, icon('refresh'), 'Recalculate')] : null,
     body: [
       h('div', { class: 'risk-head' },
@@ -1863,7 +1904,9 @@ function riskCard(a) {
           h('span', {}, f.factor, f.detail ? h('span', { class: 'muted' }, ` · ${f.detail}`) : null),
           h('span', { class: 'factor-points' }, `+${f.points}`))))
         : h('p', { class: 'muted small' }, 'No risk factors.'),
-      h('p', { class: 'hint' }, 'Levels: 25 medium, 50 high, 75 critical. Policy blocks agents at critical risk.'),
+      h('p', { class: 'hint' }, platform
+        ? `Levels: 25 medium, 50 high, 75 critical. High and critical risk raise an alert; ${platform} keeps running the agent.`
+        : 'Levels: 25 medium, 50 high, 75 critical. Policy blocks agents at critical risk.'),
     ],
   });
 }
@@ -1921,16 +1964,19 @@ function identityCard(a) {
     h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'show-credentials', onclick: guarded(() => agentCredentials(a, false)) }, icon('key'), 'Show secret'),
     h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': 'rotate-credentials', onclick: guarded(() => agentCredentials(a, true)) }, icon('refresh'), 'Rotate'),
   ] : null;
+  const platform = platformOf(a);
+  let noClient = a.status === 'discovered' ? 'Not issued (unmanaged)' : 'Not issued';
+  if (platform) noClient = "Not needed: it doesn't use the gateway";
   return card({
     title: 'Identity',
-    sub: 'The OAuth client the gateway authenticates this agent with',
+    sub: platform ? `Runs on ${platform}, outside AgentGov's gateway` : 'The OAuth client the gateway authenticates this agent with',
     actions: credentialActions,
     body: [
       id.error ? callout('critical', 'octagon', h('strong', {}, 'Identity out of sync. '), id.error) : null,
       facts([
-        ['Provider', humanize(id.provider || 'none')],
-        ['Client ID', id.client_id ? copyable(id.client_id, 'client ID') : h('span', { class: 'muted' }, a.status === 'discovered' ? 'Not issued (unmanaged)' : 'Not issued')],
-        ['Synced', id.synced_at ? timeEl(id.synced_at) : h('span', { class: 'muted' }, 'Not synced yet')],
+        platform ? null : ['Provider', humanize(id.provider || 'none')],
+        ['Client ID', id.client_id ? copyable(id.client_id, 'client ID') : h('span', { class: 'muted' }, noClient)],
+        platform ? null : ['Synced', id.synced_at ? timeEl(id.synced_at) : h('span', { class: 'muted' }, 'Not synced yet')],
         ['Agent ID', copyable(a.id, 'agent ID')],
         ['Source', a.source],
         ['Framework', a.framework],
@@ -3180,7 +3226,7 @@ function whatIfResult(res, input, example) {
 const LEDGER_TYPES = [
   ['', 'All events'], ['decision.*', 'Policy decisions'], ['approval.*', 'Approvals'], ['agent.*', 'Agent lifecycle'],
   ['toolserver.*', 'Tool servers'], ['policy.*', 'Organisation policies'], ['blueprint.*', 'Blueprints'], ['apikey.*', 'API keys'],
-  ['admin.*', 'Sign-ins and sessions'],
+  ['admin.*', 'Sign-ins and sessions'], ['platform.*', 'Platform syncs and imports'], ['connector.*', 'Connector allowlist'],
 ];
 const LEDGER_DECISIONS = [['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval']];
 const PAGE_SIZE = 100;
@@ -3523,6 +3569,270 @@ async function revokeApiKey(k) {
   if (!done) return;
   toast(`Revoked ${k.name}.`);
   await refresh();
+}
+
+/* --------------------------------------------------------------- platforms */
+
+// Agents built on Microsoft 365 Copilot and Copilot Studio. They never call the
+// gateway, so AgentGov governs what their platform reports about them.
+const PLATFORM_SOURCES = {
+  'platform:microsoft-365': 'Microsoft 365',
+  'platform:copilot-studio': 'Copilot Studio',
+};
+const M365_SETTINGS = 'AGENTGOV_M365_TENANT_ID, AGENTGOV_M365_CLIENT_ID and AGENTGOV_M365_CLIENT_SECRET';
+const INVENTORY_EXPORT = [
+  'az login',
+  `az graph query -q "PowerPlatformResources | where type == 'microsoft.copilotstudio/agents'" --first 1000 -o json > copilot-studio-agents.json`,
+].join('\n');
+const PACKAGE_TYPES = {
+  custom: 'Built by your organisation', shared: 'Shared by a user', external: 'From a partner', microsoft: 'Built by Microsoft',
+};
+const AUDIENCE = { all: 'Everyone', some: 'Some users or groups', none: 'Nobody' };
+
+function platformOf(a) {
+  return PLATFORM_SOURCES[a?.source] || null;
+}
+
+function connectorKey(id) {
+  return String(id || '').trim().replace(/\/+$/, '').split('/').pop();
+}
+
+function syncCounts(c) {
+  const parts = [`${fmt(c.created)} new`, `${fmt(c.updated)} updated`, `${fmt(c.skipped)} skipped`];
+  if (c.findings != null) parts.push(plural(c.findings, 'open finding'));
+  return parts.join(', ');
+}
+
+async function renderPlatforms() {
+  const [view, usage] = await Promise.all([api('v1/platforms'), api('v1/platforms/connectors')]);
+  const sources = Object.fromEntries(view.sources.map((src) => [src.source, src]));
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Platforms',
+      sub: "Agents built on Microsoft 365 Copilot and Copilot Studio. They don't call tools through AgentGov's gateway, so AgentGov governs what their platform reports: who owns them, who they are shared with and which connectors they use.",
+      actions: [refreshButton()],
+    }),
+    callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov reads these platforms; it does not change them. '),
+      "Blocking one of their agents here marks it in AgentGov only. To stop it from being used, block it in the Microsoft 365 admin center or the Power Platform admin center.")),
+    h('div', { class: 'grid-halves' }, m365Card(sources['microsoft-365']), copilotStudioCard(sources['copilot-studio'])),
+    connectorsCard(usage));
+}
+
+function sourceFacts(src, verb) {
+  const last = src.last_sync;
+  return facts([
+    ['Agents', src.agents
+      ? h('a', { href: `#/agents?source=${encodeURIComponent(`platform:${src.source}`)}` }, plural(src.agents, 'agent'))
+      : h('span', { class: 'muted' }, 'None yet')],
+    [`Last ${verb}`, last ? [chip('sync', last.ok ? 'ok' : 'failed'), ' ', timeEl(last.at)] : h('span', { class: 'muted' }, 'Never')],
+    last?.ok ? ['Result', syncCounts(last.counts)] : null,
+  ]);
+}
+
+function m365Card(src) {
+  const last = src.last_sync;
+  const actions = can('admin') && src.configured
+    ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'm365-sync', onclick: (e) => syncMicrosoft365(e.currentTarget) }, icon('refresh'), 'Sync now')]
+    : null;
+  return card({
+    title: 'Microsoft 365',
+    sub: "The organisation's agent catalog, read from Microsoft Graph on a schedule: custom agents, agents users share, and partners' agents.",
+    actions,
+    body: src.configured
+      ? [last && !last.ok ? callout('critical', 'octagon', h('span', {}, h('strong', {}, 'The last sync failed. '), last.message)) : null, sourceFacts(src, 'sync')]
+      : emptyState('Not connected', `To sync, set ${M365_SETTINGS} for a Microsoft Entra app that has the Microsoft Graph application permission CopilotPackages.Read.All. Microsoft requires a Microsoft Agent 365 licence for this API.`),
+  });
+}
+
+async function syncMicrosoft365(button) {
+  button.disabled = true;
+  button.lastChild.textContent = 'Syncing…';
+  try {
+    const counts = await api('v1/platforms/microsoft-365/sync', { method: 'POST' });
+    toast(`Synced the Microsoft 365 catalog: ${syncCounts(counts)}.`);
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+  }
+  refreshBadges();
+  await refresh();
+}
+
+function copilotStudioCard(src) {
+  return card({
+    title: 'Copilot Studio',
+    sub: 'Copilot Studio and Agent Builder agents with the connectors they use, from the Power Platform inventory. Microsoft only lets a signed-in admin read the inventory, so export it and import the file here.',
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'studio-import', onclick: guarded(importCopilotStudio) }, icon('upload'), 'Import inventory')] : null,
+    body: src.last_sync
+      ? sourceFacts(src, 'import')
+      : emptyState('Nothing imported yet', 'Export the inventory as a Power Platform or AI administrator (a reader role is enough), then import the file:',
+        h('pre', { class: 'kv-pre' }, INVENTORY_EXPORT)),
+  });
+}
+
+async function importCopilotStudio() {
+  const result = await ask({
+    title: 'Import Copilot Studio agents',
+    text: 'Load or paste the Power Platform inventory, as JSON. Export it as a Power Platform or AI administrator (a reader role is enough) with the Azure CLI, the Power Platform API or `pac resource-query`. Importing again updates the agents already here.',
+    extra: h('pre', { class: 'kv-pre' }, INVENTORY_EXPORT),
+    iconName: 'upload', confirm: 'Import', busy: 'Importing…', wide: true,
+    fields: [{
+      id: 'json', label: 'Inventory (JSON)', type: 'code', rows: 10, required: true, file: '.json',
+      placeholder: '{"data": [{"name": "…", "type": "microsoft.copilotstudio/agents", "properties": {…}}]}',
+    }],
+    submit: (v) => {
+      try {
+        JSON.parse(v.json);
+      } catch (err) {
+        throw new Error(`That isn't valid JSON: ${err.message}`);
+      }
+      return api('v1/platforms/copilot-studio/import', { method: 'POST', text: v.json, contentType: 'application/json' });
+    },
+  });
+  if (!result) return;
+  toast(`Imported Copilot Studio agents: ${syncCounts(result)}.`);
+  refreshBadges();
+  await refresh();
+}
+
+function connectorsCard(usage) {
+  const rows = usage.connectors || [];
+  const active = usage.allowlist_active;
+  const approved = rows.filter((r) => r.approved).length;
+  const status = (r) => {
+    if (r.approved) return chip('connector', 'approved', { title: [r.approved_by && `Approved by ${r.approved_by}`, r.approved_at && fullFmt.format(new Date(r.approved_at))].filter(Boolean).join(', ') || null });
+    return active ? chip('connector', 'unapproved', { title: 'Agents that use it get a finding' }) : chip('connector', 'unchecked', { title: 'The allowlist is empty, so nothing is flagged yet' });
+  };
+  const listed = (items, max, render) => [
+    ...items.slice(0, max).map(render),
+    items.length > max ? h('span', { class: 'muted small' }, `and ${fmt(items.length - max)} more`) : null,
+  ];
+  return card({
+    title: 'Connectors',
+    sub: active
+      ? 'The Power Platform connectors Copilot Studio agents use. An agent that uses a connector that is not approved gets a high-severity finding.'
+      : 'The Power Platform connectors Copilot Studio agents use. The allowlist is empty, so none is flagged yet: approve the connectors your organisation allows, and agents that use any other connector get a finding.',
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'approve-connector', onclick: guarded(() => approveConnector(null, active)) }, icon('plus'), 'Approve a connector')] : null,
+    flush: rows.length > 0,
+    body: rows.length
+      ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+        h('caption', { class: 'sr-only' }, 'Connectors'),
+        h('thead', {}, h('tr', {}, ['Connector', 'Allowlist', 'Agents', 'Tools', 'Maker connections', ''].map((t) => h('th', { scope: 'col', class: t === 'Maker connections' ? 'num' : null }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+        h('tbody', {}, rows.map((r) => h('tr', {},
+          h('td', { 'data-label': 'Connector', class: 'break' }, h('code', { class: 'cell-title' }, r.connector_id),
+            r.note ? h('div', { class: 'cell-sub' }, r.note) : null),
+          h('td', { 'data-label': 'Allowlist' }, status(r)),
+          h('td', { 'data-label': 'Agents' }, r.agents.length
+            ? h('div', { class: 'chip-row' }, listed(r.agents, 3, (ag) => agentLink(ag.id, ag.name)))
+            : h('span', { class: 'muted' }, 'None')),
+          h('td', { 'data-label': 'Tools' }, r.operations.length
+            ? h('div', { class: 'chip-row' }, listed(r.operations, 3, (op) => plainChip(op, { mono: true })))
+            : h('span', { class: 'muted' }, '—')),
+          h('td', { 'data-label': 'Maker connections', class: 'num' }, r.maker_connections
+            ? h('span', { title: "Tools that run with the maker's credentials for every user" }, fmt(r.maker_connections))
+            : h('span', { class: 'muted' }, '0')),
+          h('td', { 'data-label': '' }, can('admin')
+            ? (r.approved
+              ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `unapprove-${r.connector_id}`, onclick: guarded(() => unapproveConnector(r, approved)) }, icon('ban'), 'Remove approval')
+              : h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `approve-${r.connector_id}`, onclick: guarded(() => approveConnector(r, active)) }, icon('check'), 'Approve'))
+            : null))))))
+      : emptyState('No connectors yet', 'They appear here once Copilot Studio agents are imported. You can approve connectors before that.'),
+  });
+}
+
+async function approveConnector(row, active) {
+  const first = active ? '' : ' This is the first approved connector: from now on, agents that use connectors which are not approved get a finding.';
+  const done = await ask({
+    title: row ? `Approve ${row.connector_id}?` : 'Approve a connector',
+    text: (row ? `Copilot Studio agents may use ${row.connector_id} without a finding.` : 'Add a Power Platform connector to the allowlist.') + first,
+    iconName: 'check', confirm: 'Approve', busy: 'Approving…',
+    fields: [
+      row ? null : { id: 'connector', label: 'Connector ID', required: true, mono: true, placeholder: 'shared_office365', hint: 'As the inventory or the connector reference names it, with or without /providers/Microsoft.PowerApps/apis/.' },
+      { id: 'note', label: 'Note', type: 'textarea', value: row?.note || '', hint: 'Why it is allowed. Shown here and recorded in the evidence ledger.' },
+    ].filter(Boolean),
+    submit: (v) => api(`v1/platforms/connectors/${encodeURIComponent(connectorKey(row ? row.connector_id : v.connector))}/approval`, { method: 'PUT', body: { note: v.note || '' } }),
+  });
+  if (!done) return;
+  toast(`Approved ${done.connector_id}.`);
+  refreshBadges();
+  await refresh();
+}
+
+async function unapproveConnector(row, approvedCount) {
+  const users = row.agents.length ? `${plural(row.agents.length, 'agent')} that use it will get a finding.` : 'No imported agent uses it.';
+  const last = approvedCount === 1 ? ' It is the last approved connector, so the allowlist stops being checked until you approve another.' : '';
+  const done = await ask({
+    title: `Remove ${row.connector_id} from the allowlist?`,
+    text: approvedCount === 1 ? `No connector will be approved.${last}` : users,
+    tone: 'danger', iconName: 'ban', confirm: 'Remove approval', busy: 'Removing…',
+    submit: () => api(`v1/platforms/connectors/${encodeURIComponent(row.connector_id)}/approval`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`${row.connector_id} is no longer approved.`);
+  refreshBadges();
+  await refresh();
+}
+
+/** What Microsoft 365 or Copilot Studio reports about an agent (its page's main card). */
+function platformCard(a, v) {
+  const studio = v.source === 'copilot-studio';
+  const yesNo = (value) => (value == null ? null : value ? 'Yes' : 'No');
+  const notes = [];
+  if (v.in_catalog === false) notes.push(callout('warning', 'triangle', `This agent is no longer in the Microsoft 365 catalog. Delete it here when you no longer need its record.`));
+  if (v.blocked) notes.push(callout('neutral', 'ban', 'Blocked in the Microsoft 365 admin center.'));
+  if (v.quarantined) notes.push(callout('neutral', 'ban', 'Quarantined (blocked) in the Power Platform admin center.'));
+  const rows = studio ? [
+    ['Name in Copilot Studio', v.display_name],
+    ['Created in', v.created_in],
+    ['Authentication', String(v.authentication).toLowerCase() === 'none'
+      ? plainChip('None: anyone can use it', { tone: 'serious', iconName: 'triangle' }) : v.authentication],
+    ['Shared with', v.shared_with_everyone
+      ? plainChip('Everyone in the organisation', { tone: 'warning', iconName: 'alert-circle' })
+      : `${plural(v.viewers?.users ?? 0, 'person', 'people')}, ${plural(v.viewers?.groups ?? 0, 'group')}`],
+    (v.channels || []).length ? ['Channels', h('div', { class: 'chip-row' }, v.channels.map((c) => plainChip(c)))] : null,
+    v.orchestration ? ['Orchestration', v.orchestration] : null,
+    v.model ? ['Model', h('code', {}, v.model)] : null,
+    v.web_search_knowledge != null ? ['Web search for knowledge', yesNo(v.web_search_knowledge)] : null,
+    ['Published', timeEl(v.published_at, { empty: 'Not published (draft)' })],
+    v.owner_id ? ['Owner (Entra object ID)', h('code', {}, v.owner_id)] : null,
+    v.environment_id ? ['Environment', h('code', {}, v.environment_id)] : null,
+    ['Agent ID', copyable(v.external_id, 'Copilot Studio agent ID')],
+    ['Imported', timeEl(v.synced_at)],
+  ] : [
+    ['Name in Microsoft 365', v.display_name],
+    ['Type', PACKAGE_TYPES[v.type] || humanize(v.type)],
+    v.publisher ? ['Publisher', v.publisher] : null,
+    v.built_with ? ['Built with', v.built_with] : null,
+    v.classification ? ['Classification', v.classification] : null,
+    ['Available to', AUDIENCE[v.available_to] || humanize(v.available_to)],
+    ['Deployed to', AUDIENCE[v.deployed_to] || humanize(v.deployed_to)],
+    v.request ? ['Request', `${humanize(v.request.type)} request, ${v.request.status}`] : null,
+    v.version ? ['Version', v.version] : null,
+    ['Package ID', copyable(v.external_id, 'package ID')],
+    ['Changed', timeEl(v.last_modified)],
+    ['Synced', timeEl(v.synced_at)],
+  ];
+  return card({
+    title: v.source_name,
+    sub: studio ? 'As the Power Platform inventory reported it at the last import' : 'As the Microsoft 365 agent catalog reported it at the last sync',
+    body: [...notes, facts(rows), studio ? connectorList(v) : null],
+  });
+}
+
+function connectorList(v) {
+  const connectors = v.connectors || [];
+  return h('div', { class: 'stack', style: 'gap:8px; margin-top:14px' },
+    h('h3', { class: 'dialog-section' }, 'Connectors'),
+    connectors.length ? h('ul', { class: 'perm-list', role: 'list' }, connectors.map((c) => h('li', {},
+      h('span', { class: 'perm-server' }, h('code', {}, c.connector_id), ' ',
+        v.allowlist_active ? chip('connector', c.approved ? 'approved' : 'unapproved') : null),
+      h('div', { class: 'chip-row' }, (c.operations || []).map((op) => plainChip(op.operation_id || '(unnamed)', {
+        mono: true,
+        tone: op.maker_connection ? 'warning' : null,
+        title: [op.used_as, op.maker_connection ? "runs with the maker's connection" : 'runs with the user\'s own connection', op.enabled ? null : 'disabled'].filter(Boolean).join(', '),
+      })))))) : h('p', { class: 'muted small' }, 'No Power Platform connectors.'),
+    connectors.some((c) => (c.operations || []).some((op) => op.maker_connection))
+      ? h('p', { class: 'hint' }, "Highlighted tools run with their maker's connection, so every user reaches data with the maker's access.") : null,
+    v.allowlist_active ? null : h('p', { class: 'hint' }, h('a', { href: '#/platforms' }, 'The connector allowlist'), ' is empty, so connectors are not checked yet.'));
 }
 
 /* -------------------------------------------------------------------- go */

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 UNKNOWN_AGENT_MODES = ("reject", "monitor")
+M365_PACKAGE_TYPES = ("custom", "shared", "external", "microsoft")
 
 
 def _coerce(raw: str, target: str) -> Any:
@@ -85,6 +86,21 @@ class Settings:
     oidc_role_prefix: str = "agentgov-"
     session_hours: int = 8
 
+    # --- Microsoft 365 agent inventory --------------------------------------------
+    # An Entra app registration with the Microsoft Graph application permission
+    # CopilotPackages.Read.All (admin-consented). Microsoft's Package Management
+    # API needs a Microsoft Agent 365 licence. Sync is enabled when all three are set.
+    m365_tenant_id: str | None = None
+    m365_client_id: str | None = None
+    m365_client_secret: str | None = None
+    # 0 turns the scheduled sync off; admins can still sync on demand.
+    m365_sync_interval_seconds: int = 3600
+    # Package types to import: custom (built in your organisation), shared (shared
+    # by its users), external (from partners) and microsoft (Microsoft's own).
+    m365_package_types: str = "custom,shared,external"
+    graph_url: str = "https://graph.microsoft.com"
+    entra_login_url: str = "https://login.microsoftonline.com"
+
     # --- OPA (policy decisions) --------------------------------------------------
     opa_url: str | None = None
     # Longest a bundle long-poll request is held open.
@@ -155,7 +171,24 @@ class Settings:
             raise ValueError("AGENTGOV_SESSION_HOURS must be positive")
         if self.trace_url and "{trace_id}" not in self.trace_url:
             raise ValueError("AGENTGOV_TRACE_URL must contain {trace_id}")
+        m365 = (self.m365_tenant_id, self.m365_client_id, self.m365_client_secret)
+        if any(m365) and not all(m365):
+            raise ValueError(
+                "set AGENTGOV_M365_TENANT_ID, AGENTGOV_M365_CLIENT_ID and "
+                "AGENTGOV_M365_CLIENT_SECRET together"
+            )
+        self.m365_types()  # raises on unknown package types
         self.pii_thresholds()  # raises on malformed entries
+
+    def m365_types(self) -> set[str]:
+        types = {t.strip().lower() for t in self.m365_package_types.split(",") if t.strip()}
+        unknown = types - set(M365_PACKAGE_TYPES)
+        if unknown or not types:
+            raise ValueError(
+                f"AGENTGOV_M365_PACKAGE_TYPES takes {', '.join(M365_PACKAGE_TYPES)}; "
+                f"got {self.m365_package_types!r}"
+            )
+        return types
 
     def pii_thresholds(self) -> dict[str, float]:
         thresholds = {}
@@ -166,6 +199,10 @@ class Settings:
             except ValueError as exc:
                 raise ValueError(f"bad AGENTGOV_PII_ENTITIES entry {item!r}") from exc
         return thresholds
+
+    @property
+    def m365_enabled(self) -> bool:
+        return bool(self.m365_tenant_id and self.m365_client_id and self.m365_client_secret)
 
     @property
     def keycloak_enabled(self) -> bool:
