@@ -30,7 +30,10 @@ for setup and emergencies.
 | `service` | The internal endpoints used by OPA, the governance processor and the OpenTelemetry Collector |
 
 People who sign in with single sign-on get their roles from the identity provider (see the
-[deployment guide](../deploy/compose/README.md#signing-in)). API keys have one role each.
+[deployment guide](../deploy/compose/README.md#signing-in)) each time they sign in. To take
+someone's access away, remove their role there, then sign them out on the **Access**
+page so that their open sessions end too. The same page lists everyone who has signed
+in (or been refused) and every API key, for access reviews. API keys have one role each.
 The UI only shows the controls a role may use; the API enforces the roles either way.
 
 ## Tasks
@@ -57,6 +60,8 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Resolve, dismiss, reopen findings | Findings | `agentgov findings resolve\|dismiss\|reopen ID` | `POST /v1/findings/{id}/{action}` |
 | Browse, verify and export the ledger | Ledger → filters, **Verify chain**, **Export JSONL** | `agentgov ledger tail --agent A`, `ledger verify`, `ledger export` | `GET /v1/ledger`, `/v1/ledger/verify`, `/v1/ledger/export` |
 | Create, review and revoke API keys | Access → **Create API key**, **Revoke** | `agentgov apikeys create\|list\|revoke` | `POST`/`GET /v1/apikeys`, `DELETE /v1/apikeys/{id}` |
+| See who has signed in, with which roles | Access → People | `agentgov access list`, `agentgov access sessions` | `GET /v1/access` |
+| Sign someone out | Access → People → **Sign out** | `agentgov access sign-out PERSON`, `agentgov access end-session ID` | `POST /v1/access/people/{subject}/sign-out`, `DELETE /v1/access/sessions/{id}` |
 
 Every CLI command has `--help`. Commands that cannot be undone (`purge`, `delete` of
 blueprints, tool servers and policies, `apikeys revoke`) ask for confirmation unless you

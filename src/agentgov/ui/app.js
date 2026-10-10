@@ -379,6 +379,11 @@ const STATUS = {
     active: ['good', 'check-circle', 'Active'],
     revoked: ['neutral', 'ban', 'Revoked'],
   },
+  person: {
+    signed_in: ['good', 'check-circle', 'Signed in'],
+    signed_out: ['neutral', 'minus', 'Signed out'],
+    refused: ['critical', 'ban', 'Refused'],
+  },
 };
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 const TONE_COLOR = {
@@ -3175,6 +3180,7 @@ function whatIfResult(res, input, example) {
 const LEDGER_TYPES = [
   ['', 'All events'], ['decision.*', 'Policy decisions'], ['approval.*', 'Approvals'], ['agent.*', 'Agent lifecycle'],
   ['toolserver.*', 'Tool servers'], ['policy.*', 'Organisation policies'], ['blueprint.*', 'Blueprints'], ['apikey.*', 'API keys'],
+  ['admin.*', 'Sign-ins and sessions'],
 ];
 const LEDGER_DECISIONS = [['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval']];
 const PAGE_SIZE = 100;
@@ -3388,14 +3394,66 @@ const KEY_ROLES = [
 ];
 
 async function renderAccess() {
-  const keys = await api('v1/apikeys');
+  const [view, keys] = await Promise.all([api('v1/access'), api('v1/apikeys')]);
   return h('div', { class: 'page' },
     pageHead({
       title: 'Access',
-      sub: 'Who and what can use this control plane. API keys sign in the CLI, CI pipelines and other automation, each with one role.',
+      sub: 'Who and what can use this control plane: people who sign in with single sign-on, and API keys for the CLI, CI pipelines and other automation.',
       actions: [refreshButton()],
     }),
+    view.bootstrap_token ? callout('neutral', 'key', h('span', {}, h('strong', {}, 'The bootstrap admin token is set. '),
+      'Anyone who has it is an admin. Keep it for setup and emergencies, and give people and automation their own roles.')) : null,
+    signInsCard(view),
     apiKeysCard(keys));
+}
+
+function signInsCard(view) {
+  const people = view.people || [];
+  const signedIn = people.filter((p) => p.status === 'signed_in').length;
+  let body;
+  if (!people.length) {
+    body = view.sso_enabled
+      ? emptyState('Nobody has signed in yet', 'People appear here after their first sign-in with single sign-on.')
+      : emptyState('Single sign-on is not set up', 'People sign in with API keys until an identity provider is connected.');
+  } else {
+    body = h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, 'People'),
+      h('thead', {}, h('tr', {}, ['Person', 'Roles', 'Status', 'Last sign-in', 'Sign-ins', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+      h('tbody', {}, people.map((person) => h('tr', {},
+        h('td', { 'data-label': 'Person', class: 'break' }, h('span', { class: 'cell-title' }, person.name),
+          h('div', { class: 'cell-sub', title: 'Subject at the identity provider' }, person.subject)),
+        h('td', { 'data-label': 'Roles' }, person.roles.length
+          ? h('div', { class: 'chip-row' }, person.roles.map((r) => plainChip(humanize(r))))
+          : h('span', { class: 'muted' }, 'None')),
+        h('td', { 'data-label': 'Status' }, chip('person', person.status, { title: person.status === 'refused' ? 'Refused at the last attempt: no AgentGov role' : null }),
+          person.status === 'signed_in'
+            ? h('div', { class: 'cell-sub' }, `${plural(person.active_sessions, 'session')} until `, timeEl(person.session_expires_at, { absolute: true }))
+            : person.status === 'refused' ? h('div', { class: 'cell-sub' }, 'tried ', timeEl(person.last_refused)) : null),
+        h('td', { 'data-label': 'Last sign-in', class: 'nowrap' }, timeEl(person.last_sign_in, { empty: 'Never' })),
+        h('td', { 'data-label': 'Sign-ins', class: 'num' }, fmt(person.sign_ins)),
+        h('td', { 'data-label': '' }, can('admin') && person.active_sessions
+          ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `sign-out-${person.subject}`, onclick: () => signPersonOut(person) }, icon('signout'), 'Sign out')
+          : null))))));
+  }
+  return card({
+    title: 'People',
+    sub: `${plural(signedIn, 'person', 'people')} signed in now. Roles come from the identity provider at each sign-in: to take someone's access away, remove their role there, then sign them out here.`,
+    flush: people.length > 0,
+    body,
+  });
+}
+
+async function signPersonOut(person) {
+  const self = me?.via === 'session' && me?.name === person.name;
+  const done = await ask({
+    title: `Sign ${person.name} out?`,
+    text: `This ends ${plural(person.active_sessions, 'session')}${self ? ', including yours' : ''}. A new sign-in reads their roles from the identity provider again, so it only succeeds if they still have an AgentGov role.`,
+    tone: 'danger', iconName: 'signout', confirm: 'Sign out', busy: 'Signing out…',
+    submit: () => api(`v1/access/people/${encodeURIComponent(person.subject)}/sign-out`, { method: 'POST' }),
+  });
+  if (!done) return;
+  toast(`Signed ${person.name} out (${plural(done.ended, 'session')} ended).`);
+  await refresh();
 }
 
 function apiKeysCard(keys) {

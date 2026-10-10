@@ -15,6 +15,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
+from urllib.parse import quote
 
 import httpx
 import typer
@@ -49,6 +50,11 @@ app.add_typer(approvals_app, name="approvals")
 app.add_typer(findings_app, name="findings")
 app.add_typer(ledger_app, name="ledger")
 app.add_typer(apikeys_app, name="apikeys")
+access_app = typer.Typer(
+    help="Who has access: people signed in with single sign-on, and their sessions.",
+    no_args_is_help=True,
+)
+app.add_typer(access_app, name="access")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -923,6 +929,56 @@ def apikeys_revoke(key_id: str, yes: bool = YES) -> None:
     _confirm(f"Revoke API key {key_id}?", yes)
     key = _call("DELETE", f"/v1/apikeys/{key_id}")
     _done("apikey", key["id"], f"revoked ({key['name']})")
+
+
+# -------------------------------------------------------------------- access
+
+
+@access_app.command("list")
+def access_list() -> None:
+    """People who have signed in with single sign-on, or were refused."""
+    view = _call("GET", "/v1/access")
+    if view["bootstrap_token"]:
+        typer.echo(
+            "note: the bootstrap admin token is set; anyone who has it is an admin", err=True
+        )
+    if not view["sso_enabled"]:
+        typer.echo("note: single sign-on is not set up; people use API keys", err=True)
+    rows = [
+        {**p, "roles": ",".join(p["roles"]) or "-", "sessions": p["active_sessions"]}
+        for p in view["people"]
+    ]
+    _table(rows, ["name", "status", "roles", "sessions", "last_sign_in", "subject"])
+
+
+@access_app.command("sessions")
+def access_sessions() -> None:
+    """Sessions open now."""
+    rows = [{**r, "roles": ",".join(r["roles"])} for r in _call("GET", "/v1/access")["sessions"]]
+    _table(rows, ["id", "name", "roles", "started_at", "expires_at"])
+
+
+@access_app.command("sign-out")
+def access_sign_out(
+    person: str = typer.Argument(..., help="The person's name (email) or subject."),
+) -> None:
+    """End every session of a person. Signing in again re-reads their roles."""
+    people = _call("GET", "/v1/access")["people"]
+    matches = [p for p in people if person in (p["name"], p["subject"])]
+    if not matches:
+        _fail(f"nobody called {person!r} has signed in")
+    if len(matches) > 1:
+        _fail(f"{len(matches)} people are called {person!r}; pass the subject instead")
+    target = matches[0]
+    out = _call("POST", f"/v1/access/people/{quote(target['subject'], safe='')}/sign-out")
+    _done("person", target["name"], f"signed out ({out['ended']} sessions ended)")
+
+
+@access_app.command("end-session")
+def access_end_session(session_id: str) -> None:
+    """End one session (see `agentgov access sessions`)."""
+    _call("DELETE", f"/v1/access/sessions/{session_id}")
+    _done("session", session_id, "ended")
 
 
 def main() -> None:

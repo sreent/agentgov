@@ -51,7 +51,9 @@ realm comes with three demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (d
 People without an `agentgov-*` role are turned away. Sign-ins, sign-outs and refusals
 are recorded in the evidence ledger (`admin.login`, `admin.logout`,
 `admin.login_denied`). Signing out also ends the Keycloak session, and a session lasts
-at most `AGENTGOV_SESSION_HOURS` (default 8).
+at most `AGENTGOV_SESSION_HOURS` (default 8). The UI's **Access** page lists everyone who
+has signed in, with their roles and open sessions, and admins can sign a person out there
+(`agentgov access sign-out`), which is recorded as `admin.session_ended`.
 
 To sign in your own people, connect your directory to the realm as an identity provider
 (OIDC or SAML) or through user federation (LDAP, Active Directory), and give their groups

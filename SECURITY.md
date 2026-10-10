@@ -74,5 +74,7 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   [roadmap](docs/roadmap.md)); rely on network isolation.
 * Administrators' roles are read from the identity provider when they sign in. Removing a
   role or disabling an account there takes effect at the next sign-in; a session that is
-  already open lasts until it expires (`AGENTGOV_SESSION_HOURS`, default 8) or the person
-  signs out.
+  already open lasts until it expires (`AGENTGOV_SESSION_HOURS`, default 8), the person
+  signs out, or an admin signs them out on the Access page (`agentgov access sign-out`).
+  Back-channel logout, which would end it automatically, is on the
+  [roadmap](docs/roadmap.md).

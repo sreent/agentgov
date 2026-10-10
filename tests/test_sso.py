@@ -22,13 +22,14 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from sqlalchemy import update
 
-from agentgov import ids
+from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.identity.sso import display_name, roles_from_claims
 from agentgov.models import AdminSession
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
+from tests.test_cli import _Shared, runner
 
 ISSUER = "https://idp.test/realms/agentgov"
 CLIENT_ID = "agentgov-admin"
@@ -336,6 +337,82 @@ class TestRefusals:
         with rt.db.session() as s:
             s.execute(update(AdminSession).values(expires_at=ids.utcnow() - timedelta(seconds=1)))
         assert sso.get("/v1/me").status_code == 401
+
+
+def auditor_key(client: TestClient) -> dict[str, str]:
+    resp = client.post("/v1/apikeys", json={"name": "reviewer", "role": "auditor"}, headers=ADMIN)
+    return {"Authorization": f"Bearer {resp.json()['token']}"}
+
+
+class TestAccess:
+    def test_people_come_from_sign_ins_and_refusals(self, sso, provider) -> None:
+        sign_in(sso, provider, roles=["agentgov-approver"])
+        sso.cookies.clear()
+        sign_in(sso, provider, sub="user-2", email="bob@example.com", roles=["offline"])
+        view = sso.get("/v1/access", headers=ADMIN).json()
+        assert (view["sso_enabled"], view["bootstrap_token"]) == (True, True)
+        people = {p["name"]: p for p in view["people"]}
+        alice, bob = people["alice@example.com"], people["bob@example.com"]
+        assert (alice["status"], alice["roles"], alice["active_sessions"]) == (
+            "signed_in",
+            ["approver"],
+            1,
+        )
+        assert alice["sign_ins"] == 1 and alice["session_expires_at"]
+        assert (bob["status"], bob["roles"], bob["last_refused"] is not None) == (
+            "refused",
+            [],
+            True,
+        )
+        assert [s["name"] for s in view["sessions"]] == ["alice@example.com"]
+        assert view["people"][0]["name"] == "bob@example.com"  # most recent first
+
+    def test_admins_can_sign_people_out(self, sso, provider) -> None:
+        sign_in(sso, provider, roles=["agentgov-auditor"])
+        session_cookie = dict(sso.cookies)
+        sso.cookies.clear()
+        auditor = auditor_key(sso)
+        assert sso.get("/v1/access", headers=auditor).status_code == 200
+        assert sso.post("/v1/access/people/user-1/sign-out", headers=auditor).status_code == 403
+        assert sso.post("/v1/access/people/user-1/sign-out", headers=ADMIN).json() == {"ended": 1}
+        sso.cookies.update(session_cookie)
+        assert sso.get("/v1/me").status_code == 401
+        person = sso.get("/v1/access", headers=ADMIN).json()["people"][0]
+        assert (person["status"], person["active_sessions"]) == ("signed_out", 0)
+        ended = sso.get("/v1/ledger", params={"type": "admin.session_ended"}, headers=ADMIN)
+        entry = ended.json()[0]
+        assert (entry["actor"], entry["details"]["name"]) == (
+            "admin:bootstrap",
+            "alice@example.com",
+        )
+
+    def test_one_session_can_be_ended(self, sso, provider) -> None:
+        sign_in(sso, provider, roles=["agentgov-admin"])
+        session_id = sso.get("/v1/access").json()["sessions"][0]["id"]
+        assert sso.delete(f"/v1/access/sessions/{session_id}").status_code == 403  # CSRF
+        assert sso.delete(f"/v1/access/sessions/{session_id}", headers=CSRF).json() == {"ended": 1}
+        assert sso.get("/v1/me").status_code == 401
+        assert sso.delete(f"/v1/access/sessions/{session_id}", headers=ADMIN).status_code == 404
+
+    def test_the_cli_lists_and_signs_people_out(self, sso, provider, monkeypatch) -> None:
+        sign_in(sso, provider, roles=["agentgov-approver"])
+        session_cookie = dict(sso.cookies)
+        sso.cookies.clear()
+        monkeypatch.setattr(cli, "_client", lambda: _Shared(sso, "test-admin"))
+        listing = runner.invoke(cli.app, ["access", "list"])
+        assert listing.exit_code == 0, listing.output
+        assert "alice@example.com  signed_in  approver" in listing.output
+        sessions = runner.invoke(cli.app, ["access", "sessions"]).output
+        assert "alice@example.com" in sessions and "ses_" in sessions
+        out = runner.invoke(cli.app, ["access", "sign-out", "alice@example.com"])
+        assert out.output.strip() == "person/alice@example.com: signed out (1 sessions ended)"
+        assert runner.invoke(cli.app, ["access", "sign-out", "nobody"]).exit_code == 2
+        sso.cookies.update(session_cookie)
+        assert sso.get("/v1/me").status_code == 401
+
+    def test_available_without_single_sign_on(self, client) -> None:
+        view = client.get("/v1/access", headers=ADMIN).json()
+        assert view == {"sso_enabled": False, "bootstrap_token": True, "people": [], "sessions": []}
 
 
 class TestClaims:
