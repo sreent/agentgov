@@ -35,6 +35,8 @@ Examples of issues we especially want to hear about:
 * Tampering with the evidence ledger that `agentgov ledger verify` does not detect.
 * Authentication or authorization flaws in the control plane API or UI.
 * Denial of service through crafted input (for example super-linear scanning).
+* Ways to hide what the agent-instruction rules are meant to catch (see
+  [Agent instructions](docs/instructions.md)), or to make them flag safe text at will.
 
 ## Supported versions
 
@@ -60,11 +62,20 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   Use `monitor` only for discovery and only where that is acceptable.
 * Back up PostgreSQL, export the ledger regularly (`GET /v1/ledger/export`) and store the
   exports somewhere the platform cannot modify.
+* If you sync the Microsoft 365 agent catalog, give the Entra app only
+  `CopilotPackages.Read.All`, and rotate its client secret like any other credential.
+* If you run the instruction classifier, keep it on the private network: it receives
+  agents' instructions (with credentials already redacted).
 
 ## Known limitations
 
 * The prompt-injection and tool-poisoning detectors are heuristics. They raise the cost
   of common attacks; they are not a guarantee.
+* The checks on agents' instructions are rules plus, optionally, a model. Both can miss
+  reworded or obfuscated instructions and can flag legitimate ones; treat a finding as a
+  reason to review, and its absence as no proof of safety.
+* Agents on Microsoft 365 and Copilot Studio are read, not controlled: blocking one in
+  AgentGov does not stop it. Block it in Microsoft's admin centers too.
 * Personal-data detection is as good as Presidio's recognizers for your languages and
   data, and the configured confidence thresholds.
 * AgentGov governs tool traffic that goes through the gateway (and, with the Agent
