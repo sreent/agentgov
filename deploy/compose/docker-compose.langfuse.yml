@@ -8,7 +8,7 @@
 # LANGFUSE_ADMIN_PASSWORD (defaults below; set real values in .env). The
 # organisation, project and API keys are created on first start. Langfuse uses
 # the stack's PostgreSQL server (database "langfuse"); ClickHouse, Redis and
-# MinIO are its own. Only port 3000 is published.
+# SeaweedFS (S3-compatible storage) are its own. Only port 3000 is published.
 
 x-langfuse-env: &langfuse-env
   NEXTAUTH_URL: http://localhost:3000
@@ -23,17 +23,17 @@ x-langfuse-env: &langfuse-env
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
   CLICKHOUSE_CLUSTER_ENABLED: "false"
   LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
-  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
-  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
-  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
-  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${SEAWEEDFS_S3_SECRET_KEY:-dev-seaweedfs-secret}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://seaweedfs:8333
   LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
   LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
   LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
-  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
-  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
-  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
-  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${SEAWEEDFS_S3_SECRET_KEY:-dev-seaweedfs-secret}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://seaweedfs:8333
   LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
   LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
   REDIS_HOST: redis
@@ -47,7 +47,7 @@ x-langfuse-depends-on: &langfuse-depends-on
     condition: service_healthy
   redis:
     condition: service_healthy
-  minio:
+  seaweedfs:
     condition: service_healthy
 
 services:
@@ -138,24 +138,34 @@ services:
       timeout: 10s
       retries: 10
 
-  # S3-compatible event and media storage for Langfuse (AGPL-3.0, run unmodified).
-  minio:
-    image: cgr.dev/chainguard/minio@sha256:6476f81b9739912fa9f50ceae2bb049a30336527cccd24beccfbeb4145f8f696
-    entrypoint: sh
-    command: ["-c", "mkdir -p /data/langfuse && minio server --address :9000 --console-address :9001 /data"]
+  # S3-compatible event and media storage for Langfuse: SeaweedFS (Apache-2.0)
+  # in its single-process "mini" mode. The S3 API requires the credentials
+  # below; telemetry, the admin UI, WebDAV and the Iceberg/Lance endpoints are
+  # off. Its internal master, volume and filer APIs are unauthenticated, so keep
+  # this network private (or point Langfuse at a managed bucket instead).
+  seaweedfs:
+    image: ghcr.io/chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
     environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
+      S3_ACCESS_KEY: langfuse
+      S3_SECRET_KEY: ${SEAWEEDFS_S3_SECRET_KEY:-dev-seaweedfs-secret}
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        printf '{"identities":[{"name":"langfuse","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}'
+        "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /etc/seaweedfs-s3.json &&
+        exec /entrypoint.sh mini -dir=/data -bucket=langfuse -s3.config=/etc/seaweedfs-s3.json
+        -master.telemetry=false -admin.ui=false -webdav=false -s3.port.iceberg=0 -s3.port.lance=0
     volumes:
-      - langfuse-minio-data:/data
+      - langfuse-seaweedfs-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      # Healthy once the bucket exists, not just when the server answers.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8888/buckets/langfuse/"]
       interval: 2s
       timeout: 5s
-      retries: 15
+      retries: 30
 
 volumes:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:
   langfuse-redis-data:
-  langfuse-minio-data:
+  langfuse-seaweedfs-data:

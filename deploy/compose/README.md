@@ -42,7 +42,7 @@ the Compose network. The MCP server in particular is only reachable through the 
 docker compose -f docker-compose.yml -f docker-compose.langfuse.yml up -d --build
 ```
 
-This adds Langfuse (web and worker, with ClickHouse, Redis and MinIO) and makes the
+This adds Langfuse (web and worker, with ClickHouse, Redis and SeaweedFS) and makes the
 collector send every agent and gateway trace to Langfuse as well as to the control plane.
 Langfuse uses its own `langfuse` database on the stack's PostgreSQL server. Sign in at
 <http://localhost:3000> as `admin@agentgov.local` / `agentgov-admin` (or the

@@ -14,6 +14,7 @@ standards the platform aligns with. Survey date: October 2026.
 | Personal data detection | **Presidio** (MIT) | Established analyzer with offsets for redaction; runs offline. Started at Microsoft, now maintained by the community-led Data Privacy Stack organisation (images on GHCR) | LLM Guard (archived July 2026), LlamaFirewall (stale), NeMo Guardrails (possible future addition for ML checks) |
 | Telemetry | **OpenTelemetry Collector** | Vendor-neutral, speaks the GenAI semantic conventions that Agent 365 also uses | — |
 | Trace UI (optional) | **Langfuse** (MIT core) | Understands GenAI spans out of the box and accepts OTLP directly; optional because self-hosting adds ClickHouse, Redis and S3-compatible storage | Arize Phoenix (ELv2, not OSI), Grafana Tempo/Loki (AGPL, semconv-agnostic) |
+| Object storage for Langfuse (optional) | **SeaweedFS** (Apache-2.0) | Officially supported by Langfuse; its single-process `mini` mode suits the reference stack. In production, use a managed bucket | MinIO (AGPL-3.0; the community edition no longer ships images or security fixes), Garage (AGPL-3.0) |
 | In-process enforcement (optional) | **Microsoft Agent Governance Toolkit** (MIT) | Framework adapters for Agent Framework, LangGraph, CrewAI, OpenAI Agents SDK, ADK, … | — |
 
 ### What we did not reuse, and why
