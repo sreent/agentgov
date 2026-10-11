@@ -22,6 +22,7 @@ FIELDS = (
     "acts_for",
     "people_groups",
     "approvals_by",
+    "require_workload_identity",
     "require_sponsor",
     "attestation_days",
     "labels",
@@ -63,7 +64,7 @@ def _apply(bp: Blueprint, data: dict[str, Any]) -> list[str]:
             value = validation.approvals_by(value)
         elif key == "labels":
             value = validation.labels(value)
-        elif key == "require_sponsor":
+        elif key in ("require_sponsor", "require_workload_identity"):
             value = bool(value)
         elif key == "attestation_days":
             if value is not None and (not isinstance(value, int) or value <= 0):
@@ -89,6 +90,7 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Blueprint:
         acts_for="either",
         people_groups=[],
         approvals_by="approvers",
+        require_workload_identity=False,
     )
     _apply(bp, data)
     session.add(bp)
@@ -141,6 +143,7 @@ def to_dict(bp: Blueprint) -> dict[str, Any]:
         "acts_for": bp.acts_for,
         "people_groups": bp.people_groups or [],
         "approvals_by": bp.approvals_by,
+        "require_workload_identity": bp.require_workload_identity,
         "require_sponsor": bp.require_sponsor,
         "attestation_days": bp.attestation_days,
         "labels": bp.labels or {},

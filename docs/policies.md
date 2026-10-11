@@ -73,7 +73,9 @@ The decision carries `monitored`, and the ledger records it.
                         "labels": {"pii-access": "true"}, "environment": "prod",
                         "risk_tier": "medium", "risk_level": "low", "risk_score": 10,
                         "grants": [{"server": "crm", "tools": ["get_*"]}],
-                        "acts_for": "either", "people_groups": []}},
+                        "acts_for": "either", "people_groups": [],
+                        "workload_identity": {"issuer": "prod-cluster",
+                                              "subject": "system:serviceaccount:agents:support-bot"}}},
   "clients": {"agent-support-bot": "agt_…"},
   "toolservers": {"crm": {"status": "approved", "trust_level": "verified",
                           "data_classification": "confidential", "labels": {},
@@ -88,7 +90,9 @@ The decision carries `monitored`, and the ledger records it.
 `ctx.tool`, `ctx.annotations`, `ctx.granted(server, tool)`, `ctx.label(name)`, the person
 the agent acts for with `ctx.user`, `ctx.user_name` and `ctx.member_of(group)`
 ([acting for people](acting-for-people.md#in-policy)), and a feature's mode with
-`ctx.mode(feature)`, `ctx.enforced(feature)` and `ctx.monitored(feature)`.
+`ctx.mode(feature)`, `ctx.enforced(feature)` and `ctx.monitored(feature)`. An agent's
+`workload_identity` is `null` while it authenticates with a client secret
+([agents' own identities](agent-identity.md#in-policy)).
 
 ## Writing an organisation policy
 

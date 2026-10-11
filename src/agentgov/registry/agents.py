@@ -26,6 +26,7 @@ from agentgov.registry import (
     blueprints,
     features,
     findings,
+    identity_issuers,
     model_providers,
     risk,
     validation,
@@ -146,7 +147,34 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
         if getattr(agent, key) != value:
             setattr(agent, key, value)
             changed.append(key)
+    if "workload_identity" in data:
+        # Its own identity, from an identity issuer, instead of a client secret.
+        identity = identity_issuers.workload_identity(session, agent, data["workload_identity"])
+        issuer, subject = identity or (None, None)
+        if (agent.workload_issuer, agent.workload_subject) != (issuer, subject):
+            agent.workload_issuer, agent.workload_subject = issuer, subject
+            changed.append("workload_identity")
+    if (
+        {"workload_identity", "blueprint"} & set(changed)
+        and agent.status == ACTIVE
+        and _requires_workload_identity(agent)
+        and not agent.workload_issuer
+    ):
+        raise Conflict(
+            f"blueprint {agent.blueprint.name if agent.blueprint else ''} requires a workload "
+            "identity: its agents have no client secret"
+        )
     return changed
+
+
+def _requires_workload_identity(agent: Agent) -> bool:
+    return bool(agent.blueprint and agent.blueprint.require_workload_identity)
+
+
+def workload_identity(agent: Agent) -> dict[str, str] | None:
+    if not agent.workload_issuer:
+        return None
+    return {"issuer": agent.workload_issuer, "subject": agent.workload_subject or ""}
 
 
 def register(
@@ -218,6 +246,11 @@ def _check_activation(agent: Agent) -> None:
         raise Conflict(
             "an agent needs at least one sponsor before it can be activated "
             "(sponsors are accountable humans, as in Entra Agent ID)"
+        )
+    if _requires_workload_identity(agent) and not agent.workload_issuer:
+        raise Conflict(
+            f"blueprint {agent.blueprint.name if agent.blueprint else ''} requires a workload "
+            "identity: give the agent one (an identity issuer and its subject there) first"
         )
 
 
@@ -398,9 +431,12 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         "agent_card": agent.agent_card,
         "external_ids": agent.external_ids or {},
         "source": agent.source,
+        "workload_identity": workload_identity(agent),
         "identity": {
             "provider": "keycloak",
             "client_id": agent.client_id,
+            # How it authenticates to Keycloak: its workload identity, or a client secret.
+            "method": "workload-identity" if agent.workload_issuer else "client-secret",
             "synced_at": ids.isoformat(agent.identity_synced_at),
             "error": agent.identity_error,
         },

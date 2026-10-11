@@ -21,6 +21,9 @@ class FakeKeycloak:
         self.secrets: dict[str, str] = {}
         self.scopes: dict[str, dict[str, Any]] = {}
         self.optional: dict[str, set[str]] = {}  # client UUID -> optional client scope UUIDs
+        self.providers: dict[str, dict[str, Any]] = {}  # identity providers, by alias
+        self.forbid_providers = False  # the service account may not manage them
+        self.discovery: dict[str, dict[str, Any]] = {}  # OpenID Connect issuers' documents
         self.tokens = 0
         self.create_conflict_once = False
 
@@ -29,7 +32,29 @@ class FakeKeycloak:
         if path.endswith("/protocol/openid-connect/token"):
             self.tokens += 1
             return httpx.Response(200, json={"access_token": f"t{self.tokens}", "expires_in": 300})
+        if path.endswith("/.well-known/openid-configuration"):
+            issuer = str(request.url).removesuffix("/.well-known/openid-configuration")
+            document = self.discovery.get(issuer)
+            return httpx.Response(200, json=document) if document else httpx.Response(404)
         assert request.headers["authorization"].startswith("Bearer t")
+        providers = "/admin/realms/agentgov/identity-provider/instances"
+        if path.startswith(providers):
+            if self.forbid_providers:
+                return httpx.Response(403, json={"error": "HTTP 403 Forbidden"})
+            alias = path.removeprefix(providers).strip("/")
+            if request.method == "GET":
+                return httpx.Response(200, json=list(self.providers.values()))
+            if request.method == "POST":
+                rep = json.loads(request.content)
+                if rep["alias"] in self.providers:
+                    return httpx.Response(409)
+                self.providers[rep["alias"]] = rep
+                return httpx.Response(201)
+            if request.method == "PUT":
+                self.providers[alias] = json.loads(request.content)
+                return httpx.Response(204)
+            self.providers.pop(alias, None)
+            return httpx.Response(204)
         scopes = "/admin/realms/agentgov/client-scopes"
         if path == scopes and request.method == "GET":
             return httpx.Response(200, json=list(self.scopes.values()))
@@ -269,3 +294,211 @@ def test_deleting_an_agent_removes_its_scope(rt, settings, keycloak) -> None:
     with rt.db.session() as s:
         reconciler.delete(agents.get(s, "bot"))
     assert keycloak.clients == {} and keycloak.scopes == {}
+
+
+# ------------------------------------------------------------- workload identity
+
+
+def _issuers(rt, *specs: dict[str, Any]) -> None:
+    from agentgov.registry import identity_issuers
+
+    with rt.db.session() as s:
+        for spec in specs:
+            identity_issuers.create(s, spec, actor="t")
+
+
+CLUSTER = {
+    "name": "cluster",
+    "kind": "kubernetes",
+    "issuer": "https://k8s.example.com",
+    "keys_url": "https://k8s.example.com",
+}
+SPIRE = {
+    "name": "spire",
+    "kind": "spiffe",
+    "issuer": "spiffe://example.org",
+    "keys_url": "https://spire.example.org/bundle",
+}
+ENTRA = {
+    "name": "entra",
+    "kind": "oidc",
+    "issuer": "https://login.microsoftonline.com/tid/v2.0",
+    "audience": "api://agentgov",
+}
+
+
+def test_each_issuer_is_an_identity_provider(rt, settings, keycloak, reconciler) -> None:
+    keycloak.discovery["https://login.microsoftonline.com/tid/v2.0"] = {
+        "jwks_uri": "https://login.microsoftonline.com/tid/discovery/v2.0/keys",
+        "authorization_endpoint": "https://login.microsoftonline.com/tid/oauth2/v2.0/authorize",
+        "token_endpoint": "https://login.microsoftonline.com/tid/oauth2/v2.0/token",
+    }
+    _issuers(rt, CLUSTER, SPIRE, ENTRA)
+    reconciler.reconcile_all()
+    cluster = keycloak.providers["agentgov-cluster"]
+    assert (cluster["providerId"], cluster["enabled"], cluster["hideOnLogin"]) == (
+        "kubernetes",
+        True,
+        True,
+    )
+    assert cluster["config"]["issuer"] == "https://k8s.example.com"
+    assert cluster["config"]["issuerDiscoveryUrl"] == "https://k8s.example.com"
+    spire = keycloak.providers["agentgov-spire"]["config"]
+    assert (spire["trustDomain"], spire["bundleEndpoint"]) == (
+        "spiffe://example.org",
+        "https://spire.example.org/bundle",
+    )
+    entra = keycloak.providers["agentgov-entra"]["config"]
+    assert entra["jwksUrl"] == "https://login.microsoftonline.com/tid/discovery/v2.0/keys"
+    assert entra["supportsClientAssertions"] == "true"
+    # Entra ID's tokens carry the app's audience, not the realm's URL.
+    assert (entra["allowClientIdAsAudience"], entra["clientId"]) == ("true", "api://agentgov")
+    assert entra["supportsClientAssertionReuse"] == "false"
+    with rt.db.session() as s:
+        from agentgov.registry import identity_issuers
+
+        assert all(i.synced_at and not i.sync_error for i in identity_issuers.list_all(s))
+
+
+def test_blocked_issuers_and_the_feature_switch_disable_providers(
+    rt, settings, keycloak, reconciler
+) -> None:
+    from agentgov.registry import features, identity_issuers
+
+    _issuers(rt, CLUSTER)
+    reconciler.reconcile_all()
+    with rt.db.session() as s:
+        identity_issuers.set_status(s, identity_issuers.get(s, "cluster"), "block", actor="t")
+    reconciler.reconcile_all()
+    assert keycloak.providers["agentgov-cluster"]["enabled"] is False
+    with rt.db.session() as s:
+        identity_issuers.set_status(s, identity_issuers.get(s, "cluster"), "unblock", actor="t")
+        features.set_mode(s, settings, "workload-identity", "off", actor="t")
+    reconciler.reconcile_all()
+    assert keycloak.providers["agentgov-cluster"]["enabled"] is False
+    with rt.db.session() as s:
+        features.set_mode(s, settings, "workload-identity", "on", actor="t")
+    reconciler.reconcile_all()
+    assert keycloak.providers["agentgov-cluster"]["enabled"] is True
+
+
+def test_providers_of_deleted_issuers_go_but_others_stay(
+    rt, settings, keycloak, reconciler
+) -> None:
+    from agentgov.registry import identity_issuers
+
+    keycloak.providers["github"] = {"alias": "github", "providerId": "github", "config": {}}
+    keycloak.providers["agentgov-by-hand"] = {"alias": "agentgov-by-hand", "config": {}}
+    _issuers(rt, CLUSTER)
+    reconciler.reconcile_all()
+    with rt.db.session() as s:
+        identity_issuers.delete(s, identity_issuers.get(s, "cluster"), actor="t")
+    reconciler.reconcile_all()
+    assert set(keycloak.providers) == {"github", "agentgov-by-hand"}
+
+
+def test_an_issuer_keycloak_wont_take_says_why(rt, settings, keycloak, reconciler) -> None:
+    from agentgov.registry import identity_issuers
+
+    keycloak.forbid_providers = True
+    _issuers(rt, CLUSTER, {**ENTRA, "audience": None})
+    _agent(rt, settings)
+    assert reconciler.reconcile_all() == {"synced": 1, "failed": 0}  # agents still sync
+    keycloak.forbid_providers = False
+    reconciler.reconcile_all()  # Entra ID's discovery document isn't there
+    with rt.db.session() as s:
+        assert identity_issuers.get(s, "cluster").sync_error is None
+        assert "couldn't read" in identity_issuers.get(s, "entra").sync_error
+    keycloak.forbid_providers = True
+    reconciler.reconcile_all()
+    with rt.db.session() as s:
+        assert "manage-identity-providers" in identity_issuers.get(s, "cluster").sync_error
+
+
+def test_agents_with_a_workload_identity_have_no_secret(rt, settings, keycloak, reconciler) -> None:
+    _issuers(rt, CLUSTER)
+    _agent(rt, settings)
+    reconciler.reconcile_all()
+    client = keycloak.by_client_id("agent-bot")
+    before = keycloak.secrets[client["id"]]
+    subject = "system:serviceaccount:agents:bot"
+    with rt.db.session() as s:
+        agents.update(
+            s,
+            agents.get(s, "bot"),
+            {"workload_identity": {"issuer": "cluster", "subject": subject}},
+            actor="t",
+        )
+    reconciler.reconcile_all()
+    client = keycloak.by_client_id("agent-bot")
+    assert client["clientAuthenticatorType"] == "federated-jwt"
+    assert client["attributes"]["jwt.credential.issuer"] == "agentgov-cluster"
+    assert client["attributes"]["jwt.credential.sub"] == subject
+    # The secret it had can't authenticate it any more.
+    assert keycloak.secrets[client["id"]] != before
+    with rt.db.session() as s:
+        creds = reconciler.credentials(agents.get(s, "bot"))
+        assert creds["method"] == "workload-identity" and "client_secret" not in creds
+        assert (creds["issuer"], creds["subject"]) == ("cluster", subject)
+        with pytest.raises(KeycloakError, match="no secret to rotate"):
+            reconciler.credentials(agents.get(s, "bot"), rotate=True)
+        # Back to a secret: a new one.
+        agents.update(s, agents.get(s, "bot"), {"workload_identity": None}, actor="t")
+    reconciler.reconcile_all()
+    client = keycloak.by_client_id("agent-bot")
+    assert client["clientAuthenticatorType"] == "client-secret"
+    with rt.db.session() as s:
+        assert reconciler.credentials(agents.get(s, "bot"))["method"] == "client-secret"
+
+
+def test_the_api_says_what_token_authenticates_an_agent(settings, keycloak) -> None:
+    from fastapi.testclient import TestClient
+
+    from agentgov.api.app import create_app
+    from agentgov.runtime import Runtime
+    from tests.conftest import ADMIN
+
+    settings = settings.with_overrides(keycloak_issuer="https://id.example.com/realms/agentgov")
+    rt = Runtime(settings)
+    rt.init_db()
+    http = httpx.Client(transport=httpx.MockTransport(keycloak.handler))
+    admin = KeycloakAdmin("http://kc", "agentgov", "agentgov-control-plane", "secret", http=http)
+    rt.identity = IdentityReconciler(rt.db, settings, admin)
+    keycloak.discovery[ENTRA["issuer"]] = {"jwks_uri": "https://login.example.com/keys"}
+    _issuers(rt, CLUSTER, SPIRE, ENTRA)
+    with rt.db.session() as s:
+        blueprints.create(s, {"name": "bp", "require_sponsor": False}, actor="t")
+        for name, issuer, subject in (
+            ("pod", "cluster", "system:serviceaccount:agents:pod"),
+            ("svid", "spire", "spiffe://example.org/agents/svid"),
+            ("entra", "entra", "6f1c5e1a-0000-4000-8000-000000000001"),
+        ):
+            identity = {"issuer": issuer, "subject": subject}
+            data = {"name": name, "blueprint": "bp", "workload_identity": identity}
+            agents.register(s, settings, data, actor="t", approve=True)
+        agents.register(s, settings, {"name": "plain", "blueprint": "bp"}, actor="t", approve=True)
+    rt.identity.reconcile_all()
+    token_endpoint = "https://id.example.com/realms/agentgov/protocol/openid-connect/token"
+    with TestClient(create_app(settings, runtime=rt, background=False)) as client:
+
+        def creds(name: str) -> dict[str, Any]:
+            resp = client.post(f"/v1/agents/{name}/credentials", json={}, headers=ADMIN)
+            resp.raise_for_status()
+            return resp.json()
+
+        pod = creds("pod")
+        assert pod["method"] == "workload-identity" and "client_secret" not in pod
+        assert pod["token_endpoint"] == token_endpoint
+        # Its token's audience is the realm, as Keycloak expects of client assertions...
+        assert pod["assertion_audience"] == "https://id.example.com/realms/agentgov"
+        assert pod["assertion_type"] == "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        svid = creds("svid")
+        assert svid["assertion_type"] == "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
+        # ...unless the issuer can't do that: Microsoft Entra ID names the app.
+        assert creds("entra")["assertion_audience"] == "api://agentgov"
+        plain = creds("plain")
+        assert plain["method"] == "client-secret" and plain["client_secret"]
+        assert "assertion_type" not in plain
+        rotate = client.post("/v1/agents/pod/credentials", json={"rotate": True}, headers=ADMIN)
+        assert rotate.status_code == 409 and "no secret to rotate" in rotate.json()["detail"]
+    rt.db.dispose()

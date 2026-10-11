@@ -1,0 +1,27 @@
+# Identity issuers whose tokens agents authenticate with instead of a client secret
+# (docs/agent-identity.md). Each agent names its subject there in its spec:
+#
+#   workload_identity: {issuer: demo-cluster, subject: system:serviceaccount:agents:support-bot}
+#
+# This one stands in for a Kubernetes cluster's service account issuer (the demo server
+# in examples/identity/workload-issuer). For the cluster AgentGov runs in, the issuer
+# is https://kubernetes.default.svc.cluster.local.
+apiVersion: agentgov/v1alpha1
+kind: IdentityIssuer
+metadata:
+  name: demo-cluster
+spec:
+  kind: kubernetes
+  issuer: http://workload-issuer:9200
+  description: Stand-in Kubernetes cluster (demo server in examples/identity/workload-issuer).
+  status: approved
+# Other kinds:
+#
+#   kind: spiffe                     # SPIRE and other SPIFFE implementations' JWT-SVIDs
+#   issuer: spiffe://example.org     # the trust domain
+#   keys_url: https://spire-bundle.example.org   # its bundle endpoint
+#
+#   kind: oidc                       # Microsoft Entra ID (Agent ID), Okta, AWS, Google...
+#   issuer: https://login.microsoftonline.com/<tenant ID>/v2.0
+#   audience: api://agentgov         # what Entra ID's tokens carry, not the realm's URL
+#   allow_reuse: true                # Entra ID's tokens have no jti to take each once

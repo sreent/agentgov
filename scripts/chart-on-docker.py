@@ -19,7 +19,8 @@ start first, each once the one before is ready, and `up` returns when every pod
 is ready. Network policies, ingresses and the scheduler are Kubernetes' own: the
 kind check (scripts/ci.sh --kind) covers them where kind runs.
 
-  chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server and model)
+  chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server, model
+                                                 and workload identity issuer)
   chart-on-docker.py secret RENDERED.yaml KEY    print a value of the chart's Secret
   chart-on-docker.py logs                        state and recent logs, for failures
   chart-on-docker.py down                        remove everything it started
@@ -254,6 +255,10 @@ def up(rendered: str, demo: bool) -> None:
         sh("docker", "run", "-d", "--name", "agentgov-demo-model", "--label", LABEL,
            "--network", NETWORK, "--network-alias", "demo-model",
            "-e", f"MOCK_MODEL_KEY={DEMO_MODEL_KEY}", "agentgov-demo-model:local")  # fmt: skip
+        # The stand-in cluster whose service account tokens agents authenticate with.
+        sh("docker", "run", "-d", "--name", "agentgov-demo-workload-issuer", "--label", LABEL,
+           "--network", NETWORK, "--network-alias", "workload-issuer", "-p", "9200:9200",
+           "-e", "ISSUER=http://workload-issuer:9200", "agentgov-demo-issuer:local")  # fmt: skip
 
 
 def logs() -> None:

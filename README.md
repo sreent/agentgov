@@ -127,7 +127,7 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[demo]"
 export AGENTGOV_TOKEN=dev-admin-token
-agentgov apply -f examples/manifests      # blueprints, the CRM tool server, a model, an agent, a policy
+agentgov apply -f examples/manifests      # blueprints, the CRM tool server, a model, an agent, a policy, an identity issuer
 python examples/agents/demo_agent.py
 ```
 
@@ -149,13 +149,20 @@ the gateway. It shows each control in turn:
    is refused, credentials are kept out of prompts and answers, and once the agent's
    metered tokens reach its daily budget, its calls are refused. A jailbreak attempt
    goes through but is recorded: jailbreak detection starts in monitor mode.
-10. **Kill switch**: blocking the agent takes effect everywhere within a second.
-11. **Shadow AI**: telemetry from an unregistered agent is discovered.
-12. **Developer tools**: the MCP servers approved for developers are served as an MCP
+10. **Acting for people**: sam signs in to the demo chat app, and the agent exchanges
+    sam's token for one of its own: it acts for sam as its blueprint allows, only for
+    people in the groups the blueprint names, and sam approves what it wants to do for
+    them.
+11. **Kill switch**: blocking the agent takes effect everywhere within a second.
+12. **Own identities**: an agent with no client secret at all authenticates with its
+    service account token from a stand-in Kubernetes cluster, and calls a tool; blocking
+    the cluster's issuer stops Keycloak taking its tokens.
+13. **Shadow AI**: telemetry from an unregistered agent is discovered.
+14. **Developer tools**: the MCP servers approved for developers are served as an MCP
     registry for GitHub Copilot, and a developer's laptop
     ([examples/developer-machine](examples/developer-machine)) reports its MCP servers:
     those that aren't approved, or skip the gateway, raise findings.
-13. **Evidence**: every decision is in a ledger whose hash chain verifies.
+15. **Evidence**: every decision is in a ledger whose hash chain verifies.
 
 Then look around:
 
@@ -231,6 +238,9 @@ what-if evaluation.
   (`agentgov agents credentials <agent>`), request tokens from Keycloak with the
   client-credentials grant, and connect to `http://<gateway>/mcp/<server>` with
   `Authorization: Bearer <token>`. Any MCP client works.
+* **No client secret**: an agent that already has an identity, a Kubernetes service
+  account, a SPIFFE ID, a Microsoft Entra Agent ID or another OpenID Connect issuer's
+  token, sends that token instead of a secret ([agents' own identities](docs/agent-identity.md)).
 * **Models**: point any OpenAI client at `http://<gateway>/llm/<provider>/v1`, with the
   same token as its API key. The gateway adds the provider's key
   ([model calls](docs/models.md)).
@@ -282,6 +292,9 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   Code, and the MCP servers developers set up on their machines
 * [Acting for people](docs/acting-for-people.md): agents that act for a person, whom each
   may act for, the person in policy and the ledger, and approvals sent to the person
+* [Agents' own identities](docs/agent-identity.md): agents that authenticate with a
+  Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID instead of a
+  client secret
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin
@@ -301,11 +314,11 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 
 ```text
 src/agentgov/
-  registry/     agents, blueprints, tool servers, model providers and usage, approvals,
-                findings, risk, discovery, features
+  registry/     agents, blueprints, tool servers, model providers and usage, identity
+                issuers, approvals, findings, risk, discovery, features
   policies/     Rego library (agentgov.*, agentos) and its tests
   opa/          bundle server and Rego validation
-  identity/     Keycloak reconciler
+  identity/     Keycloak reconciler (agents' clients and identity issuers)
   gateway.py    agentgateway config generator
   processor/    governance processor (ExtMcp, and the guardrail webhook for model calls)
                 and detectors
@@ -315,8 +328,8 @@ src/agentgov/
   mcp_scan.py   the MCP servers set up on a developer's machine (agentgov mcp scan)
 deploy/compose/ reference deployment
 deploy/helm/    Helm chart
-examples/       manifests, a demo MCP server, a demo model, a developer's machine and the
-                demo agent
+examples/       manifests, a demo MCP server, a demo model, a demo workload identity
+                issuer, a developer's machine and the demo agent
 docs/           design documents and ADRs
 tests/          unit and integration tests
 ```

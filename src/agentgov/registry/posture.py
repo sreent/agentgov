@@ -17,7 +17,7 @@ from agentgov import ids
 from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, ToolServer
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import findings, platforms, validation
+from agentgov.registry import findings, identity_issuers, platforms, validation
 
 POSTURE_TYPES = {
     "agent.no_owner",
@@ -27,6 +27,8 @@ POSTURE_TYPES = {
     "agent.broad_permissions",
     "agent.no_blueprint",
     "agent.identity_error",
+    "agent.no_workload_identity",
+    "identity_issuer.sync_error",
     "toolserver.unverified",
     "toolserver.pending_review",
 }
@@ -120,7 +122,37 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
                 agent_id=agent.id,
                 description=agent.identity_error,
             )
+        # Its blueprint came to require a workload identity after it was activated.
+        if (
+            agent.status == ACTIVE
+            and agent.blueprint is not None
+            and agent.blueprint.require_workload_identity
+            and not agent.workload_issuer
+        ):
+            flag(
+                "agent.no_workload_identity",
+                agent.id,
+                "medium",
+                f"Agent {agent.name} authenticates with a client secret",
+                agent_id=agent.id,
+                description=f"Blueprint {agent.blueprint.name} requires a workload identity.",
+                remediation="Give it a workload identity: an identity issuer and its subject "
+                "there.",
+            )
         agents_svc.refresh_risk(session, settings, agent)
+
+    for issuer in identity_issuers.list_all(session):
+        if issuer.sync_error:
+            # A block that hasn't reached Keycloak leaves the issuer's agents signing in.
+            flag(
+                "identity_issuer.sync_error",
+                issuer.id,
+                "high" if issuer.status == BLOCKED else "medium",
+                f"Identity issuer {issuer.name} is out of sync with Keycloak",
+                description=issuer.sync_error,
+                remediation="Fix what the error names: until then Keycloak trusts the issuer "
+                "as it last did, blocked or not.",
+            )
 
     for ts in session.scalars(select(ToolServer)):
         if ts.status == "approved" and ts.trust_level != "verified":

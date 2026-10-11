@@ -42,11 +42,11 @@ The defaults are for evaluation. Before anyone else relies on the installation:
   `postgresql.enabled=false`, `externalDatabase.existingSecret` (and
   `externalDatabase.key`, `database-url` by default). Back it up, before every upgrade
   too.
-* **Use your own Keycloak**, run with its operator or chart rather than in development
-  mode. Import [`files/agentgov-realm.json`](files/agentgov-realm.json) into it (or create
-  the `agentgov-control-plane` and `agentgov-admin` clients it describes), then set
-  `keycloak.enabled=false`, `externalKeycloak.url` and, if its tokens name a different
-  issuer, `externalKeycloak.issuer`. To sign administrators in through Microsoft Entra
+* **Use your own Keycloak** (26.6 or later), run with its operator or chart rather than in
+  development mode. Import [`files/agentgov-realm.json`](files/agentgov-realm.json) into it
+  (or create the `agentgov-control-plane` and `agentgov-admin` clients it describes), then
+  set `keycloak.enabled=false`, `externalKeycloak.url` and, if its tokens name a different
+  issuer, `externalKeycloak.issuer`. SPIFFE identity issuers need its `spiffe` feature. To sign administrators in through Microsoft Entra
   ID instead, see [platforms.md](../../../docs/platforms.md#setting-it-up) and pass the
   settings in `controlPlane.env` and `controlPlane.envFrom`.
 * **Manage the secrets.** Create a Secret with `admin-token`, `service-token`,
@@ -104,6 +104,8 @@ controlPlane:
 | `postgresql.enabled` | `true` | The bundled PostgreSQL; otherwise `externalDatabase` |
 | `keycloak.enabled` | `true` | The bundled Keycloak (development mode); otherwise `externalKeycloak` |
 | `keycloak.demoUsers` | `true` | Import the demo users and the demo app `agentgov-demo-chat` |
+| `keycloak.features` | `[spiffe]` | Keycloak features to turn on: SPIFFE identity issuers need the `spiffe` preview ([agents' own identities](../../../docs/agent-identity.md)) |
+| `keycloak.mountServiceAccountToken` | `false` | Let Keycloak read this cluster's service account keys, so that agents in the cluster authenticate with their service account tokens ([agents' own identities](../../../docs/agent-identity.md#kubernetes)) |
 | `peopleApps` | `[]` | Keycloak clients of the apps people use agents from: AgentGov offers them each agent's client scope ([acting for people](../../../docs/acting-for-people.md)) |
 | `networkPolicy.enabled` | `false` | Restrict traffic between AgentGov's parts |
 | `modelKeys.existingSecret`, `modelKeys.keys` | — | Model providers' API keys, one per provider name, for the gateway only ([model calls](../../../docs/models.md)) |
@@ -136,3 +138,10 @@ starting together migrate one at a time. To migrate from a job of your own inste
 `AGENTGOV_DATABASE_URL` before upgrading; the control plane then refuses to start until
 the schema is current. `helm test agentgov -n agentgov` checks that the control plane
 and the gateway answer.
+
+Keycloak imports AgentGov's realm on its first start only. If yours was imported before
+agents could have their own identities, give the control plane's service account the
+two roles it now needs: in Keycloak's admin console, open the `agentgov` realm, then
+Clients, `agentgov-control-plane`, Service account roles, Assign role, and assign
+`realm-management`'s `manage-identity-providers` and `view-identity-providers`. Until
+then, identity issuers show an error saying so.

@@ -195,6 +195,14 @@ keycloak:
   # Secret), and the demo app agentgov-demo-chat, where people sign in with their
   # password. Turn off before anyone else can reach Keycloak.
   demoUsers: true
+  # Keycloak features to turn on (KC_FEATURES): SPIFFE identity issuers need the spiffe
+  # preview feature.
+  features: [spiffe]
+  # Mount Keycloak's service account token, so that it can read the keys of this
+  # cluster's own service account issuer: agents in the cluster then authenticate with
+  # their service account tokens, through an identity issuer of kind kubernetes and
+  # issuer https://kubernetes.default.svc.cluster.local (docs/agent-identity.md).
+  mountServiceAccountToken: false
   resources:
     requests: {cpu: 200m, memory: 512Mi}
     limits: {memory: 1536Mi}

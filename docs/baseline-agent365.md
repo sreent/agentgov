@@ -52,7 +52,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Owners and sponsors (sponsor required) | ✅ | Activation requires a sponsor unless the blueprint waives it |
 | Autonomous (app-only) token flow | ✅ | OAuth client credentials; tokens carry `agent_id` and the gateway audience |
 | On-behalf-of user flow | ✅ | Agents exchange a person's token for one of their own (Keycloak's token exchange, RFC 8693, or its delegation preview with `act`); blueprints say whom their agents act for, and policy, the ledger and approvals see the person and their groups ([acting for people](acting-for-people.md)) |
-| Secretless credentials (federated identity credentials) | ⏳ | Keycloak federated client authentication with Kubernetes / SPIFFE tokens |
+| Secretless credentials (federated identity credentials) | ✅ | Agents authenticate with their workload's own token instead of a client secret: Kubernetes service account tokens, SPIFFE JWT-SVIDs, or tokens from Entra Agent ID and other OpenID Connect issuers, through Keycloak's federated client authentication; blueprints can require it, and blocking an issuer stops its agents ([agents' own identities](agent-identity.md)) |
 | Credential rotation | ✅ | `POST /v1/agents/{id}/credentials {"rotate": true}` |
 | Entra Agent ID identities of agents built on Microsoft's platforms | ✅ | Read from Microsoft Graph and linked to their registry agents; an identity Microsoft disabled raises a finding ([connections](microsoft-connections.md#microsoft-entra-agent-id)) |
 | Conditional Access for agents | ✅ | **OPA** policies evaluated on every tool call, with registry context |

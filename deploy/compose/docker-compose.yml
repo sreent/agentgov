@@ -42,6 +42,8 @@ services:
       KC_HOSTNAME: http://localhost:8180
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_HEALTH_ENABLED: "true"
+      # SPIFFE identity issuers need this preview feature (docs/agent-identity.md).
+      KC_FEATURES: spiffe
       AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
       # Imported into the realm: the admin sign-in client and the demo users' password.
       AGENTGOV_OIDC_CLIENT_SECRET: ${AGENTGOV_OIDC_CLIENT_SECRET:-dev-oidc-secret}
@@ -235,6 +237,18 @@ services:
     image: agentgov-demo-model:local
     environment:
       MOCK_MODEL_KEY: demo-model-key
+
+  # Demo workload identity issuer: a stand-in Kubernetes cluster whose service account
+  # tokens agents authenticate with instead of a client secret. Keycloak reads its keys
+  # at workload-issuer:9200; the demo gets tokens from it on port 9200.
+  workload-issuer:
+    build:
+      context: ../../examples/identity/workload-issuer
+    image: agentgov-demo-issuer:local
+    environment:
+      ISSUER: http://workload-issuer:9200
+    ports:
+      - "9200:9200"
 
 volumes:
   postgres-data:

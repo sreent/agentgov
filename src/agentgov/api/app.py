@@ -26,6 +26,7 @@ from agentgov.api import (
     copilot_studio_routes,
     feature_routes,
     governance_routes,
+    identity_routes,
     instruction_routes,
     integration_routes,
     mcp_routes,
@@ -152,6 +153,7 @@ def create_app(
     app.include_router(copilot_studio_routes.router)
     app.include_router(feature_routes.router)
     app.include_router(model_routes.router)
+    app.include_router(identity_routes.router)
     app.include_router(mcp_routes.router)
     app.include_router(mcp_routes.public)
 

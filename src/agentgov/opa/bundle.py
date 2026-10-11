@@ -100,6 +100,8 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
             "over_budget": model_usage.over_budget(budget, used.get(agent.id, 0)),
             "acts_for": bp.acts_for if bp else "either",
             "people_groups": (bp.people_groups or []) if bp else [],
+            # How it authenticates: its workload identity, or (null) a client secret.
+            "workload_identity": agents_svc.workload_identity(agent),
         }
         if agent.client_id:
             clients[agent.client_id] = agent.id
