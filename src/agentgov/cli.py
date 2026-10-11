@@ -2,9 +2,9 @@
 
 The administration commands are a thin layer over the HTTP API and follow the
 admin UI's pages: agents, blueprints, tool servers, policies, approvals,
-findings, the ledger, access (API keys), platforms and features, plus a checker
-for agent instructions. Whatever the UI can change, the CLI can change too, through the
-same endpoints and with the same role checks.
+findings, the ledger, access (API keys), platforms, features and security
+operations, plus a checker for agent instructions. Whatever the UI can change,
+the CLI can change too, through the same endpoints and with the same role checks.
 """
 
 from __future__ import annotations
@@ -99,6 +99,16 @@ issuers_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(issuers_app, name="issuers")
+secops_app = typer.Typer(
+    help="Security operations: what AgentGov hands to the security team's tools.",
+    no_args_is_help=True,
+)
+app.add_typer(secops_app, name="secops")
+destinations_app = typer.Typer(
+    help="SIEMs, and Teams and Slack channels, that get AgentGov's events and alerts.",
+    no_args_is_help=True,
+)
+app.add_typer(destinations_app, name="destinations")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -2413,6 +2423,224 @@ def issuers_delete(name: str, yes: bool = YES) -> None:
     _confirm(f"Delete identity issuer {name}?", yes)
     _call("DELETE", f"/v1/identity-issuers/{quote(name)}")
     _done("identity-issuer", name, "deleted")
+
+
+# ------------------------------------------------------------ security operations
+
+HANDOFF = "security-operations"
+
+
+@secops_app.command("status")
+def secops_status() -> None:
+    """The hand-off level, what it lets the secops role do, and where things go."""
+    view = _call("GET", "/v1/secops")
+    may = "; ".join(view["secops_may"]) or "read"
+    typer.echo(f"hand-off: {view['level']} (the secops role may: {may})")
+    if not view["sending"]:
+        typer.echo("nothing is sent (agentgov secops level inform turns it on)")
+    _destination_table(view["destinations"])
+
+
+@secops_app.command("level")
+def secops_level(
+    level: str = typer.Argument(..., help="off, inform, triage, contain or decide."),
+    yes: bool = YES,
+) -> None:
+    """Choose how much is handed to the security team's tools (administrators)."""
+    features_set(HANDOFF, level, yes)
+
+
+@secops_app.command("events")
+def secops_events(
+    after: int = typer.Option(0, help="From after this ledger entry (0: the start)."),
+    limit: int = typer.Option(200, help="Events per request (up to 1000)."),
+    events: str | None = typer.Option(
+        None, help="decisions, approvals, findings, access, changes (comma-separated)."
+    ),
+    min_severity: str = typer.Option("info", help="info, low, medium, high or critical."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Keep waiting for new ones."),
+    every: float = typer.Option(5.0, help="With --follow: seconds between polls."),
+) -> None:
+    """The ledger as OCSF events, one JSON object per line (for a SIEM's agent to collect).
+    Where to go on from (--after) goes to standard error."""
+    import time
+
+    while True:
+        params = {"after": after, "limit": limit, "min_severity": min_severity}
+        page = _call("GET", "/v1/secops/events", params={**params, **_given(events=events)})
+        for event in page["events"]:
+            typer.echo(json.dumps(event, separators=(",", ":")))
+        after = page["next"]
+        if page["more"]:
+            continue
+        if not follow:
+            typer.echo(f"next: --after {after}", err=True)
+            return
+        time.sleep(every)
+
+
+def _destination_table(rows: list[dict[str, Any]]) -> None:
+    out = []
+    for d in rows:
+        delivery = d["delivery"]
+        state = delivery["last_error"] or (
+            f"{delivery['behind']} behind" if delivery["behind"] else "up to date"
+        )
+        secret = d["secret"]
+        if not secret["present"] and secret["need"] == "required":
+            state = f"no secret file {secret['file']}"
+        out.append(
+            {
+                **d,
+                "events": ",".join(d["events"]),
+                "sent": delivery["delivered"],
+                "state": state,
+            }
+        )
+    _table(out, ["name", "kind", "status", "events", "min_severity", "sent", "state"])
+
+
+DEST_URL = typer.Option(
+    None, "--url", help="The SIEM's endpoint (OTLP/HTTP, HTTP input or Splunk HEC)."
+)
+DEST_EVENTS = typer.Option(
+    None,
+    "--events",
+    help="SIEMs: decisions, approvals, findings, access, changes. Chats: findings, approvals, "
+    "blocks. Comma-separated; all by default.",
+)
+DEST_SEVERITY = typer.Option(
+    None, "--min-severity", help="info, low, medium, high or critical (chats: high by default)."
+)
+DEST_FORMAT = typer.Option(None, "--format", help="Webhooks: json (an array) or ndjson.")
+
+
+def _destination_fields(**fields: Any) -> dict[str, Any]:
+    body = _given(**{k: v for k, v in fields.items() if k not in ("label", "events")})
+    if body.get("url") == "":
+        body["url"] = None
+    if fields.get("events") is not None:
+        body["events"] = _split([fields["events"]])
+    if fields.get("label") is not None:
+        body["labels"] = _labels(fields["label"])
+    return body
+
+
+@destinations_app.command("list")
+def destinations_list() -> None:
+    """List destinations, with how far each has got."""
+    _destination_table(_call("GET", "/v1/destinations"))
+
+
+@destinations_app.command("get")
+def destinations_get(name: str) -> None:
+    """Show a destination (never its credential)."""
+    _print(_call("GET", f"/v1/destinations/{quote(name)}"))
+
+
+@destinations_app.command("create")
+def destinations_create(
+    name: str,
+    kind: str = typer.Option(..., help="otlp, webhook, splunk-hec, slack or teams."),
+    url: str | None = DEST_URL,
+    events: str | None = DEST_EVENTS,
+    min_severity: str | None = DEST_SEVERITY,
+    format: str | None = DEST_FORMAT,
+    backfill: bool = typer.Option(
+        False, "--backfill", help="SIEMs: send the ledger from its start, not from now."
+    ),
+    paused: bool = typer.Option(False, "--paused", help="Add it paused."),
+    description: str | None = DESCRIPTION,
+    label: list[str] | None = LABEL,
+) -> None:
+    """Send a SIEM the ledger, or a chat alerts. Its credential goes in its secret file."""
+    body = _destination_fields(
+        kind=kind,
+        url=url,
+        events=events,
+        min_severity=min_severity,
+        format=format,
+        description=description,
+        label=label,
+    )
+    if backfill:
+        body["backfill"] = True
+    if paused:
+        body["status"] = "paused"
+    out = _call("POST", "/v1/destinations", json={"name": name, **body})
+    _done("destination", out["name"], out["status"])
+    secret = out["secret"]
+    if not secret["present"]:
+        need = "needs" if secret["need"] == "required" else "may have"
+        typer.echo(f"it {need} a secret file: {secret['file']} (see docs/secops.md)")
+
+
+@destinations_app.command("update")
+def destinations_update(
+    name: str,
+    url: str | None = DEST_URL,
+    events: str | None = DEST_EVENTS,
+    min_severity: str | None = DEST_SEVERITY,
+    format: str | None = DEST_FORMAT,
+    description: str | None = DESCRIPTION,
+    label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+) -> None:
+    """Change a destination."""
+    body = _destination_fields(
+        url=url,
+        events=events,
+        min_severity=min_severity,
+        format=format,
+        description=description,
+        label=label,
+    )
+    if not body:
+        _fail("nothing to change: pass at least one option (see --help)")
+    out = _call("PATCH", f"/v1/destinations/{quote(name)}", json=body)
+    _done("destination", out["name"], "updated")
+
+
+@destinations_app.command("pause")
+def destinations_pause(name: str) -> None:
+    """Stop sending to a destination; it keeps its place in the ledger."""
+    out = _call("POST", f"/v1/destinations/{quote(name)}/pause")
+    _done("destination", out["name"], out["status"])
+
+
+@destinations_app.command("resume")
+def destinations_resume(name: str) -> None:
+    """Send to a paused destination again, from where it stopped."""
+    out = _call("POST", f"/v1/destinations/{quote(name)}/resume")
+    _done("destination", out["name"], out["status"])
+
+
+@destinations_app.command("replay")
+def destinations_replay(
+    name: str,
+    after: int = typer.Option(0, help="From after this ledger entry (0: the start)."),
+    yes: bool = YES,
+) -> None:
+    """Send a SIEM the ledger again (it drops what it already has by metadata.uid)."""
+    _confirm(f"Send {name} the ledger again from after entry {after}?", yes)
+    out = _call("POST", f"/v1/destinations/{quote(name)}/replay", json={"after": after})
+    _done("destination", out["name"], f"from after entry {out['delivery']['cursor']}")
+
+
+@destinations_app.command("test")
+def destinations_test(name: str) -> None:
+    """Send a test event (SIEMs) or message (chats) now."""
+    out = _call("POST", f"/v1/destinations/{quote(name)}/test")
+    if not out["ok"]:
+        _fail(f"destination/{name}: {out['error']}")
+    _done("destination", name, "test sent")
+
+
+@destinations_app.command("delete")
+def destinations_delete(name: str, yes: bool = YES) -> None:
+    """Stop sending to a destination, for good."""
+    _confirm(f"Delete destination {name}?", yes)
+    _call("DELETE", f"/v1/destinations/{quote(name)}")
+    _done("destination", name, "deleted")
 
 
 @models_app.command("usage")

@@ -51,6 +51,9 @@ ACTS_FOR = ("people", "itself", "either")
 APPROVALS_BY = ("approvers", "person")
 # Identity providers whose tokens agents may authenticate with instead of a secret.
 ISSUER_KINDS = ("kubernetes", "spiffe", "oidc")
+# Where events and alerts go: SIEMs (OpenTelemetry logs, an HTTP input, Splunk's HTTP Event
+# Collector) and chats.
+DESTINATION_KINDS = ("otlp", "webhook", "splunk-hec", "slack", "teams")
 
 
 def _created() -> Mapped[datetime]:
@@ -256,6 +259,40 @@ class IdentityIssuer(Base):
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class Destination(Base):
+    """Where AgentGov hands its evidence and alerts to the security team: a SIEM, through
+    OpenTelemetry logs, an HTTP input or Splunk's HTTP Event Collector, or a Teams or Slack
+    channel. Its credential (a token, or the chat's webhook URL) is a file the control plane
+    reads, named after the destination: never in the database.
+    """
+
+    __tablename__ = "destinations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # The SIEM's endpoint; for Teams and Slack, the webhook URL is the credential.
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A webhook's body: a JSON array of events, or JSON lines.
+    format: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # What it gets: categories of ledger entries for a SIEM, alerts for a chat.
+    events: Mapped[list[str]] = mapped_column(JSON, default=list)
+    min_severity: Mapped[str] = mapped_column(String(16), default="info")
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Delivery: the ledger entry it has been sent up to, at least once.
+    cursor: Mapped[int] = mapped_column(Integer, default=0)
+    delivered: Mapped[int] = mapped_column(Integer, default=0)
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()

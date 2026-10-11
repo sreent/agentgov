@@ -13,6 +13,32 @@ from agentgov.registry.errors import NotFound, ValidationError
 
 POSTURE = "posture"
 THREAT = "threat"
+SYSTEM = "system:agentgov"
+
+
+def _record(session: Session, finding: Finding, change: str, actor: str) -> None:
+    """A finding raised, reopened, resolved or dismissed, in the ledger (and so on its way
+    to the security team's tools)."""
+    ledger.append(
+        session,
+        type=f"finding.{change}",
+        actor=actor,
+        severity="warning"
+        if change != "resolved" and finding.severity in ("high", "critical")
+        else "info",
+        agent=session.get(Agent, finding.agent_id) if finding.agent_id else None,
+        agent_id=finding.agent_id,
+        resource=finding.subject,
+        reason=finding.title,
+        details={
+            "finding_id": finding.id,
+            "type": finding.type,
+            "category": finding.category,
+            "severity": finding.severity,
+            **({"description": finding.description[:2000]} if finding.description else {}),
+            **({"remediation": finding.remediation[:1000]} if finding.remediation else {}),
+        },
+    )
 
 
 def raise_finding(
@@ -56,6 +82,7 @@ def raise_finding(
         )
         session.add(finding)
         session.flush()
+        _record(session, finding, "raised", SYSTEM)
         return finding, True
     finding.last_seen = now
     finding.severity = severity
@@ -71,6 +98,7 @@ def raise_finding(
         finding.status = "open"
         finding.resolved_at = None
         finding.resolved_by = None
+        _record(session, finding, "reopened", SYSTEM)
     return finding, reopened
 
 
@@ -91,6 +119,7 @@ def resolve_absent(
             finding.status = "resolved"
             finding.resolved_at = ids.utcnow()
             finding.resolved_by = actor
+            _record(session, finding, "resolved", actor)
             count += 1
     return count
 
@@ -117,16 +146,7 @@ def set_status(session: Session, finding_id: str, status: str, actor: str) -> Fi
     else:
         finding.resolved_at = ids.utcnow()
         finding.resolved_by = actor
-    ledger.append(
-        session,
-        type=f"finding.{'reopened' if status == 'open' else status}",
-        actor=actor,
-        agent=session.get(Agent, finding.agent_id) if finding.agent_id else None,
-        agent_id=finding.agent_id,
-        resource=finding.subject,
-        reason=finding.title,
-        details={"finding_id": finding.id, "type": finding.type, "severity": finding.severity},
-    )
+    _record(session, finding, "reopened" if status == "open" else status, actor)
     return finding
 
 

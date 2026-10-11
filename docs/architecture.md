@@ -44,7 +44,7 @@ flowchart LR
 
 | Component | Role | Agent 365 analogue |
 |---|---|---|
-| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; reads agents from Microsoft 365, Copilot Studio and Entra Agent ID, and their use and alerts from Purview and Defender; answers Copilot Studio's threat-detection calls ([platforms](platforms.md), [connections](microsoft-connections.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance |
+| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; reads agents from Microsoft 365, Copilot Studio and Entra Agent ID, and their use and alerts from Purview and Defender; answers Copilot Studio's threat-detection calls ([platforms](platforms.md), [connections](microsoft-connections.md)); sends the ledger to SIEMs as OCSF events and alerts to Teams and Slack ([security operations](secops.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance, Defender's SIEM connectors |
 | **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server, and its guardrail webhook for model calls: content inspection, OPA queries, approvals, redaction, decision records | Defender real-time protection, Purview DLP enforcement |
 | [Keycloak](https://www.keycloak.org) 26.8 | One OAuth client per agent; issues short-lived tokens with `agent_id` and the gateway audience, for the agent itself or, by token exchange, for a person it acts for ([acting for people](acting-for-people.md)); takes agents' own identities, Kubernetes service account tokens, SPIFFE JWT-SVIDs or other OpenID Connect issuers' tokens, in place of client secrets ([agents' own identities](agent-identity.md)); signs administrators in to the control plane (and can federate an existing directory) | Entra Agent ID (including federated identity credentials), Entra ID sign-in |
 | [OPA](https://www.openpolicyagent.org) 1.21 | Policy decision point; evaluates the Rego library against registry data | Conditional Access |
@@ -153,7 +153,14 @@ Appenders take a row lock on the chain head, so concurrent writers extend it one
 time. `GET /v1/ledger/verify` recomputes the chain and reports the first broken entry
 (edited, deleted or truncated). The overview's integrity badge checks new entries as they
 arrive and re-verifies the whole chain every five minutes. `GET /v1/ledger/export`
-streams the ledger as JSON Lines for a SIEM or for offline verification.
+streams the ledger as JSON Lines for offline verification.
+
+The security team's tools get the ledger as it grows ([security operations](secops.md)):
+a delivery loop in the control plane sends each destination the entries after its
+cursor, as OCSF events to SIEMs (OTLP logs, an HTTP input, Splunk's HTTP Event Collector)
+and as alerts to Teams and Slack, and moves the cursor once they are accepted. It wakes
+when a transaction that wrote to the ledger commits, and every few seconds otherwise.
+SIEMs that collect read the same events from `GET /v1/secops/events`.
 
 ## Trust boundaries and failure modes
 

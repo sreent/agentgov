@@ -20,6 +20,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from agentgov import ids
+from agentgov.db import mark_changed
 from agentgov.models import Agent, LedgerEntry, LedgerHead
 
 GENESIS = "0" * 64
@@ -114,6 +115,8 @@ def append(
     head.last_hash = entry.hash
     session.add(entry)
     session.flush()
+    # For what sends the ledger on (agentgov.secops.delivery), once this commits.
+    mark_changed(session, "ledger")
     return entry
 
 

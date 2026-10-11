@@ -17,8 +17,10 @@ from agentgov import ids
 from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, ToolServer
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import findings, identity_issuers, platforms, validation
+from agentgov.registry import destinations, findings, identity_issuers, platforms, validation
 
+# Failed deliveries in a row before a destination is a finding.
+FAILING = 3
 POSTURE_TYPES = {
     "agent.no_owner",
     "agent.no_sponsor",
@@ -29,6 +31,7 @@ POSTURE_TYPES = {
     "agent.identity_error",
     "agent.no_workload_identity",
     "identity_issuer.sync_error",
+    "destination.failing",
     "toolserver.unverified",
     "toolserver.pending_review",
 }
@@ -152,6 +155,21 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
                 description=issuer.sync_error,
                 remediation="Fix what the error names: until then Keycloak trusts the issuer "
                 "as it last did, blocked or not.",
+            )
+
+    for destination in destinations.list_all(session):
+        if destination.status == destinations.ACTIVE and destination.failures >= FAILING:
+            # The security team isn't getting the evidence or the alerts it expects.
+            flag(
+                "destination.failing",
+                destination.id,
+                "high",
+                f"Destination {destination.name} is failing: the security team isn't getting "
+                "what it should",
+                description=destination.last_error or "",
+                remediation="Fix what the error names (the destination's URL, its secret file, "
+                "or the SIEM or chat itself). It keeps its place in the ledger and catches up "
+                "once it works again.",
             )
 
     for ts in session.scalars(select(ToolServer)):

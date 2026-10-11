@@ -191,14 +191,17 @@ def list_for_person(
     return list(session.scalars(stmt))
 
 
-def may_decide(req: ApprovalRequest, roles: frozenset[str], subject: str | None) -> bool:
+def may_decide(
+    req: ApprovalRequest, roles: frozenset[str], subject: str | None, *, secops: bool = False
+) -> bool:
     """Administrators decide any request; the person decides requests sent to them, and
-    approvers the others."""
+    approvers the others (and the secops role, when the hand-off to security operations
+    is at decide: ``secops``)."""
     if "admin" in roles:
         return True
     if req.deciders == PERSON:
         return bool(subject) and subject == req.on_behalf_of_id
-    return "approver" in roles
+    return "approver" in roles or (secops and "secops" in roles)
 
 
 def decide(

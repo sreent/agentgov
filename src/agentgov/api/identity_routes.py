@@ -11,6 +11,7 @@ from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.models import Agent
 from agentgov.registry import identity_issuers
 from agentgov.registry.errors import NotFound
+from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1/identity-issuers", tags=["identity"])
 read = require(*READ_ROLES)
@@ -66,13 +67,14 @@ def update_issuer(
 
 @router.post("/{ref}/{action}")
 def issuer_action(
-    request: Request, ref: str, action: str, principal: Principal = Depends(admin)
+    request: Request, ref: str, action: str, principal: Principal = Depends(require("secops"))
 ) -> dict[str, Any]:
     """``block`` stops every agent authenticating with the issuer's tokens; ``unblock``
     lets them again."""
     if action not in ("block", "unblock"):
         raise NotFound(f"no action {action!r}: block or unblock")
     with request.app.state.rt.db.session() as s:
+        handoff.check_kill_switch(s, principal, action)
         issuer = identity_issuers.get(s, ref)
         identity_issuers.set_status(s, issuer, action, actor=principal.actor)
         return _with_count(s, issuer)

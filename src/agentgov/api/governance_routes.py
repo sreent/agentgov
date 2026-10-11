@@ -29,6 +29,7 @@ from agentgov.models import (
 )
 from agentgov.registry import agents, approvals, discovery, findings, manifests
 from agentgov.registry.errors import ValidationError
+from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1")
 read = require(*READ_ROLES)
@@ -87,7 +88,10 @@ def decide_approval(
         raise HTTPException(404, "verdict must be approve or deny")
     with _rt(request).db.session() as s:
         req = approvals.get(s, approval_id)
-        if not approvals.may_decide(req, principal.roles, principal.subject):
+        secops = handoff.at_least(s, handoff.DECIDE)
+        if not approvals.may_decide(req, principal.roles, principal.subject, secops=secops):
+            if req.deciders != approvals.PERSON:
+                handoff.check(s, principal, handoff.DECIDE, also=("approver",))
             who = (
                 f"{req.on_behalf_of}, whom the agent acted for,"
                 if req.deciders == approvals.PERSON
@@ -130,12 +134,14 @@ def finding_action(
     request: Request,
     finding_id: str,
     action: str,
-    principal: Principal = Depends(require("approver")),
+    principal: Principal = Depends(require("approver", "secops")),
 ) -> dict[str, Any]:
     status = {"resolve": "resolved", "dismiss": "dismissed", "reopen": "open"}.get(action)
     if status is None:
         raise HTTPException(404, "action must be resolve, dismiss or reopen")
     with _rt(request).db.session() as s:
+        # The security team's tools, as far as the hand-off lets them.
+        handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
         return findings.to_dict(findings.set_status(s, finding_id, status, principal.actor))
 
 

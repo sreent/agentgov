@@ -2,8 +2,8 @@
 
 ```yaml
 apiVersion: agentgov/v1alpha1
-kind: Agent            # Feature | IdentityIssuer | Blueprint | ToolServer | ModelProvider |
-                       # Policy | Agent
+kind: Agent            # Feature | Destination | IdentityIssuer | Blueprint | ToolServer |
+                       # ModelProvider | Policy | Agent
 metadata:
   name: support-bot
 spec:
@@ -35,6 +35,7 @@ from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
 from agentgov.registry import (
     agents,
     blueprints,
+    destinations,
     features,
     identity_issuers,
     instructions,
@@ -45,7 +46,16 @@ from agentgov.registry import (
 from agentgov.registry.errors import NotFound, ValidationError
 
 API_VERSION = "agentgov/v1alpha1"
-ORDER = ["Feature", "IdentityIssuer", "Blueprint", "ToolServer", "ModelProvider", "Policy", "Agent"]
+ORDER = [
+    "Feature",
+    "Destination",
+    "IdentityIssuer",
+    "Blueprint",
+    "ToolServer",
+    "ModelProvider",
+    "Policy",
+    "Agent",
+]
 
 
 def parse(text: str) -> list[dict[str, Any]]:
@@ -89,6 +99,7 @@ def apply(
         name = spec["name"]
         action = {
             "Feature": _feature,
+            "Destination": _destination,
             "IdentityIssuer": _identity_issuer,
             "Blueprint": _blueprint,
             "ToolServer": _toolserver,
@@ -108,6 +119,25 @@ def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: 
     except NotFound as exc:
         raise ValidationError(str(exc)) from None
     return "configured" if changed else "unchanged"
+
+
+def _destination(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    desired = spec.pop("status", destinations.ACTIVE)
+    if desired not in (destinations.ACTIVE, destinations.PAUSED):
+        raise ValidationError(f"destination {spec['name']}: status must be active or paused")
+    try:
+        destination = destinations.get(session, spec["name"])
+    except NotFound:
+        destinations.create(session, {**spec, "status": desired}, actor=actor)
+        return "created"
+    spec.pop("backfill", None)  # where a new destination starts in the ledger
+    changed = destinations.update(session, destination, spec, actor=actor)
+    action = "configured" if changed else "unchanged"
+    if destination.status != desired:
+        verb = "pause" if desired == destinations.PAUSED else "resume"
+        destinations.set_status(session, destination, verb, actor=actor)
+        action = "configured"
+    return action
 
 
 def _identity_issuer(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
@@ -233,6 +263,23 @@ def export(session: Session) -> list[dict[str, Any]]:
     docs: list[dict[str, Any]] = [
         _doc("Feature", key, {"mode": mode}) for key, mode in features.chosen(session).items()
     ]
+    # Where events and alerts go; their credentials are files, never exported.
+    for destination in destinations.list_all(session):
+        spec = {"kind": destination.kind}
+        defaults = {
+            "description": "",
+            "url": None,
+            "format": "json" if destination.kind == destinations.WEBHOOK else None,
+            "events": destinations.default_events(destination.kind),
+            "min_severity": destinations.default_severity(destination.kind),
+            "labels": {},
+        }
+        for key, default in defaults.items():
+            value = getattr(destination, key)
+            if value not in (default, None):
+                spec[key] = value
+        spec["status"] = destination.status
+        docs.append(_doc("Destination", destination.name, spec))
     for issuer in identity_issuers.list_all(session):
         d = identity_issuers.to_dict(issuer)
         spec = {k: d[k] for k in identity_issuers.FIELDS if d[k] not in (None, "", {}, False)}

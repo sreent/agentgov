@@ -25,9 +25,10 @@ export AGENTGOV_TOKEN=$(kubectl -n agentgov get secret agentgov -o jsonpath='{.d
 agentgov apply -f examples/manifests
 ```
 
-Then open <http://localhost:8000/ui>. The demo users `admin`, `alice` and `audrey` sign in
-with the `demo-password` from the same Secret, and `sam`, a person agents act for, signs
-in to the demo app `agentgov-demo-chat` ([acting for people](../../../docs/acting-for-people.md)).
+Then open <http://localhost:8000/ui>. The demo users `admin`, `alice`, `sofia` (security
+operations) and `audrey` sign in with the `demo-password` from the same Secret, and `sam`,
+a person agents act for, signs in to the demo app `agentgov-demo-chat`
+([acting for people](../../../docs/acting-for-people.md)).
 
 The image is published to `ghcr.io/sreent/agentgov` for each release. To run a build of
 your own, push it to a registry the cluster can pull from and set `image.repository` and
@@ -55,7 +56,9 @@ The defaults are for evaluation. Before anyone else relies on the installation:
   the chart generates random values once and keeps them. Put model providers' API keys
   in a Secret of your own too, one key per provider name, and set
   `modelKeys.existingSecret`: `modelKeys.keys` keeps them in your values, which is for
-  evaluation.
+  evaluation. The same goes for destinations' credentials (SIEM tokens, Teams and Slack
+  webhook URLs): a Secret with one key per destination name, in
+  `destinationSecrets.existingSecret`.
 * **Set the addresses and TLS.** `urls.controlPlane`, `urls.gateway` and `urls.keycloak`
   are what people, agents and outside services use, with `https://`. Turn on
   `controlPlane.ingress`, `gateway.ingress` (and `keycloak.ingress` for the bundled
@@ -109,6 +112,7 @@ controlPlane:
 | `peopleApps` | `[]` | Keycloak clients of the apps people use agents from: AgentGov offers them each agent's client scope ([acting for people](../../../docs/acting-for-people.md)) |
 | `networkPolicy.enabled` | `false` | Restrict traffic between AgentGov's parts |
 | `modelKeys.existingSecret`, `modelKeys.keys` | — | Model providers' API keys, one per provider name, for the gateway only ([model calls](../../../docs/models.md)) |
+| `destinationSecrets.existingSecret`, `destinationSecrets.values` | — | Destinations' credentials, one per destination name, for the control plane only, at `/destination-secrets` ([security operations](../../../docs/secops.md)) |
 
 Each component also takes `resources`, `nodeSelector`, `tolerations` and `affinity`.
 [`values.yaml`](values.yaml) documents every value.

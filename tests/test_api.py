@@ -376,10 +376,20 @@ class TestGovernance:
         finding = client.get("/v1/findings", headers=ADMIN).json()[0]
         for action in ("resolve", "resolve", "reopen"):
             client.post(f"/v1/findings/{finding['id']}/{action}", headers=ADMIN).raise_for_status()
-        entries = client.get("/v1/ledger", params={"type": "finding.*"}, headers=ADMIN).json()
-        assert [e["type"] for e in entries] == ["finding.reopened", "finding.resolved"]
+        entries = [
+            e
+            for e in client.get("/v1/ledger", params={"type": "finding.*"}, headers=ADMIN).json()
+            if e["details"]["finding_id"] == finding["id"]
+        ]
+        # Raised by the scan, resolved once (the second resolve changes nothing), reopened.
+        assert [e["type"] for e in entries] == [
+            "finding.reopened",
+            "finding.resolved",
+            "finding.raised",
+        ]
         assert entries[0]["actor"] == "admin:bootstrap"
-        assert entries[0]["details"]["finding_id"] == finding["id"]
+        assert entries[-1]["actor"] == "system:agentgov"
+        assert entries[-1]["details"]["category"] == "posture"
 
     def test_overview_lists_each_held_call_once(self, client) -> None:
         agent = seed(client)

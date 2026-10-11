@@ -33,12 +33,14 @@ from agentgov.api import (
     model_routes,
     platform_routes,
     registry_routes,
+    secops_routes,
     sso_routes,
 )
 from agentgov.api.auth import Principal, signed_in
 from agentgov.config import Settings
 from agentgov.registry.errors import RegistryError
 from agentgov.runtime import Runtime
+from agentgov.secops import handoff
 
 log = logging.getLogger(__name__)
 
@@ -140,7 +142,12 @@ def create_app(
     @app.get("/v1/me", tags=["system"])
     def whoami(principal: Principal = Depends(signed_in)) -> dict[str, Any]:
         """The caller's identity and roles, so clients can tailor what they offer."""
-        return principal.describe()
+        out = principal.describe()
+        if "secops" in principal.roles:
+            # What the hand-off to security operations lets the secops role do.
+            with rt.db.session() as s:
+                out["handoff"] = {"level": handoff.level(s), "reached": handoff.reached(s)}
+        return out
 
     app.include_router(registry_routes.router)
     app.include_router(governance_routes.router)
@@ -154,6 +161,7 @@ def create_app(
     app.include_router(feature_routes.router)
     app.include_router(model_routes.router)
     app.include_router(identity_routes.router)
+    app.include_router(secops_routes.router)
     app.include_router(mcp_routes.router)
     app.include_router(mcp_routes.public)
 

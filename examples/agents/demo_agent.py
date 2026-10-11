@@ -14,8 +14,11 @@ gateway's OpenAI-compatible route, with the same token. Then it acts for sam, a
 person in the demo realm: sam signs in to the demo chat app, the agent exchanges
 sam's token for a token of its own, and sam signs in to AgentGov to approve what
 it wants to do for them (AGENTGOV_DEMO_PASSWORD is the demo users' password).
-Last, an agent with no secret at all authenticates with its service account token
-from a stand-in Kubernetes cluster (examples/identity/workload-issuer).
+Then an agent with no secret at all authenticates with its service account token
+from a stand-in Kubernetes cluster (examples/identity/workload-issuer). Last, the
+security team's tools get what happened: their SIEM the ledger as OCSF events, their
+chats alerts, and their SOAR blocks a shadow agent once the hand-off lets it
+(examples/secops/sink stands in for all of them).
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import re
 import secrets
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +57,10 @@ WORKLOAD_ISSUER = os.environ.get("AGENTGOV_DEMO_WORKLOAD_ISSUER", "http://localh
 CLUSTER = "demo-cluster"
 # MCP clients set up as on a developer's laptop (examples/developer-machine).
 DEVELOPER_MACHINE = Path(__file__).resolve().parent.parent / "developer-machine"
+# The stand-in for the security team's SIEM, Splunk, Slack and Teams (examples/secops/sink),
+# and the hand-off feature (secops.yaml).
+SINK = os.environ.get("AGENTGOV_DEMO_SINK", "http://localhost:9300")
+HANDOFF = "/v1/features/security-operations"
 
 BOLD, DIM, GREEN, RED, YELLOW, RESET = (
     "\033[1m",
@@ -579,7 +587,7 @@ async def own_identity() -> None:
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
 
 
-def shadow_agent() -> None:
+def shadow_agent() -> str | None:
     step("13. Shadow AI: telemetry from an unregistered agent is discovered")
     service = f"notebook-agent-{secrets.token_hex(2)}"
     span = {
@@ -617,9 +625,10 @@ def shadow_agent() -> None:
                 True,
                 f"{service} (source {found[0]['source']}, risk {found[0]['risk']['level']})",
             )
-            return
+            return service
         time.sleep(0.5)
     show("not discovered", False, service)
+    return None
 
 
 def developer_tools() -> None:
@@ -666,8 +675,106 @@ def developer_tools() -> None:
     )
 
 
+def received(kind: str) -> list[dict[str, Any]]:
+    """What the security team's tools got (otlp, hec, slack or teams)."""
+    resp = httpx.get(f"{SINK}/received", params={"kind": kind}, timeout=10)
+    resp.raise_for_status()
+    return resp.json()  # type: ignore[no-any-return]
+
+
+def teams_text(message: dict[str, Any]) -> str:
+    return str(message["attachments"][0]["content"]["body"][0]["text"]).replace("\u200b", "")
+
+
+def security_operations(name: str, shadow: str | None) -> None:
+    step("15. Security operations: the SOC's SIEM and chats get it all, and its SOAR acts")
+    head = admin("GET", "/v1/ledger", params={"limit": 1})[0]["seq"]
+
+    def siem_events() -> list[dict[str, Any]]:
+        return [r["body"] for r in received("otlp")]
+
+    caught_up, waited = until(
+        lambda: any(e["metadata"]["sequence"] >= head for e in siem_events()), timeout=60
+    )
+    events = siem_events()
+    about = [
+        e
+        for e in events
+        if (e.get("ai_agent") or {}).get("name") == name
+        or any(r.get("name") == name for r in e.get("resources") or [])
+    ]
+    classes = Counter(e["class_name"] for e in about)
+    show(
+        "SIEM, OCSF over OTLP:",
+        caught_up and bool(about),
+        f"{len(events)} events, up to ledger entry {head} {waited:.1f}s later; about {name}: "
+        + ", ".join(f"{n} {c}" for c, n in classes.most_common()),
+    )
+    blocked = next((e for e in about if e.get("disposition") == "Blocked"), None)
+    if blocked:
+        target = (blocked.get("resources") or [{}])[0].get("name", "")
+        print(
+            f"  {DIM}e.g. {blocked['type_name']}: {blocked['api']['operation']} {target}, "
+            f"{blocked['disposition']}: {blocked.get('status_detail', '')[:60]}{RESET}"
+        )
+    hec = received("hec")
+    show(
+        "Splunk:",
+        bool(hec) and all(h["event"]["severity_id"] >= 3 for h in hec),
+        f"{len(hec)} events: decisions and findings, medium severity and up",
+    )
+    slack = [m["blocks"][0]["text"]["text"] for m in received("slack")]
+    show(
+        "Slack:",
+        any(f"Agent {name} blocked" == t for t in slack),
+        f"{len(slack)} alerts, such as: " + "; ".join(slack[-3:]),
+    )
+    teams = [teams_text(m) for m in received("teams")]
+    show("Teams:", any(name in t for t in teams), f"{len(teams)} kill switches: {teams[-1:]}")
+
+    # The SOC's SOAR acts with its own API key (the secops role), as far as the hand-off
+    # lets it: blocking an agent takes contain.
+    if shadow is None:
+        show("no shadow agent", False, "to contain")
+        return
+    key = admin("POST", "/v1/apikeys", json={"name": "soc-soar", "role": "secops"})
+    soar = {"Authorization": f"Bearer {key['token']}"}
+
+    def block() -> httpx.Response:
+        return httpx.post(
+            f"{CONTROL_PLANE}/v1/agents/{shadow}/block",
+            json={"reason": "SOAR playbook: unknown agent in production"},
+            headers=soar,
+            timeout=30,
+        )
+
+    try:
+        refused = block()
+        show("SOAR refused at inform:", refused.status_code == 403, refused.json()["detail"])
+        admin("PUT", HANDOFF, json={"mode": "contain"})
+        print(f"  {YELLOW}administrator{RESET} raised the hand-off to contain")
+        done = block()
+        show(
+            "SOAR blocked the shadow agent:",
+            done.status_code == 200 and done.json()["status"] == "blocked",
+            f"{shadow}, as secops:soc-soar in the ledger",
+        )
+        alerted, waited = until(
+            lambda: any(shadow in m["blocks"][0]["text"]["text"] for m in received("slack")),
+            timeout=60,
+        )
+        show("alerted:", alerted, f"Slack heard of it {waited:.1f}s later")
+    finally:
+        admin("PUT", HANDOFF, json={"mode": "inform"})
+        httpx.delete(
+            f"{CONTROL_PLANE}/v1/apikeys/{key['id']}",
+            headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+            timeout=30,
+        )
+
+
 def evidence(name: str) -> None:
-    step("15. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("16. Evidence: every decision is in a hash-chained, verifiable ledger")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -691,8 +798,9 @@ def main() -> None:
         asyncio.run(run_scenarios(name, creds, token))
         asyncio.run(own_identity())
     finally:
-        shadow_agent()
+        shadow = shadow_agent()
         developer_tools()
+        security_operations(name, shadow)
         evidence(name)
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")

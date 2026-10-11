@@ -66,7 +66,7 @@ them needs the AI administrator or Power Platform administrator role
 | **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call and model call using live registry context; the models each blueprint allows, with daily token budgets; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
-| **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger | Presidio, OPA, AgentGov processor, Granite Guardian (optional) |
+| **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), OCSF, OpenTelemetry |
 
 Use only the parts you need. Each [feature](docs/features.md) can be turned off, and each
 control at the gateway can run in monitor mode first: it records what it would have
@@ -127,7 +127,7 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[demo]"
 export AGENTGOV_TOKEN=dev-admin-token
-agentgov apply -f examples/manifests      # blueprints, the CRM tool server, a model, an agent, a policy, an identity issuer
+agentgov apply -f examples/manifests      # blueprints, the CRM tool server, a model, an agent, a policy, an identity issuer, the SOC's destinations
 python examples/agents/demo_agent.py
 ```
 
@@ -162,14 +162,19 @@ the gateway. It shows each control in turn:
     registry for GitHub Copilot, and a developer's laptop
     ([examples/developer-machine](examples/developer-machine)) reports its MCP servers:
     those that aren't approved, or skip the gateway, raise findings.
-15. **Evidence**: every decision is in a ledger whose hash chain verifies.
+15. **Security operations**: the SOC's stand-in SIEM has the ledger as OCSF events, its
+    Splunk the decisions and findings that matter, and its Slack and Teams the alerts;
+    its SOAR's `secops` key is refused a block at the `inform` level, and blocks the
+    shadow agent once the level is `contain`.
+16. **Evidence**: every decision is in a ledger whose hash chain verifies.
 
 Then look around:
 
 * Admin UI: <http://localhost:8000/ui>. Choose *Sign in with single sign-on* and use
-  `admin` (administrator), `alice` (approver, and the demo agent's sponsor) or `audrey`
-  (auditor), all with the password `dev-password`; or paste the API token
-  `dev-admin-token`
+  `admin` (administrator), `alice` (approver, and the demo agent's sponsor), `sofia`
+  (security operations) or `audrey` (auditor), all with the password `dev-password`; or
+  paste the API token `dev-admin-token`
+* What the security team's tools got: <http://localhost:9300/received> (the demo sink)
 * API reference: <http://localhost:8000/docs>
 * CLI: `agentgov agents list`, `agentgov findings`, `agentgov approvals list`,
   `agentgov ledger verify`. The CLI can do everything the UI can
@@ -303,6 +308,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   Copilot Studio threat detection, each optional
 * [Agent instructions](docs/instructions.md): checking agents' system prompts for harmful
   or malicious content
+* [Security operations](docs/secops.md): the ledger to SIEMs as OCSF events,
+  alerts in Teams and Slack, and how much the security team's tools may do
 * [Policies](docs/policies.md)
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)
@@ -315,7 +322,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 ```text
 src/agentgov/
   registry/     agents, blueprints, tool servers, model providers and usage, identity
-                issuers, approvals, findings, risk, discovery, features
+                issuers, approvals, findings, risk, discovery, features, destinations
+  secops/       the ledger as OCSF events, delivery to SIEMs and chats, hand-off levels
   policies/     Rego library (agentgov.*, agentos) and its tests
   opa/          bundle server and Rego validation
   identity/     Keycloak reconciler (agents' clients and identity issuers)
@@ -329,7 +337,8 @@ src/agentgov/
 deploy/compose/ reference deployment
 deploy/helm/    Helm chart
 examples/       manifests, a demo MCP server, a demo model, a demo workload identity
-                issuer, a developer's machine and the demo agent
+                issuer, a stand-in for the security team's tools, a developer's machine
+                and the demo agent
 docs/           design documents and ADRs
 tests/          unit and integration tests
 ```

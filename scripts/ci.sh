@@ -31,7 +31,7 @@ KUBECTL_VERSION=1.34.1
 CHART=deploy/helm/agentgov
 AGENTGATEWAY_IMAGE=ghcr.io/agentgateway/agentgateway:v1.6.0
 COMPOSE=(docker compose -p agentgov-ci -f deploy/compose/docker-compose.yml)
-E2E_PORTS=(8000 8080 8180 8181 4317 4318 9200)
+E2E_PORTS=(8000 8080 8180 8181 4317 4318 9200 9300)
 
 lint=1 tests=1 chart=1 image=1 e2e=0 kind=0 matrix=0 keep=0 setup_only=0
 for arg in "$@"; do
@@ -307,13 +307,22 @@ e2e_logs() {
   "${COMPOSE[@]}" logs --no-color --tail 100 || true
 }
 
-# The control plane's image and the demo's stand-ins: a tool server, a model provider
-# and a workload identity issuer.
+# The control plane's image and the demo's stand-ins: a tool server, a model provider,
+# a workload identity issuer and the security team's tools.
 build_demo_images() {
   docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm &&
     docker_build agentgov-demo-model:local examples/models/mock &&
-    docker_build agentgov-demo-issuer:local examples/identity/workload-issuer
+    docker_build agentgov-demo-issuer:local examples/identity/workload-issuer &&
+    docker_build agentgov-demo-sink:local examples/secops/sink
 }
+
+# What the demo's destinations (examples/manifests/secops.yaml) need, for the chart: the
+# sink's Slack and Teams webhook URLs and its Splunk token.
+DEMO_DESTINATION_SECRETS=(
+  --set destinationSecrets.values.soc-slack=http://demo-sink:9300/slack/T0000/B0000/demo-only
+  --set destinationSecrets.values.soc-teams=http://demo-sink:9300/teams/workflows/demo-only
+  --set destinationSecrets.values.soc-splunk=demo-hec-token
+)
 
 end_to_end() {
   local port busy=() rc=0
@@ -351,7 +360,7 @@ end_to_end() {
 chart_on_docker() {
   local rendered rc=0 busy=() port
   setup_chart_tools || return 1
-  for port in 8000 8080 8180 4318 9200; do
+  for port in 8000 8080 8180 4318 9200 9300; do
     if port_in_use "$port"; then busy+=("$port"); fi
   done
   if [ ${#busy[@]} -gt 0 ]; then
@@ -362,7 +371,7 @@ chart_on_docker() {
   rendered=$(mktemp)
   helm template agentgov "$CHART" --set image.repository=agentgov --set image.tag=local \
     --set image.pullPolicy=Never --set presidio.image.tag=2.2.364 \
-    --set modelKeys.keys.demo=demo-model-key >"$rendered" || return 1
+    --set modelKeys.keys.demo=demo-model-key "${DEMO_DESTINATION_SECRETS[@]}" >"$rendered" || return 1
   python scripts/chart-on-docker.py down
   if python scripts/chart-on-docker.py up "$rendered" --demo; then
     AGENTGOV_TOKEN=$(python scripts/chart-on-docker.py secret "$rendered" admin-token)
@@ -418,12 +427,14 @@ kind_end_to_end() {
     # kind loads images by tag: the digest pin would make the node pull it.
     --set presidio.image.tag=2.2.364
     --set modelKeys.keys.demo=demo-model-key
+    "${DEMO_DESTINATION_SECRETS[@]}"
   )
   setup_chart_tools && setup_kind_tools || return 1
   kind delete cluster --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
   build_demo_images || return 1
   kind create cluster --name "$KIND_CLUSTER" --wait 180s || return 1
   for image in agentgov-demo-crm:local agentgov-demo-model:local agentgov-demo-issuer:local \
+    agentgov-demo-sink:local \
     $(helm template agentgov "$CHART" "${values[@]}" |
     awk '$1 == "image:" { gsub(/"/, "", $2); print $2 }' | sort -u); do
     if ! { docker image inspect "$image" >/dev/null 2>&1 || docker pull --quiet "$image" >/dev/null; } ||
@@ -496,6 +507,28 @@ metadata: {name: workload-issuer}
 spec:
   selector: {app: workload-issuer}
   ports: [{port: 9200}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: demo-sink}
+spec:
+  selector: {matchLabels: {app: demo-sink}}
+  template:
+    metadata: {labels: {app: demo-sink}}
+    spec:
+      containers:
+        - name: sink
+          image: "agentgov-demo-sink:local"
+          imagePullPolicy: Never
+          ports: [{containerPort: 9300}]
+          env: [{name: HEC_TOKEN, value: demo-hec-token}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: demo-sink}
+spec:
+  selector: {app: demo-sink}
+  ports: [{port: 9300}]
 EOF
   fi
   if [ "$rc" = 0 ]; then
@@ -504,12 +537,13 @@ EOF
   fi
   if [ "$rc" = 0 ]; then
     for forward in agentgov-control-plane:8000:8000 agentgov-gateway:8080:8080 \
-      agentgov-keycloak:8180:8080 agentgov-otel-collector:4318:4318 workload-issuer:9200:9200; do
+      agentgov-keycloak:8180:8080 agentgov-otel-collector:4318:4318 workload-issuer:9200:9200 \
+      demo-sink:9300:9300; do
       IFS=: read -r service local remote <<<"$forward"
       kubectl -n "$KIND_NAMESPACE" port-forward "svc/$service" "$local:$remote" >/dev/null &
       pids+=($!)
     done
-    for port in 8000 8080 8180 4318 9200; do wait_port "$port" || rc=1; done
+    for port in 8000 8080 8180 4318 9200 9300; do wait_port "$port" || rc=1; done
   fi
   if [ "$rc" = 0 ]; then
     AGENTGOV_TOKEN=$(kubectl -n "$KIND_NAMESPACE" get secret agentgov \

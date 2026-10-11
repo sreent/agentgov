@@ -21,8 +21,9 @@ start first, each once the one before is ready, and `up` returns when every pod
 is ready. Network policies, ingresses and the scheduler are Kubernetes' own: the
 kind check (scripts/ci.sh --kind) covers them where kind runs.
 
-  chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server, model
-                                                 and workload identity issuer)
+  chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server, model,
+                                                 workload identity issuer and the sink that
+                                                 stands in for the security team's tools)
   chart-on-docker.py secret RENDERED.yaml KEY    print a value of the chart's Secret
   chart-on-docker.py logs                        state and recent logs, for failures
   chart-on-docker.py down                        remove everything it started
@@ -297,6 +298,11 @@ def up(rendered: str, demo: bool) -> None:
         sh("docker", "run", "-d", "--name", "agentgov-demo-workload-issuer", "--label", LABEL,
            "--network", NETWORK, "--network-alias", "workload-issuer", "-p", "9200:9200",
            "-e", "ISSUER=http://workload-issuer:9200", "agentgov-demo-issuer:local")  # fmt: skip
+        # The security team's SIEM, Splunk, Slack and Teams (scripts/ci.sh gives the chart
+        # their URLs and token as destinationSecrets).
+        sh("docker", "run", "-d", "--name", "agentgov-demo-sink", "--label", LABEL,
+           "--network", NETWORK, "--network-alias", "demo-sink", "-p", "127.0.0.1:9300:9300",
+           "-e", "HEC_TOKEN=demo-hec-token", "agentgov-demo-sink:local")  # fmt: skip
 
 
 def logs() -> None:

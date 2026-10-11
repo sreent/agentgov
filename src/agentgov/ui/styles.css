@@ -876,3 +876,12 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .issue-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: var(--fs-sm); }
 .issue-excerpt { display: block; margin-top: 4px; padding-left: 10px; border-left: 2px solid var(--line-strong); color: var(--ink-2); font-size: var(--fs-xs); overflow-wrap: anywhere; quotes: none; }
 .instructions-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ----------------------------------------------------- security operations */
+
+.levels { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.levels li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: var(--radius-sm); }
+.levels li .ico { width: 18px; height: 18px; margin-top: 2px; flex: none; color: var(--neutral); }
+.levels li[data-reached="true"] .ico { color: var(--good); }
+.levels li[data-reached="false"] { color: var(--ink-3); }
+.levels li[aria-current="step"] { background: var(--accent-soft); }
