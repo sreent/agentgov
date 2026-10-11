@@ -42,6 +42,7 @@ pipelines, use an API key instead.
 | `approver` | Read everything; decide approval requests; resolve, dismiss and reopen findings; attest the agents it sponsors |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), and report the MCP servers set up on developers' machines; it cannot read the registry |
+| `person` | Someone without an AgentGov role, signed in to decide the approval requests that agents acting for them sent them, while the `approvals-by-person` feature is on; sees nothing else ([acting for people](acting-for-people.md)) |
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector |
 
 People who sign in with single sign-on get their roles from the identity provider (see the
@@ -77,12 +78,15 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Give a blueprint or an agent models, and a daily token budget | Blueprint or agent → **Edit** → Models | `agentgov blueprints update B --model-access 'openai:gpt-4.1*' --token-budget N` (agents: the same options) | `model_access`, `daily_token_budget` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |
 | See model usage, cost and budgets, and who is spending | Models; an agent's page → Models | `agentgov models usage [--agent A] [--days N] [--by owner\|sponsor]` | `GET /v1/models/usage` |
 | Add, edit, enable, disable, delete policies | Policies → **Add policy**, **Edit**, **Disable**/**Enable**, **Delete** | `agentgov policies create\|update\|enable\|disable\|delete` | `POST /v1/policies`, `PUT`/`DELETE /v1/policies/{name}` |
-| Ask what policy would decide, for a tool call or a model call | Policies → **What if** | `agentgov policies evaluate --server crm --tool delete_customer --agent support-bot`, or `--provider openai --model gpt-4.1` | `POST /v1/policies/evaluate` |
+| Say whom a blueprint's agents act for, and who decides their approvals for a person ([acting for people](acting-for-people.md)) | Blueprint → **Edit** → People | `agentgov blueprints update B --acts-for people --people-groups support --approvals-by person` | `acts_for`, `people_groups`, `approvals_by` in `PATCH /v1/blueprints/{name}` |
+| Ask what policy would decide, for a tool call or a model call | Policies → **What if** | `agentgov policies evaluate --server crm --tool delete_customer --agent support-bot`, or `--provider openai --model gpt-4.1`; `--user sam --groups support` for a call for a person | `POST /v1/policies/evaluate` |
 | Apply manifests | Policies → **Import manifests** | `agentgov apply -f DIR` | `POST /v1/apply` |
 | Export manifests | Policies → **Export manifests** | `agentgov export` | `GET /v1/export` |
 | Decide an approval request | Approvals → **Approve** / **Deny** | `agentgov approvals approve\|deny ID` | `POST /v1/approvals/{id}/approve\|deny` |
+| See the approval requests sent to you, as the person an agent acted for | Approvals → *Waiting for you* | `agentgov approvals list --mine` | `GET /v1/me/approvals` |
 | Resolve, dismiss, reopen findings | Findings | `agentgov findings resolve\|dismiss\|reopen ID` | `POST /v1/findings/{id}/{action}` |
 | Browse, verify and export the ledger | Ledger → filters, **Verify chain**, **Export JSONL** | `agentgov ledger tail --agent A`, `ledger verify`, `ledger export` | `GET /v1/ledger`, `/v1/ledger/verify`, `/v1/ledger/export` |
+| See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |
 | Open the trace of a gateway decision | Ledger or an agent's Recent activity → **Open trace** | `agentgov ledger tail --traces` | `trace_url` on `GET /v1/ledger` entries (set `AGENTGOV_TRACE_URL`) |
 | Create, review and revoke API keys | Access → **Create API key**, **Revoke** | `agentgov apikeys create\|list\|revoke` | `POST`/`GET /v1/apikeys`, `DELETE /v1/apikeys/{id}` |
 | See who has signed in, with which roles | Access → People | `agentgov access list`, `agentgov access sessions` | `GET /v1/access` |

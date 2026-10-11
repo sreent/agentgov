@@ -1,1 +1,2 @@
-"""Identity: agent clients in Keycloak, and administrator single sign-on (OIDC)."""
+"""Identity: agent clients in Keycloak, the people agents act for, and administrator
+single sign-on (OIDC)."""

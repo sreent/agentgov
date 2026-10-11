@@ -55,7 +55,7 @@ its route answers 503. [Model calls](../../docs/models.md) has the rest.
 ## Signing in
 
 The admin UI at <http://localhost:8000/ui> offers single sign-on through Keycloak. The
-realm comes with three demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (default
+realm comes with four demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (default
 `dev-password`):
 
 | User | Realm role | What they can do |
@@ -63,8 +63,10 @@ realm comes with three demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (d
 | `admin` | `agentgov-admin` | Everything |
 | `alice` | `agentgov-approver` | Decide approval requests and findings; attest the agents they sponsor (the demo's `support-bot`) |
 | `audrey` | `agentgov-auditor` | See everything, change nothing |
+| `sam` | none (group `support`) | A person agents act for: signs in to the demo app `agentgov-demo-chat`, and to AgentGov to decide the approval requests sent to them, while `approvals-by-person` is on ([acting for people](../../docs/acting-for-people.md)) |
 
-People without an `agentgov-*` role are turned away. Sign-ins, sign-outs and refusals
+People without an `agentgov-*` role are turned away, unless the `approvals-by-person`
+feature is on: then they see only the approval requests sent to them. Sign-ins, sign-outs and refusals
 are recorded in the evidence ledger (`admin.login`, `admin.logout`,
 `admin.login_denied`). Signing out also ends the Keycloak session, and a session lasts
 at most `AGENTGOV_SESSION_HOURS` (default 8). The UI's **Access** page lists everyone who
@@ -153,7 +155,7 @@ AgentGov to Microsoft's services](../../docs/microsoft-connections.md) have the 
 |---|---|
 | `docker-compose.yml` | Services and their wiring; `AGENTGOV_*` variables are documented in `src/agentgov/config.py` |
 | `.env.example` | Every secret the stack uses |
-| `keycloak/agentgov-realm.json` | Realm with the control plane's provisioning client, the `agentgov-admin` sign-in client, the AgentGov roles and the demo users (imported on first start) |
+| `keycloak/agentgov-realm.json` | Realm with the control plane's provisioning client, the `agentgov-admin` sign-in client, the AgentGov roles, the demo users and the demo app people use agents from, `agentgov-demo-chat` (imported on first start) |
 | `opa/config.yaml` | OPA bundle, decision log and status services (all served by the control plane) |
 | `otel/collector.yaml` | OTLP in; spans to the control plane for discovery and activity, and the gateway's access logs of model calls for usage |
 | `otel/langfuse.yaml` | Merged over the collector config by the Langfuse override |

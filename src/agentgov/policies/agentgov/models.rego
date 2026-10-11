@@ -7,6 +7,7 @@
 #   kind:       "model"
 #   phase:      "request" | "response"
 #   agent:      {"agent_id", "client_id"}      (from the validated JWT)
+#   user:       the person the agent acts for, if any (see agentgov.context)
 #   provider:   the model provider's name in the registry
 #   model:      the model the agent asked for
 #   detections: {"categories": ["pii","secret"], "entities": [...],
@@ -118,6 +119,12 @@ violation contains {
 } if {
 	phase == "request"
 	detections.jailbreak == true
+}
+
+violation contains {"control": "acting-for-people", "message": msg} if {
+	phase == "request"
+	ctx.agent.status == "active"
+	some msg in ctx.person_refusals
 }
 
 violation contains {"control": "risk-based-access", "message": msg} if {

@@ -19,6 +19,9 @@ FIELDS = (
     "permissions",
     "model_access",
     "daily_token_budget",
+    "acts_for",
+    "people_groups",
+    "approvals_by",
     "require_sponsor",
     "attestation_days",
     "labels",
@@ -52,6 +55,12 @@ def _apply(bp: Blueprint, data: dict[str, Any]) -> list[str]:
             value = validation.model_access(value)
         elif key == "daily_token_budget":
             value = validation.token_budget(value)
+        elif key == "acts_for":
+            value = validation.acts_for(value)
+        elif key == "people_groups":
+            value = validation.people_groups(value)
+        elif key == "approvals_by":
+            value = validation.approvals_by(value)
         elif key == "labels":
             value = validation.labels(value)
         elif key == "require_sponsor":
@@ -72,7 +81,14 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Blueprint:
     if session.scalar(select(Blueprint).where(Blueprint.name == name)):
         raise Conflict(f"blueprint {name!r} already exists")
     bp = Blueprint(
-        id=ids.new_id(ids.BLUEPRINT), name=name, permissions=[], model_access=[], labels={}
+        id=ids.new_id(ids.BLUEPRINT),
+        name=name,
+        permissions=[],
+        model_access=[],
+        labels={},
+        acts_for="either",
+        people_groups=[],
+        approvals_by="approvers",
     )
     _apply(bp, data)
     session.add(bp)
@@ -122,6 +138,9 @@ def to_dict(bp: Blueprint) -> dict[str, Any]:
         "permissions": bp.permissions or [],
         "model_access": bp.model_access or [],
         "daily_token_budget": bp.daily_token_budget,
+        "acts_for": bp.acts_for,
+        "people_groups": bp.people_groups or [],
+        "approvals_by": bp.approvals_by,
         "require_sponsor": bp.require_sponsor,
         "attestation_days": bp.attestation_days,
         "labels": bp.labels or {},

@@ -8,6 +8,7 @@ code and its verifier at ``/auth/cli/token`` for a session token of its own.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any
 from urllib.parse import urlencode
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field
 from agentgov import ids
 from agentgov.api.auth import CSRF_HEADER, SESSION_COOKIE, bearer_token, session_principal
 from agentgov.identity import sso
+from agentgov.registry import features
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["sign-in"])
@@ -123,8 +125,11 @@ def callback(
     refresh_token = tokens.get("refresh_token") if rt.delegations is not None else None
     with rt.db.session() as s:
         if not who.roles:
-            sso.record_denied(s, who)
-            return failed("no_role")
+            if not features.is_on(s, "approvals-by-person"):
+                sso.record_denied(s, who)
+                return failed("no_role")
+            # They may decide the approval requests sent to them, and nothing else.
+            who = dataclasses.replace(who, roles=[sso.PERSON])
         if port:
             try:
                 one_time = sso.cli_signed_in(s, state, who)

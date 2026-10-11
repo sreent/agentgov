@@ -10,6 +10,12 @@
 {{- if hasKey . "serviceAccountClientId" }}{{ $kept = append $kept . }}{{ end }}
 {{- end }}
 {{- $_ := set $realm "users" $kept }}
+{{- /* The demo app people sign in to with a password goes with the demo users. */}}
+{{- $clients := list }}
+{{- range $realm.clients }}
+{{- if ne .clientId "agentgov-demo-chat" }}{{ $clients = append $clients . }}{{ end }}
+{{- end }}
+{{- $_ := set $realm "clients" $clients }}
 {{- end }}
 {{- $realmJson := toPrettyJson $realm }}
 # Agent identities (one OAuth client per agent) and administrators' single sign-on.

@@ -23,6 +23,12 @@ spec:
     - provider: demo
       models: [mock-small]
   daily_token_budget: 20000
+  # Whom its agents act for (docs/acting-for-people.md): people, itself or either; the
+  # groups those people must be in (empty: anyone); and who decides the approval
+  # requests its agents make for a person: approvers or person.
+  acts_for: either
+  people_groups: []
+  approvals_by: approvers
 ---
 apiVersion: agentgov/v1alpha1
 kind: Blueprint

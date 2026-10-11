@@ -46,6 +46,9 @@ SEVERITIES = ("info", "low", "medium", "high", "critical")
 # Model providers agentgateway can call with an API key. "openai-compatible" is any
 # server that speaks OpenAI's API (vLLM, Ollama, LiteLLM, hosted APIs) at base_url.
 MODEL_PROVIDER_KINDS = ("openai", "anthropic", "gemini", "openai-compatible")
+# Who a blueprint's agents act for, and who decides approvals made for a person.
+ACTS_FOR = ("people", "itself", "either")
+APPROVALS_BY = ("approvers", "person")
 
 
 def _created() -> Mapped[datetime]:
@@ -72,6 +75,15 @@ class Blueprint(Base):
     model_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
     # Tokens (input and output) each of its agents may use per UTC day; None: no limit.
     daily_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Who its agents act for: "people" (only for a person), "itself" (only on their own)
+    # or "either"; and the groups those people must be in (empty: anyone).
+    acts_for: Mapped[str] = mapped_column(String(16), default="either", server_default="either")
+    people_groups: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    # Who decides its agents' approval requests made for a person: "approvers" (AgentGov's
+    # approvers) or "person" (the person the agent acted for).
+    approvals_by: Mapped[str] = mapped_column(
+        String(16), default="approvers", server_default="approvers"
+    )
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -410,6 +422,15 @@ class ApprovalRequest(Base):
     decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # The person the agent acted for: their name, and their ID (the token's subject),
+    # which an approval must match to be used.
+    on_behalf_of: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    on_behalf_of_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    # Who decides it: "approvers" (AgentGov's approvers) or "person" (that person).
+    # Administrators can always decide.
+    deciders: Mapped[str] = mapped_column(
+        String(16), default="approvers", server_default="approvers"
+    )
 
 
 class Finding(Base):
@@ -487,6 +508,8 @@ class LedgerEntry(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The person the agent acted for, by name (agentgov.identity.people.name_of).
+    on_behalf_of: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     prev_hash: Mapped[str] = mapped_column(String(64))
     hash: Mapped[str] = mapped_column(String(64))
 

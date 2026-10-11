@@ -144,3 +144,18 @@ def test_a_missing_head_is_reported(rt) -> None:
         result = ledger.verify(s)
     assert result["valid"] is False
     assert result["problem"] == "chain head is missing"
+
+
+def test_the_person_an_agent_acted_for_is_hashed_when_there_is_one(rt) -> None:
+    with rt.db.session() as s:
+        ledger.append(s, type="decision.request", actor="agent:bot", on_behalf_of="alice")
+        ledger.append(s, type="decision.request", actor="agent:bot")
+    with rt.db.session() as s:
+        with_person, without = list(ledger.iter_entries(s))
+        assert ledger.to_dict(with_person)["on_behalf_of"] == "alice"
+        # Entries without a person hash as they did before the column existed.
+        assert "on_behalf_of" not in ledger.to_dict(without)
+        assert ledger.verify(s)["valid"] is True
+        s.execute(update(LedgerEntry).where(LedgerEntry.seq == 1).values(on_behalf_of="mallory"))
+    with rt.db.session() as s:
+        assert ledger.verify(s)["broken_at"] == 1

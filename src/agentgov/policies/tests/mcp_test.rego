@@ -1,5 +1,6 @@
 package agentgov.mcp_test
 
+import data.agentgov.context as ctx
 import data.agentgov.mcp
 
 registry := {
@@ -369,4 +370,87 @@ test_monitored_risk_shows_critical_agents_their_tools if {
 	inp := object.union(tool_list, {"agent": {"client_id": "agent-risky"}})
 	v := mcp.visible_tools with input as inp with data.registry as with_modes({"risk-based-access": "monitor"})
 	v == {"lookup_customer", "export_all"}
+}
+
+# ---------------------------------------------------------------------------
+# Who the agent acts for (acting-for-people).
+# ---------------------------------------------------------------------------
+
+alice := {"id": "u-alice", "username": "alice", "groups": ["/support"], "roles": [], "via": "exchange"}
+
+for_alice(inp) := object.union(inp, {"user": alice})
+
+acting(acts_for, groups) := object.union(registry, {"agents": {"agt_support": {"acts_for": acts_for, "people_groups": groups}}})
+
+test_an_agent_that_acts_for_people_needs_a_person if {
+	d := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer")
+		with data.registry as acting("people", [])
+	d.reasons == ["Agent support-bot acts only for people, and this call is on no one's behalf"]
+	allowed := mcp.decision with input as for_alice(call("agent-support-bot", "crm", "lookup_customer"))
+		with data.registry as acting("people", [])
+	allowed.effect == "allow"
+}
+
+test_an_agent_that_acts_on_its_own_refuses_people if {
+	d := mcp.decision with input as for_alice(call("agent-support-bot", "crm", "lookup_customer"))
+		with data.registry as acting("itself", [])
+	d.reasons == ["Agent support-bot acts only on its own behalf, and this call is on behalf of alice"]
+	alone := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer")
+		with data.registry as acting("itself", [])
+	alone.effect == "allow"
+}
+
+test_people_must_be_in_the_blueprints_groups if {
+	# Group names match with or without their path's leading "/".
+	inside := mcp.decision with input as for_alice(call("agent-support-bot", "crm", "lookup_customer"))
+		with data.registry as acting("either", ["hr", "support"])
+	inside.effect == "allow"
+	outside := mcp.decision with input as for_alice(call("agent-support-bot", "crm", "lookup_customer"))
+		with data.registry as acting("either", ["/hr", "finance"])
+	outside.reasons == ["Agent support-bot acts only for people in /hr, finance, and alice is in none of them"]
+
+	# The agent on its own isn't checked against the groups.
+	alone := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer")
+		with data.registry as acting("either", ["hr"])
+	alone.effect == "allow"
+}
+
+test_either_takes_both if {
+	alone := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer")
+		with data.registry as acting("either", [])
+	alone.effect == "allow"
+	for_person := mcp.decision with input as for_alice(call("agent-support-bot", "crm", "lookup_customer"))
+		with data.registry as acting("either", [])
+	for_person.effect == "allow"
+}
+
+test_who_the_agent_acts_for_is_monitored_or_off if {
+	reg := object.union(acting("people", []), {"features": {"acting-for-people": "monitor"}})
+	d := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer") with data.registry as reg
+	d.effect == "allow"
+	d.monitored == ["acting-for-people: Agent support-bot acts only for people, and this call is on no one's behalf"]
+	off := object.union(acting("people", []), {"features": {"acting-for-people": "off"}})
+	d2 := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer") with data.registry as off
+	d2.effect == "allow"
+	d2.monitored == []
+}
+
+test_no_tools_are_listed_for_people_the_agent_may_not_act_for if {
+	inp := {"agent": {"client_id": "agent-support-bot"}, "resource": {"server": "crm"}, "tools": [{"name": "lookup_customer"}]}
+	none := mcp.visible_tools with input as inp with data.registry as acting("people", [])
+	count(none) == 0
+	some_ := mcp.visible_tools with input as for_alice(inp) with data.registry as acting("people", [])
+	some_ == {"lookup_customer"}
+	monitored := object.union(acting("people", []), {"features": {"acting-for-people": "monitor"}})
+	all_ := mcp.visible_tools with input as inp with data.registry as monitored
+	all_ == {"lookup_customer"}
+}
+
+test_policies_can_ask_who_the_person_is if {
+	ctx.member_of("support") with input as for_alice({})
+	ctx.member_of("/support") with input as for_alice({})
+	not ctx.member_of("finance") with input as for_alice({})
+	ctx.user_name == "alice" with input as for_alice({})
+	ctx.user.via == "exchange" with input as for_alice({})
+	not ctx.user with input as {"user": {}}
 }

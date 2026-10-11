@@ -51,7 +51,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Agent identity blueprint holding inheritable permissions | ✅ | Blueprint grants are inherited by every agent that uses it |
 | Owners and sponsors (sponsor required) | ✅ | Activation requires a sponsor unless the blueprint waives it |
 | Autonomous (app-only) token flow | ✅ | OAuth client credentials; tokens carry `agent_id` and the gateway audience |
-| On-behalf-of user flow | ⏳ | RFC 8693 token exchange (supported by Keycloak) with `act` claims in policy |
+| On-behalf-of user flow | ✅ | Agents exchange a person's token for one of their own (Keycloak's token exchange, RFC 8693, or its delegation preview with `act`); blueprints say whom their agents act for, and policy, the ledger and approvals see the person and their groups ([acting for people](acting-for-people.md)) |
 | Secretless credentials (federated identity credentials) | ⏳ | Keycloak federated client authentication with Kubernetes / SPIFFE tokens |
 | Credential rotation | ✅ | `POST /v1/agents/{id}/credentials {"rotate": true}` |
 | Entra Agent ID identities of agents built on Microsoft's platforms | ✅ | Read from Microsoft Graph and linked to their registry agents; an identity Microsoft disabled raises a finding ([connections](microsoft-connections.md#microsoft-entra-agent-id)) |
@@ -104,7 +104,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Posture assessment and recommendations | ✅ | Findings with remediation (ownerless, no sponsor, expired attestation, stale, broad grants, unverified servers, identity drift) |
 | Harmful or malicious agent instructions | ✅ | Agents' system prompts (registered, reported in telemetry, or read from Microsoft 365) are checked by rules and optionally by **IBM Granite Guardian**; problems become findings and add to the risk score ([instructions](instructions.md)) |
 | Connectors used by Copilot Studio agents; risky agent settings | ✅ | Connector allowlist with findings for agents that use other connectors, publish without authentication, use their maker's connections or are shared with everyone; enforced by pushing it into Power Platform's advanced connector policies, and by Copilot Studio threat detection ([connections](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform)) |
-| Human approval for sensitive actions | ✅ | Destructive tools (and any policy you write) route to an approver; single-use approvals |
+| Human approval for sensitive actions | ✅ | Destructive tools (and any policy you write) route to an approver, or to the person the agent acted for; single-use approvals ([acting for people](acting-for-people.md#approvals-sent-to-the-person)) |
 | Alerts / incidents | 🟡 | Findings + webhook alerts; Defender's alerts about agents become findings ([connections](microsoft-connections.md#microsoft-defender-alerts)); SIEM integration ⏳ |
 | Insider risk, eDiscovery, retention policies | ➖ / ⏳ | Ledger export provides evidence; retention policy ⏳ |
 

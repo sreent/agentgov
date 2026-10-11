@@ -1019,7 +1019,7 @@ def blueprints_list() -> None:
     for r in rows:
         r["grants"] = "; ".join(f"{g['server']}:{','.join(g['tools'])}" for g in r["permissions"])
         r["review"] = f"{r['attestation_days']}d" if r["attestation_days"] else "none"
-    _table(rows, ["name", "risk_tier", "require_sponsor", "review", "grants"])
+    _table(rows, ["name", "risk_tier", "require_sponsor", "review", "acts_for", "grants"])
 
 
 @blueprints_app.command("get")
@@ -1049,6 +1049,36 @@ def _blueprint_fields(
     return body
 
 
+def _people_fields(
+    acts_for: str | None,
+    people_groups: list[str] | None,
+    all_people: bool,
+    approvals_by: str | None,
+) -> dict[str, Any]:
+    body = _given(acts_for=acts_for, approvals_by=approvals_by)
+    if all_people:
+        body["people_groups"] = []
+    elif people_groups is not None:
+        body["people_groups"] = _split(people_groups)
+    return body
+
+
+ACTS_FOR = typer.Option(
+    None,
+    help="Who its agents act for: people (only for a person), itself (only on their own) "
+    "or either.",
+)
+PEOPLE_GROUPS = typer.Option(
+    None,
+    "--people-groups",
+    help="Groups the people its agents act for must be in (repeatable or comma-separated).",
+)
+ALL_PEOPLE = typer.Option(False, "--all-people", help="Act for people in any group.")
+APPROVALS_BY = typer.Option(
+    None,
+    help="Who decides approval requests made for a person: approvers or person (the "
+    "person the agent acted for).",
+)
 BP_GRANT = typer.Option(None, "--grant", help="Tool grant server:tool,tool (repeatable).")
 REVIEW_DAYS = typer.Option(None, help="Sponsors re-attest agents every N days.")
 NO_REVIEW = typer.Option(False, "--no-review", help="No periodic attestation.")
@@ -1068,12 +1098,19 @@ def blueprints_create(
     require_sponsor: bool | None = REQUIRE_SPONSOR,
     model_access: list[str] | None = MODEL_ACCESS,
     token_budget: int | None = TOKEN_BUDGET,
+    acts_for: str | None = ACTS_FOR,
+    people_groups: list[str] | None = PEOPLE_GROUPS,
+    approvals_by: str | None = APPROVALS_BY,
     label: list[str] | None = LABEL,
 ) -> None:
     """Create a blueprint."""
-    body = _blueprint_fields(
-        description, grant, risk_tier, review_days, no_review, require_sponsor, label
-    ) | _model_fields(model_access, token_budget, False)
+    body = (
+        _blueprint_fields(
+            description, grant, risk_tier, review_days, no_review, require_sponsor, label
+        )
+        | _model_fields(model_access, token_budget, False)
+        | _people_fields(acts_for, people_groups, False, approvals_by)
+    )
     bp = _call("POST", "/v1/blueprints", json={"name": name, **body})
     _done("blueprint", bp["name"], "created")
 
@@ -1094,12 +1131,22 @@ def blueprints_update(
     ),
     token_budget: int | None = TOKEN_BUDGET,
     no_token_budget: bool = NO_TOKEN_BUDGET,
+    acts_for: str | None = ACTS_FOR,
+    people_groups: list[str] | None = typer.Option(
+        None, "--people-groups", help="Groups the people must be in (replace them)."
+    ),
+    all_people: bool = ALL_PEOPLE,
+    approvals_by: str | None = APPROVALS_BY,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
 ) -> None:
     """Change a blueprint. Every agent on it gets the change."""
-    body = _blueprint_fields(
-        description, grant, risk_tier, review_days, no_review, require_sponsor, label
-    ) | _model_fields(model_access, token_budget, no_token_budget)
+    body = (
+        _blueprint_fields(
+            description, grant, risk_tier, review_days, no_review, require_sponsor, label
+        )
+        | _model_fields(model_access, token_budget, no_token_budget)
+        | _people_fields(acts_for, people_groups, all_people, approvals_by)
+    )
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
     bp = _call("PATCH", f"/v1/blueprints/{name}", json=body)
@@ -1400,6 +1447,15 @@ def policies_evaluate(
     tool_calls: bool = typer.Option(
         False, "--tool-calls", help="The model call's conversation holds tool calls."
     ),
+    user: str | None = typer.Option(
+        None, "--user", help="The person the agent acts for (default: it acts on its own)."
+    ),
+    groups: list[str] | None = typer.Option(
+        None, "--groups", help="The person's groups (repeatable or comma-separated)."
+    ),
+    via: str = typer.Option(
+        "exchange", help="How the agent got the person's token: exchange or delegation."
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print OPA's full result."),
 ) -> None:
     """What if: ask the live OPA what it would decide for a tool call or a model call.
@@ -1437,6 +1493,16 @@ def policies_evaluate(
             "resource": {"server": server, "name": tool},
             "detections": detections,
         }
+    if user:
+        if via not in ("exchange", "delegation"):
+            _fail(f"--via is exchange or delegation (got {via!r})")
+        decision_input["user"] = {
+            "id": user,
+            "username": user,
+            "groups": _split(groups),
+            "roles": [],
+            "via": via,
+        }
     body = {"path": path, "input": decision_input}
     result = _call("POST", "/v1/policies/evaluate", json=body)["result"]
     if as_json or not result:
@@ -1455,10 +1521,16 @@ def policies_evaluate(
 
 
 @approvals_app.command("list")
-def approvals_list(status: str = "pending") -> None:
+def approvals_list(
+    status: str = typer.Option("pending", help="pending, approved, denied, used, expired or all."),
+    mine: bool = typer.Option(
+        False, "--mine", help="Only the requests sent to you: agents acted for you."
+    ),
+) -> None:
     """List approval requests (pending ones by default)."""
-    rows = _call("GET", "/v1/approvals", params={"status": status})
-    _table(rows, ["id", "agent_name", "resource", "status", "requested_at"])
+    path = "/v1/me/approvals" if mine else "/v1/approvals"
+    rows = _call("GET", path, params={"status": status} if status != "all" else {})
+    _table(rows, ["id", "agent_name", "resource", "on_behalf_of", "status", "requested_at"])
 
 
 @approvals_app.command("approve")
@@ -1537,13 +1609,17 @@ def ledger_tail(
     limit: int = 20,
     type: str | None = typer.Option(None, help="Event type; * is a wildcard (decision.*)."),
     agent: str | None = typer.Option(None, help="Only this agent's entries."),
+    user: str | None = typer.Option(None, help="Only what agents did for this person."),
     decision: str | None = typer.Option(None, help="allow, deny or require_approval."),
     traces: bool = typer.Option(False, "--traces", help="Add links to the trace viewer."),
 ) -> None:
     """Show the latest ledger entries, oldest first."""
-    params: dict[str, Any] = {"limit": limit, **_given(type=type, agent=agent, decision=decision)}
+    params: dict[str, Any] = {
+        "limit": limit,
+        **_given(type=type, agent=agent, user=user, decision=decision),
+    }
     rows = list(reversed(_call("GET", "/v1/ledger", params=params)))
-    columns = ["seq", "ts", "type", "agent_name", "resource", "decision", "reason"]
+    columns = ["seq", "ts", "type", "agent_name", "on_behalf_of", "resource", "decision", "reason"]
     _table(rows, columns + (["trace_url"] if traces else []))
 
 

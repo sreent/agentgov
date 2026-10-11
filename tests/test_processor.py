@@ -91,20 +91,22 @@ def _meta(**fields) -> struct_pb2.Struct:
     return s
 
 
-def call_request(name: str, arguments: dict[str, Any], method: str = "tools/call") -> pb.McpRequest:
+def call_request(
+    name: str, arguments: dict[str, Any], method: str = "tools/call", **claims: Any
+) -> pb.McpRequest:
     params = {"name": name, "arguments": arguments}
     return pb.McpRequest(
         service_names=["crm"],
         method=method,
-        metadata_context=_meta(),
+        metadata_context=_meta(**claims),
         mcp_request=json.dumps(params).encode(),
     )
 
 
 def call_response(
-    result: dict[str, Any], method: str = "tools/call", target: str = "get"
+    result: dict[str, Any], method: str = "tools/call", target: str = "get", **claims: Any
 ) -> pb.McpResponse:
-    meta = _meta(request={"agentgov_target": target, "agentgov_method": method})
+    meta = _meta(request={"agentgov_target": target, "agentgov_method": method}, **claims)
     return pb.McpResponse(
         service_names=["crm"],
         method=method,
@@ -433,3 +435,93 @@ class TestFeatureModes:
         _, cp = run(opa, response=call_response({"tools": tools}, method="tools/list"))
         catalog = next(payload for kind, payload in cp.calls if kind == "catalog")
         assert catalog["poisoned"] == {}
+
+
+# The claims the gateway passes when the agent called with a token it got for alice.
+ALICE = {
+    "subject": "u-alice",
+    "username": "alice",
+    "email": "alice@example.com",
+    "groups": ["/support"],
+    "roles": ["default-roles-agentgov"],
+}
+ALICE_AS_POLICY_SEES_HER = {
+    "id": "u-alice",
+    "username": "alice",
+    "email": "alice@example.com",
+    "groups": ["/support"],
+    "roles": ["default-roles-agentgov"],
+    "via": "exchange",
+}
+
+
+class TestPeople:
+    def test_the_person_reaches_policy_and_the_ledger(self) -> None:
+        opa = FakeOpa()
+        _, cp = run(opa, request=call_request("get", {}, **ALICE))
+        assert opa.inputs[0][1]["user"] == ALICE_AS_POLICY_SEES_HER
+        assert cp.records[0]["user"] == ALICE_AS_POLICY_SEES_HER
+        # The tool's result is decided and recorded for her too.
+        opa = FakeOpa()
+        _, cp = run(opa, response=call_response({"content": []}, **ALICE))
+        assert opa.inputs[0][1]["user"]["username"] == "alice"
+        assert cp.records[0]["user"]["username"] == "alice"
+
+    def test_delegation_names_the_agent_the_person_delegated_to(self) -> None:
+        opa = FakeOpa()
+        act = {"sub": "sa-1", "client_id": "agent-bot"}
+        run(opa, request=call_request("get", {}, **ALICE, act=act))
+        assert opa.inputs[0][1]["user"]["via"] == "delegation"
+        assert opa.inputs[0][1]["user"]["actor"] == "agent-bot"
+
+    def test_an_agent_on_its_own_acts_for_no_one(self) -> None:
+        opa = FakeOpa()
+        claims = {"subject": "sa-1", "username": "service-account-agent-bot"}
+        _, cp = run(opa, request=call_request("get", {}, **claims))
+        assert "user" not in opa.inputs[0][1]
+        assert cp.records[0]["user"] is None
+
+    def test_tools_are_listed_for_the_person(self) -> None:
+        opa = FakeOpa(visible=["get"])
+        result = {"tools": [{"name": "get", "description": "Get"}]}
+        run(opa, response=call_response(result, method="tools/list", **ALICE))
+        assert opa.inputs[0][0] == "agentgov/mcp/list_view"
+        assert opa.inputs[0][1]["user"]["username"] == "alice"
+
+    def test_approval_requests_say_who_the_call_is_for(self) -> None:
+        opa = FakeOpa(
+            lambda inp: {
+                "effect": "require_approval",
+                "reasons": ["destructive"],
+                "redact": [],
+                "agent": AGENT,
+            }
+        )
+        _, cp = run(opa, request=call_request("delete", {"id": "c-1"}, **ALICE))
+        approval = next(payload for kind, payload in cp.calls if kind == "approval")
+        assert approval["user"] == ALICE_AS_POLICY_SEES_HER
+
+    def test_the_agent_hears_who_decides_and_where(self) -> None:
+        class SentToThePerson(FakeControlPlane):
+            async def check_approval(self, payload):
+                self.calls.append(("approval", payload))
+                approval = {"id": "apr_1", "deciders": "person", "on_behalf_of": "alice"}
+                return {
+                    "outcome": "created",
+                    "approval": approval,
+                    "url": "https://ag/ui/#/approvals",
+                }
+
+        opa = FakeOpa(
+            lambda inp: {
+                "effect": "require_approval",
+                "reasons": ["destructive"],
+                "redact": [],
+                "agent": AGENT,
+            }
+        )
+        reply, _ = run(opa, SentToThePerson(), request=call_request("delete", {}, **ALICE))
+        assert reply.error.reason == (
+            "Human approval required: destructive. Approval request apr_1 is pending for alice "
+            "to approve at https://ag/ui/#/approvals; retry the same call once it is approved."
+        )

@@ -142,6 +142,8 @@ def internal_approval_check(
     request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(service)
 ) -> dict[str, Any]:
     rt = _rt(request)
+    # The person the agent acts for, if it acts for one.
+    person = body.get("user") if isinstance(body.get("user"), dict) else None
     with rt.db.session() as s:
         agent = agents.get(s, body["agent_id"])
         outcome, req = approvals.check_or_request(
@@ -153,12 +155,24 @@ def internal_approval_check(
             redacted_arguments=body.get("redacted_arguments"),
             reasons=list(body.get("reasons") or []),
             ttl_seconds=rt.settings.approval_ttl_seconds,
+            person=person if person and person.get("id") else None,
         )
         if outcome == "created":
+            waiting = ""
+            if req.on_behalf_of:
+                waiting = f" for {req.on_behalf_of}"
+                if req.deciders == approvals.PERSON:
+                    waiting += ", who decides it"
             rt.alerts.send(
-                f"AgentGov: approval {req.id} needed - {agent.name} wants to call {req.resource}"
+                f"AgentGov: approval {req.id} needed - {agent.name} wants to call "
+                f"{req.resource}{waiting}"
             )
-        return {"outcome": outcome, "approval": approvals.to_dict(req)}
+        return {
+            "outcome": outcome,
+            "approval": approvals.to_dict(req),
+            # Where the person, or an approver, decides it.
+            "url": f"{rt.settings.public_url.rstrip('/')}/ui/#/approvals",
+        }
 
 
 @router.post("/v1/internal/decisions", tags=["internal"])

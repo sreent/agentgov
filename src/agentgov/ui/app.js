@@ -248,6 +248,12 @@ function can(kind) {
   return kind === 'approve' && roles.includes('approver');
 }
 
+// Someone without an AgentGov role, signed in to decide the approval requests that agents
+// acting for them sent them (the approvals-by-person feature). They see only those.
+function isPerson() {
+  return Boolean(me) && !me.roles.some((r) => READ_ROLES.includes(r)) && me.roles.includes('person');
+}
+
 // Reasons /auth/callback sends back (?sso_error=...). Only these fixed texts are shown.
 const SSO_ERRORS = {
   no_role: 'You signed in, but your account has no AgentGov role. Ask an administrator for agentgov-admin, agentgov-approver or agentgov-auditor.',
@@ -807,6 +813,10 @@ function updateBadges({ pendingApprovals, findings }) {
 
 async function refreshBadges() {
   try {
+    if (isPerson()) {
+      updateBadges({ pendingApprovals: (await api('v1/me/approvals?status=pending')).length });
+      return;
+    }
     const [pending, open] = await Promise.all([api('v1/approvals?status=pending'), api('v1/findings?status=open')]);
     updateBadges({ pendingApprovals: pending.length, findings: summarizeFindings(open) });
   } catch { /* badges are a convenience; the pages show the real state */ }
@@ -865,7 +875,8 @@ async function route({ soft = false } = {}) {
     match = path.match(p.re);
     if (match) { page = p; break; }
   }
-  if (!page) { location.replace('#/overview'); return; }
+  if (!page) { location.replace(isPerson() ? '#/approvals' : '#/overview'); return; }
+  if (isPerson() && page.nav !== 'approvals') { location.replace('#/approvals'); return; }
   const seq = ++renderSeq;
   setActiveNav(page.nav);
   closeNav(false);
@@ -978,7 +989,11 @@ function enterApp() {
   $('.skip-link').hidden = false;
   $('#shell').hidden = false;
   firstRender = true;
-  if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', '#/overview');
+  // People without an AgentGov role have only their approvals.
+  for (const link of document.querySelectorAll('#nav [data-nav]')) {
+    link.closest('li').hidden = isPerson() && link.dataset.nav !== 'approvals';
+  }
+  if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', isPerson() ? '#/approvals' : '#/overview');
   route();
   refreshBadges();
   getInfo().then((info) => {
@@ -1035,7 +1050,7 @@ async function onSignin(event) {
   try {
     token = value;
     const who = await api('v1/me', { signingIn: true });
-    if (!who.roles.some((r) => READ_ROLES.includes(r))) throw new ApiError(403, '', `its role is ${who.role}`);
+    if (!who.roles.some((r) => READ_ROLES.includes(r) || r === 'person')) throw new ApiError(403, '', `its role is ${who.role}`);
     me = who;
     session = false;
     writeStore('sessionStorage', TOKEN_KEY, value);
@@ -1095,7 +1110,7 @@ async function start() {
       showSignin(ssoError ? SSO_ERRORS[ssoError] || SSO_ERRORS.provider : undefined);
       return;
     }
-    if (!who.roles.some((r) => READ_ROLES.includes(r))) {
+    if (!who.roles.some((r) => READ_ROLES.includes(r) || r === 'person')) {
       if (!token) await api('auth/logout', { method: 'POST', signingIn: true }).catch(() => null);
       resetToSignin(`Your role (${who.role}) can't open the admin center. Use an admin, approver or auditor account.`);
       return;
@@ -2010,6 +2025,7 @@ function permissionsCard(a) {
       facts([
         ['Blueprint', a.blueprint ? h('a', { href: '#/policies' }, a.blueprint) : h('span', { class: 'muted' }, 'None assigned')],
         ['Declared risk tier', humanize(a.risk_tier)],
+        ['Acts for', actsFor(a)],
       ]),
       broad ? callout('warning', 'triangle', 'This agent may call every tool on every server (*/*). Replace the wildcard with the tools it needs.') : null,
       list,
@@ -2674,12 +2690,20 @@ function connectionsTable(model) {
 
 async function renderApprovals({ match }) {
   const tab = match[1] === 'history' ? 'history' : 'pending';
-  const [all, agents] = await Promise.all([api('v1/approvals'), api('v1/agents?include_deleted=true').catch(() => [])]);
+  const person = isPerson();
+  // Requests sent to the person signed in: agents acted for them.
+  const [all, agents, mine] = await Promise.all([
+    person ? api('v1/me/approvals') : api('v1/approvals'),
+    person ? [] : api('v1/agents?include_deleted=true').catch(() => []),
+    api('v1/me/approvals?status=pending').catch(() => []),
+  ]);
   const agentsById = new Map(agents.map((a) => [a.id, a]));
+  const mineIds = new Set(mine.map((r) => r.id));
   const pending = all.filter((r) => r.status === 'pending');
   const history = all.filter((r) => r.status !== 'pending');
   updateBadges({ pendingApprovals: pending.length });
-  const approvalsMode = (await featureModes().catch(() => ({}))).approvals;
+  const approvalsMode = person ? 'enforce' : (await featureModes().catch(() => ({}))).approvals;
+  const card = (r) => approvalCard(r, agentsById.get(r.agent_id), mineIds.has(r.id));
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'Approval views' },
     h('a', { class: 'tab', href: '#/approvals', 'aria-current': tab === 'pending' ? 'page' : null },
       'Pending', h('span', { class: 'nav-badge', 'data-tone': pending.length ? 'warning' : '' }, fmt(pending.length))),
@@ -2687,10 +2711,19 @@ async function renderApprovals({ match }) {
       'History', h('span', { class: 'nav-badge' }, fmt(history.length))));
   let content;
   if (tab === 'pending') {
+    // Yours first: requests agents made while acting for you wait for your decision.
+    const yours = pending.filter((r) => mineIds.has(r.id));
+    const others = pending.filter((r) => !mineIds.has(r.id));
     content = pending.length
-      ? h('div', { class: 'approval-list' }, pending.map((r) => approvalCard(r, agentsById.get(r.agent_id))))
-      : h('section', { class: 'card' }, emptyState('Nothing is waiting for approval',
-        'When policy holds a tool call for a human (for example a tool its server marks destructive), it appears here.'));
+      ? h('div', { class: 'stack' },
+        yours.length && !person ? h('div', { class: 'section-title' }, h('h2', {}, 'Waiting for you')) : null,
+        yours.length ? h('div', { class: 'approval-list' }, yours.map(card)) : null,
+        yours.length && others.length ? h('div', { class: 'section-title' }, h('h2', {}, "Everyone else's")) : null,
+        others.length ? h('div', { class: 'approval-list' }, others.map(card)) : null)
+      : h('section', { class: 'card' }, person
+        ? emptyState('Nothing is waiting for you', 'When an agent acting for you needs your approval to do something, it appears here.')
+        : emptyState('Nothing is waiting for approval',
+          'When policy holds a tool call for a human (for example a tool its server marks destructive), it appears here.'));
   } else {
     content = h('section', { class: 'card', 'aria-label': 'Approval history' },
       history.length ? approvalHistoryTable(history) : emptyState('No decided approvals yet'));
@@ -2698,7 +2731,9 @@ async function renderApprovals({ match }) {
   return h('div', { class: 'page', 'data-title': tab === 'history' ? 'Approval history' : 'Approvals' },
     pageHead({
       title: 'Approvals',
-      sub: 'Tool calls that policy held for a human decision. An approval is single-use: the agent retries the identical call and it goes through once.',
+      sub: person
+        ? 'What agents acting for you want to do, and need you to approve first. Approve a call and the agent can make it once.'
+        : 'Tool calls that policy held for a human decision. An approval is single-use: the agent retries the identical call and it goes through once.',
       actions: [refreshButton()],
     }),
     approvalsMode && approvalsMode !== 'enforce' ? callout('warning', 'eye', h('span', {},
@@ -2708,7 +2743,7 @@ async function renderApprovals({ match }) {
     tabs, content);
 }
 
-function approvalCard(r, agent) {
+function approvalCard(r, agent, mine = false) {
   const noteId = `note-${r.id}`;
   const note = h('textarea', { id: noteId, rows: 1, placeholder: 'For example: confirmed with the customer', 'data-focus-key': noteId });
   const approveBtn = h('button', { type: 'button', class: 'btn btn--primary' }, icon('check'), 'Approve');
@@ -2738,11 +2773,16 @@ function approvalCard(r, agent) {
         'Policy denies its calls before approvals are checked, so approving changes nothing unless the agent becomes active before the request expires.'))
     : null;
   const headingId = nextId('approval');
+  // The person it was sent to decides it, or approvers; administrators can always decide.
+  const forPerson = r.deciders === 'person';
+  const mayDecide = can('admin') || (forPerson ? mine : can('approve'));
+  const deciders = forPerson ? (mine ? 'You decide this request.' : `${r.on_behalf_of} decides this request.`) : 'An approver or admin decides this request.';
   return h('section', { class: 'card approval', 'aria-labelledby': headingId, 'data-focus-key': `approval-${r.id}`, tabindex: '-1' },
     h('div', { class: 'card-head' },
       h('div', { class: 'card-head-text' },
         h('h2', { id: headingId, class: 'resource' }, r.resource),
-        h('p', { class: 'card-sub' }, `${r.action} requested by `, agentLink(r.agent_id, r.agent_name), ' · ', timeEl(r.requested_at))),
+        h('p', { class: 'card-sub' }, `${r.action} requested by `, isPerson() ? r.agent_name : agentLink(r.agent_id, r.agent_name),
+          r.on_behalf_of ? [' for ', mine ? 'you' : isPerson() ? r.on_behalf_of : personLink(r.on_behalf_of)] : null, ' · ', timeEl(r.requested_at))),
       h('div', { class: 'chip-row' }, chip('approval', r.status),
         h('span', { class: 'chip chip--plain', title: r.expires_at ? fullFmt.format(new Date(r.expires_at)) : null }, icon('clock'), `Expires ${r.expires_at ? relTime(r.expires_at) : 'never'}`))),
     h('div', { class: 'card-body' },
@@ -2753,20 +2793,24 @@ function approvalCard(r, agent) {
             ? h('ul', { class: 'reasons', role: 'list' }, r.reasons.map((reason) => h('li', {}, icon('user-check'), h('span', {}, reason))))
             : h('p', { class: 'muted small' }, 'No reason recorded.')),
         h('div', { class: 'stack', style: 'gap:8px' }, h('span', { class: 'field-label' }, 'Arguments (redacted)'), jsonBlock(r.arguments ?? {}))),
-      can('approve')
+      forPerson && !mine && mayDecide
+        ? callout('neutral', 'info', `${r.on_behalf_of}, whom the agent acted for, decides this request. As an administrator, you can decide it instead.`)
+        : null,
+      mayDecide
         ? h('div', { class: 'decide' },
           h('div', { class: 'field' }, h('label', { for: noteId }, 'Note for the ledger ', h('span', { class: 'muted' }, '(optional)')), note),
           h('div', { class: 'btn-row' }, denyBtn, approveBtn))
-        : h('p', { class: 'muted small' }, 'An approver or admin decides this request.')));
+        : h('p', { class: 'muted small' }, deciders)));
 }
 
 function approvalHistoryTable(rows) {
   return h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
-    h('thead', {}, h('tr', {}, ['Outcome', 'Tool call', 'Agent', 'Decided by', 'Decided', 'Note', 'Requested'].map((t) => h('th', { scope: 'col' }, t)))),
+    h('thead', {}, h('tr', {}, ['Outcome', 'Tool call', 'Agent', 'For', 'Decided by', 'Decided', 'Note', 'Requested'].map((t) => h('th', { scope: 'col' }, t)))),
     h('tbody', {}, rows.map((r) => h('tr', {},
       h('td', { 'data-label': 'Outcome' }, chip('approval', r.status, { title: r.used_at ? `Used ${fullFmt.format(new Date(r.used_at))}` : null })),
       h('td', { 'data-label': 'Tool call' }, h('span', { class: 'resource' }, r.resource)),
-      h('td', { 'data-label': 'Agent', class: 'break' }, agentLink(r.agent_id, r.agent_name)),
+      h('td', { 'data-label': 'Agent', class: 'break' }, isPerson() ? r.agent_name : agentLink(r.agent_id, r.agent_name)),
+      h('td', { 'data-label': 'For', class: 'break' }, r.on_behalf_of ? (isPerson() ? r.on_behalf_of : personLink(r.on_behalf_of)) : h('span', { class: 'muted' }, '—')),
       h('td', { 'data-label': 'Decided by', class: 'break' }, r.decided_by || h('span', { class: 'muted' }, r.status === 'expired' ? 'Nobody (expired)' : '—')),
       h('td', { 'data-label': 'Decided', class: 'nowrap' }, timeEl(r.decided_at)),
       h('td', { 'data-label': 'Note', class: 'break' }, r.decision_note || h('span', { class: 'muted' }, '—')),
@@ -3230,6 +3274,16 @@ async function blueprintFormFlow(b, servers) {
         hint: 'Models its agents may call through the gateway: one provider per line; model names can use * wildcards.',
       },
       { id: 'daily_token_budget', label: 'Daily token budget per agent', type: 'number', min: 0, value: b?.daily_token_budget ?? '', hint: 'Input and output tokens per UTC day. Empty: no budget.' },
+      { type: 'section', label: 'People' },
+      { id: 'acts_for', label: 'Its agents act for', type: 'select', value: b?.acts_for || 'either', options: Object.entries(ACTS_FOR).map(([value, label]) => ({ value, label })) },
+      {
+        id: 'people_groups', label: "People's groups", value: (b?.people_groups || []).join(', '), placeholder: 'support, /emea/sales', mono: true,
+        hint: 'When its agents act for a person, the person must be in one of these groups. Empty: anyone.',
+      },
+      {
+        id: 'approvals_by', label: 'Approval requests made for a person go to', type: 'select', value: b?.approvals_by || 'approvers', options: Object.entries(APPROVALS_BY).map(([value, label]) => ({ value, label })),
+        hint: 'To the person while the approvals-by-person feature is on; administrators can always decide.',
+      },
       { id: 'labels', label: 'Labels', value: formatLabels(b?.labels), placeholder: 'data=customer', mono: true },
     ].filter(Boolean),
     submit: (v) => {
@@ -3239,6 +3293,7 @@ async function blueprintFormFlow(b, servers) {
         description: v.description, permissions: parseGrants(v.permissions), risk_tier: v.risk_tier,
         attestation_days: days, require_sponsor: v.require_sponsor, labels: parseLabels(v.labels),
         model_access: parseModelAccess(v.model_access), daily_token_budget: parseBudget(v.daily_token_budget),
+        acts_for: v.acts_for, people_groups: parseList(v.people_groups), approvals_by: v.approvals_by,
       };
       if (editing) return api(`v1/blueprints/${encodeURIComponent(b.name)}`, { method: 'PATCH', body });
       return api('v1/blueprints', { method: 'POST', body: { name: v.name, ...body } });
@@ -3366,6 +3421,22 @@ function permissionList(grants) {
     h('div', { class: 'chip-row' }, g.tools.map((t) => plainChip(t, { mono: true }))))));
 }
 
+// Who a blueprint's agents act for (acting-for-people), and who decides approvals made for a person.
+const ACTS_FOR = {
+  either: 'People, or itself',
+  people: 'Only people: every call is for a person',
+  itself: 'Only itself: never for a person',
+};
+const APPROVALS_BY = { approvers: 'Approvers', person: 'The person the agent acted for' };
+
+function actsFor(x) {
+  const groups = x.people_groups || [];
+  const who = { either: 'People or itself', people: 'People only', itself: 'Itself only' }[x.acts_for] || humanize(x.acts_for || 'either');
+  return x.acts_for !== 'itself' && groups.length
+    ? h('span', {}, `${who}; people in `, h('span', { class: 'chip-row', style: 'display:inline-flex' }, groups.map((g) => plainChip(g, { mono: true }))))
+    : who;
+}
+
 function blueprintCard(b, used, servers) {
   const labels = Object.entries(b.labels || {});
   return card({
@@ -3380,6 +3451,8 @@ function blueprintCard(b, used, servers) {
         ['Used by', used ? h('a', { href: '#/agents' }, plural(used, 'agent')) : h('span', { class: 'muted' }, 'No agents')],
         ['Sponsor', b.require_sponsor ? 'Required before activation' : 'Not required'],
         ['Attestation', b.attestation_days ? `Every ${plural(b.attestation_days, 'day')}` : 'Not required'],
+        ['Acts for', actsFor(b)],
+        b.approvals_by === 'person' ? ['Approvals', APPROVALS_BY.person] : null,
         labels.length ? ['Labels', h('div', { class: 'chip-row' }, labels.map(([k, v]) => plainChip(`${k}=${v}`, { mono: true })))] : null,
       ]),
       h('div', { class: 'field-label' }, 'Permissions'),
@@ -3453,6 +3526,9 @@ function whatIfCard(agents, servers, providers = []) {
   providerInput.addEventListener('change', fillModels);
   agentSel.addEventListener('change', fillModels);
 
+  // The person the agent acts for, if any.
+  const userInput = h('input', { type: 'text', id: 'wi-user', placeholder: 'No one: the agent alone', autocomplete: 'off', spellcheck: 'false' });
+  const groupsInput = h('input', { type: 'text', id: 'wi-groups', placeholder: 'support, /emea/sales', autocomplete: 'off', spellcheck: 'false' });
   const kindTool = h('input', { type: 'radio', name: 'wi-kind', id: 'wi-kind-tool', value: 'tool', checked: true });
   const kindModel = h('input', { type: 'radio', name: 'wi-kind', id: 'wi-kind-model', value: 'model' });
   const phaseRequest = h('input', { type: 'radio', name: 'wi-phase', id: 'wi-phase-request', value: 'request', checked: true });
@@ -3500,18 +3576,20 @@ function whatIfCard(agents, servers, providers = []) {
       ? { client_id: 'agent-not-registered' }
       : { agent_id: agent?.id, client_id: agent?.identity?.client_id || undefined };
     const detections = { categories, prompt_injection: injection.checked, injection_score: injection.checked ? 0.95 : 0 };
+    const name = userInput.value.trim();
+    const user = name ? { user: { id: name, username: name, groups: parseList(groupsInput.value), roles: [], via: 'exchange' } } : {};
     if (isModel()) {
       return {
         path: 'agentgov/models/decision',
         input: {
-          kind: 'model', phase, agent: caller, provider: providerInput.value.trim(), model: modelInput.value.trim(),
+          kind: 'model', phase, agent: caller, ...user, provider: providerInput.value.trim(), model: modelInput.value.trim(),
           detections: { ...detections, jailbreak: jailbreak.checked }, tool_calls: toolCalls.checked,
         },
       };
     }
     return {
       path: 'agentgov/mcp/decision',
-      input: { phase, method: 'tools/call', agent: caller, resource: { server: serverInput.value.trim(), name: toolInput.value.trim() }, detections },
+      input: { phase, method: 'tools/call', agent: caller, ...user, resource: { server: serverInput.value.trim(), name: toolInput.value.trim() }, detections },
     };
   }
 
@@ -3539,6 +3617,9 @@ function whatIfCard(agents, servers, providers = []) {
         h('label', { class: 'check', for: 'wi-kind-tool' }, kindTool, 'A tool call'),
         h('label', { class: 'check', for: 'wi-kind-model' }, kindModel, 'A model call'))),
     h('div', { class: 'field' }, h('label', { for: 'wi-agent' }, 'Agent'), agentSel),
+    h('div', { class: 'form-row' },
+      h('div', { class: 'field' }, h('label', { for: 'wi-user' }, 'On behalf of'), userInput),
+      h('div', { class: 'field' }, h('label', { for: 'wi-groups' }, 'Their groups'), groupsInput)),
     toolFields, modelFields,
     h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Phase'),
       h('div', { class: 'radio-row' },
@@ -3622,6 +3703,7 @@ function ledgerDetail(e) {
       ['Time', timeEl(e.ts, { absolute: true })],
       ['Severity', humanize(e.severity)],
       ['Action', e.action ? h('code', {}, e.action) : null],
+      e.on_behalf_of ? ['On behalf of', personLink(e.on_behalf_of)] : null,
       e.trace_id ? ['Trace', h('span', {}, h('code', {}, e.trace_id), e.trace_url ? [' ', traceLink(e)] : null)] : null,
       ['Hash', h('code', { class: 'hash break' }, e.hash)],
       ['Previous hash', h('code', { class: 'hash break' }, e.prev_hash)],
@@ -3631,6 +3713,11 @@ function ledgerDetail(e) {
 
 const clockFmt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 const shortDayFmt = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+
+// What agents did for a person: the ledger, filtered to them.
+function personLink(name) {
+  return h('a', { href: `#/ledger?${new URLSearchParams({ user: name })}`, title: `What agents did for ${name}` }, name);
+}
 
 function ledgerTime(iso) {
   const date = new Date(iso);
@@ -3657,7 +3744,8 @@ function ledgerRows(entries, { compact = false } = {}) {
       event,
       compact ? null : h('td', { 'data-label': 'Agent', class: 'break col-agent' },
         e.agent_name ? agentLink(e.agent_id, e.agent_name) : null,
-        actorIsAgent ? null : h('div', { class: e.agent_name ? 'cell-sub nowrap' : null }, e.agent_name ? `by ${e.actor}` : e.actor)),
+        actorIsAgent ? null : h('div', { class: e.agent_name ? 'cell-sub nowrap' : null }, e.agent_name ? `by ${e.actor}` : e.actor),
+        e.on_behalf_of ? h('div', { class: 'cell-sub nowrap' }, 'for ', personLink(e.on_behalf_of)) : null),
       h('td', { 'data-label': 'Decision', class: e.decision ? null : 'is-empty' }, e.decision ? chip('decision', e.decision) : dash()),
       compact ? null : h('td', { 'data-label': 'Reason', class: e.reason ? 'break' : 'is-empty' }, e.reason ? h('span', { class: 'clamp-2', title: e.reason }, e.reason) : dash()));
     const detail = h('tr', { class: 'row-detail', id: detailId, hidden: true }, h('td', { colspan: cols, 'data-label': '' }, ledgerDetail(e)));
@@ -3683,11 +3771,12 @@ function ledgerTable(entries, { compact = false } = {}) {
 }
 
 async function renderLedger({ params }) {
-  const state = { agent: params.get('agent') || '', type: params.get('type') || '', decision: params.get('decision') || '' };
+  const state = { agent: params.get('agent') || '', user: params.get('user') || '', type: params.get('type') || '', decision: params.get('decision') || '' };
   const agents = await api('v1/agents?include_deleted=true').catch(() => []);
   const query = (before) => {
     const p = new URLSearchParams({ limit: String(PAGE_SIZE) });
     if (state.agent) p.set('agent', state.agent);
+    if (state.user) p.set('user', state.user);
     if (state.type) p.set('type', state.type);
     if (state.decision) p.set('decision', state.decision);
     if (before) p.set('before_seq', String(before));
@@ -3696,6 +3785,7 @@ async function renderLedger({ params }) {
 
   const agentInput = h('input', { type: 'text', id: 'ledger-agent', list: 'ledger-agent-list', value: state.agent, placeholder: 'Any agent', autocomplete: 'off', spellcheck: 'false', 'data-focus-key': 'ledger-agent' });
   const agentList = h('datalist', { id: 'ledger-agent-list' }, agents.map((a) => h('option', { value: a.name })));
+  const userInput = h('input', { type: 'text', id: 'ledger-user', value: state.user, placeholder: 'Anyone', autocomplete: 'off', spellcheck: 'false', 'data-focus-key': 'ledger-user' });
   const typeSel = h('select', { id: 'ledger-type', 'data-focus-key': 'ledger-type' }, LEDGER_TYPES.map(([v, l]) => h('option', { value: v, selected: v === state.type }, l)));
   const decisionSel = h('select', { id: 'ledger-decision', 'data-focus-key': 'ledger-decision' }, LEDGER_DECISIONS.map(([v, l]) => h('option', { value: v, selected: v === state.decision }, l)));
   const banner = h('div', { class: 'verify-banner', 'aria-live': 'polite' });
@@ -3777,13 +3867,15 @@ async function renderLedger({ params }) {
   }
 
   agentInput.addEventListener('change', () => { state.agent = agentInput.value.trim(); reload(); });
+  userInput.addEventListener('change', () => { state.user = userInput.value.trim(); reload(); });
   typeSel.addEventListener('change', () => { state.type = typeSel.value; reload(); });
   decisionSel.addEventListener('change', () => { state.decision = decisionSel.value; reload(); });
   const clearBtn = h('button', {
     type: 'button', class: 'btn btn--ghost', 'data-focus-key': 'ledger-clear',
     onclick: () => {
-      Object.assign(state, { agent: '', type: '', decision: '' });
+      Object.assign(state, { agent: '', user: '', type: '', decision: '' });
       agentInput.value = '';
+      userInput.value = '';
       typeSel.value = '';
       decisionSel.value = '';
       reload();
@@ -3806,6 +3898,7 @@ async function renderLedger({ params }) {
     banner,
     h('div', { class: 'filters' },
       h('div', { class: 'field' }, h('label', { for: 'ledger-agent' }, 'Agent'), agentInput, agentList),
+      h('div', { class: 'field' }, h('label', { for: 'ledger-user' }, 'On behalf of'), userInput),
       h('div', { class: 'field' }, h('label', { for: 'ledger-type' }, 'Event type'), typeSel),
       h('div', { class: 'field' }, h('label', { for: 'ledger-decision' }, 'Decision'), decisionSel),
       h('div', { class: 'field', style: 'flex:0 0 auto; align-self:flex-end' }, clearBtn),

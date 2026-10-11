@@ -285,3 +285,43 @@ def test_the_webhook_server_runs_beside_grpc() -> None:
         return resp.status_code
 
     assert asyncio.run(go()) == 200
+
+
+def test_the_person_reaches_policy_and_the_ledger() -> None:
+    # agentgateway sends the claims as headers, lists and objects as JSON, in UTF-8.
+    groups = json.dumps(["/support", "Équipe"], ensure_ascii=False).encode()
+    act = json.dumps({"sub": "sa-1", "client_id": "agent-bot"}).encode()
+    headers = {
+        **HEADERS,
+        "x-agentgov-subject": "u-alice",
+        "x-agentgov-username": "alice",
+        "x-agentgov-email": "alice@example.com",
+        "x-agentgov-groups": groups,
+        "x-agentgov-roles": b'["default-roles-agentgov"]',
+        "x-agentgov-act": act,
+    }
+    opa = FakeOpa(allow())
+    _, cp = check(opa, prompt(user("hi")), headers=headers)
+    person = {
+        "id": "u-alice",
+        "username": "alice",
+        "email": "alice@example.com",
+        "groups": ["/support", "Équipe"],
+        "roles": ["default-roles-agentgov"],
+        "via": "delegation",
+        "actor": "agent-bot",
+    }
+    assert opa.inputs[0][1]["user"] == person
+    assert cp.records[0]["user"] == person
+
+
+def test_an_agent_on_its_own_sends_no_person_to_policy() -> None:
+    headers = {
+        **HEADERS,
+        "x-agentgov-subject": "sa-1",
+        "x-agentgov-username": "service-account-agent-bot",
+    }
+    opa = FakeOpa(allow())
+    _, cp = check(opa, prompt(user("hi")), headers=headers)
+    assert "user" not in opa.inputs[0][1]
+    assert cp.records[0]["user"] is None

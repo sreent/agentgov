@@ -3,8 +3,9 @@
 Each approved model provider is a route on the gateway (``agentgov.gateway``).
 agentgateway sends the processor every prompt before it leaves for the provider
 (``POST /request``) and every answer before it reaches the agent
-(``POST /response``), with the caller's identity, the provider and the model in
-headers it computes from the validated token. For each one the processor:
+(``POST /response``), with the caller's identity (and the person it acts for, if
+any), the provider and the model in headers it computes from the validated token.
+For each one the processor:
 
 1. looks for credentials and personal data in the conversation, for
    instructions aimed at the agent in the tool results the conversation holds,
@@ -37,6 +38,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
+from agentgov.identity import people
 from agentgov.opa.client import OpaError
 from agentgov.processor import detectors, jailbreak
 from agentgov.processor.server import Inspection, trace_id_from
@@ -53,6 +55,13 @@ AGENT_ID = "x-agentgov-agent-id"
 CLIENT_ID = "x-agentgov-client-id"
 PROVIDER = "x-agentgov-provider"
 MODEL = "x-agentgov-model"
+# The person the agent acts for: the token's claims (agentgov.gateway.PERSON_HEADERS).
+SUBJECT = "x-agentgov-subject"
+USERNAME = "x-agentgov-username"
+EMAIL = "x-agentgov-email"
+GROUPS = "x-agentgov-groups"
+ROLES = "x-agentgov-roles"
+ACT = "x-agentgov-act"
 
 PASS: dict[str, Any] = {"action": {}}
 
@@ -128,6 +137,19 @@ class ModelGuard:
             if headers.get(header)
         }
 
+    @staticmethod
+    def _person(headers: Any) -> dict[str, Any] | None:
+        return people.person_of(
+            {
+                "subject": people.header_text(headers.get(SUBJECT)),
+                "username": people.header_text(headers.get(USERNAME)),
+                "email": people.header_text(headers.get(EMAIL)),
+                "groups": people.header_json(headers.get(GROUPS)),
+                "roles": people.header_json(headers.get(ROLES)),
+                "act": people.header_json(headers.get(ACT)),
+            }
+        )
+
     def _recorder(
         self, phase: str, headers: Any, inspection: Inspection, monitored: list[str]
     ) -> Callable[..., None]:
@@ -138,6 +160,7 @@ class ModelGuard:
         started = time.perf_counter()
         provider, model = headers.get(PROVIDER) or "unknown", headers.get(MODEL) or ""
         identity = self._identity(headers)
+        person = self._person(headers)
         trace_id = trace_id_from([headers.get("traceparent") or ""])
 
         def finish(
@@ -157,6 +180,7 @@ class ModelGuard:
                 resource=f"{provider}/{model}" if model else provider,
                 agent=agent,
                 identity=identity,
+                user=person,
                 effect=effect,
                 reasons=reasons,
                 redacted=redacted or [],
@@ -210,6 +234,9 @@ class ModelGuard:
             "detections": inspection.summary,
             "tool_calls": holds_tool_calls(messages),
         }
+        person = self._person(headers)
+        if person:
+            opa_input["user"] = person
         try:
             decision, decision_id = await self.p.opa.evaluate("agentgov/models/decision", opa_input)
         except OpaError as exc:
@@ -260,6 +287,9 @@ class ModelGuard:
             "model": headers.get(MODEL) or "",
             "detections": inspection.summary,
         }
+        person = self._person(headers)
+        if person:
+            opa_input["user"] = person
         try:
             decision, decision_id = await self.p.opa.evaluate("agentgov/models/decision", opa_input)
         except OpaError as exc:

@@ -29,7 +29,7 @@ from agentgov.config import Settings
 from agentgov.identity.sso import display_name, roles_from_claims
 from agentgov.models import AdminSession, CliLogin
 from agentgov.runtime import Runtime
-from tests.conftest import ADMIN
+from tests.conftest import ADMIN, SERVICE, seed
 from tests.test_cli import _Shared, runner
 
 ISSUER = "https://idp.test/realms/agentgov"
@@ -455,6 +455,97 @@ class TestAccess:
     def test_available_without_single_sign_on(self, client) -> None:
         view = client.get("/v1/access", headers=ADMIN).json()
         assert view == {"sso_enabled": False, "bootstrap_token": True, "people": [], "sessions": []}
+
+
+def _check(client: TestClient, sub: str, username: str) -> dict[str, Any]:
+    """The processor's approval check for support-bot's call for this person."""
+    agent = client.get("/v1/agents/support-bot", headers=ADMIN).json()
+    check = {
+        "agent_id": agent["id"],
+        "action": "tools/call",
+        "resource": "crm/delete_customer",
+        "arguments": {"id": "c-1"},
+        "reasons": ["destructive"],
+        "user": {"id": sub, "username": username, "via": "exchange"},
+    }
+    return client.post("/v1/internal/approvals/check", json=check, headers=SERVICE).json()
+
+
+def _held_for(client: TestClient, sub: str, username: str) -> dict[str, Any]:
+    """An agent whose blueprint sends approvals to the person, held calling for one."""
+    seed(client)
+    client.patch(
+        "/v1/blueprints/support", json={"approvals_by": "person"}, headers=ADMIN
+    ).raise_for_status()
+    return _check(client, sub, username)
+
+
+def _approvals_by_person(client: TestClient, mode: str = "on") -> None:
+    client.put(
+        "/v1/features/approvals-by-person", json={"mode": mode}, headers=ADMIN
+    ).raise_for_status()
+
+
+class TestApprovalsByThePerson:
+    def test_people_without_a_role_sign_in_to_decide_their_own(self, sso, provider) -> None:
+        _approvals_by_person(sso)
+        held = _held_for(sso, "user-1", "alice")
+        assert (held["outcome"], held["approval"]["deciders"]) == ("created", "person")
+        assert held["url"].endswith("/ui/#/approvals")
+        resp = sign_in(sso, provider, sub="user-1", roles=["offline_access"])
+        assert resp.headers["location"] == "/ui/"
+        assert sso.get("/v1/me").json()["roles"] == ["person"]
+        mine = sso.get("/v1/me/approvals", params={"status": "pending"}).json()
+        assert [r["id"] for r in mine] == [held["approval"]["id"]]
+        assert mine[0]["on_behalf_of"] == "alice"
+        # Their requests, and nothing else.
+        for path in ("/v1/approvals", "/v1/agents", "/v1/ledger", "/v1/overview"):
+            assert sso.get(path).status_code == 403, path
+        approval_id = held["approval"]["id"]
+        decided = sso.post(f"/v1/approvals/{approval_id}/approve", json={}, headers=CSRF)
+        assert decided.json()["decided_by"] == "person:alice@example.com"
+        # The agent's retry for her goes through once.
+        again = _check(sso, "user-1", "alice")
+        assert again["outcome"] == "approved"
+        entries = sso.get("/v1/ledger", params={"user": "alice"}, headers=ADMIN).json()
+        assert {"approval.requested", "approval.approved", "approval.used"} <= {
+            e["type"] for e in entries
+        }
+
+    def test_only_the_person_or_an_administrator_decides(self, sso, provider) -> None:
+        _approvals_by_person(sso)
+        held = _held_for(sso, "user-2", "bob")
+        approval_id = held["approval"]["id"]
+        # An approver who isn't bob, and someone else without a role.
+        sign_in(sso, provider, sub="user-1", roles=["agentgov-approver"])
+        refused = sso.post(f"/v1/approvals/{approval_id}/approve", json={}, headers=CSRF)
+        assert refused.status_code == 403
+        assert refused.json()["detail"] == (
+            "bob, whom the agent acted for, or an administrator decides this request"
+        )
+        assert sso.get("/v1/me/approvals").json() == []
+        sso.cookies.clear()
+        sign_in(sso, provider, sub="user-3", roles=[])
+        assert sso.get(f"/v1/approvals/{approval_id}").status_code == 403
+        # Administrators can always decide.
+        decided = sso.post(f"/v1/approvals/{approval_id}/deny", json={}, headers=ADMIN)
+        assert decided.json()["status"] == "denied"
+
+    def test_without_the_feature_approvers_decide(self, sso, provider) -> None:
+        held = _held_for(sso, "user-1", "alice")
+        assert held["approval"]["deciders"] == "approvers"
+        assert error_code(sign_in(sso, provider, sub="user-1", roles=[])) == "no_role"
+        sign_in(sso, provider, sub="user-9", roles=["agentgov-approver"])
+        approval_id = held["approval"]["id"]
+        decided = sso.post(f"/v1/approvals/{approval_id}/approve", json={}, headers=CSRF)
+        assert decided.status_code == 200
+
+    def test_turning_the_feature_off_ends_their_sessions(self, sso, provider) -> None:
+        _approvals_by_person(sso)
+        sign_in(sso, provider, sub="user-1", roles=[])
+        assert sso.get("/v1/me").status_code == 200
+        _approvals_by_person(sso, "off")
+        assert sso.get("/v1/me").status_code == 401
 
 
 class TestCliSignIn:

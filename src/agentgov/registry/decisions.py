@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
+from agentgov.identity import people
 from agentgov.models import Agent
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings, risk
@@ -41,6 +42,8 @@ def record_mcp_decisions(
         agent_info = rec.get("agent") or {}
         agent = session.get(Agent, agent_info.get("id")) if agent_info.get("id") else None
         identity = rec.get("identity") or {}
+        # The person the agent acted for, if it acted for one.
+        user = rec["user"] if isinstance(rec.get("user"), dict) else None
         phase = rec.get("phase", "request")
         effect = rec.get("effect")
         detections = rec.get("detections") or {}
@@ -85,8 +88,10 @@ def record_mcp_decisions(
                 "opa_decision_id": rec.get("opa_decision_id"),
                 "latency_ms": rec.get("latency_ms"),
                 "identity": identity,
+                **({"user": user} if user else {}),
             },
             trace_id=_trace_id(rec.get("trace_id")),
+            on_behalf_of=people.name_of(user),
             ts=when,
         )
         if agent is None:
@@ -94,7 +99,7 @@ def record_mcp_decisions(
         agent.last_seen_at = when
         touched[agent.id] = agent
         if model_call:
-            _model_signals(session, agent, phase, effect, detections, resource)
+            _model_signals(session, agent, phase, effect, detections, resource, user)
         elif phase == "request":
             discovery.record_activity(
                 session, agent.id, when=when, tool_calls=1, denied=1 if effect == "deny" else 0
@@ -152,6 +157,7 @@ def _model_signals(
     effect: str | None,
     detections: dict[str, Any],
     resource: Any,
+    user: dict[str, Any] | None = None,
 ) -> None:
     """Risk signals and findings from a decision on a prompt or an answer."""
     categories = set(detections.get("categories") or [])
@@ -209,16 +215,21 @@ def _model_signals(
             agent_id=agent.id,
             category=findings.THREAT,
             title=f"People tried to jailbreak {agent.name}",
-            description=f"A prompt {agent.name} sent to {resource} tried to set aside the "
-            "model's instructions or safety rules ("
+            description=f"A prompt {agent.name} sent to {resource}"
+            + (f" on behalf of {people.name_of(user)}" if user else "")
+            + " tried to set aside the model's instructions or safety rules ("
             + ", ".join(detections.get("jailbreak_reasons") or [])
             + (
                 "). The model call was refused."
                 if effect == "deny"
                 else "). The model call went through: jailbreak detection is not enforced."
             ),
-            remediation="Find who sent it in the agent's conversations, and check that the "
-            "agent's instructions hold up against such prompts.",
+            remediation=(
+                f"Ask {people.name_of(user)} about it"
+                if user
+                else "Find who sent it in the agent's conversations"
+            )
+            + ", and check that the agent's instructions hold up against such prompts.",
         )
 
 

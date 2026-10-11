@@ -10,12 +10,16 @@ Each run registers a fresh agent from the customer-support blueprint, so the
 registry lifecycle (request -> approval -> identity) is part of the demo and
 risk signals from earlier runs do not carry over. The agent calls tools through
 the gateway with an MCP client, and a model (examples/models/mock) through the
-gateway's OpenAI-compatible route, with the same token.
+gateway's OpenAI-compatible route, with the same token. Then it acts for sam, a
+person in the demo realm: sam signs in to the demo chat app, the agent exchanges
+sam's token for a token of its own, and sam signs in to AgentGov to approve what
+it wants to do for them (AGENTGOV_DEMO_PASSWORD is the demo users' password).
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import re
@@ -36,6 +40,11 @@ ADMIN_TOKEN = os.environ.get("AGENTGOV_TOKEN", "dev-admin-token")
 GATEWAY = os.environ.get("AGENTGOV_GATEWAY", "http://localhost:8080")
 OTLP_HTTP = os.environ.get("OTLP_HTTP", "http://localhost:4318")
 MODEL_ROUTE = "/llm/demo/v1/chat/completions"  # the demo model provider (models.yaml)
+# The demo realm's people (deploy/compose/keycloak), and the app they use agents from.
+DEMO_PASSWORD = os.environ.get("AGENTGOV_DEMO_PASSWORD", "dev-password")
+DEMO_APP = "agentgov-demo-chat"
+TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
+ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token"
 # MCP clients set up as on a developer's laptop (examples/developer-machine).
 DEVELOPER_MACHINE = Path(__file__).resolve().parent.parent / "developer-machine"
 
@@ -178,7 +187,7 @@ def monitored_entry(name: str, control: str = "", timeout: float = 20) -> dict[s
     return None
 
 
-def register_agent() -> tuple[str, str]:
+def register_agent() -> tuple[str, dict[str, str], str]:
     name = f"demo-agent-{secrets.token_hex(3)}"
     agent = admin(
         "POST",
@@ -204,7 +213,58 @@ def register_agent() -> tuple[str, str]:
         timeout=30,
     ).json()["access_token"]
     print(f"  Keycloak issued an access token to OAuth client {creds['client_id']}")
-    return name, token
+    return name, creds, token
+
+
+def token_for(person: str, creds: dict[str, str]) -> str:
+    """The person signs in to the demo app, asking for a token the agent may use (the
+    agent's client scope); the agent exchanges it for a token of its own (RFC 8693)."""
+    signed_in = httpx.post(
+        creds["token_endpoint"],
+        data={
+            "grant_type": "password",
+            "client_id": DEMO_APP,
+            "username": person,
+            "password": DEMO_PASSWORD,
+            "scope": f"openid {creds['client_id']}",
+        },
+        timeout=30,
+    )
+    signed_in.raise_for_status()
+    exchanged = httpx.post(
+        creds["token_endpoint"],
+        data={
+            "grant_type": TOKEN_EXCHANGE,
+            "subject_token": signed_in.json()["access_token"],
+            "subject_token_type": ACCESS_TOKEN,
+            "requested_token_type": ACCESS_TOKEN,
+        },
+        auth=(creds["client_id"], creds["client_secret"]),
+        timeout=30,
+    )
+    exchanged.raise_for_status()
+    return exchanged.json()["access_token"]
+
+
+def agentgov_session(person: str) -> httpx.Client:
+    """Sign in to AgentGov through Keycloak, as the person's browser does."""
+    browser = httpx.Client(timeout=30)
+    login = browser.get(f"{CONTROL_PLANE}/auth/login")
+    page = browser.get(login.headers["location"])
+    # Keycloak marks its cookies Secure, which browsers send to http://localhost anyway.
+    for cookie in browser.cookies.jar:
+        cookie.secure = False
+    form = re.search(r'<form[^>]*action="([^"]+)"', page.text)
+    if form is None:
+        raise SystemExit(f"no sign-in form at {login.headers['location']}")
+    back = browser.post(
+        html.unescape(form.group(1)), data={"username": person, "password": DEMO_PASSWORD}
+    )
+    if "location" not in back.headers:
+        raise SystemExit(f"{person} could not sign in to AgentGov ({back.status_code})")
+    browser.get(back.headers["location"])
+    browser.headers["X-AgentGov-CSRF"] = "1"
+    return browser
 
 
 async def model_calls(http: httpx2.AsyncClient, name: str) -> None:
@@ -264,7 +324,65 @@ async def model_calls(http: httpx2.AsyncClient, name: str) -> None:
     print(f"  {DIM}jailbreak detection starts in monitor mode; enforced, it refuses{RESET}")
 
 
-async def run_scenarios(name: str, token: str) -> None:
+async def acting_for_people(name: str, creds: dict[str, str]) -> None:
+    step("10. Acting for people: the agent acts for sam, as its blueprint allows, and sam approves")
+    token = token_for("sam", creds)
+    print(f"  sam signed in to {DEMO_APP}; the agent exchanged sam's token for a token of its own")
+    blueprint = "/v1/blueprints/customer-support"
+    headers = {"Authorization": f"Bearer {token}"}
+    async with (
+        httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(30.0, read=60.0)) as http,
+        Client(
+            streamable_http_client(f"{GATEWAY}/mcp/crm", http_client=http),
+            client_info=Implementation(name=name, version="1.0.0"),
+        ) as client,
+    ):
+        allowed, payload = await call(client, "get_customer", {"customer_id": "c-001"})
+        report(allowed, payload, expect_allowed=True)
+        entries = admin("GET", "/v1/ledger", params={"agent": name, "user": "sam", "limit": 1})
+        show(
+            "recorded:" if entries else "not recorded",
+            bool(entries),
+            f"{entries[0]['type']} {entries[0]['resource']} for {entries[0]['on_behalf_of']}"
+            if entries
+            else "",
+        )
+        try:
+            admin("PATCH", blueprint, json={"people_groups": ["finance"]})
+            print("  the blueprint's agents now act only for people in finance; sam is in support")
+            allowed, payload = await once_mode_applies(
+                client, "get_customer", {"customer_id": "c-001"}, allowed=False
+            )
+            report(allowed, payload, expect_allowed=False)
+            admin("PATCH", blueprint, json={"people_groups": [], "approvals_by": "person"})
+            admin("PUT", "/v1/features/approvals-by-person", json={"mode": "on"})
+            print("  approval requests the agent makes for a person now go to that person")
+            allowed, payload = await call(client, "delete_customer", {"customer_id": "c-003"})
+            report(allowed, payload, expect_allowed=False)
+            match = re.search(r"apr_[0-9a-f]{16}", str(payload))
+            if match:
+                sam = agentgov_session("sam")
+                try:
+                    me = sam.get(f"{CONTROL_PLANE}/v1/me").json()
+                    waiting = sam.get(f"{CONTROL_PLANE}/v1/me/approvals?status=pending").json()
+                    show(
+                        "sam signed in:",
+                        me.get("roles") == ["person"] and [r["id"] for r in waiting] == [match[0]],
+                        f"as {me.get('actor')}, with {len(waiting)} request(s) waiting for them",
+                    )
+                    decided = sam.post(f"{CONTROL_PLANE}/v1/approvals/{match[0]}/approve", json={})
+                    decided.raise_for_status()
+                finally:
+                    sam.close()
+                print(f"  {YELLOW}sam{RESET} approved {match[0]}; the agent retries the same call")
+                allowed, payload = await call(client, "delete_customer", {"customer_id": "c-003"})
+                report(allowed, payload, expect_allowed=True)
+        finally:
+            admin("PATCH", blueprint, json={"people_groups": [], "approvals_by": "approvers"})
+            admin("PUT", "/v1/features/approvals-by-person", json={"mode": "off"})
+
+
+async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(30.0, read=60.0)) as http:
         transport = streamable_http_client(f"{GATEWAY}/mcp/crm", http_client=http)
@@ -340,8 +458,9 @@ async def run_scenarios(name: str, token: str) -> None:
                 report(allowed, payload, expect_allowed=True)
 
             await model_calls(http, name)
+            await acting_for_people(name, creds)
 
-            step("10. Kill switch: blocking the agent takes effect everywhere within a second")
+            step("11. Kill switch: blocking the agent takes effect everywhere within a second")
             started = time.monotonic()
             admin("POST", f"/v1/agents/{name}/block", json={"reason": "demo kill switch"})
             allowed = True
@@ -354,7 +473,7 @@ async def run_scenarios(name: str, token: str) -> None:
 
 
 def shadow_agent() -> None:
-    step("11. Shadow AI: telemetry from an unregistered agent is discovered")
+    step("12. Shadow AI: telemetry from an unregistered agent is discovered")
     service = f"notebook-agent-{secrets.token_hex(2)}"
     span = {
         "traceId": secrets.token_hex(16),
@@ -399,7 +518,7 @@ def shadow_agent() -> None:
 def developer_tools() -> None:
     from agentgov import mcp_scan
 
-    step("12. Developer tools: approved MCP servers as a registry, and what developers set up")
+    step("13. Developer tools: approved MCP servers as a registry, and what developers set up")
     admin("PUT", "/v1/features/mcp-registry", json={"mode": "on"})
     print("  mcp-registry set to on: GitHub Copilot and VS Code can read it")
     page = httpx.get(f"{CONTROL_PLANE}/registry/v0.1/servers", timeout=10).json()
@@ -441,7 +560,7 @@ def developer_tools() -> None:
 
 
 def evidence(name: str) -> None:
-    step("13. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("14. Evidence: every decision is in a hash-chained, verifiable ledger")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -449,18 +568,20 @@ def evidence(name: str) -> None:
         f"{verify['checked']} entries",
     )
     for entry in reversed(admin("GET", "/v1/ledger", params={"agent": name, "limit": 8})):
+        person = f"for {entry['on_behalf_of']}" if entry.get("on_behalf_of") else ""
         print(
             f"  {DIM}#{entry['seq']} {entry['type']:<20} {entry.get('resource') or '':<28} "
-            f"{entry.get('decision') or '':<17} {(entry.get('reason') or '')[:60]}{RESET}"
+            f"{person:<9} {entry.get('decision') or '':<17} "
+            f"{(entry.get('reason') or '')[:50]}{RESET}"
         )
 
 
 def main() -> None:
     wait_for_gateway("/mcp/crm", MODEL_ROUTE)
     step("1. Registration: a new agent is requested, approved and given an identity")
-    name, token = register_agent()
+    name, creds, token = register_agent()
     try:
-        asyncio.run(run_scenarios(name, token))
+        asyncio.run(run_scenarios(name, creds, token))
     finally:
         shadow_agent()
         developer_tools()

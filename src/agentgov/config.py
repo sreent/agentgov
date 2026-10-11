@@ -80,6 +80,11 @@ class Settings:
     keycloak_jwks_url: str | None = None
     # Audience every agent token carries; the gateway requires it.
     gateway_audience: str = "agentgov-gateway"
+    # Keycloak clients of the apps people sign in to and use agents from (comma-separated
+    # client IDs). Each agent that acts for people has a client scope named after its
+    # client ID, which these apps may request: the person's token is then one the agent
+    # can exchange for a token of its own, on the person's behalf.
+    people_app_clients: str = ""
 
     # --- Administrator single sign-on (OIDC) -------------------------------------
     # The control plane signs administrators in with an OIDC provider (Keycloak by
@@ -267,6 +272,9 @@ class Settings:
     def copilot_studio_configured(self) -> bool:
         """Whether Copilot Studio's calls can be authenticated."""
         return bool(self.copilot_studio_callers() and self.copilot_studio_tenant())
+
+    def people_apps(self) -> list[str]:
+        return [c.strip() for c in self.people_app_clients.split(",") if c.strip()]
 
     def copilot_studio_callers(self) -> list[str]:
         return [a.strip() for a in self.copilot_studio_caller_app_ids.split(",") if a.strip()]

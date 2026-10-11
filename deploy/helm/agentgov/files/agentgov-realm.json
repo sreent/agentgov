@@ -43,6 +43,25 @@
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:8000/ui/"
       }
+    },
+    {
+      "clientId": "agentgov-demo-chat",
+      "name": "AgentGov demo chat",
+      "description": "A demo of an app people use agents from: it signs people in and hands their tokens to the agents that act for them. Its password sign-in is for the demo only.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false
+    }
+  ],
+  "groups": [
+    {
+      "name": "support"
     }
   ],
   "users": [
@@ -110,6 +129,24 @@
       ],
       "realmRoles": [
         "agentgov-auditor"
+      ]
+    },
+    {
+      "username": "sam",
+      "email": "sam@example.com",
+      "emailVerified": true,
+      "firstName": "Sam",
+      "lastName": "Support",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${AGENTGOV_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/support"
       ]
     }
   ],

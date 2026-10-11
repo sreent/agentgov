@@ -228,6 +228,32 @@ class TestGovernance:
         second = client.post("/v1/internal/approvals/check", json=check, headers=SERVICE).json()
         assert second["outcome"] == "approved"
 
+    def test_an_approval_is_for_the_person_the_agent_acted_for(self, client) -> None:
+        agent = seed(client)
+        check = {
+            "agent_id": agent["id"],
+            "action": "tools/call",
+            "resource": "crm/delete_customer",
+            "arguments": {"id": "c-1"},
+            "reasons": ["destructive"],
+        }
+
+        def held(**extra):  # type: ignore[no-untyped-def]
+            body = {**check, **extra}
+            return client.post("/v1/internal/approvals/check", json=body, headers=SERVICE).json()
+
+        alice = {"id": "u-1", "username": "alice", "via": "exchange"}
+        for_alice = held(user=alice)
+        assert for_alice["approval"]["on_behalf_of"] == "alice"
+        assert for_alice["approval"]["deciders"] == "approvers"  # the default
+        client.post(
+            f"/v1/approvals/{for_alice['approval']['id']}/approve", json={}, headers=ADMIN
+        ).raise_for_status()
+        # The same call for bob, or for no one, needs an approval of its own.
+        assert held(user={"id": "u-2", "username": "bob"})["outcome"] == "created"
+        assert held()["outcome"] == "created"
+        assert held(user=alice)["outcome"] == "approved"
+
     def test_decision_records_feed_ledger_risk_and_findings(self, client) -> None:
         agent = seed(client)
         record = {
@@ -249,6 +275,46 @@ class TestGovernance:
         assert any(f["type"] == "agent.credential_exfiltration_attempt" for f in found)
         risk = client.get("/v1/agents/support-bot/risk", headers=ADMIN).json()
         assert risk["score"] > 10
+
+    def test_decisions_record_who_the_agent_acted_for(self, client) -> None:
+        agent = seed(client)
+        alice = {"id": "u-1", "username": "alice", "groups": ["/support"], "via": "exchange"}
+        records = [
+            {"phase": "request", "resource": "crm/get_customer", "agent": {"id": agent["id"]},
+             "effect": "allow", "user": alice},
+            {"phase": "request", "resource": "crm/get_customer", "agent": {"id": agent["id"]},
+             "effect": "allow"},
+        ]  # fmt: skip
+        client.post("/v1/internal/decisions", json={"records": records}, headers=SERVICE)
+        entries = client.get("/v1/ledger", params={"type": "decision.*"}, headers=ADMIN).json()
+        assert "on_behalf_of" not in entries[0]
+        assert entries[1]["on_behalf_of"] == "alice"
+        assert entries[1]["details"]["user"] == alice
+        for_alice = client.get("/v1/ledger", params={"user": "alice"}, headers=ADMIN).json()
+        assert [e["seq"] for e in for_alice] == [entries[1]["seq"]]
+        assert client.get("/v1/ledger/verify", headers=ADMIN).json()["valid"] is True
+
+    def test_blueprints_say_who_their_agents_act_for(self, client) -> None:
+        seed(client)
+        assert client.get("/v1/agents/support-bot", headers=ADMIN).json()["acts_for"] == "either"
+        changed = client.patch(
+            "/v1/blueprints/support",
+            json={"acts_for": "people", "people_groups": ["support", "/emea/sales"],
+                  "approvals_by": "person"},
+            headers=ADMIN,
+        )  # fmt: skip
+        assert changed.status_code == 200, changed.text
+        agent = client.get("/v1/agents/support-bot", headers=ADMIN).json()
+        assert (agent["acts_for"], agent["people_groups"], agent["approvals_by"]) == (
+            "people",
+            ["support", "/emea/sales"],
+            "person",
+        )
+        for body in ({"acts_for": "anyone"}, {"people_groups": ["/"]},
+                     {"people_groups": "support"}, {"approvals_by": "the-person"}):  # fmt: skip
+            assert (
+                client.patch("/v1/blueprints/support", json=body, headers=ADMIN).status_code == 422
+            )
 
     def test_gateway_decisions_link_to_their_trace(self, settings, tmp_path) -> None:
         settings = settings.with_overrides(trace_url="https://traces.example/t/{trace_id}")

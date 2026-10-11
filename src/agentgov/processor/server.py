@@ -3,7 +3,8 @@
 agentgateway calls this service (``ExtMcp`` over gRPC) for every governed MCP
 operation. For each one the processor:
 
-1. identifies the caller from claims agentgateway already validated,
+1. identifies the caller from claims agentgateway already validated, and the
+   person it acts for, if any (``agentgov.identity.people``),
 2. inspects the content (secrets locally, PII with Presidio, prompt injection
    and tool poisoning heuristics),
 3. asks OPA for a decision (data.agentgov.mcp.*), and
@@ -32,6 +33,7 @@ from google.protobuf import json_format, struct_pb2
 
 from agentgov import ids
 from agentgov.config import Settings
+from agentgov.identity import people
 from agentgov.opa.client import OpaClient, OpaError
 from agentgov.processor import detectors
 from agentgov.processor.control_plane import (
@@ -217,6 +219,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         if target is None:
             return _pass_request()
         identity = self._identity(meta)
+        person = people.person_of(meta)
         modes = await self.features.current()
         inspection = await self._inspect(
             payload, protect=modes["data-protection"] != "off", check_injection=False
@@ -241,6 +244,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 resource=resource,
                 agent=agent,
                 identity=identity,
+                user=person,
                 effect=effect,
                 reasons=reasons,
                 redacted=redacted or [],
@@ -276,6 +280,8 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             "arguments": payload,
             "detections": inspection.summary,
         }
+        if person:
+            opa_input["user"] = person
         try:
             decision, decision_id = await self.opa.evaluate("agentgov/mcp/decision", opa_input)
         except OpaError as exc:
@@ -308,6 +314,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                         "arguments": payload,
                         "redacted_arguments": redacted_args,
                         "reasons": reasons,
+                        "user": person,
                     }
                 )
             except ControlPlaneError as exc:
@@ -323,9 +330,16 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             elif status == "denied":
                 effect, reasons = "deny", [f"A reviewer denied this call (approval {approval_id})"]
             else:
+                approval = outcome["approval"]
+                waiting = (
+                    f" for {approval['on_behalf_of']} to approve at {outcome['url']}"
+                    if approval.get("deciders") == "person" and outcome.get("url")
+                    else ""
+                )
                 reasons = [
                     f"Human approval required: {'; '.join(reasons)}. Approval request "
-                    f"{approval_id} is pending; retry the same call once it is approved."
+                    f"{approval_id} is pending{waiting}; retry the same call once it is "
+                    "approved."
                 ]
                 finish(
                     "require_approval",
@@ -384,8 +398,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         server = (list(request.service_names) or [meta.get("server")])[0] or "unknown"
         result = json.loads(request.mcp_response) if request.mcp_response else {}
         identity = self._identity(meta)
+        person = people.person_of(meta)
         if method == "tools/list":
-            return await self._filter_tools(server, identity, result)
+            return await self._filter_tools(server, identity, person, result)
         if method not in ("tools/call", "resources/read"):
             return _pass_response()
 
@@ -415,6 +430,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 resource=f"{server}/{target}",
                 agent=agent,
                 identity=identity,
+                user=person,
                 effect=effect,
                 reasons=reasons,
                 redacted=redacted or [],
@@ -446,6 +462,8 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             "resource": {"server": server, "name": target},
             "detections": inspection.summary,
         }
+        if person:
+            opa_input["user"] = person
         try:
             decision, decision_id = await self.opa.evaluate("agentgov/mcp/decision", opa_input)
         except OpaError as exc:
@@ -474,7 +492,11 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         return _pass_response()
 
     async def _filter_tools(
-        self, server: str, identity: dict[str, Any], result: dict[str, Any]
+        self,
+        server: str,
+        identity: dict[str, Any],
+        person: dict[str, Any] | None,
+        result: dict[str, Any],
     ) -> pb.McpResponseResult:
         tools = [t for t in result.get("tools") or [] if isinstance(t, dict)]
         modes = await self.features.current()
@@ -489,6 +511,8 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             "tools": [{"name": t.get("name")} for t in tools],
             "poisoned": poisoned,
         }
+        if person:
+            opa_input["user"] = person
         try:
             view, _ = await self.opa.evaluate("agentgov/mcp/list_view", opa_input)
         except OpaError as exc:
