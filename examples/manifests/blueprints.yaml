@@ -29,6 +29,9 @@ spec:
   acts_for: either
   people_groups: []
   approvals_by: approvers
+  # Other agents its agents may hand work to over A2A, through the gateway
+  # (docs/agent-to-agent.md): names, or patterns such as billing-*.
+  agent_access: [billing-agent]
 ---
 apiVersion: agentgov/v1alpha1
 kind: Blueprint
@@ -43,3 +46,19 @@ spec:
   permissions:
     - server: crm
       tools: ["search_*", "get_*", "export_customers"]
+---
+apiVersion: agentgov/v1alpha1
+kind: Blueprint
+metadata:
+  name: billing
+spec:
+  description: Agents that answer billing questions other agents hand them over A2A.
+  risk_tier: medium
+  require_sponsor: true
+  attestation_days: 90
+  # No client secrets: its agents authenticate as their workloads (docs/agent-identity.md).
+  require_workload_identity: true
+  permissions:
+    - server: crm
+      tools: [get_customer]
+  acts_for: either

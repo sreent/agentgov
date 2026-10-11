@@ -769,6 +769,12 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .edge-sponsor { stroke: var(--ink-3); stroke-width: 1.5; stroke-dasharray: 1 4; }
 .edge-granted { stroke: var(--edge); }
 .edge-ungranted { stroke: var(--critical); stroke-dasharray: 7 5; }
+/* Agents calling agents: arcs beside the agent column, with arrowheads. */
+.edge-calls { stroke: var(--accent); }
+.edge-calls-ungranted { stroke: var(--critical); stroke-dasharray: 7 5; }
+.edge.edge-head { stroke: none; }
+.edge.edge-head-calls { fill: var(--accent); }
+.edge.edge-head-calls-ungranted { fill: var(--critical); }
 .edge-label-bg { fill: var(--surface); stroke: var(--line); }
 .edge-label { fill: var(--ink-2); font-size: 11px; font-variant-numeric: tabular-nums; }
 .map-svg.has-active .node:not(.is-related) { opacity: 0.28; }

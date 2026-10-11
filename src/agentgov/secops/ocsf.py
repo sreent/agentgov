@@ -3,16 +3,18 @@ schema SIEMs read: one event per ledger entry.
 
 | Ledger entries | OCSF class |
 |---|---|
-| ``decision.*`` (tool and model calls), ``approval.*``, ungranted tool use | API Activity (6003) |
+| ``decision.*`` (tool, model, agent calls), ``approval.*``, ungranted tools | API Activity (6003) |
 | ``admin.*`` (sign-ins and sessions) | Authentication (3002) |
 | ``finding.*`` | Compliance Finding (2003) for posture, Detection Finding (2004) for threats |
 | everything else: what AgentGov governs, and who changed it | Entity Management (3004) |
 
 Events carry the agent as an ``ai_agent`` (and the model as an ``ai_model``) from OCSF's
-AI Operation profile, and what a control decided as ``action_id`` and ``disposition_id``
-from its Security Control profile. ``metadata.uid`` is the ledger entry's ID, so a SIEM can
-drop an event it got twice, and ``unmapped.agentgov`` keeps the entry itself, with its
-hash in the ledger's chain.
+AI Operation profile, with the ``delegation`` a call was made under when another agent
+handed the work down (or, for a call between agents, the one it gave the called agent,
+whose parent is the caller's), and what a control decided as ``action_id`` and
+``disposition_id`` from its Security Control profile. ``metadata.uid`` is the ledger
+entry's ID, so a SIEM can drop an event it got twice, and ``unmapped.agentgov`` keeps the
+entry itself, with its hash in the ledger's chain.
 """
 
 from __future__ import annotations
@@ -232,17 +234,21 @@ def _api_activity(entry: LedgerEntry, agent: Agent | None) -> dict[str, Any]:
     details = entry.details or {}
     kind = entry.type.split(".", 1)[0]
     model_call = entry.type.startswith("decision.model.")
+    agent_call = entry.type.startswith("decision.a2a.")
     method = entry.action or ("chat" if model_call else "tools/call")
-    # server/tool, or provider/model; a tool alone for in-process agents.
+    # server/tool, or provider/model; a tool alone for in-process agents; the called agent.
     resource = entry.resource or ""
     service, target = resource.split("/", 1) if "/" in resource else ("", resource)
+    if agent_call:
+        service = target
     if kind == "approval":
         verb = entry.type.split(".", 1)[1]
         activity_id, activity = 99, f"Approval {verb}"
-    elif method.endswith("/list") or method.endswith("/read"):
+    elif method.endswith(("/list", "/read")) or (agent_call and method.startswith(("Get", "List"))):
         activity_id, activity = 2, "Read"
     else:
-        activity_id, activity = 99, "Model call" if model_call else "Tool call"
+        call = "Agent call" if agent_call else "Model call" if model_call else "Tool call"
+        activity_id, activity = 99, call
     event = _base(entry, API_ACTIVITY, activity_id, activity)
     api: dict[str, Any] = {"operation": method, "service": {"name": service or "unknown"}}
     request_uid = details.get("approval_id") or details.get("opa_decision_id")
@@ -261,10 +267,30 @@ def _api_activity(entry: LedgerEntry, agent: Agent | None) -> dict[str, Any]:
         # An approver's decision: the person who decided.
         actor["user"] = _who(entry.actor)
     event["actor"] = actor
-    if target:
+    if agent_call and target:
+        called = details.get("a2a") if isinstance(details.get("a2a"), dict) else {}
+        resource_entry: dict[str, Any] = {"name": target, "type": "AI Agent"}
+        if called.get("target_id"):
+            resource_entry["uid"] = str(called["target_id"])
+        event["resources"] = [resource_entry]
+        if called.get("context_id"):
+            _with_profile(event, "ai_operation")
+            # The A2A conversation, and the agent that handles it.
+            service_entry = {
+                "name": target,
+                **({"uid": str(called["target_id"])} if called.get("target_id") else {}),
+            }
+            event["message_context"] = {
+                "uid": str(called["context_id"]),
+                "ai_role_id": 4,
+                "ai_role": "Agent",
+                "service": service_entry,
+            }
+    elif target:
         event["resources"] = [{"name": target, "type": "AI Model" if model_call else "Tool"}]
     if model_call and target:
         event["ai_model"] = {"name": target, "ai_provider": service}
+    _delegation(event, entry, details)
     monitored = bool(details.get("monitored"))
     decision = entry.decision
     if entry.type == "telemetry.ungranted_tool_use":
@@ -298,6 +324,19 @@ def _api_activity(entry: LedgerEntry, agent: Agent | None) -> dict[str, Any]:
         event["status_detail"] = entry.reason
     event["message"] = _message(entry)
     return event
+
+
+def _delegation(event: dict[str, Any], entry: LedgerEntry, details: dict[str, Any]) -> None:
+    """The delegation the call was made under (OCSF's delegation object, from the AI
+    Operation profile): AgentGov's gateway issued it, so it is a trusted issuer's."""
+    delegation = details.get("delegation") if isinstance(details.get("delegation"), dict) else {}
+    if not delegation.get("uid"):
+        return
+    _with_profile(event, "ai_operation")
+    out: dict[str, Any] = {"uid": str(delegation["uid"]), "issuer_uid": "agentgov"}
+    if delegation.get("parent_uid"):
+        out["parent_uid"] = str(delegation["parent_uid"])
+    event["delegation"] = out
 
 
 def _authentication(entry: LedgerEntry) -> dict[str, Any]:

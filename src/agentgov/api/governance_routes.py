@@ -313,7 +313,8 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
 
 @router.get("/graph", tags=["overview"])
 def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
-    """People, agents and tool servers with sponsorship, grants and observed usage."""
+    """People, agents and tool servers with sponsorship, grants and observed usage; and
+    the agents that may call, or did call, other agents."""
     with _rt(request).db.session() as s:
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
@@ -337,7 +338,19 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
         for agent_id, resource, decision, count in usage_rows:
             if agent_id and resource:
                 usage[(agent_id, resource.split("/", 1)[0])][decision or "none"] += count
-        for a in s.scalars(select(Agent).where(Agent.status != DELETED)).unique():
+        # Calls between agents, by caller and the called agent's name.
+        a2a_rows = s.execute(
+            select(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision, func.count())
+            .where(LedgerEntry.type == "decision.a2a.request", LedgerEntry.ts >= since)
+            .group_by(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision)
+        ).all()
+        a2a_usage: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+        for agent_id, target, decision, count in a2a_rows:
+            if agent_id and target:
+                a2a_usage[(agent_id, target)][decision or "none"] += count
+        listed = list(s.scalars(select(Agent).where(Agent.status != DELETED)).unique())
+        by_name = {a.name: a for a in listed}
+        for a in listed:
             nodes[f"agent:{a.id}"] = {
                 "id": f"agent:{a.id}",
                 "kind": "agent",
@@ -377,6 +390,19 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
                         "label": srv,
                         "status": "unregistered",
                     },
+                )
+            granted_agents = {b.name for b in listed if agents.may_call(a, b)}
+            called = {name for (aid, name) in a2a_usage if aid == a.id and name in by_name}
+            for name in sorted(granted_agents | called):
+                counts = a2a_usage.get((a.id, name), Counter())
+                edges.append(
+                    {
+                        "from": f"agent:{a.id}",
+                        "to": f"agent:{by_name[name].id}",
+                        "kind": "calls" if name in granted_agents else "calls-ungranted",
+                        "calls": sum(counts.values()),
+                        "denied": counts.get("deny", 0),
+                    }
                 )
         return {"nodes": list(nodes.values()), "edges": edges}
 

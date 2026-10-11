@@ -8,6 +8,8 @@
 #   phase:      "request" | "response"
 #   agent:      {"agent_id", "client_id"}      (from the validated JWT)
 #   user:       the person the agent acts for, if any (see agentgov.context)
+#   chain:      who handed the work down to the agent, when another agent did
+#               (see agentgov.a2a): [{"type": "person" | "agent", "id", "name"}]
 #   provider:   the model provider's name in the registry
 #   model:      the model the agent asked for
 #   detections: {"categories": ["pii","secret"], "entities": [...],

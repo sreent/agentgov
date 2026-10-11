@@ -33,7 +33,7 @@ from google.protobuf import json_format, struct_pb2
 
 from agentgov import ids
 from agentgov.config import Settings
-from agentgov.identity import people
+from agentgov.identity import chains, people
 from agentgov.opa.client import OpaClient, OpaError
 from agentgov.processor import detectors
 from agentgov.processor.control_plane import (
@@ -100,6 +100,22 @@ def _pass_request(context: dict[str, Any] | None = None) -> pb.McpRequestResult:
     return result
 
 
+def _header(headers: Any, name: str) -> str | None:
+    """A request header agentgateway forwarded to the processor."""
+    for h in headers:
+        if h.key.lower() == name:
+            value = h.value
+            return value.decode("latin-1") if isinstance(value, bytes) else str(value)
+    return None
+
+
+def _delegation(chain: chains.Chain | None) -> dict[str, Any] | None:
+    """What the ledger keeps of the delegation a call was made under."""
+    if chain is None:
+        return None
+    return {"chain": chain.links, "uid": chain.uid, "parent_uid": chain.parent}
+
+
 def _to_struct(values: dict[str, Any]) -> struct_pb2.Struct:
     struct = struct_pb2.Struct()
     struct.update({k: v for k, v in values.items() if v is not None})
@@ -141,6 +157,8 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         self.recorder = recorder
         self.presidio = presidio
         self.features = FeatureModes(opa)
+        # Signs and checks the delegations agents carry from agent to agent.
+        self.chain_key = chains.signing_key(settings.service_token)
         self._background: set[asyncio.Task[Any]] = set()
 
     # ------------------------------------------------------------------ helpers
@@ -179,6 +197,30 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
     @staticmethod
     def _identity(meta: dict[str, Any]) -> dict[str, Any]:
         return {k: meta[k] for k in ("client_id", "agent_id", "subject") if meta.get(k)}
+
+    @staticmethod
+    def holder(identity: dict[str, Any]) -> dict[str, Any] | None:
+        """The agent a call's token names, for refusals made before policy looks it up:
+        a delegation an agent can't use is that agent's doing."""
+        return {"id": identity["agent_id"]} if identity.get("agent_id") else None
+
+    def delegation(
+        self, token: str | None, identity: dict[str, Any], person: dict[str, Any] | None
+    ) -> tuple[chains.Chain | None, str | None]:
+        """The delegation a call carries (None without one), or why it can't be used: an
+        agent calls with one when another agent handed it the work (agentgov.identity.chains)."""
+        if not token:
+            return None, None
+        try:
+            chain = chains.verify(self.chain_key, token, holder=identity.get("agent_id"))
+        except chains.ChainError as exc:
+            return None, f"The call can't be accepted: {exc}"
+        if not chains.same_person(person, chain.person):
+            return None, (
+                "The call can't be accepted: the agent acts for one person, and the "
+                "delegation it carries is for another"
+            )
+        return chain, None
 
     async def _observe_unknown(self, identity: dict[str, Any], server: str, method: str) -> None:
         try:
@@ -220,6 +262,10 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             return _pass_request()
         identity = self._identity(meta)
         person = people.person_of(meta)
+        # Work another agent handed down: the chain, and the person at its head.
+        chain, unusable = self.delegation(_header(request.headers, chains.HEADER), identity, person)
+        if chain is not None and person is None:
+            person = chain.person
         modes = await self.features.current()
         inspection = await self._inspect(
             payload, protect=modes["data-protection"] != "off", check_injection=False
@@ -254,6 +300,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 opa_decision_id=decision_id,
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 trace_id=trace_id,
+                delegation=_delegation(chain),
             )
 
         def reject(
@@ -267,6 +314,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 )
             )
 
+        if unusable:
+            finish("deny", [unusable], agent=self.holder(identity))
+            return reject("deny", [unusable])
         if inspection.scan.pii_error and self._fail_closed(modes):
             reasons = ["Content inspection is unavailable, so the call was not forwarded"]
             finish("deny", reasons)
@@ -282,6 +332,8 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         }
         if person:
             opa_input["user"] = person
+        if chain is not None:
+            opa_input["chain"] = chain.links
         try:
             decision, decision_id = await self.opa.evaluate("agentgov/mcp/decision", opa_input)
         except OpaError as exc:

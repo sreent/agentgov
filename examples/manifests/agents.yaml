@@ -23,3 +23,22 @@ spec:
         description: Look up the customer behind a ticket and record the outcome.
         tags: [support, crm]
   status: active
+---
+# An agent other agents call (examples/agents/billing). It serves A2A at its a2a_url,
+# which only the gateway reaches: agents call it at /a2a/billing-agent on the gateway,
+# as their blueprints' agent_access allows. It has no secret: it authenticates with its
+# service account token from the demo cluster (identity.yaml).
+apiVersion: agentgov/v1alpha1
+kind: Agent
+metadata:
+  name: billing-agent
+spec:
+  description: Answers billing questions about customers that other agents hand it.
+  blueprint: billing
+  owner: finance-platform
+  sponsors: [bob@example.com]
+  framework: a2a
+  environment: prod
+  workload_identity: {issuer: demo-cluster, subject: "system:serviceaccount:agents:billing-agent"}
+  a2a_url: http://billing-agent:9600
+  status: active

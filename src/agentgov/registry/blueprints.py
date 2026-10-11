@@ -18,6 +18,7 @@ FIELDS = (
     "risk_tier",
     "permissions",
     "model_access",
+    "agent_access",
     "daily_token_budget",
     "acts_for",
     "people_groups",
@@ -54,6 +55,8 @@ def _apply(bp: Blueprint, data: dict[str, Any]) -> list[str]:
             value = validation.permissions(value)
         elif key == "model_access":
             value = validation.model_access(value)
+        elif key == "agent_access":
+            value = validation.agent_access(value)
         elif key == "daily_token_budget":
             value = validation.token_budget(value)
         elif key == "acts_for":
@@ -86,6 +89,7 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Blueprint:
         name=name,
         permissions=[],
         model_access=[],
+        agent_access=[],
         labels={},
         acts_for="either",
         people_groups=[],
@@ -139,6 +143,7 @@ def to_dict(bp: Blueprint) -> dict[str, Any]:
         "risk_tier": bp.risk_tier,
         "permissions": bp.permissions or [],
         "model_access": bp.model_access or [],
+        "agent_access": bp.agent_access or [],
         "daily_token_budget": bp.daily_token_budget,
         "acts_for": bp.acts_for,
         "people_groups": bp.people_groups or [],

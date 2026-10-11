@@ -255,6 +255,19 @@ services:
     ports:
       - "9200:9200"
 
+  # Demo agent that other agents call over A2A, only through the gateway (at
+  # /a2a/billing-agent). It has no secret: it authenticates with its service account
+  # token from the workload issuer, and looks customers up in the CRM through the gateway.
+  billing-agent:
+    build:
+      context: ../../examples/agents/billing
+    image: agentgov-demo-billing:local
+    environment:
+      GATEWAY_URL: http://agentgateway:8080
+      TOKEN_URL: http://keycloak:8080/realms/agentgov/protocol/openid-connect/token
+      ASSERTION_AUDIENCE: http://localhost:8180/realms/agentgov
+      WORKLOAD_ISSUER: http://workload-issuer:9200
+
   # Demo stand-in for the security team's tools: it receives OCSF events as a SIEM (OTLP,
   # Splunk's HTTP Event Collector) and alerts as Slack and Teams do, and shows them at
   # localhost:9300/received.

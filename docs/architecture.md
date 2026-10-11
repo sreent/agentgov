@@ -16,20 +16,21 @@ flowchart LR
       ui[Admin UI · API · CLI]
     end
     subgraph runtime[Enforcement path]
-      gw[agentgateway<br/>MCP and model gateway]
-      proc[Governance processor<br/>ExtMcp gRPC · guardrail webhook]
+      gw[agentgateway<br/>MCP, model and A2A gateway]
+      proc[Governance processor<br/>ExtMcp gRPC · guardrail webhook · A2A authorization]
       opa[OPA<br/>Rego library]
       presidio[Presidio<br/>PII detection]
     end
     kc[Keycloak<br/>agent identities · admin sign-in]
     otel[OTel Collector]
     agent([AI agent]) -- client credentials --> kc
-    agent -- MCP and model calls + bearer token --> gw
-    gw -- every tool call, result, tools/list, prompt and answer --> proc
+    agent -- MCP, model and A2A calls + bearer token --> gw
+    gw -- every tool call, result, tools/list, prompt, answer and call between agents --> proc
     proc --> opa
     proc --> presidio
     gw --> mcp[(MCP servers)]
     gw -- provider's API key --> llm[(Model providers)]
+    gw -- delegation + who handed the work down --> peer([Agents serving A2A])
     admin --> ui --> reg
     admin -. single sign-on .-> kc
     rec -- clients --> kc
@@ -45,10 +46,10 @@ flowchart LR
 | Component | Role | Agent 365 analogue |
 |---|---|---|
 | **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; reads agents from Microsoft 365, Copilot Studio and Entra Agent ID, and their use and alerts from Purview and Defender; answers Copilot Studio's threat-detection calls ([platforms](platforms.md), [connections](microsoft-connections.md)); sends the ledger to SIEMs as OCSF events and alerts to Teams and Slack ([security operations](secops.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance, Defender's SIEM connectors |
-| **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server, and its guardrail webhook for model calls: content inspection, OPA queries, approvals, redaction, decision records | Defender real-time protection, Purview DLP enforcement |
+| **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server, its guardrail webhook for model calls, and its external authorization for calls between agents: content inspection, OPA queries, approvals, redaction, the delegations agents pass on, decision records | Defender real-time protection, Purview DLP enforcement |
 | [Keycloak](https://www.keycloak.org) 26.8 | One OAuth client per agent; issues short-lived tokens with `agent_id` and the gateway audience, for the agent itself or, by token exchange, for a person it acts for ([acting for people](acting-for-people.md)); takes agents' own identities, Kubernetes service account tokens, SPIFFE JWT-SVIDs or other OpenID Connect issuers' tokens, in place of client secrets ([agents' own identities](agent-identity.md)); signs administrators in to the control plane (and can federate an existing directory) | Entra Agent ID (including federated identity credentials), Entra ID sign-in |
 | [OPA](https://www.openpolicyagent.org) 1.21 | Policy decision point; evaluates the Rego library against registry data | Conditional Access |
-| [agentgateway](https://agentgateway.dev) 1.6 | MCP and model gateway, and policy enforcement point; validates tokens, calls the processor, routes to MCP servers and to model providers with their API keys ([model calls](models.md)) | Agent 365 tooling gateway, Azure API Management's AI gateway |
+| [agentgateway](https://agentgateway.dev) 1.6 | MCP, model and A2A gateway, and policy enforcement point; validates tokens, calls the processor, routes to MCP servers, to model providers with their API keys ([model calls](models.md)) and to agents that serve A2A ([agent to agent](agent-to-agent.md)) | Agent 365 tooling gateway, Azure API Management's AI gateway |
 | [Presidio](https://github.com/data-privacy-stack/presidio) | Personal-data detection | Purview classifiers |
 | [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) | Receives agent and gateway traces, forwards GenAI spans to the control plane (and optionally Langfuse); gateway decisions in the ledger carry the trace ID, so the UI links each one to its trace. Forwards the gateway's access logs of model calls, from which the control plane meters tokens and cost | Agent 365 observability |
 | [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (optional) | In-process enforcement inside agent frameworks, querying the same OPA | — |
@@ -118,6 +119,21 @@ the OpenTelemetry Collector to the control plane, which meters it per agent agai
 agent's daily budget; an agent over budget is in the next bundle, and OPA refuses its
 calls. [Model calls](models.md) has the details.
 
+## The path of a call between agents
+
+An agent that serves A2A is a gateway route, `/a2a/<agent>`, whose card agentgateway
+points at the gateway. The calling agent sends its A2A request with its own token.
+agentgateway validates the token, then asks the processor (external authorization over
+HTTP, fail-closed) with the request's JSON-RPC body and headers it computes from the
+token: the caller, the person it acts for, and any delegation the caller carries. The
+processor checks the delegation, inspects the message, asks OPA
+(`data.agentgov.a2a.decision`), and answers go ahead or refuse. Going ahead, it gives the
+agent called a delegation of its own, a token signed with a key derived from the service
+token that names the chain of agents and the person at its head, and agentgateway passes
+it on in headers, over any the caller set. The agent called sends the delegation with
+the calls it makes for that work, and the processor puts the chain into policy and the
+ledger of each one. [Agent to agent](agent-to-agent.md) has the details.
+
 ## Developers' MCP clients
 
 The tool servers listed for developers are also served as an MCP registry, at
@@ -137,7 +153,7 @@ The registry is the source of truth. Every committed change notifies three recon
 |---|---|---|
 | Agent approved, blocked, deleted, restored; a blueprint's `acts_for` changed; an identity issuer added, changed, blocked or deleted; an agent's workload identity changed | Identity | Keycloak client created, enabled or disabled, with token exchange allowed while it may act for people, and its client scope offered to the people's apps; each identity issuer an identity provider, enabled while it is approved, and an agent with a workload identity a client that authenticates with that issuer's token for its subject instead of a secret; level-triggered, retried every 60 s |
 | Anything OPA needs (agents, grants, risk, tool catalog, policies) | Bundle server | New bundle revision; long-polling OPA instances receive it immediately |
-| Tool server or model provider added, approved, blocked; a feature's mode changed | Gateway config | A sidecar beside the gateway (`agentgov gateway-config`) fetches the generated config from `GET /v1/gateway/config` every few seconds and rewrites agentgateway's file atomically; agentgateway reloads it. The sidecar holds back a model provider's route, which then answers 503, until the provider's API key is there: agentgateway would refuse the whole file otherwise. (The control plane can write the file itself instead, with `AGENTGOV_GATEWAY_CONFIG_PATH`, where it shares a volume with the gateway and can see the keys) |
+| Tool server or model provider added, approved, blocked; an agent that serves A2A approved, blocked or deleted, or its endpoint changed; a feature's mode changed | Gateway config | A sidecar beside the gateway (`agentgov gateway-config`) fetches the generated config from `GET /v1/gateway/config` every few seconds and rewrites agentgateway's file atomically; agentgateway reloads it. The sidecar holds back a model provider's route, which then answers 503, until the provider's API key is there: agentgateway would refuse the whole file otherwise. (The control plane can write the file itself instead, with `AGENTGOV_GATEWAY_CONFIG_PATH`, where it shares a volume with the gateway and can see the keys) |
 
 **Kill switch.** Blocking an agent changes the bundle; OPA, which holds a long-poll
 request open on the control plane, activates the new bundle at once, and the next call
@@ -170,7 +186,9 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | Agent → gateway | Keycloak-issued JWT, audience-bound to the gateway, 5-minute lifetime; for a person, a token the agent got by exchanging the person's (its subject is the person, the agent the client it was issued to) |
 | Gateway → MCP server | The agent's token is never forwarded (MCP spec: no token passthrough); servers are only reachable through the gateway |
 | Gateway → model provider | The provider's API key, which only the gateway (and its config sidecar) can read, from a file; the agent's token is never forwarded |
-| Gateway → processor | Internal network, fail-closed (`failureMode: failClosed`) for tool calls (gRPC) and model calls (the webhook); mTLS ⏳ |
+| Gateway → agent serving A2A | The caller's token is never forwarded; the agent called gets a delegation and who handed it the work in headers AgentGov sets on every call it passes on, so only the gateway should reach agents' A2A endpoints (a NetworkPolicy in Kubernetes) |
+| Agent → agent (delegation) | A JWT for the agent called only, signed by the processors with a key derived from the service token (agents never see it), lasting an hour; checked on each call that carries it (signature, expiry, holder, and the same person as the caller's token) |
+| Gateway → processor | Internal network, fail-closed (`failureMode: failClosed`) for tool calls (gRPC), model calls (the webhook) and calls between agents (external authorization); mTLS ⏳ |
 | Components → control plane | Service token on internal endpoints; admin API keys are scoped by role |
 | Copilot Studio → control plane (threat detection) | The only endpoint meant for the internet: a token that Microsoft Entra ID signed (RS256, keys from the tenant's JWKS) for the configured tenant and AgentGov's API, issued to an allowed caller app; anything else gets 401 |
 | Control plane → Microsoft | AgentGov's app registration (client credentials, read-only Graph permissions) on a schedule; Power Platform and Graph admin actions only as a signed-in admin, with their delegated token |
@@ -178,7 +196,7 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 
 | Failure | Behaviour |
 |---|---|
-| Processor down or erroring | agentgateway refuses governed calls and model calls (fail-closed) |
+| Processor down or erroring | agentgateway refuses governed calls, model calls and calls between agents (fail-closed) |
 | A model provider's API key is missing | That provider's route answers 503 until the key is there; the gateway serves its other routes as usual |
 | Access logs don't reach the control plane | Model calls go on, unmetered: budgets can't stop an agent whose usage isn't counted |
 | OPA unreachable or bundle missing | Processor denies ("policy engine unavailable") |
@@ -215,12 +233,13 @@ src/agentgov/
   platforms/      Microsoft's services (Graph, the Power Platform API) and Copilot Studio
                   threat detection
   scanners/       checks on agent instructions: rules and the Granite Guardian client
-  identity/       Keycloak admin client and identity reconciler, single sign-on, and
-                  the people agents act for
+  identity/       Keycloak admin client and identity reconciler, single sign-on, the
+                  people agents act for, and the delegations agents pass on
   opa/            bundle builder and long-poll server, Rego validation, OPA client
   policies/       the Rego library (+ tests) shipped to OPA
   processor/      governance processor: ExtMcp gRPC server, guardrail webhook for model
-                  calls, detectors, Presidio client
+                  calls, external authorization for calls between agents, detectors,
+                  Presidio client
   gateway.py      agentgateway config generator
   telemetry.py    OTLP ingestion (discovery, activity, detective controls; model usage)
   mcp_scan.py     the MCP servers set up on a developer's machine (agentgov mcp scan)
@@ -229,5 +248,6 @@ src/agentgov/
   ui/             admin UI (static)
 deploy/compose/   reference stack (Docker Compose)
 deploy/helm/      Helm chart for Kubernetes
-examples/         manifests, demo MCP server, demo model, a developer's machine, demo agent
+examples/         manifests, demo MCP server, demo model, a developer's machine, an agent
+                  other agents call, demo agent
 ```

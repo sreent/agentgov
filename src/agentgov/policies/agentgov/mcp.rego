@@ -10,6 +10,8 @@
 #   agent:      {"agent_id", "client_id", "subject"}  (from the validated JWT)
 #   user:       the person the agent acts for, if any (see agentgov.context):
 #               {"id", "username", "email", "groups", "roles", "via"}
+#   chain:      who handed the work down to the agent, when another agent did
+#               (see agentgov.a2a): [{"type": "person" | "agent", "id", "name"}]
 #   resource:   {"server", "name"}
 #   arguments:  tool arguments (request phase)
 #   detections: {"categories": ["pii","secret"], "entities": [...],

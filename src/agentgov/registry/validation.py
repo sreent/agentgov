@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from agentgov.models import (
     ACTS_FOR,
@@ -128,6 +129,42 @@ def merge_model_access(*grant_lists: list[dict[str, Any]]) -> list[dict[str, Any
             models = merged.setdefault(grant["provider"], [])
             models.extend(m for m in grant["models"] if m not in models)
     return [{"provider": provider, "models": models} for provider, models in merged.items()]
+
+
+# Agent names, or glob patterns over them.
+_AGENT_PATTERN = re.compile(r"^[a-z0-9*?\[\]!-]{1,63}$")
+
+
+def agent_access(value: Any) -> list[str]:
+    """The agents an agent may call over A2A: names or glob patterns (``billing-*``)."""
+    patterns = string_list(value, "agent_access")
+    for pattern in patterns:
+        if not _AGENT_PATTERN.match(pattern):
+            raise ValidationError(
+                f"agent_access: {pattern!r} is not an agent's name or a pattern of names "
+                "(lowercase letters, digits, '-', and * or ? to match any)"
+            )
+    return patterns
+
+
+def merge_agent_access(*lists: list[str]) -> list[str]:
+    return list(dict.fromkeys(p for patterns in lists for p in patterns or []))
+
+
+def a2a_url(value: Any) -> str | None:
+    """An agent's A2A endpoint: http(s), no credentials, query or fragment."""
+    if value is None or value == "":
+        return None
+    parts = urlsplit(str(value))
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValidationError(f"a2a_url must be an http(s) URL (got {value!r})")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise ValidationError("a2a_url must not hold credentials, a query or a fragment")
+    try:
+        parts.port  # noqa: B018 (raises on a port that isn't one)
+    except ValueError:
+        raise ValidationError(f"a2a_url has an invalid port (got {value!r})") from None
+    return str(value).rstrip("/")
 
 
 def token_budget(value: Any) -> int | None:

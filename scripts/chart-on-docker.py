@@ -22,8 +22,9 @@ is ready. Network policies, ingresses and the scheduler are Kubernetes' own: the
 kind check (scripts/ci.sh --kind) covers them where kind runs.
 
   chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server, model,
-                                                 workload identity issuer and the sink that
-                                                 stands in for the security team's tools)
+                                                 workload identity issuer, the sink that
+                                                 stands in for the security team's tools,
+                                                 and the agent other agents call)
   chart-on-docker.py secret RENDERED.yaml KEY    print a value of the chart's Secret
   chart-on-docker.py logs                        state and recent logs, for failures
   chart-on-docker.py down                        remove everything it started
@@ -303,6 +304,14 @@ def up(rendered: str, demo: bool) -> None:
         sh("docker", "run", "-d", "--name", "agentgov-demo-sink", "--label", LABEL,
            "--network", NETWORK, "--network-alias", "demo-sink", "-p", "127.0.0.1:9300:9300",
            "-e", "HEC_TOKEN=demo-hec-token", "agentgov-demo-sink:local")  # fmt: skip
+        # The agent other agents call over A2A, through the gateway (agents.yaml).
+        sh("docker", "run", "-d", "--name", "agentgov-demo-billing-agent", "--label", LABEL,
+           "--network", NETWORK, "--network-alias", "billing-agent",
+           "-e", "GATEWAY_URL=http://agentgov-gateway:8080",
+           "-e", "TOKEN_URL=http://agentgov-keycloak:8080/realms/agentgov/protocol/openid-connect/token",
+           "-e", "ASSERTION_AUDIENCE=http://localhost:8180/realms/agentgov",
+           "-e", "WORKLOAD_ISSUER=http://workload-issuer:9200",
+           "agentgov-demo-billing:local")  # fmt: skip
 
 
 def logs() -> None:

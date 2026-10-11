@@ -27,7 +27,7 @@ python examples/agents/demo_agent.py
 | Port | Service | Notes |
 |---|---|---|
 | 8000 | Control plane | API (`/docs`), admin UI (`/ui`), OPA bundles, OTLP ingest, the MCP registry for developers' tools (`/registry`, once `mcp-registry` is on) |
-| 8080 | agentgateway | MCP routes at `/mcp/<server>` and model routes at `/llm/<provider>`; requires a Keycloak-issued token |
+| 8080 | agentgateway | MCP routes at `/mcp/<server>`, model routes at `/llm/<provider>` and agents that serve A2A at `/a2a/<agent>`; requires a Keycloak-issued token |
 | 8180 | Keycloak | Admin console user `admin`, password `KEYCLOAK_ADMIN_PASSWORD` (default `admin`); realm `agentgov` |
 | 8181 | OPA | Query API, handy for debugging policies |
 | 4317 / 4318 | OTel Collector | OTLP gRPC / HTTP for agents |
@@ -35,9 +35,12 @@ python examples/agents/demo_agent.py
 | 9300 | Demo sink | A stand-in for the security team's SIEM, Splunk, Slack and Teams: what the demo's destinations sent is at `/received` ([security operations](../../docs/secops.md)); not for real use |
 | 3000 | Langfuse | Only with the Langfuse override (below) |
 
-PostgreSQL, Presidio, the processor, the demo MCP server and the demo model are only
-reachable inside the Compose network. The MCP server and the model in particular are only
-reachable through the gateway.
+PostgreSQL, Presidio, the processor, the demo MCP server, the demo model and the demo
+billing agent are only reachable inside the Compose network. The MCP server, the model
+and the billing agent in particular are only reachable through the gateway. The billing
+agent ([examples/agents/billing](../../examples/agents/billing/server.py)) is the agent
+other agents call in the demo ([agent to agent](../../docs/agent-to-agent.md)); not for
+real use.
 
 ## Model providers' API keys
 
