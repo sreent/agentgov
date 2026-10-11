@@ -52,7 +52,7 @@ SIGNAL_LABELS = {
     "approval_denied": "Approvals denied by reviewers",
     "tool_poisoning_exposure": "Exposure to poisoned tool definitions",
     "unregistered_activity": "Activity while unregistered",
-    "jailbreak_attempt": "Jailbreak attempts in conversations (Microsoft Purview)",
+    "jailbreak_attempt": "Jailbreak attempts in conversations",
 }
 
 

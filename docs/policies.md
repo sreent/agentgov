@@ -151,6 +151,7 @@ that holds something to decide on (`phase: "response"`). Its built-in rules:
 | Personal data in a prompt to a provider whose `trust_level` is not `verified` | redact `pii` (masked before the prompt leaves) | `data-protection` |
 | Personal data to mask in a conversation that holds tool calls | deny (masking would break them) | `data-protection` |
 | A tool result in the conversation contains a prompt-injection payload | deny | `prompt-injection` |
+| The latest prompt from a person looks like a jailbreak | deny | `jailbreak-detection` |
 | Agent risk level is `critical` | deny | `risk-based-access` |
 | Agent has used its daily token budget | deny | `token-budgets` |
 
@@ -166,7 +167,8 @@ as `data-protection` does. A model call can't wait for an approver, so
   "provider": "openai",
   "model": "gpt-4.1-mini",
   "detections": {"categories": ["pii"], "entities": ["EMAIL_ADDRESS"],
-                 "prompt_injection": false, "injection_score": 0.0},
+                 "prompt_injection": false, "injection_score": 0.0,
+                 "jailbreak": false, "jailbreak_score": 0.0},
   "tool_calls": false                       // the conversation holds tool calls or results
 }
 ```
@@ -188,7 +190,8 @@ deny contains "Production agents may only use self-hosted models" if {
 ```
 
 Rules written for tool calls look at `input.resource`, which model calls don't have, so
-they don't apply to them. To ask the live OPA about a model call, send
+they don't apply to them. To ask the live OPA about a model call, use **What if** on the
+Policies page, `agentgov policies evaluate --provider … --model …`, or send
 `"path": "agentgov/models/decision"` with the input to `POST /v1/policies/evaluate`.
 
 ## Copilot Studio's tool calls

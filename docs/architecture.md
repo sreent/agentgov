@@ -109,7 +109,8 @@ Each approved model provider is a gateway route, `/llm/<provider>/v1/chat/comple
 The agent calls it with its own token, as it calls tools. agentgateway validates the
 token, then sends the prompt to the processor's guardrail webhook (HTTP), with the
 agent, the provider and the model in headers it computes from the token and the request.
-The processor inspects the prompt, asks OPA (`data.agentgov.models.decision`) and answers
+The processor inspects the prompt (credentials, personal data, instructions injected
+through tool results, jailbreaks), asks OPA (`data.agentgov.models.decision`) and answers
 pass, masked prompt or refuse. agentgateway sends the prompt on with the provider's API
 key, which it reads from a file, and sends the answer through the webhook the same way
 before the agent gets it. Its access log of the call (tokens, model, agent) goes through

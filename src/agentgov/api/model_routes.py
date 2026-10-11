@@ -79,8 +79,9 @@ def get_usage(
     provider: str | None = None,
     _: Principal = Depends(read),
 ) -> dict[str, Any]:
-    """Calls, tokens and cost per agent, day, provider and model for the last ``days`` days,
-    and each agent's tokens today against its budget."""
+    """Calls, tokens and cost per agent, day, provider and model for the last ``days`` days;
+    the same added up per owner and per sponsor of the agents; and each agent's tokens
+    today against its budget."""
     with request.app.state.rt.db.session() as s:
         agent_id = agents.get(s, agent).id if agent else None
         rows = model_usage.usage(
@@ -102,9 +103,12 @@ def get_usage(
                     "over_budget": model_usage.over_budget(budget, used.get(a.id, 0)),
                 }
             )
+        spend = model_usage.spend(s, rows)
         return {
             "day": model_usage.today(),
             "rows": [{**model_usage.to_dict(r), "agent_name": names.get(r.agent_id)} for r in rows],
+            "by_owner": spend["owner"],
+            "by_sponsor": spend["sponsor"],
             "today": sorted(budgets, key=lambda b: -b["used_today"]),
             "totals": {
                 "calls": sum(r.calls for r in rows),

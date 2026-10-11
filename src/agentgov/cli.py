@@ -1302,34 +1302,66 @@ def policies_delete(name: str, yes: bool = YES) -> None:
 
 @policies_app.command("evaluate")
 def policies_evaluate(
-    server: str = typer.Option(..., help="Tool server name."),
-    tool: str = typer.Option(..., help="Tool name."),
+    server: str | None = typer.Option(None, help="Tool server name (with --tool)."),
+    tool: str | None = typer.Option(None, help="Tool name."),
+    provider: str | None = typer.Option(
+        None, help="Model provider name (with --model), for a model call instead."
+    ),
+    model: str | None = typer.Option(None, help="Model the agent asks for."),
     agent: str | None = typer.Option(None, help="Agent (default: an unregistered caller)."),
-    phase: str = typer.Option("request", help="request (the call) or response (the result)."),
+    phase: str = typer.Option(
+        "request", help="request (the call or prompt) or response (the result or answer)."
+    ),
     pii: bool = typer.Option(False, "--pii", help="Personal data was detected."),
     secret: bool = typer.Option(False, "--secret", help="A credential was detected."),
-    injection: bool = typer.Option(False, "--injection", help="Prompt injection in the result."),
+    injection: bool = typer.Option(
+        False,
+        "--injection",
+        help="Prompt injection in the result (in a model call: in a tool result it holds).",
+    ),
+    jailbreak: bool = typer.Option(False, "--jailbreak", help="The prompt is a jailbreak."),
+    tool_calls: bool = typer.Option(
+        False, "--tool-calls", help="The model call's conversation holds tool calls."
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print OPA's full result."),
 ) -> None:
-    """What if: ask the live OPA what it would decide for a tool call. Nothing is recorded."""
+    """What if: ask the live OPA what it would decide for a tool call or a model call.
+    Nothing is recorded."""
+    if bool(server and tool) == bool(provider and model):
+        _fail("give --server and --tool for a tool call, or --provider and --model")
     if agent:
         found = _call("GET", f"/v1/agents/{agent}")
         caller = {"agent_id": found["id"], "client_id": found["identity"]["client_id"]}
     else:
         caller = {"client_id": "agent-not-registered"}
     categories = [c for c, on in (("pii", pii), ("secret", secret)) if on]
-    decision_input = {
-        "phase": phase,
-        "method": "tools/call",
-        "agent": {k: v for k, v in caller.items() if v},
-        "resource": {"server": server, "name": tool},
-        "detections": {
-            "categories": categories,
-            "prompt_injection": injection,
-            "injection_score": 0.95 if injection else 0,
-        },
+    detections: dict[str, Any] = {
+        "categories": categories,
+        "prompt_injection": injection,
+        "injection_score": 0.95 if injection else 0,
     }
-    result = _call("POST", "/v1/policies/evaluate", json={"input": decision_input})["result"]
+    if provider:
+        path = "agentgov/models/decision"
+        decision_input: dict[str, Any] = {
+            "kind": "model",
+            "phase": phase,
+            "agent": {k: v for k, v in caller.items() if v},
+            "provider": provider,
+            "model": model,
+            "detections": {**detections, "jailbreak": jailbreak},
+            "tool_calls": tool_calls,
+        }
+    else:
+        path = "agentgov/mcp/decision"
+        decision_input = {
+            "phase": phase,
+            "method": "tools/call",
+            "agent": {k: v for k, v in caller.items() if v},
+            "resource": {"server": server, "name": tool},
+            "detections": detections,
+        }
+    body = {"path": path, "input": decision_input}
+    result = _call("POST", "/v1/policies/evaluate", json=body)["result"]
     if as_json or not result:
         _print(result)
         return
@@ -1338,6 +1370,8 @@ def policies_evaluate(
         typer.echo(f"  - {reason}")
     if result.get("redact"):
         typer.echo(f"  redact: {', '.join(result['redact'])}")
+    for monitored in result.get("monitored") or []:
+        typer.echo(f"  monitored: {monitored}")
 
 
 # ----------------------------------------------------------------- approvals
@@ -1973,10 +2007,28 @@ def models_usage(
     days: int = typer.Option(7, help="How many days back, today included."),
     agent: str | None = typer.Option(None, help="Only this agent."),
     provider: str | None = typer.Option(None, help="Only this provider."),
+    by: str | None = typer.Option(
+        None, help="Add it up per owner or sponsor of the agents instead."
+    ),
 ) -> None:
     """Calls, tokens and cost per agent, day, provider and model; and budgets today."""
+    if by not in (None, "owner", "sponsor"):
+        _fail(f"--by takes owner or sponsor (got {by!r})")
     params = {"days": days, **_given(agent=agent, provider=provider)}
     view = _call("GET", "/v1/models/usage", params=params)
+    if by:
+        groups = [
+            {
+                **g,
+                by: g[by] or f"(no {by})",
+                "tokens_in": g["input_tokens"],
+                "tokens_out": g["output_tokens"],
+                "cost_usd": f"{g['cost_usd']:.4f}",
+            }
+            for g in view[f"by_{by}"]
+        ]
+        _table(groups, [by, "agents", "calls", "tokens_in", "tokens_out", "cost_usd"])
+        return
     rows = [
         {
             **r,

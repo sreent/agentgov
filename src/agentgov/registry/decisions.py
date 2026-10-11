@@ -199,6 +199,27 @@ def _model_signals(
             "targeting your agents. Tools called through the MCP gateway are checked as they "
             "answer.",
         )
+    if phase == "request" and detections.get("jailbreak"):
+        risk.add_signal(session, agent.id, "jailbreak_attempt", resource)
+        findings.raise_finding(
+            session,
+            type="agent.jailbreak_attempts",
+            severity="medium",
+            subject=agent.id,
+            agent_id=agent.id,
+            category=findings.THREAT,
+            title=f"People tried to jailbreak {agent.name}",
+            description=f"A prompt {agent.name} sent to {resource} tried to set aside the "
+            "model's instructions or safety rules ("
+            + ", ".join(detections.get("jailbreak_reasons") or [])
+            + (
+                "). The model call was refused."
+                if effect == "deny"
+                else "). The model call went through: jailbreak detection is not enforced."
+            ),
+            remediation="Find who sent it in the agent's conversations, and check that the "
+            "agent's instructions hold up against such prompts.",
+        )
 
 
 def record_opa_decisions(session: Session, events: list[dict[str, Any]]) -> int:

@@ -150,6 +150,21 @@ CATALOG: tuple[Feature, ...] = (
         },
     ),
     Feature(
+        "jailbreak-detection",
+        "Jailbreak detection",
+        "controls",
+        "Prompts that try to talk a model out of its instructions or its safety rules "
+        "(jailbreaks) are looked for in the latest message from a person in each model call. "
+        "It starts in monitor mode: people's own words vary more than tool results do.",
+        CONTROL,
+        MONITOR,
+        {
+            ENFORCE: "Such prompts are refused, and a finding is raised.",
+            MONITOR: "They go through, are recorded and raise a finding.",
+            OFF: "Prompts aren't checked.",
+        },
+    ),
+    Feature(
         "tool-integrity",
         "Tool integrity",
         "controls",

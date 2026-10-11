@@ -97,6 +97,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Prompt injection (XPIA) protection | ✅ | Tool results with injected instructions are withheld, and model calls whose conversation holds one are refused; heuristics, ML classifier ⏳; jailbreak and XPIA attempts that Microsoft detects against Microsoft 365 and Copilot Studio agents become findings (Purview audit log) |
 | Tool poisoning and definition drift | ✅ | Poisoned tools hidden; changed definitions refused until re-approved |
 | DLP / sensitivity of personal data | ✅ | **Presidio** detects PII; policy redacts it from results and from calls to unverified servers |
+| Jailbreak detection in prompts (Azure AI Content Safety's Prompt Shields) | ✅ | The latest prompt from a person in each model call is checked with heuristics; monitored by default, refused when enforced, and a finding either way ([model calls](models.md)) |
 | DLP for prompts (Purview DLP for Microsoft 365 Copilot) | ✅ | Personal data masked in prompts to model providers that aren't verified; prompts with credentials refused, and answers with them withheld ([model calls](models.md)) |
 | Posture assessment and recommendations | ✅ | Findings with remediation (ownerless, no sponsor, expired attestation, stale, broad grants, unverified servers, identity drift) |
 | Harmful or malicious agent instructions | ✅ | Agents' system prompts (registered, reported in telemetry, or read from Microsoft 365) are checked by rules and optionally by **IBM Granite Guardian**; problems become findings and add to the risk score ([instructions](instructions.md)) |
@@ -126,7 +127,8 @@ Microsoft documentation and announcements, checked October 2026:
 - Security: [Defender real-time protection](https://learn.microsoft.com/en-us/defender-xdr/security-for-ai/ai-agent-real-time-protection),
   [Purview for Agent 365](https://learn.microsoft.com/en-us/purview/ai-agent-365),
   [Purview DLP for Microsoft 365 Copilot](https://learn.microsoft.com/en-us/purview/dlp-microsoft365-copilot-location-learn-about)
-- Models: [AI gateway capabilities in Azure API Management](https://learn.microsoft.com/en-us/azure/api-management/genai-gateway-capabilities)
+- Models: [AI gateway capabilities in Azure API Management](https://learn.microsoft.com/en-us/azure/api-management/genai-gateway-capabilities),
+  [Prompt Shields](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/concepts/jailbreak-detection)
 - Connections: [Entra agent identities](https://learn.microsoft.com/en-us/graph/api/resources/agentidentity),
   [Purview audit log queries](https://learn.microsoft.com/en-us/graph/api/security-auditcoreroot-post-auditlogqueries),
   [Defender alerts](https://learn.microsoft.com/en-us/graph/api/security-list-alerts_v2),

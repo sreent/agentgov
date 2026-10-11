@@ -6,8 +6,9 @@ agentgateway sends the processor every prompt before it leaves for the provider
 (``POST /response``), with the caller's identity, the provider and the model in
 headers it computes from the validated token. For each one the processor:
 
-1. looks for credentials and personal data in the conversation, and for
+1. looks for credentials and personal data in the conversation, for
    instructions aimed at the agent in the tool results the conversation holds,
+   and for a jailbreak in its latest message from the user role,
 2. asks OPA (``data.agentgov.models.decision``), and
 3. answers: go ahead; go ahead with personal data masked; or refuse the prompt
    (or withhold the answer),
@@ -37,7 +38,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from agentgov.opa.client import OpaError
-from agentgov.processor import detectors
+from agentgov.processor import detectors, jailbreak
 from agentgov.processor.server import Inspection, trace_id_from
 
 if TYPE_CHECKING:
@@ -186,6 +187,13 @@ class ModelGuard:
             inspection.scan.injection_score = injected.injection_score
             inspection.scan.injection_reasons = injected.injection_reasons
             inspection.summary = inspection.scan.summary(self.p.settings.prompt_injection_threshold)
+        if modes["jailbreak-detection"] != "off":
+            score, reasons = jailbreak.score(jailbreak.latest_prompt(messages))
+            inspection.summary.update(
+                jailbreak=score >= self.p.settings.prompt_injection_threshold,
+                jailbreak_score=round(score, 3),
+                jailbreak_reasons=reasons,
+            )
         monitored: list[str] = []
         finish = self._recorder("request", headers, inspection, monitored)
 

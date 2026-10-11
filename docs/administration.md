@@ -70,9 +70,9 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Approve, edit, delete model providers ([model calls](models.md)) | Models → **Add provider**, **Edit**, **Delete** | `agentgov models create\|update\|delete` | `POST /v1/models/providers`, `PATCH`/`DELETE /v1/models/providers/{ref}` |
 | Block or unblock a model provider | Models → **Block**, **Unblock** | `agentgov models block\|unblock NAME` | `POST /v1/models/providers/{ref}/block\|unblock` |
 | Give a blueprint or an agent models, and a daily token budget | Blueprint or agent → **Edit** → Models | `agentgov blueprints update B --model-access 'openai:gpt-4.1*' --token-budget N` (agents: the same options) | `model_access`, `daily_token_budget` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |
-| See model usage, cost and budgets | Models; an agent's page → Models | `agentgov models usage [--agent A] [--days N]` | `GET /v1/models/usage` |
+| See model usage, cost and budgets, and who is spending | Models; an agent's page → Models | `agentgov models usage [--agent A] [--days N] [--by owner\|sponsor]` | `GET /v1/models/usage` |
 | Add, edit, enable, disable, delete policies | Policies → **Add policy**, **Edit**, **Disable**/**Enable**, **Delete** | `agentgov policies create\|update\|enable\|disable\|delete` | `POST /v1/policies`, `PUT`/`DELETE /v1/policies/{name}` |
-| Ask what policy would decide | Policies → **What if** | `agentgov policies evaluate --server crm --tool delete_customer --agent support-bot` | `POST /v1/policies/evaluate` |
+| Ask what policy would decide, for a tool call or a model call | Policies → **What if** | `agentgov policies evaluate --server crm --tool delete_customer --agent support-bot`, or `--provider openai --model gpt-4.1` | `POST /v1/policies/evaluate` |
 | Apply manifests | Policies → **Import manifests** | `agentgov apply -f DIR` | `POST /v1/apply` |
 | Export manifests | Policies → **Export manifests** | `agentgov export` | `GET /v1/export` |
 | Decide an approval request | Approvals → **Approve** / **Deny** | `agentgov approvals approve\|deny ID` | `POST /v1/approvals/{id}/approve\|deny` |

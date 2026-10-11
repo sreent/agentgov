@@ -10,8 +10,10 @@
 #   provider:   the model provider's name in the registry
 #   model:      the model the agent asked for
 #   detections: {"categories": ["pii","secret"], "entities": [...],
-#                "prompt_injection": bool, "injection_score": number}
-#               (prompt_injection: in the tool results the conversation holds)
+#                "prompt_injection": bool, "injection_score": number,
+#                "jailbreak": bool, "jailbreak_score": number}
+#               (prompt_injection: in the tool results the conversation holds;
+#               jailbreak: in its latest message from the user role)
 #   tool_calls: true when the conversation holds tool calls or tool results
 #
 # Identity, lifecycle and the registry always apply; the controls apply as their
@@ -108,6 +110,14 @@ violation contains {
 } if {
 	phase == "request"
 	detections.prompt_injection == true
+}
+
+violation contains {
+	"control": "jailbreak-detection",
+	"message": "The prompt looks like a jailbreak: it tries to set aside the model's instructions or safety rules",
+} if {
+	phase == "request"
+	detections.jailbreak == true
 }
 
 violation contains {"control": "risk-based-access", "message": msg} if {

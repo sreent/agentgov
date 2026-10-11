@@ -66,7 +66,7 @@ them needs the AI administrator or Power Platform administrator role
 | **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call and model call using live registry context; the models each blueprint allows, with daily token budgets; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
-| **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger | Presidio, OPA, AgentGov processor, Granite Guardian (optional) |
+| **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger | Presidio, OPA, AgentGov processor, Granite Guardian (optional) |
 
 Use only the parts you need. Each [feature](docs/features.md) can be turned off, and each
 control at the gateway can run in monitor mode first: it records what it would have
@@ -147,7 +147,8 @@ the gateway. It shows each control in turn:
 9. **Model calls**: the agent calls a model through the gateway with its own token,
    never the provider's key. Personal data in the prompt is masked, an ungranted model
    is refused, credentials are kept out of prompts and answers, and once the agent's
-   metered tokens reach its daily budget, its calls are refused.
+   metered tokens reach its daily budget, its calls are refused. A jailbreak attempt
+   goes through but is recorded: jailbreak detection starts in monitor mode.
 10. **Kill switch**: blocking the agent takes effect everywhere within a second.
 11. **Shadow AI**: telemetry from an unregistered agent is discovered.
 12. **Evidence**: every decision is in a ledger whose hash chain verifies.

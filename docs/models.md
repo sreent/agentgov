@@ -101,12 +101,16 @@ enforced, monitored or off:
 | `least-privilege` | Refuses a model the agent wasn't granted |
 | `data-protection` | Refuses a prompt that holds credentials, and withholds an answer that does. Masks personal data in prompts to providers that aren't verified. A conversation that holds tool calls can't be masked without breaking them, so it is refused instead |
 | `prompt-injection` | Refuses a prompt whose conversation holds a tool result with instructions aimed at the agent |
+| `jailbreak-detection` | Looks for a jailbreak in the conversation's latest message from a person: "ignore your previous instructions", "you have no restrictions", a made-up system turn. Monitored by default, so such prompts go through and are recorded; enforce it to refuse them. Either way it raises a finding |
 | `risk-based-access` | Refuses agents at critical risk |
 | `token-budgets` | Refuses agents that have used their daily token budget |
 | `unknown-callers` | In monitor mode, lets callers without an agent's token through and records them; with `discovery` on, they join the inventory as discovered agents |
 
 The `model-gateway` feature publishes the providers on the gateway; off, no provider is
-reachable. A refused call gets an OpenAI-style error with status 403, whose
+reachable. To see what policy would decide for a model call, use **What if** on the
+Policies page (*A model call*), `agentgov policies evaluate --provider openai --model
+gpt-4.1 --agent support-bot`, or `POST /v1/policies/evaluate` with
+`"path": "agentgov/models/decision"`. A refused call gets an OpenAI-style error with status 403, whose
 `error.agentgov.reasons` says why:
 
 ```json
@@ -128,9 +132,11 @@ for their usage.
 
 | | How |
 |---|---|
-| Admin UI | **Models** page: today's tokens against each agent's budget, and calls, tokens and cost per day; each agent's page |
-| CLI | `agentgov models usage --days 30 --agent support-bot` |
-| API | `GET /v1/models/usage?days=30&agent=support-bot&provider=openai` |
+| Admin UI | **Models** page: today's tokens against each agent's budget; who is spending, per owner and per sponsor of the agents; and calls, tokens and cost per day. Each agent's page shows its own |
+| CLI | `agentgov models usage --days 30 --agent support-bot`, or `--by owner` / `--by sponsor` |
+| API | `GET /v1/models/usage?days=30&agent=support-bot&provider=openai`: `rows`, `by_owner`, `by_sponsor` and `today` |
+
+An agent with several sponsors counts in full for each of them.
 
 A **daily token budget** counts tokens in and out over the UTC day. When an agent's
 usage reaches it, the ledger records `model.budget_reached`, and while `token-budgets` is
@@ -172,6 +178,8 @@ it expires, and use it with `client.with_options(api_key=new_token)`.
   OpenAI's Responses API, Anthropic's Messages API directly) aren't routed yet.
 * Personal data is masked in prompts, not in answers; an answer with credentials is
   withheld.
+* Jailbreaks and injected instructions are found with heuristics: they catch the common
+  phrasings, not every rewording of them.
 * The gateway doesn't log the usage of an answer it withholds, so those tokens aren't
   metered, although the provider may bill for them.
 * The gateway shows the processor a conversation's text. Masking returns text, which is

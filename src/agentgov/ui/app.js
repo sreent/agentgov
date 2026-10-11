@@ -3122,8 +3122,8 @@ function findingCard(f, agentsById, act) {
 /* ---------------------------------------------------------------- policies */
 
 async function renderPolicies() {
-  const [blueprints, policies, agents, servers] = await Promise.all([
-    api('v1/blueprints'), api('v1/policies'), api('v1/agents'), api('v1/toolservers'),
+  const [blueprints, policies, agents, servers, providers] = await Promise.all([
+    api('v1/blueprints'), api('v1/policies'), api('v1/agents'), api('v1/toolservers'), api('v1/models/providers'),
   ]);
   const usage = countBy(agents, (a) => a.blueprint || '');
   const exportBtn = h('button', { type: 'button', class: 'btn', 'data-focus-key': 'export-yaml' }, icon('download'), 'Export manifests');
@@ -3131,7 +3131,7 @@ async function renderPolicies() {
     exportBtn.disabled = true;
     try {
       const blob = await saveDownload('v1/export', `agentgov-manifests-${fileStamp()}.yaml`);
-      toast(`Exported blueprints, tool servers, policies and agents as YAML (${fmtBytes(blob.size)}).`);
+      toast(`Exported features, blueprints, tool servers, model providers, policies and agents as YAML (${fmtBytes(blob.size)}).`);
     } catch (err) {
       toast(err.message, { tone: 'critical' });
     } finally {
@@ -3168,7 +3168,7 @@ async function renderPolicies() {
           policies.length
             ? policies.map(policyCard)
             : h('section', { class: 'card' }, emptyState('No organisation policies', 'Only the built-in library (package agentgov.mcp) is enforced.')))),
-      whatIfCard(agents, servers)));
+      whatIfCard(agents, servers, providers)));
 }
 
 /** Create a blueprint (no `b`) or edit one. */
@@ -3373,7 +3373,7 @@ function policyCard(p) {
   });
 }
 
-function whatIfCard(agents, servers) {
+function whatIfCard(agents, servers, providers = []) {
   const registered = agents.filter((a) => a.status !== 'discovered');
   const discovered = agents.filter((a) => a.status === 'discovered');
   const recent = (a) => (a.last_seen_at ? Date.parse(a.last_seen_at) : 0);
@@ -3384,6 +3384,8 @@ function whatIfCard(agents, servers) {
       `${a.name}${a.identity?.client_id ? ` (${a.identity.client_id})` : ''} · ${a.status}`))) : null,
     discovered.length ? h('optgroup', { label: 'Discovered (unmanaged)' }, discovered.map((a) => h('option', { value: a.id, selected: a === preferred }, `${a.name} · no client ID`))) : null,
     h('option', { value: '__unregistered' }, 'An unregistered caller'));
+
+  // A tool call: a tool server and one of its tools.
   const serverInput = h('input', { type: 'text', id: 'wi-server', list: 'wi-server-list', autocomplete: 'off', spellcheck: 'false' });
   const toolInput = h('input', { type: 'text', id: 'wi-tool', list: 'wi-tool-list', autocomplete: 'off', spellcheck: 'false' });
   const serverList = h('datalist', { id: 'wi-server-list' }, servers.map((ts) => h('option', { value: ts.name })));
@@ -3400,39 +3402,97 @@ function whatIfCard(agents, servers) {
   toolInput.value = destructive?.name || ts0?.tools?.[0]?.name || '';
   serverInput.addEventListener('change', fillTools);
 
+  // A model call: a model provider and a model.
+  const providerInput = h('input', { type: 'text', id: 'wi-provider', list: 'wi-provider-list', autocomplete: 'off', spellcheck: 'false' });
+  const modelInput = h('input', { type: 'text', id: 'wi-model', list: 'wi-model-list', autocomplete: 'off', spellcheck: 'false' });
+  const providerList = h('datalist', { id: 'wi-provider-list' }, providers.map((p) => h('option', { value: p.name })));
+  const modelList = h('datalist', { id: 'wi-model-list' });
+  providerInput.value = (providers.find((p) => p.status === 'approved') || providers[0])?.name || '';
+  // The models the chosen agent may call there, where they are names rather than globs.
+  const grantedModels = () => {
+    const agent = agents.find((a) => a.id === agentSel.value);
+    return (agent?.effective_model_access || [])
+      .filter((g) => g.provider === providerInput.value.trim())
+      .flatMap((g) => g.models).filter((m) => !/[*?[]/.test(m));
+  };
+  const fillModels = () => modelList.replaceChildren(...grantedModels().map((m) => h('option', { value: m })));
+  fillModels();
+  modelInput.value = grantedModels()[0] || '';
+  providerInput.addEventListener('change', fillModels);
+  agentSel.addEventListener('change', fillModels);
+
+  const kindTool = h('input', { type: 'radio', name: 'wi-kind', id: 'wi-kind-tool', value: 'tool', checked: true });
+  const kindModel = h('input', { type: 'radio', name: 'wi-kind', id: 'wi-kind-model', value: 'model' });
   const phaseRequest = h('input', { type: 'radio', name: 'wi-phase', id: 'wi-phase-request', value: 'request', checked: true });
   const phaseResponse = h('input', { type: 'radio', name: 'wi-phase', id: 'wi-phase-response', value: 'response' });
   const pii = h('input', { type: 'checkbox', id: 'wi-pii', value: 'pii' });
   const secret = h('input', { type: 'checkbox', id: 'wi-secret', value: 'secret' });
   const injection = h('input', { type: 'checkbox', id: 'wi-injection' });
+  const jailbreak = h('input', { type: 'checkbox', id: 'wi-jailbreak' });
+  const toolCalls = h('input', { type: 'checkbox', id: 'wi-tool-calls' });
   const result = h('div', { class: 'stack', style: 'gap:12px', 'aria-live': 'polite' });
   const submit = h('button', { type: 'submit', class: 'btn btn--primary' }, icon('play'), 'Evaluate');
+
+  const requestLabel = h('span', {});
+  const responseLabel = h('span', {});
+  const injectionLabel = h('span', {});
+  const toolFields = h('div', { class: 'form-row' },
+    h('div', { class: 'field' }, h('label', { for: 'wi-server' }, 'Tool server'), serverInput, serverList),
+    h('div', { class: 'field' }, h('label', { for: 'wi-tool' }, 'Tool'), toolInput, toolList));
+  const modelFields = h('div', { class: 'form-row' },
+    h('div', { class: 'field' }, h('label', { for: 'wi-provider' }, 'Model provider'), providerInput, providerList),
+    h('div', { class: 'field' }, h('label', { for: 'wi-model' }, 'Model'), modelInput, modelList));
+  const modelOnly = [
+    h('label', { class: 'check', for: 'wi-jailbreak' }, jailbreak, 'A jailbreak in the prompt'),
+    h('label', { class: 'check', for: 'wi-tool-calls' }, toolCalls, 'The conversation holds tool calls'),
+  ];
+  const isModel = () => kindModel.checked;
+  const showKind = () => {
+    const model = isModel();
+    toolFields.hidden = model;
+    modelFields.hidden = !model;
+    modelOnly.forEach((el) => { el.hidden = !model; });
+    requestLabel.textContent = model ? 'Request (the prompt)' : 'Request (the tool call)';
+    responseLabel.textContent = model ? 'Response (the answer)' : 'Response (the tool result)';
+    injectionLabel.textContent = model ? 'Prompt injection in a tool result in the conversation' : 'Prompt injection in the result';
+  };
+  showKind();
+  [kindTool, kindModel].forEach((r) => r.addEventListener('change', showKind));
 
   function buildInput() {
     const agentId = agentSel.value;
     const agent = agents.find((a) => a.id === agentId);
     const categories = [pii, secret].filter((c) => c.checked).map((c) => c.value);
     const phase = phaseResponse.checked ? 'response' : 'request';
+    const caller = agentId === '__unregistered'
+      ? { client_id: 'agent-not-registered' }
+      : { agent_id: agent?.id, client_id: agent?.identity?.client_id || undefined };
+    const detections = { categories, prompt_injection: injection.checked, injection_score: injection.checked ? 0.95 : 0 };
+    if (isModel()) {
+      return {
+        path: 'agentgov/models/decision',
+        input: {
+          kind: 'model', phase, agent: caller, provider: providerInput.value.trim(), model: modelInput.value.trim(),
+          detections: { ...detections, jailbreak: jailbreak.checked }, tool_calls: toolCalls.checked,
+        },
+      };
+    }
     return {
-      phase,
-      method: 'tools/call',
-      agent: agentId === '__unregistered'
-        ? { client_id: 'agent-not-registered' }
-        : { agent_id: agent?.id, client_id: agent?.identity?.client_id || undefined },
-      resource: { server: serverInput.value.trim(), name: toolInput.value.trim() },
-      detections: { categories, prompt_injection: injection.checked, injection_score: injection.checked ? 0.95 : 0 },
+      path: 'agentgov/mcp/decision',
+      input: { phase, method: 'tools/call', agent: caller, resource: { server: serverInput.value.trim(), name: toolInput.value.trim() }, detections },
     };
   }
 
   async function evaluate(example) {
-    const input = buildInput();
-    if (!input.resource.server || !input.resource.name) {
-      result.replaceChildren(callout('warning', 'alert-circle', 'Choose a tool server and a tool to evaluate.'));
+    const { path, input } = buildInput();
+    const missing = isModel() ? !input.provider || !input.model : !input.resource.server || !input.resource.name;
+    if (missing) {
+      result.replaceChildren(callout('warning', 'alert-circle', isModel() ? 'Choose a model provider and a model to evaluate.' : 'Choose a tool server and a tool to evaluate.'));
       return;
     }
     submit.disabled = true;
     try {
-      const res = await api('v1/policies/evaluate', { method: 'POST', body: { input } });
+      const res = await api('v1/policies/evaluate', { method: 'POST', body: { path, input } });
       fill(result, whatIfResult(res, input, example));
     } catch (err) {
       result.replaceChildren(callout('critical', 'alert-circle', h('span', {}, h('strong', {}, "Couldn't evaluate. "), err.message)));
@@ -3442,18 +3502,21 @@ function whatIfCard(agents, servers) {
   }
 
   const form = h('form', { class: 'whatif-form', novalidate: true },
+    h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Call'),
+      h('div', { class: 'radio-row' },
+        h('label', { class: 'check', for: 'wi-kind-tool' }, kindTool, 'A tool call'),
+        h('label', { class: 'check', for: 'wi-kind-model' }, kindModel, 'A model call'))),
     h('div', { class: 'field' }, h('label', { for: 'wi-agent' }, 'Agent'), agentSel),
-    h('div', { class: 'form-row' },
-      h('div', { class: 'field' }, h('label', { for: 'wi-server' }, 'Tool server'), serverInput, serverList),
-      h('div', { class: 'field' }, h('label', { for: 'wi-tool' }, 'Tool'), toolInput, toolList)),
+    toolFields, modelFields,
     h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Phase'),
       h('div', { class: 'radio-row' },
-        h('label', { class: 'check', for: 'wi-phase-request' }, phaseRequest, 'Request (the tool call)'),
-        h('label', { class: 'check', for: 'wi-phase-response' }, phaseResponse, 'Response (the tool result)'))),
+        h('label', { class: 'check', for: 'wi-phase-request' }, phaseRequest, requestLabel),
+        h('label', { class: 'check', for: 'wi-phase-response' }, phaseResponse, responseLabel))),
     h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Detections ', h('span', { class: 'muted' }, '(what Presidio and the detectors found)')),
       h('label', { class: 'check', for: 'wi-pii' }, pii, 'Personal data (pii)'),
       h('label', { class: 'check', for: 'wi-secret' }, secret, 'Credentials (secret)'),
-      h('label', { class: 'check', for: 'wi-injection' }, injection, 'Prompt injection in the result')),
+      h('label', { class: 'check', for: 'wi-injection' }, injection, injectionLabel),
+      ...modelOnly),
     h('div', { class: 'btn-row' }, submit));
   form.addEventListener('submit', (e) => { e.preventDefault(); evaluate(false); });
   if (agents.length || servers.length) evaluate(true);
@@ -3462,7 +3525,7 @@ function whatIfCard(agents, servers) {
   return h('section', { class: 'card whatif', 'aria-labelledby': 'whatif-title' },
     h('div', { class: 'card-head' }, h('div', { class: 'card-head-text' },
       h('h2', { id: 'whatif-title' }, 'What if'),
-      h('p', { class: 'card-sub' }, 'Ask the live OPA what it would decide for a tool call. Nothing is recorded.'))),
+      h('p', { class: 'card-sub' }, 'Ask the live OPA what it would decide for a tool call or a model call. Nothing is recorded.'))),
     h('div', { class: 'card-body' }, form, h('hr', { style: 'border:0; border-top:1px solid var(--line); margin:4px 0; width:100%' }), result));
 }
 
@@ -3485,6 +3548,10 @@ function whatIfResult(res, input, example) {
       ? h('div', { class: 'stack', style: 'gap:6px' }, h('span', { class: 'field-label' }, 'Reasons'),
         h('ul', { class: 'reasons', role: 'list' }, r.reasons.map((reason) => h('li', {}, icon(r.effect === 'deny' ? 'ban' : 'user-check'), h('span', {}, reason)))))
       : null,
+    (r.monitored || []).length
+      ? h('div', { class: 'stack', style: 'gap:6px' }, h('span', { class: 'field-label' }, 'Monitored: would have been stopped'),
+        h('ul', { class: 'reasons', role: 'list' }, r.monitored.map((m) => h('li', {}, icon('eye'), h('span', {}, m)))))
+      : null,
     facts([
       ['Redact', (r.redact || []).length ? h('div', { class: 'chip-row' }, r.redact.map((c) => plainChip(c, { mono: true }))) : 'Nothing'],
       ['Agent seen as', r.agent ? [r.agent.name, ` · ${r.agent.status} · ${r.agent.risk_level} risk`] : h('span', { class: 'muted' }, 'Not a registered agent')],
@@ -3501,7 +3568,7 @@ const LEDGER_TYPES = [
   ['', 'All events'], ['decision.*', 'Policy decisions'], ['approval.*', 'Approvals'], ['agent.*', 'Agent lifecycle'],
   ['toolserver.*', 'Tool servers'], ['policy.*', 'Organisation policies'], ['blueprint.*', 'Blueprints'], ['apikey.*', 'API keys'],
   ['admin.*', 'Sign-ins and sessions'], ['platform.*', 'Platform syncs and imports'], ['connector.*', 'Connector allowlist'],
-  ['feature.*', 'Features'],
+  ['feature.*', 'Features'], ['model_provider.*', 'Model providers'], ['model.*', 'Model budgets'],
 ];
 const LEDGER_DECISIONS = [
   ['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval'],
@@ -4448,6 +4515,7 @@ async function renderModels() {
       h('strong', {}, 'The model gateway is off: '), 'no provider is published on the gateway. ', h('a', { href: '#/features' }, 'Features'), '.')) : null,
     providersCard(providers, gateway),
     budgetsCard(usage),
+    spendCard(usage),
     usageCard(usage));
 }
 
@@ -4489,6 +4557,36 @@ function budgetsCard(usage) {
         h('div', { class: 'meter', role: 'img', 'aria-label': `${fmt(b.used_today)} of ${fmt(b.daily_token_budget)} tokens`, style: `background: var(--neutral-tint)` },
           h('span', { style: `width:${b.daily_token_budget ? Math.min(100, (b.used_today / b.daily_token_budget) * 100) : 100}%; background:${TONE_COLOR[tone]}` })));
     })),
+  });
+}
+
+// Usage added up per owner or per sponsor of the agents behind it.
+function spendCard(usage) {
+  const groups = { owner: usage.by_owner || [], sponsor: usage.by_sponsor || [] };
+  if (!groups.owner.length) return null;
+  const words = { owner: ['Owner', 'No owner'], sponsor: ['Sponsor', 'No sponsor'] };
+  const table = (by) => h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('caption', { class: 'sr-only' }, `Model usage per ${by}`),
+    h('thead', {}, h('tr', {}, [words[by][0], 'Agents', 'Calls', 'Tokens', 'Cost'].map((c, i) => h('th', { scope: 'col', class: i ? 'num' : null }, c)))),
+    h('tbody', {}, groups[by].map((g) => h('tr', {},
+      h('td', { 'data-label': words[by][0] }, g[by] ? h('span', { class: 'break' }, g[by]) : h('span', { class: 'muted' }, words[by][1])),
+      h('td', { 'data-label': 'Agents', class: 'num' }, fmt(g.agents)),
+      h('td', { 'data-label': 'Calls', class: 'num' }, fmt(g.calls)),
+      h('td', { 'data-label': 'Tokens', class: 'num' }, fmt(g.input_tokens + g.output_tokens)),
+      h('td', { 'data-label': 'Cost', class: 'num' }, g.cost_usd ? `$${g.cost_usd.toFixed(4)}` : h('span', { class: 'muted' }, '—')))))));
+  const body = h('div', {}, table('owner'));
+  const choose = h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'Add up per' },
+    ['owner', 'sponsor'].map((by) => {
+      const input = h('input', { type: 'radio', id: `spend-${by}`, name: 'spend-by', value: by, checked: by === 'owner', 'data-focus-key': `spend-${by}` });
+      input.addEventListener('change', () => fill(body, table(by)));
+      return h('label', { for: `spend-${by}` }, input, h('span', {}, words[by][0]));
+    }));
+  return card({
+    title: 'Who is spending',
+    sub: 'The last 7 days, per owner and per sponsor of the agents. An agent with several sponsors counts in full for each.',
+    actions: [choose],
+    flush: true,
+    body,
   });
 }
 

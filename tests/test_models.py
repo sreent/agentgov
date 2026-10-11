@@ -281,6 +281,24 @@ class TestMetering:
         only = client.get("/v1/models/usage", params={"agent": "bot"}, headers=ADMIN).json()
         assert len(only["rows"]) == 1
 
+    def test_spend_per_owner_and_sponsor(self, rt, settings, client, bot) -> None:
+        with rt.db.session() as s:
+            other = agents.register(
+                s, settings,
+                {"name": "bot2", "blueprint": "chat", "owner": "cx", "sponsors": ["a", "b"]},
+                actor="a", approve=True,
+            ).id  # fmt: skip
+        records = [access_log(agent_id=bot), access_log(agent_id=other, tokens=(10, 10))]
+        records.append(access_log())  # an unidentified caller counts for nobody
+        client.post("/v1/otlp/v1/logs", json=logs(*records), headers=SERVICE)
+        view = client.get("/v1/models/usage", headers=ADMIN).json()
+        assert {g["owner"]: (g["agents"], g["calls"]) for g in view["by_owner"]} == {
+            None: (1, 1),
+            "cx": (1, 1),
+        }
+        assert [(g["sponsor"], g["agents"]) for g in view["by_sponsor"]] == [("a", 2), ("b", 1)]
+        assert view["by_sponsor"][0]["cost_usd"] == pytest.approx((450 + 125) / 1e6)
+
 
 class TestDecisions:
     def test_model_decisions_are_ledgered_with_findings(self, rt, settings, bot) -> None:
@@ -309,6 +327,36 @@ class TestDecisions:
             # Model calls' activity comes from the access logs, not from decisions.
             assert model_usage.tokens_used(s) == {}
 
+    def test_jailbreak_attempts_raise_a_finding(self, rt, settings, bot) -> None:
+        record = {
+            "kind": "model",
+            "phase": "request",
+            "method": "chat",
+            "resource": "openai/gpt-4o-mini",
+            "agent": {"id": bot},
+            "identity": {"agent_id": bot},
+            "effect": "allow",
+            "reasons": [],
+            "monitored": ["jailbreak-detection: The prompt looks like a jailbreak"],
+            "detections": {
+                "categories": [],
+                "jailbreak": True,
+                "jailbreak_reasons": ["instruction_override"],
+            },
+        }
+        with rt.db.session() as s:
+            decisions.record_mcp_decisions(s, settings, [record])
+        with rt.db.session() as s:
+            finding = s.scalars(
+                select(Finding).where(Finding.type == "agent.jailbreak_attempts")
+            ).one()
+            assert finding.title == "People tried to jailbreak bot"
+            assert "went through: jailbreak detection is not enforced" in finding.description
+            entry = s.scalars(
+                select(LedgerEntry).where(LedgerEntry.type == "decision.model.request")
+            ).one()
+            assert entry.reason.startswith("monitored: jailbreak-detection")
+
 
 class TestManifestsAndCli:
     def test_apply_and_export(self, rt, settings) -> None:
@@ -333,6 +381,37 @@ class TestManifestsAndCli:
             [exported] = [d for d in manifests.export(s) if d["kind"] == "ModelProvider"]
         assert exported["spec"] == {**doc["spec"], "status": "blocked"}
 
+    def test_what_if_for_model_calls(self, monkeypatch) -> None:
+        sent = []
+
+        def fake_call(method: str, path: str, **kwargs: Any) -> Any:
+            if path == "/v1/agents/bot":
+                return {"id": "agt_1", "identity": {"client_id": "agent-bot"}}
+            sent.append(kwargs["json"])
+            return {
+                "result": {
+                    "effect": "deny",
+                    "reasons": ["Model openai/o3 is not granted to agent bot"],
+                    "redact": [],
+                    "monitored": ["jailbreak-detection: The prompt looks like a jailbreak"],
+                }
+            }
+
+        monkeypatch.setattr(cli, "_call", fake_call)
+        args = ["policies", "evaluate", "--provider", "openai", "--model", "o3", "--agent", "bot"]
+        out = ok(runner.invoke(cli.app, [*args, "--jailbreak", "--tool-calls"]))
+        assert out.splitlines()[0] == "deny"
+        assert "monitored: jailbreak-detection: The prompt looks like a jailbreak" in out
+        [body] = sent
+        assert body["path"] == "agentgov/models/decision"
+        assert body["input"]["kind"] == "model" and body["input"]["tool_calls"] is True
+        assert body["input"]["detections"]["jailbreak"] is True
+        assert body["input"]["agent"] == {"agent_id": "agt_1", "client_id": "agent-bot"}
+        # A tool call or a model call, not half of one, nor both.
+        assert runner.invoke(cli.app, ["policies", "evaluate", "--server", "crm"]).exit_code == 2
+        both = [*args, "--server", "crm", "--tool", "get_customer"]
+        assert runner.invoke(cli.app, both).exit_code == 2
+
     def test_cli(self, client, monkeypatch) -> None:
         def agentgov(*args: str):
             monkeypatch.setattr(cli, "_client", lambda: _Shared(client, "test-admin"))
@@ -354,5 +433,7 @@ class TestManifestsAndCli:
         ok(agentgov("blueprints", "update", "chat", "--no-token-budget"))
         assert client.get("/v1/blueprints/chat", headers=ADMIN).json()["daily_token_budget"] is None
         assert ok(agentgov("models", "usage")).startswith("DAY")
+        assert ok(agentgov("models", "usage", "--by", "sponsor")).startswith("SPONSOR")
+        assert agentgov("models", "usage", "--by", "team").exit_code == 2
         bad = agentgov("models", "create", "x", "--kind", "openai", "--price", "gpt=lots")
         assert bad.exit_code == 2

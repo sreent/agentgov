@@ -155,6 +155,23 @@ test_injected_tool_results_in_the_conversation_are_refused if {
 	contains(d.reasons[0], "possible prompt injection")
 }
 
+test_jailbreaks_are_refused_when_enforced if {
+	inp := object.union(prompt("agt_support", "openai", "gpt-4o-mini"), {"detections": {"categories": [], "jailbreak": true}})
+	d := models.decision with input as inp with data.registry as with_modes({"jailbreak-detection": "enforce"})
+	d.effect == "deny"
+	contains(d.reasons[0], "looks like a jailbreak")
+}
+
+test_monitored_jailbreaks_are_only_recorded if {
+	inp := object.union(prompt("agt_support", "openai", "gpt-4o-mini"), {"detections": {"categories": [], "jailbreak": true}})
+	d := models.decision with input as inp with data.registry as with_modes({"jailbreak-detection": "monitor"})
+	d.effect == "allow"
+	count(d.monitored) == 1
+	startswith(d.monitored[0], "jailbreak-detection: ")
+	off := models.decision with input as inp with data.registry as with_modes({"jailbreak-detection": "off"})
+	off.monitored == []
+}
+
 test_critical_risk_agents_are_refused if {
 	d := models.decision with input as prompt("agt_risky", "openai", "gpt-4o")
 		with data.registry as registry

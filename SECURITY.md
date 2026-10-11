@@ -71,7 +71,8 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   Helm chart's network policies (`networkPolicy.enabled=true`) and its demo users off
   (`keycloak.demoUsers=false`), or use your own Keycloak.
 * Keep the controls at the gateway enforced, as they are by default, and the processor
-  fail-closed. Monitor mode and turning a control off are for rollout and evaluation
+  fail-closed. Jailbreak detection starts in monitor mode: enforce it once its findings
+  show what it would refuse. Monitor mode and turning a control off are for rollout and evaluation
   ([features](docs/features.md)). Both are recorded in the ledger as warnings, and only
   administrators can choose them. To keep the choice with the deployment, pin the
   features in `AGENTGOV_FEATURES` (the Helm value `features`). Monitor `unknown-callers`
@@ -114,7 +115,7 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
 
 ## Known limitations
 
-* The prompt-injection and tool-poisoning detectors are heuristics. They raise the cost
+* The prompt-injection, jailbreak and tool-poisoning detectors are heuristics. They raise the cost
   of common attacks; they are not a guarantee.
 * The checks on agents' instructions are rules plus, optionally, a model. Both can miss
   reworded or obfuscated instructions and can flag legitimate ones; treat a finding as a

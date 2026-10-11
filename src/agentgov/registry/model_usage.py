@@ -9,6 +9,9 @@ and prices them with the provider's prices.
 An agent that reaches its daily token budget is over budget until the day ends:
 OPA learns it from the bundle (``over_budget``) and, while the token-budgets
 control is enforced, its further model calls are refused.
+
+Usage also adds up per owner and per sponsor of the agents behind it
+(``spend``), for the people and teams who answer for what agents cost.
 """
 
 from __future__ import annotations
@@ -178,6 +181,48 @@ def _budgets_reached(session: Session, spent: dict[tuple[str, str], int]) -> Non
                 details={"budget": budget, "used": after, "day": day},
             )
             mark_changed(session, "agents")
+
+
+SPEND_BY = ("owner", "sponsor")
+
+
+def spend(session: Session, rows: list[ModelUsage]) -> dict[str, list[dict[str, Any]]]:
+    """``rows`` added up per owner and per sponsor of their agents, the costliest first.
+
+    An agent with several sponsors counts in full for each; an agent without an owner
+    or sponsors counts under ``None``. Calls from unidentified callers aren't included.
+    """
+    ids_ = {r.agent_id for r in rows if r.agent_id}
+    found = session.scalars(select(Agent).where(Agent.id.in_(ids_))).unique() if ids_ else []
+    agents = {a.id: a for a in found}
+    groups: dict[str, dict[str | None, dict[str, Any]]] = {by: {} for by in SPEND_BY}
+    for row in rows:
+        agent = agents.get(row.agent_id)
+        if agent is None:
+            continue
+        names = {"owner": [agent.owner or None], "sponsor": list(agent.sponsors or []) or [None]}
+        for by in SPEND_BY:
+            for name in dict.fromkeys(names[by]):
+                group = groups[by].setdefault(
+                    name,
+                    {by: name, "agents": set(), "calls": 0, "input_tokens": 0,
+                     "output_tokens": 0, "cost_usd": 0.0},
+                )  # fmt: skip
+                group["agents"].add(agent.id)
+                group["calls"] += row.calls
+                group["input_tokens"] += row.input_tokens
+                group["output_tokens"] += row.output_tokens
+                group["cost_usd"] += row.cost_usd
+    return {
+        by: sorted(
+            (
+                {**g, "agents": len(g["agents"]), "cost_usd": round(g["cost_usd"], 6)}
+                for g in groups[by].values()
+            ),
+            key=lambda g: (-g["cost_usd"], -(g["input_tokens"] + g["output_tokens"])),
+        )
+        for by in SPEND_BY
+    }
 
 
 def usage(
