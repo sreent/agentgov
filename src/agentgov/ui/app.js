@@ -415,6 +415,15 @@ const STATUS = {
     partiallyDelivered: ['warning', 'triangle', 'Partly delivered'],
     deliveryFailed: ['critical', 'octagon', 'Delivery failed'],
   },
+  rule: {
+    waiting: ['neutral', 'clock', 'Waiting'],
+    due: ['warning', 'alert-circle', 'Due'],
+    acted: ['serious', 'check-double', 'Acted on'],
+    exempt: ['neutral', 'shield-check', 'Held back'],
+    cannot: ['neutral', 'ban', "Can't act"],
+    monitored: ['neutral', 'eye', 'Would have acted'],
+    off: ['neutral', 'minus', 'Off'],
+  },
   notification: {
     pending: ['neutral', 'clock', 'Sending'],
     sent: ['good', 'check-circle', 'Sent'],
@@ -689,7 +698,7 @@ function inputFields(fields) {
  */
 function ask({
   title, text, tone = 'primary', iconName = 'info', confirm = 'Confirm', cancel = 'Cancel',
-  fields = [], extra, wide = false, submit, busy = 'Saving…', onReady,
+  fields = [], extra, after, wide = false, submit, busy = 'Saving…', onReady,
 }) {
   return new Promise((resolve) => {
     const dlg = $('#dialog');
@@ -720,6 +729,7 @@ function ask({
           text ? h('p', { class: 'dialog-text' }, text) : null)),
       extra || null,
       fields.map((f) => dialogField(f, controls)),
+      after || null,
       error,
       h('div', { class: 'dialog-actions' }, cancelBtn, confirmBtn));
     const showError = (message, control) => {
@@ -1727,7 +1737,7 @@ const ATTESTABLE = new Set(['active', 'blocked', 'pending']);
 async function renderAgent({ match }) {
   const ref = decodeURIComponent(match[1]);
   const agent = await api(`v1/agents/${encodeURIComponent(ref)}`);
-  const [entries, openFindings, instructions, usage, a2a, held, packages, modes] = await Promise.all([
+  const [entries, openFindings, instructions, usage, a2a, held, packages, modes, matchedRules] = await Promise.all([
     api(`v1/ledger?agent=${encodeURIComponent(agent.id)}&limit=12`).catch((e) => e),
     api(`v1/findings?status=open&agent=${encodeURIComponent(agent.id)}`).catch((e) => e),
     api(`v1/agents/${encodeURIComponent(agent.id)}/instructions`).catch((e) => e),
@@ -1736,6 +1746,7 @@ async function renderAgent({ match }) {
     api(`v1/agents/${encodeURIComponent(agent.id)}/access-packages`).catch((e) => e),
     api('v1/access-packages').catch(() => []),
     featureModes().catch(() => ({})),
+    api(`v1/agents/${encodeURIComponent(agent.id)}/rules`).catch(() => []),
   ]);
   // What Microsoft Entra ID Governance assigns its Entra identity, when it has one.
   const entra = agent.external_ids?.entra_agent_id
@@ -1755,6 +1766,7 @@ async function renderAgent({ match }) {
         views.length ? null : agentCardCard(agent)),
       h('div', { class: 'stack' }, riskCard(agent, enforced), peopleCard(agent), attestationCard(agent), identityCard(agent),
         entra instanceof Error || !entra ? null : entraAccessCard(agent, entra),
+        agentRulesCard(matchedRules),
         agentFindingsCard(openFindings))));
 }
 
@@ -3671,6 +3683,7 @@ function historyCard(f) {
       h('div', { class: 'cell-sub break' }, e.actor, ' · ', timeEl(e.ts),
         e.details?.to ? ` · to ${e.details.to}` : '',
         e.details?.why ? ` · ${e.details.why}` : '',
+        e.details?.outcome ? ` · ${e.details.outcome}` : '',
         e.details?.assignees ? ` · ${e.details.assignees.join(', ')}` : '')))),
   });
 }
@@ -3765,9 +3778,9 @@ async function deleteTeam(t) {
 /* ---------------------------------------------------------------- policies */
 
 async function renderPolicies() {
-  const [blueprints, policies, agents, servers, providers, packages] = await Promise.all([
+  const [blueprints, policies, agents, servers, providers, packages, rules, modes] = await Promise.all([
     api('v1/blueprints'), api('v1/policies'), api('v1/agents'), api('v1/toolservers'), api('v1/models/providers'),
-    api('v1/access-packages').catch(() => []),
+    api('v1/access-packages').catch(() => []), api('v1/rules').catch(() => []), featureModes().catch(() => ({})),
   ]);
   const usage = countBy(agents, (a) => a.blueprint || '');
   const exportBtn = h('button', { type: 'button', class: 'btn', 'data-focus-key': 'export-yaml' }, icon('download'), 'Export manifests');
@@ -3775,7 +3788,7 @@ async function renderPolicies() {
     exportBtn.disabled = true;
     try {
       const blob = await saveDownload('v1/export', `agentgov-manifests-${fileStamp()}.yaml`);
-      toast(`Exported features, identity issuers, blueprints, tool servers, model providers, policies and agents as YAML (${fmtBytes(blob.size)}).`);
+      toast(`Exported the registry as YAML manifests (${fmtBytes(blob.size)}).`);
     } catch (err) {
       toast(err.message, { tone: 'critical' });
     } finally {
@@ -3814,6 +3827,19 @@ async function renderPolicies() {
             : h('section', { class: 'card' }, emptyState('No access packages', admin
               ? 'Create one for access agents need for a while: a project, an incident, a pilot.'
               : 'An admin creates access packages here, with the CLI or with an AccessPackage manifest.'))),
+        h('section', { class: 'stack', 'aria-labelledby': 'rules-title' },
+          h('div', { class: 'section-title' },
+            h('div', {}, h('h2', { id: 'rules-title' }, 'Management rules'),
+              h('p', {}, 'What to do about agents that meet some conditions for long enough, after telling their people')),
+            admin ? h('div', { class: 'btn-row' },
+              rules.length ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'run-rules', onclick: guarded(runRules) }, icon('refresh'), 'Run now') : null,
+              sectionAction('New rule', 'new-rule', () => ruleForm(null, blueprints))) : null),
+          rulesNote(modes),
+          rules.length
+            ? h('div', { class: 'bp-grid' }, rules.map((r) => ruleCard(r, blueprints)))
+            : h('section', { class: 'card' }, emptyState('No management rules', admin
+              ? 'Add one to block agents nobody uses, give ownerless agents an owner, or clean up stale registrations, after telling their people.'
+              : 'An admin adds management rules here, with the CLI or with a ManagementRule manifest.'))),
         h('section', { class: 'stack', 'aria-labelledby': 'rego-title' },
           h('div', { class: 'section-title' },
             h('div', {}, h('h2', { id: 'rego-title' }, 'Organisation policies'),
@@ -4140,6 +4166,254 @@ async function deletePackage(pk) {
   if (!done) return;
   toast(`Deleted access package ${pk.name}.`);
   await refresh();
+}
+
+/* ------------------------------------------------------ management rules */
+
+const RULE_ACTIONS = {
+  issue: 'Raise an issue',
+  assign_owner: 'Give it an owner',
+  block: 'Block it',
+  delete: 'Delete it',
+  revoke_access: 'Revoke its access packages',
+};
+const RULE_MISSING = { workload_identity: 'workload identity' };
+
+// What an agent must meet, in words.
+function ruleWhen(c) {
+  const parts = [];
+  if (c.inactive_days) parts.push(`no activity for ${plural(c.inactive_days, 'day')}`);
+  if (c.missing) parts.push(`no ${c.missing.map((m) => RULE_MISSING[m] || m).join(' or no ')}`);
+  if (c.attestation_overdue_days != null) parts.push(c.attestation_overdue_days ? `attestation overdue for ${plural(c.attestation_overdue_days, 'day')}` : 'attestation overdue');
+  if (c.findings) parts.push(`an open ${c.finding_severity ? `${c.finding_severity}+ ` : ''}finding: ${c.findings.join(', ')}`);
+  if (c.risk_level) parts.push(`${c.risk_level} risk or more`);
+  if (c.status) parts.push(`it is ${c.status.join(' or ')}`);
+  return parts.join(' · ') || '—';
+}
+
+const RULE_PLATFORMS = { gateway: 'the gateway', 'microsoft-365': 'Microsoft 365', 'copilot-studio': 'Copilot Studio' };
+
+function ruleScope(scope) {
+  const parts = [];
+  if (scope.platforms?.length) parts.push(`on ${scope.platforms.map((x) => RULE_PLATFORMS[x] || x).join(' or ')}`);
+  for (const [key, label] of [['blueprints', 'blueprint'], ['teams', 'team'], ['environments', 'environment']]) {
+    if (scope[key]?.length) parts.push(`${label} ${scope[key].join(' or ')}`);
+  }
+  if (scope.labels && Object.keys(scope.labels).length) parts.push(`labelled ${formatLabels(scope.labels)}`);
+  return parts.length ? parts.join(' · ') : 'All agents';
+}
+
+function ruleThen(r) {
+  const what = r.action === 'assign_owner' ? `Make ${r.params.owner} its owner` : RULE_ACTIONS[r.action] || r.action;
+  if (r.action === 'issue') return r.after_days ? `${what}, once it has matched for ${plural(r.after_days, 'day')}` : `${what}, at once`;
+  return `${what}, ${plural(r.after_days, 'day')} after telling its people`;
+}
+
+function rulesNote(modes) {
+  const mode = modes['management-rules'];
+  if (mode === 'off') return callout('warning', 'minus', h('span', {}, h('strong', {}, 'Off: '), 'management rules are off in Features, so no rule runs.'));
+  if (modes['posture-checks'] === 'off') return callout('warning', 'triangle', h('span', {}, h('strong', {}, 'Not running: '), 'rules run after each posture scan, and posture checks are off in Features.'));
+  if (mode === 'monitor') return callout('neutral', 'eye', h('span', {}, h('strong', {}, 'Monitored: '), 'rules tell nobody and change nothing; they record what they would have done. Enforce the feature in Features, and a rule, for it to act.'));
+  return null;
+}
+
+function ruleCard(r, blueprints) {
+  const capped = r.mode !== r.effective_mode;
+  return card({
+    title: r.name, level: 'h3', id: `rule-${r.id}`,
+    sub: r.description,
+    actions: [chip('mode', r.effective_mode, { title: capped ? `${humanize(r.mode)} in the rule, ${r.effective_mode} by the feature` : null })],
+    foot: h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `rule-preview-${r.name}`, onclick: guarded(() => rulePreview(r)) }, icon('eye'), 'Preview'),
+      can('admin') ? [
+        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `rule-edit-${r.name}`, onclick: guarded(() => ruleForm(r, blueprints)) }, icon('edit'), 'Edit'),
+        h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `rule-delete-${r.name}`, onclick: guarded(() => deleteRule(r)) }, icon('trash'), 'Delete'),
+      ] : null),
+    body: facts([
+      ['When', ruleWhen(r.conditions)],
+      ['Agents', ruleScope(r.scope)],
+      ['Then', ruleThen(r)],
+      ['At once', `${plural(r.max_actions, 'agent')} at most`],
+      ['Matching', [r.matches.matching ? plural(r.matches.matching, 'agent') : h('span', { class: 'muted' }, 'No agents'),
+        r.matches.acted ? ` · acted on ${fmt(r.matches.acted)}` : '', r.matches.would_have_acted ? ` · would have acted on ${fmt(r.matches.would_have_acted)}` : '']],
+      capped ? ['Mode', `${humanize(r.mode)} in the rule; ${r.effective_mode} by the feature`] : null,
+    ]),
+  });
+}
+
+// What a rule matches now and would do: for a saved rule, or the form's draft.
+function rulePreviewView(view) {
+  const notes = [];
+  if (!view.running) notes.push(callout('warning', 'triangle', h('span', {}, h('strong', {}, 'Not running: '), `${view.why_not}.`)));
+  else if (view.mode === 'monitor') notes.push(callout('neutral', 'eye', h('span', {}, h('strong', {}, 'Monitored: '), 'it tells nobody and changes nothing; it records what it would have done.')));
+  if (view.held_back) notes.push(callout('critical', 'octagon', h('span', {}, h('strong', {}, 'Too many at once: '), `${fmt(view.due)} agents are due, more than its limit of ${fmt(view.max_actions)}, so it acts on none of them and raises an issue about itself.`)));
+  const line = (e) => h('li', { class: 'access-row' },
+    h('div', { class: 'access-main' },
+      h('div', { class: 'cell-title' }, agentLink(e.agent_id, e.agent), ' ', chip('rule', e.state)),
+      h('div', { class: 'cell-sub break' }, humanize(e.detail), e.reasons.length ? ` · ${e.reasons.join('; ')}` : '')));
+  return h('div', { class: 'stack rule-preview' },
+    h('p', { class: 'muted' }, `${plural(view.matching, 'agent')} ${view.matching === 1 ? 'matches' : 'match'} now${view.due ? `, ${fmt(view.due)} due` : ''}.`),
+    notes,
+    view.agents.length ? h('ul', { class: 'access-list', role: 'list' }, view.agents.map(line)) : null,
+    view.unknown_count ? h('details', { class: 'disclosure' }, h('summary', {}, icon('chevron'), `Can't tell for ${plural(view.unknown_count, 'agent')}`),
+      h('ul', { class: 'access-list', role: 'list' }, view.unknown.map((u) => h('li', { class: 'access-row' },
+        h('div', { class: 'access-main' }, h('div', { class: 'cell-title' }, agentLink(u.agent_id, u.agent)), h('div', { class: 'cell-sub break' }, u.why)))))) : null);
+}
+
+async function rulePreview(r) {
+  const view = await api(`v1/rules/${encodeURIComponent(r.name)}/preview`);
+  await ask({ title: `Preview: ${r.name}`, text: 'The agents the rule matches now, since when, and what it will do to each.', iconName: 'eye', confirm: 'Close', cancel: null, wide: true, extra: rulePreviewView(view) });
+}
+
+function ruleBody(v) {
+  const whole = (text, label, min, max) => {
+    if (text === '' || text == null) return null;
+    const n = Number(text);
+    if (!(Number.isInteger(n) && n >= min && n <= max)) throw new Error(`${label} is a whole number from ${min} to ${max}.`);
+    return n;
+  };
+  const pick = (entries) => Object.fromEntries(entries.filter(([, value]) => value != null && value !== '' && !(Array.isArray(value) && !value.length)));
+  const labels = parseLabels(v.scope_labels);
+  return {
+    description: v.description,
+    conditions: pick([
+      ['inactive_days', whole(v.inactive_days, 'No activity for', 1, 3650)],
+      ['attestation_overdue_days', whole(v.attestation_overdue_days, 'Attestation overdue for', 0, 3650)],
+      ['missing', parseList(v.missing)],
+      ['findings', parseList(v.findings)],
+      ['finding_severity', v.finding_severity],
+      ['risk_level', v.risk_level],
+      ['status', parseList(v.status)],
+    ]),
+    scope: pick([
+      ['blueprints', parseList(v.blueprints)], ['teams', parseList(v.teams)],
+      ['environments', parseList(v.environments)], ['platforms', parseList(v.platforms)],
+      ['labels', Object.keys(labels).length ? labels : null],
+    ]),
+    action: v.action,
+    params: v.action === 'assign_owner' ? { owner: v.owner } : {},
+    after_days: whole(v.after_days, 'After', 0, 365) ?? 14,
+    max_actions: whole(v.max_actions, 'At most at once', 1, 1000) ?? 10,
+    severity: v.severity,
+    mode: v.mode,
+    labels: parseLabels(v.labels),
+  };
+}
+
+/** Create a rule (no `r`) or edit one, with a preview of what it matches before saving. */
+async function ruleForm(r, blueprints) {
+  const editing = Boolean(r);
+  const teams = await api('v1/teams').catch(() => []);
+  const c = r?.conditions || {};
+  const scope = r?.scope || {};
+  const options = (values, any) => [...(any ? [{ value: '', label: any }] : []), ...values.map((x) => ({ value: x, label: humanize(x) }))];
+  let controls = {};
+  const box = h('div', { class: 'rule-preview-box', 'aria-live': 'polite' });
+  const previewBtn = h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'rule-form-preview' }, icon('eye'), 'Preview the agents it matches');
+  previewBtn.addEventListener('click', async () => {
+    const values = Object.fromEntries(Object.entries(controls).map(([k, el]) => [k, el.type === 'checkbox' ? el.checked : el.value.trim()]));
+    previewBtn.disabled = true;
+    try {
+      const view = await api('v1/rules/preview', { method: 'POST', body: { ...ruleBody(values), name: values.name || r?.name || 'draft' } });
+      box.replaceChildren(rulePreviewView(view));
+    } catch (err) {
+      box.replaceChildren(callout('critical', 'octagon', err.message));
+    } finally {
+      previewBtn.disabled = false;
+    }
+  });
+  const saved = await ask({
+    title: editing ? `Edit rule ${r.name}` : 'New management rule',
+    text: 'When an agent meets all its conditions, the rule tells the agent’s people at once, and acts after its days of notice if the agent still matches. Monitored, it only records what it would have done.',
+    iconName: editing ? 'edit' : 'policies', confirm: editing ? 'Save changes' : 'Create rule', wide: true,
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'inactive-agents', hint: NAME_HINT },
+      { id: 'description', label: 'Description', type: 'textarea', rows: 2, value: r?.description || '' },
+      { type: 'section', label: 'When an agent has all of these' },
+      { type: 'row', fields: [
+        { id: 'inactive_days', label: 'No activity for (days)', type: 'number', min: 1, value: c.inactive_days ?? '' },
+        { id: 'attestation_overdue_days', label: 'Attestation overdue for (days)', type: 'number', min: 0, value: c.attestation_overdue_days ?? '' },
+      ] },
+      { id: 'missing', label: 'No', value: (c.missing || []).join(', '), mono: true, hint: 'Any of owner, sponsors, team, blueprint, workload_identity, separated by commas.' },
+      { type: 'row', fields: [
+        { id: 'findings', label: 'An open finding of type', value: (c.findings || []).join(', '), mono: true, placeholder: 'agent.stale', hint: '* wildcards, separated by commas.' },
+        { id: 'finding_severity', label: 'Of severity', type: 'select', value: c.finding_severity || '', options: options(['low', 'medium', 'high', 'critical'], 'Any') },
+      ] },
+      { type: 'row', fields: [
+        { id: 'risk_level', label: 'Risk at least', type: 'select', value: c.risk_level || '', options: options(['low', 'medium', 'high', 'critical'], 'Any') },
+        { id: 'status', label: 'Status', value: (c.status || []).join(', '), mono: true, hint: 'pending, active, blocked or discovered.' },
+      ] },
+      { type: 'section', label: 'Which agents it looks at' },
+      { type: 'row', fields: [
+        { id: 'blueprints', label: 'Blueprints', value: (scope.blueprints || []).join(', '), mono: true, hint: `Empty: all of them.${blueprints.length ? ` Blueprints: ${blueprints.map((b) => b.name).join(', ')}.` : ''}` },
+        { id: 'teams', label: 'Teams', value: (scope.teams || []).join(', '), mono: true, hint: teams.length ? `Teams: ${teams.map((t) => t.name).join(', ')}.` : null },
+      ] },
+      { type: 'row', fields: [
+        { id: 'platforms', label: 'Platforms', value: (scope.platforms || []).join(', '), mono: true, hint: 'gateway, microsoft-365 or copilot-studio.' },
+        { id: 'environments', label: 'Environments', value: (scope.environments || []).join(', '), mono: true },
+      ] },
+      { id: 'scope_labels', label: 'With labels', value: formatLabels(scope.labels), mono: true, hint: 'key=value, separated by commas. Agents labelled agentgov/exempt-rules with the rule’s name, or *, are left out.' },
+      { type: 'section', label: 'What it does' },
+      { type: 'row', fields: [
+        { id: 'action', label: 'Action', type: 'select', required: true, value: r?.action || 'issue', options: Object.entries(RULE_ACTIONS).map(([value, label]) => ({ value, label })) },
+        { id: 'owner', label: 'Owner it gives', value: r?.params?.owner || '', mono: true, datalist: teams.map((t) => t.name), hint: 'For "Give it an owner": a team, or an email address.' },
+      ] },
+      { type: 'row', fields: [
+        { id: 'after_days', label: 'After (days)', type: 'number', min: 0, required: true, value: r?.after_days ?? 14, hint: 'How long an agent matches before the action. Rules that change something give a day’s notice at least.' },
+        { id: 'max_actions', label: 'At most at once', type: 'number', min: 1, required: true, value: r?.max_actions ?? 10, hint: 'More agents due at once: it acts on none.' },
+      ] },
+      { type: 'row', fields: [
+        { id: 'severity', label: 'Its issues’ severity', type: 'select', required: true, value: r?.severity || 'medium', options: options(['low', 'medium', 'high', 'critical']) },
+        { id: 'mode', label: 'Mode', type: 'select', required: true, value: r?.mode || 'monitor', options: [{ value: 'monitor', label: 'Monitor: record what it would do' }, { value: 'enforce', label: 'Enforce: tell, then act' }, { value: 'off', label: 'Off' }] },
+      ] },
+      { id: 'labels', label: 'Labels', value: formatLabels(r?.labels), mono: true },
+    ].filter(Boolean),
+    after: h('div', { class: 'stack' }, h('div', { class: 'btn-row' }, previewBtn), box),
+    onReady: (found) => { controls = found; },
+    submit: (v) => {
+      const body = ruleBody(v);
+      if (editing) return api(`v1/rules/${encodeURIComponent(r.name)}`, { method: 'PATCH', body });
+      return api('v1/rules', { method: 'POST', body: { name: v.name, ...body } });
+    },
+  });
+  if (!saved) return;
+  toast(editing ? `Saved rule ${saved.name}.` : `Created rule ${saved.name} (${saved.effective_mode}).`);
+  await refresh();
+}
+
+async function deleteRule(r) {
+  const done = await ask({
+    title: `Delete rule ${r.name}?`,
+    text: 'Its open issues are resolved. What it did stays done: blocked agents stay blocked until someone unblocks them.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete rule', busy: 'Deleting…',
+    submit: () => api(`v1/rules/${encodeURIComponent(r.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted rule ${r.name}.`);
+  await refresh();
+}
+
+async function runRules() {
+  const out = await api('v1/rules/evaluate', { method: 'POST' });
+  if (out.off) {
+    toast('Management rules are off in Features.', { tone: 'warning' });
+  } else {
+    const sum = (key) => Object.values(out).reduce((n, counts) => n + (counts[key] || 0), 0);
+    toast(`Rules ran: ${plural(sum('matching'), 'agent')} matching, ${fmt(sum('acted'))} acted on, ${fmt(sum('would_act'))} would have been, ${fmt(sum('held_back'))} held back.`);
+  }
+  await refresh();
+}
+
+function agentRulesCard(rows) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  return card({
+    title: 'Management rules',
+    sub: 'The rules it matches, and what each will do or did.',
+    body: h('ul', { class: 'access-list', role: 'list' }, rows.map((r) => h('li', { class: 'access-row' },
+      h('div', { class: 'access-main' },
+        h('div', { class: 'cell-title' }, r.rule, ' ', chip('rule', r.state)),
+        h('div', { class: 'cell-sub break' }, humanize(r.detail), ' · matching since ', timeEl(r.since)))))),
+  });
 }
 
 /* -------------------------------------------- access packages on agents */

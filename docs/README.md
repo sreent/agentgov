@@ -41,6 +41,8 @@
   while once approved, with reminders, renewals and reviews
 * [Issues](issues.md): findings sent to the people responsible for each agent (its owner,
   its sponsors, its team), escalated until someone takes them on
+* [Management rules](management-rules.md): what to do about agents that meet some
+  conditions for long enough (inactive, ownerless, long blocked), after telling their people
 * [Security operations](secops.md): the ledger to SIEMs as OCSF events, alerts in Teams and
   Slack, and how much the security team's tools may do
 

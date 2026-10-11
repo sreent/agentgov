@@ -988,8 +988,69 @@ def issues(name: str) -> None:
         )
 
 
+def management_rules(name: str) -> None:
+    step("19. Management rules: the agent's people are told first, and the rule acts later")
+    rule = f"blocked-agents-{secrets.token_hex(2)}"
+    spec = {
+        "description": "Delete agents that stay blocked for 30 days",
+        "conditions": {"status": ["blocked"]},
+        "scope": {"blueprints": ["customer-support"]},
+        "action": "delete",
+        "after_days": 30,
+    }
+    # Before saving it: which agents it matches, and what it would do (monitored, by default).
+    draft = admin("POST", "/v1/rules/preview", json={"name": rule, **spec})
+    ours = next((a for a in draft["agents"] if a["agent"] == name), None)
+    show(
+        f"previewed ({draft['mode']}):",
+        ours is not None,
+        f"{name}, blocked since step 13: {ours['detail'] if ours else 'not matched'}",
+    )
+    feature = "/v1/features/management-rules"
+    admin("POST", "/v1/rules", json={"name": rule, **spec, "mode": "enforce"})
+    admin("PUT", feature, json={"mode": "enforce"})
+    try:
+        admin("POST", "/v1/rules/evaluate")  # it runs after each posture scan, or now
+        issue = next(
+            iter(
+                admin(
+                    "GET",
+                    "/v1/findings",
+                    params={"type": "rule.matched", "agent": name, "status": "open"},
+                )
+            ),
+            None,
+        )
+        chain = admin("GET", f"/v1/findings/{issue['id']}")["chain"] if issue else []
+        to = ", then ".join(f"{', '.join(c['who'])} ({c['level']})" for c in chain)
+        show(
+            "enforced, it tells first:",
+            issue is not None,
+            f"{issue['title'] if issue else ''}: to {to}",
+        )
+        if issue:
+            alice = agentgov_session("alice")
+            accepted = alice.post(
+                f"{CONTROL_PLANE}/v1/findings/{issue['id']}/accept",
+                json={"reason": "Kept blocked for the incident review", "until": 60},
+            )
+            admin("POST", "/v1/rules/evaluate")
+            state = next(
+                (r for r in admin("GET", f"/v1/agents/{name}/rules") if r["rule"] == rule), {}
+            )
+            show(
+                "alice, its sponsor, accepted the risk:",
+                accepted.status_code == 200 and state.get("state") == "exempt",
+                f"the rule leaves it be: {state.get('detail', accepted.text)}",
+            )
+    finally:
+        admin("DELETE", f"/v1/rules/{rule}")
+        admin("PUT", feature, json={"mode": "monitor"})
+        print(f"  {DIM}rule {rule} deleted, and its issue resolved; rules monitored again{RESET}")
+
+
 def evidence(name: str) -> None:
-    step("19. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("20. Evidence: every decision is in a hash-chained, verifiable ledger")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -1017,6 +1078,7 @@ def main() -> None:
         developer_tools()
         security_operations(name, shadow)
         issues(name)
+        management_rules(name)
         evidence(name)
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")

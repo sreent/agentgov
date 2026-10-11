@@ -39,7 +39,7 @@ pipelines, use an API key instead.
 
 | Role | Can |
 |---|---|
-| `admin` | Everything below, plus agent lifecycle, blueprints, access packages, tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations, teams and which [features](features.md) are used |
+| `admin` | Everything below, plus agent lifecycle, blueprints, access packages, [management rules](management-rules.md), tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations, teams and which [features](features.md) are used |
 | `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks; attest the agents it sponsors |
 | `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings, acknowledge issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
@@ -102,6 +102,8 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Add, edit and delete access packages ([access packages](access-packages.md)) | Policies → *Access packages* | `agentgov access-packages create\|update\|delete`, `agentgov access-packages list` | `POST /v1/access-packages`, `PATCH`/`DELETE /v1/access-packages/{name}` |
 | Ask for an access package for an agent, or renew one | Agent → *Access packages* → **Request access**, **Renew** | `agentgov access-packages request AGENT PACKAGE --reason R` | `POST /v1/access-assignments` |
 | Decide, revoke or review an agent's access package | Approvals → *Access requests*; agent → *Access packages* | `agentgov access-packages approve\|deny\|revoke ID`, `agentgov access-packages review ID --keep\|--remove` | `POST /v1/access-assignments/{id}/approve\|deny\|revoke\|review` |
+| Add, edit, preview and delete management rules, and run them now ([management rules](management-rules.md)) | Policies → *Management rules* → **New rule**, **Preview**, **Edit**, **Delete**, **Run now** | `agentgov rules create\|update\|delete\|preview\|evaluate`, `agentgov rules list` | `POST /v1/rules`, `PATCH`/`DELETE /v1/rules/{name}`, `GET /v1/rules/{name}/preview`, `POST /v1/rules/preview`, `POST /v1/rules/evaluate` |
+| See the management rules an agent matches, and what each will do | Agent → *Management rules* | `agentgov rules agent AGENT` | `GET /v1/agents/{ref}/rules` |
 | Name the team issues about an agent escalate to | Blueprint or agent → **Edit** → *Team* | `agentgov blueprints update B --team T` (agents: the same option) | `team` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |
 | Browse, verify and export the ledger | Ledger → filters, **Verify chain**, **Export JSONL** | `agentgov ledger tail --agent A`, `ledger verify`, `ledger export` | `GET /v1/ledger`, `/v1/ledger/verify`, `/v1/ledger/export` |
 | See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |

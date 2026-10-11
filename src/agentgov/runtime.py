@@ -38,6 +38,7 @@ from agentgov.registry import (
     microsoft_signals,
     platforms,
     posture,
+    rules,
 )
 from agentgov.registry import agents as agents_svc
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
@@ -138,6 +139,8 @@ class Runtime:
         # The Microsoft 365 agent catalog, read with Microsoft Graph (app-only).
         self.m365 = MicrosoftApp(settings, http=m365_http) if settings.m365_enabled else None
         self._m365_lock = threading.Lock()
+        # Rules run after the scheduled posture scans and when an administrator asks.
+        self._rules_lock = threading.Lock()
         # Copilot Studio asks AgentGov about each tool call its agents make, while the
         # copilot-studio-threat-detection feature is on.
         self.threat_detection: ThreatDetection | None = None
@@ -264,11 +267,20 @@ class Runtime:
             self._classifier_worker.trigger()
 
     def run_posture_scan(self) -> dict[str, Any] | None:
-        """Scan, unless posture checks are off (then None)."""
+        """Scan, unless posture checks are off (then None); then the management rules."""
         with self.db.session() as session:
-            if not features.is_on(session, "posture-checks"):
-                return None
-            return posture.scan(session, self.settings)
+            scanned = (
+                posture.scan(session, self.settings)
+                if features.is_on(session, "posture-checks")
+                else None
+            )
+        ruled = self.run_rules()
+        return None if scanned is None else {**scanned, "rules": ruled}
+
+    def run_rules(self) -> dict[str, Any]:
+        """A round of the management rules (docs/management-rules.md)."""
+        with self._rules_lock, self.db.session() as session:
+            return rules.evaluate(session, self.settings)
 
     def purge_deleted_agents(self) -> list[str]:
         """Purge the agents deleted longer ago than AGENTGOV_SOFT_DELETE_RETENTION_DAYS."""
@@ -470,6 +482,9 @@ class Runtime:
                         counts["maker_events"] += got["events"]
                     state = connections.load_state(session, "purview-audit")
                     state[kind], state[f"{kind}_until"] = None, pending["end"]
+                    # From when AgentGov knows what happened (management rules about
+                    # inactive agents count no further back).
+                    state.setdefault(f"{kind}_from", pending["start"])
                     connections.save_state(session, "purview-audit", state)
             elif status in ("failed", "cancelled") or ids.utcnow() - started > AUDIT_GIVE_UP:
                 # Search the same window again: from where the failed search started, which

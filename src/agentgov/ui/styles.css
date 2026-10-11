@@ -899,3 +899,7 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .levels li[data-reached="true"] .ico { color: var(--good); }
 .levels li[data-reached="false"] { color: var(--ink-3); }
 .levels li[aria-current="step"] { background: var(--accent-soft); }
+
+/* Management rules: a rule's preview lists the agents it matches, scrolling in its dialog. */
+.rule-preview .access-list { max-height: 320px; overflow: auto; }
+.rule-preview-box:empty { display: none; }

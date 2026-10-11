@@ -29,6 +29,8 @@ makers change them, or when an administrator with permissions in that platform d
 AgentGov often has neither. The issue reaches the people who can fix it, and goes further
 until someone takes it on. Where AgentGov can enforce, at its gateway, it still does: issues
 add the people to the picture, they don't replace the controls in [features](features.md).
+[Management rules](management-rules.md) use issues too: a rule that will block, delete or
+change an agent tells its people first, with the date, and again once it has.
 
 ## Who it goes to
 

@@ -17,6 +17,8 @@ matrix in docs/baseline-agent365.md maps one-to-one:
                    agents escalate to.
 * ``AccessPackage`` - grants an agent can hold for a while, once approved
                    (``AccessAssignment``).
+* ``ManagementRule`` - acts on the agents that match it, after telling their people
+                   (``RuleMatch``).
 * ``McpSighting`` - an MCP server set up on a developer's machine, as reported.
 """
 
@@ -644,6 +646,54 @@ class AccessAssignment(Base):
     ended_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+
+
+class ManagementRule(Base):
+    """Conditions on agents, and what to do about the agents that meet them for long enough:
+    raise an issue, give them an owner, block them, delete them or revoke their access
+    packages, after telling their people (docs/management-rules.md)."""
+
+    __tablename__ = "management_rules"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    # off, monitor (records what it would do) or enforce; the feature's mode caps it.
+    mode: Mapped[str] = mapped_column(String(16), default="monitor")
+    # What an agent must meet (all of it), and which agents the rule looks at.
+    conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    scope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # issue, assign_owner, block, delete or revoke_access, and what it needs (the owner to
+    # assign); how many days an agent matches before it, how severe its issue is, and how
+    # many agents it acts on at once, at most.
+    action: Mapped[str] = mapped_column(String(32), default="issue")
+    params: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    after_days: Mapped[int] = mapped_column(Integer, default=14)
+    severity: Mapped[str] = mapped_column(String(16), default="medium")
+    max_actions: Mapped[int] = mapped_column(Integer, default=10)
+    labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class RuleMatch(Base):
+    """An agent a management rule matches, from when it started to match: when its people
+    were told, and what the rule did or would have done. Gone once the agent no longer
+    matches."""
+
+    __tablename__ = "rule_matches"
+    __table_args__ = (Index("ix_rule_matches_once", "rule_id", "agent_id", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    rule_id: Mapped[str] = mapped_column(String(32), index=True)
+    agent_id: Mapped[str] = mapped_column(String(32), index=True)
+    since: Mapped[datetime] = mapped_column(UTCDateTime)
+    # When the agent's people were told what the rule will do (an enforced rule only).
+    warned_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # When a monitored rule would have acted, and when an enforced one did.
+    monitored_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    acted_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Notification(Base):

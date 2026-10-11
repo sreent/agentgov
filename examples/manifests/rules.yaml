@@ -1,0 +1,50 @@
+# Management rules (docs/management-rules.md): what to do about agents that meet some
+# conditions for long enough. They are monitored, so they record what they would do and
+# change nothing: preview them (agentgov rules preview NAME), then enforce the
+# management-rules feature and each rule you want to act.
+apiVersion: agentgov/v1alpha1
+kind: ManagementRule
+metadata:
+  name: inactive-agents
+spec:
+  description: Block agents nobody has used for 90 days
+  conditions:
+    inactive_days: 90
+  action: block
+  after_days: 14
+---
+apiVersion: agentgov/v1alpha1
+kind: ManagementRule
+metadata:
+  name: ownerless-agents
+spec:
+  description: Agents left without an owner go to the AI governance team
+  conditions:
+    missing: [owner]
+    status: [pending, active]
+  action: assign_owner
+  params:
+    owner: ai-governance
+  after_days: 14
+---
+apiVersion: agentgov/v1alpha1
+kind: ManagementRule
+metadata:
+  name: stale-registrations
+spec:
+  description: Delete registrations nobody approved within 30 days
+  conditions:
+    status: [pending]
+  action: delete
+  after_days: 30
+---
+apiVersion: agentgov/v1alpha1
+kind: ManagementRule
+metadata:
+  name: expired-access
+spec:
+  description: Revoke access packages a week after they expired, unless renewed
+  conditions:
+    findings: [access.expired]
+  action: revoke_access
+  after_days: 7
