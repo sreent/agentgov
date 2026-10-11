@@ -35,17 +35,19 @@ Modes run from the weakest to the strongest. The default is in bold.
 | Feature | Modes | What it does |
 |---|---|---|
 | `mcp-gateway` | off, **on** | Publishes approved MCP tool servers on agentgateway at `/mcp/<server>`. Agents call them there with their AgentGov token, and the controls below check every call. Off, no tool server is published, but the registry keeps them |
+| `model-gateway` | off, **on** | Publishes approved [model providers](models.md) on agentgateway at `/llm/<provider>`. Agents call models there with their AgentGov token instead of the provider's API key, and the controls below check every prompt and answer. Off, no provider is published, but the registry keeps them |
 
 ### Controls at the gateway
 
 | Feature | Modes | What it does |
 |---|---|---|
-| `least-privilege` | off, monitor, **enforce** | Agents may call only the tools their blueprint and their own grants allow, and see only those tools when they list a server's. In monitor mode, agents see and call every tool, and calls they weren't granted are recorded. Telemetry showing a tool used without a grant raises a finding unless this control is off |
+| `least-privilege` | off, monitor, **enforce** | Agents may call only the tools and models their blueprint and their own grants allow, and see only those tools when they list a server's. In monitor mode, agents see and call every tool, and calls they weren't granted are recorded. Telemetry showing a tool used without a grant raises a finding unless this control is off |
 | `approvals` | off, monitor, **enforce** | Calls to tools their servers mark destructive, and calls organisation policies single out (`require_approval`), wait for a person to approve them |
-| `data-protection` | off, monitor, **enforce** | Inspects tool arguments and results for credentials and personal data. Credentials stop the call, and personal data is masked unless policy allows it. Off, nothing is inspected and Presidio isn't called. Monitor records what was found. Only an enforced control stops calls when Presidio is down (`AGENTGOV_PRESIDIO_FAILURE_MODE=closed`) |
-| `prompt-injection` | off, monitor, **enforce** | Withholds tool results that carry instructions aimed at the agent (indirect prompt injection) and raises a finding. Monitor passes the result on and still raises the finding |
+| `data-protection` | off, monitor, **enforce** | Inspects tool calls and model calls for credentials and personal data. Credentials stop the call (and an answer that contains them is withheld), and personal data is masked unless policy allows it. Off, nothing is inspected and Presidio isn't called. Monitor records what was found. Only an enforced control stops calls when Presidio is down (`AGENTGOV_PRESIDIO_FAILURE_MODE=closed`) |
+| `prompt-injection` | off, monitor, **enforce** | Withholds tool results that carry instructions aimed at the agent (indirect prompt injection) and raises a finding, and refuses model calls whose conversation holds such a result. Monitor lets them through and still raises the finding |
 | `tool-integrity` | off, monitor, **enforce** | Quarantines tools whose descriptions hide instructions. Tools that changed since approval are held until an administrator reviews them |
 | `risk-based-access` | off, monitor, **enforce** | Refuses agents at critical risk, and blocks agents whose risk score reaches `AGENTGOV_AUTO_BLOCK_RISK_SCORE`. Monitor lets them through, and the automatic block raises an `agent.would_auto_block` finding instead. Risk is always scored and shown |
+| `token-budgets` | off, monitor, **enforce** | Refuses model calls from agents that have used their daily token budget, their own or their blueprint's, until the day ends (UTC). Off, budgets aren't checked; usage is still metered |
 | `unknown-callers` | monitor, **enforce** | Refuses callers without a registered agent's identity. Monitor lets them through and records them; with `discovery` on, they are added to the inventory |
 
 ### Detection

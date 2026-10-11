@@ -8,10 +8,10 @@
   can be anywhere.
 */}}
 {{- $internal := list
-  (dict "component" "opa" "port" 8181 "from" (list "control-plane" "processor") "enabled" true)
-  (dict "component" "processor" "port" 50051 "from" (list "gateway") "enabled" true)
-  (dict "component" "presidio" "port" 3000 "from" (list "processor") "enabled" .Values.presidio.enabled)
-  (dict "component" "postgresql" "port" 5432 "from" (list "control-plane" "keycloak") "enabled" .Values.postgresql.enabled) }}
+  (dict "component" "opa" "ports" (list 8181) "from" (list "control-plane" "processor") "enabled" true)
+  (dict "component" "processor" "ports" (list 50051 8091) "from" (list "gateway") "enabled" true)
+  (dict "component" "presidio" "ports" (list 3000) "from" (list "processor") "enabled" .Values.presidio.enabled)
+  (dict "component" "postgresql" "ports" (list 5432) "from" (list "control-plane" "keycloak") "enabled" .Values.postgresql.enabled) }}
 {{- range $internal }}
 {{- if .enabled }}
 ---
@@ -34,7 +34,9 @@ spec:
               {{- include "agentgov.selector" (list $root .) | nindent 14 }}
         {{- end }}
       ports:
-        - port: {{ .port }}
+        {{- range .ports }}
+        - port: {{ . }}
+        {{- end }}
 {{- end }}
 {{- end }}
 {{- $public := list

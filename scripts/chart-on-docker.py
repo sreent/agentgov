@@ -7,7 +7,7 @@ kubelet would, as far as containers go:
 
 * a pod's containers share one network namespace, reachable under the pod's
   Service name, and its volumes (emptyDir and claims as volumes without Docker's
-  copy-up, configMaps as read-only files);
+  copy-up, configMaps and Secrets as read-only files);
 * init containers run to completion first;
 * the pod's user and group, read-only root file systems, dropped capabilities
   and no-new-privileges apply as in the chart;
@@ -19,7 +19,7 @@ start first, each once the one before is ready, and `up` returns when every pod
 is ready. Network policies, ingresses and the scheduler are Kubernetes' own: the
 kind check (scripts/ci.sh --kind) covers them where kind runs.
 
-  chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server)
+  chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server and model)
   chart-on-docker.py secret RENDERED.yaml KEY    print a value of the chart's Secret
   chart-on-docker.py logs                        state and recent logs, for failures
   chart-on-docker.py down                        remove everything it started
@@ -49,6 +49,8 @@ PUBLISH = {
     "agentgov-keycloak": ["8180:8080"],
     "agentgov-otel-collector": ["4318:4318"],
 }
+# The key the demo model accepts; scripts/ci.sh gives it to the chart (modelKeys).
+DEMO_MODEL_KEY = "demo-model-key"
 # Started in this order and waited for; the rest start together after them.
 FIRST = ["agentgov-postgresql", "agentgov-keycloak", "agentgov-control-plane"]
 READY_SECONDS = 600
@@ -68,7 +70,8 @@ def load(path: str) -> list[dict[str, Any]]:
 def secret_values(docs: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
     return {
         d["metadata"]["name"]: {
-            k: base64.b64decode(v).decode() for k, v in (d.get("data") or {}).items()
+            **{k: base64.b64decode(v).decode() for k, v in (d.get("data") or {}).items()},
+            **(d.get("stringData") or {}),
         }
         for d in docs
         if d["kind"] == "Secret"
@@ -156,6 +159,17 @@ def start_pod(workload: dict[str, Any], docs: list[dict[str, Any]]) -> None:
                 (folder / key).chmod(0o644)
             folder.chmod(0o755)
             mounts[name] = f"type=bind,source={folder}"
+        elif "secret" in volume:
+            source = volume["secret"]
+            if source["secretName"] not in secrets and not source.get("optional"):
+                sys.exit(f"{pod}: no Secret {source['secretName']}")
+            folder = WORK / pod / name
+            folder.mkdir(parents=True, exist_ok=True)
+            for key, content in secrets.get(source["secretName"], {}).items():
+                (folder / key).write_text(content)
+                (folder / key).chmod(0o644)
+            folder.chmod(0o755)
+            mounts[name] = f"type=bind,source={folder}"
         elif "emptyDir" in volume:
             # emptyDir: empty and writable by anyone, unlike a fresh Docker volume.
             mounts[name] = new_volume(f"{pod}-{name}", mode="1777")
@@ -233,9 +247,13 @@ def up(rendered: str, demo: bool) -> None:
     for workload in rest:
         wait_ready(workload)
     if demo:
-        name, alias = "agentgov-demo-crm-mcp", "crm-mcp"  # the examples' tool server
-        sh("docker", "run", "-d", "--name", name, "--label", LABEL, "--network", NETWORK,
-           "--network-alias", alias, "agentgov-demo-crm:local")  # fmt: skip
+        # The examples' tool server and model provider.
+        sh("docker", "run", "-d", "--name", "agentgov-demo-crm-mcp", "--label", LABEL,
+           "--network", NETWORK, "--network-alias", "crm-mcp",
+           "agentgov-demo-crm:local")  # fmt: skip
+        sh("docker", "run", "-d", "--name", "agentgov-demo-model", "--label", LABEL,
+           "--network", NETWORK, "--network-alias", "demo-model",
+           "-e", f"MOCK_MODEL_KEY={DEMO_MODEL_KEY}", "agentgov-demo-model:local")  # fmt: skip
 
 
 def logs() -> None:

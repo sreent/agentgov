@@ -130,6 +130,7 @@ const ICONS = {
   access: 'M5 8a4 4 0 1 0 8 0a4 4 0 1 0-8 0M3 21c0-3.3 2.7-6 6-6 1.2 0 2.3.3 3.2.9M17 14a2 2 0 1 0 0 4a2 2 0 1 0 0-4M18.4 15.6L22 12M20.5 13.5l1.5 1.5',
   platforms: 'M7 19h10.5a4.5 4.5 0 0 0 .5-8.98A6 6 0 0 0 6.34 9.03 5 5 0 0 0 7 19z',
   features: 'M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4',
+  models: 'M7 7h10v10H7zM10 10h4v4h-4zM10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4',
 };
 
 function icon(name, { label, cls } = {}) {
@@ -755,6 +756,29 @@ function formatGrants(grants) {
   return (grants || []).map((g) => `${g.server}: ${g.tools.join(', ')}`).join('\n');
 }
 
+// Model access is typed like tool grants: "provider: model, model", one provider per line.
+function parseModelAccess(text) {
+  return String(text || '').split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const colon = line.indexOf(':');
+    if (colon < 1) throw new Error(`Write each line as "provider: model, model" ("${line}" has no provider).`);
+    const provider = line.slice(0, colon).trim();
+    const models = parseList(line.slice(colon + 1));
+    if (!models.length) throw new Error(`List the models of ${provider} it may call, or * for all of them.`);
+    return { provider, models };
+  });
+}
+
+function formatModelAccess(access) {
+  return (access || []).map((g) => `${g.provider}: ${g.models.join(', ')}`).join('\n');
+}
+
+function parseBudget(text) {
+  if (!text) return null;
+  const n = Number(text);
+  if (!Number.isInteger(n) || n < 0) throw new Error('The daily token budget is a whole number of tokens, or empty.');
+  return n;
+}
+
 const orNull = (text) => text || null;
 
 /* ------------------------------------------------------------ nav badges */
@@ -802,6 +826,7 @@ const PAGES = [
   { re: /^\/access$/, nav: 'access', title: 'Access', render: renderAccess },
   { re: /^\/platforms$/, nav: 'platforms', title: 'Platforms', render: renderPlatforms },
   { re: /^\/features$/, nav: 'features', title: 'Features', render: renderFeatures },
+  { re: /^\/models$/, nav: 'models', title: 'Models', render: renderModels },
 ];
 
 let renderSeq = 0;
@@ -1633,15 +1658,17 @@ const ATTESTABLE = new Set(['active', 'blocked', 'pending']);
 async function renderAgent({ match }) {
   const ref = decodeURIComponent(match[1]);
   const agent = await api(`v1/agents/${encodeURIComponent(ref)}`);
-  const [entries, openFindings, instructions] = await Promise.all([
+  const [entries, openFindings, instructions, usage] = await Promise.all([
     api(`v1/ledger?agent=${encodeURIComponent(agent.id)}&limit=12`).catch((e) => e),
     api(`v1/findings?status=open&agent=${encodeURIComponent(agent.id)}`).catch((e) => e),
     api(`v1/agents/${encodeURIComponent(agent.id)}/instructions`).catch((e) => e),
+    api(`v1/models/usage?agent=${encodeURIComponent(agent.id)}&days=7`).catch((e) => e),
   ]);
   // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
   const views = agent.platforms || [];
   const where = views.length && agent.status !== 'deleted' ? await platformActionTarget(agent) : null;
-  const main = views.length ? views.map((v) => platformCard(agent, v, where)) : [permissionsCard(agent)];
+  const main = views.length ? views.map((v) => platformCard(agent, v, where))
+    : [permissionsCard(agent), agentModelsCard(agent, usage)];
   // With threat detection enforcing, AgentGov's policies decide about its tool calls.
   const enforced = views.some((v) => v.source === 'copilot-studio')
     && (await featureModes().catch(() => ({})))['copilot-studio-threat-detection'] === 'enforce';
@@ -1863,6 +1890,11 @@ async function agentForm(a) {
       hint: 'Added to the blueprint\'s grants. One server per line; tool names can use * wildcards, and * alone means every tool.',
     },
     {
+      id: 'model_access', label: 'Extra model access', type: 'code', rows: 2, value: formatModelAccess(a?.model_access), placeholder: 'openai: gpt-4o-mini',
+      hint: "Added to the blueprint's model access. One provider per line; model names can use * wildcards.",
+    },
+    { id: 'daily_token_budget', label: 'Daily token budget', type: 'number', min: 0, value: a?.daily_token_budget ?? '', hint: "Input and output tokens per UTC day. Empty: the blueprint's budget." },
+    {
       id: 'risk_tier', label: 'Declared risk tier', type: 'select', value: a?.risk_tier || '',
       options: editing ? tiers : [{ value: '', label: "The blueprint's tier (medium without one)" }, ...tiers],
     },
@@ -1889,6 +1921,8 @@ async function agentForm(a) {
         sponsors: parseList(v.sponsors),
         blueprint: v.blueprint || null,
         permissions: parseGrants(v.permissions),
+        model_access: parseModelAccess(v.model_access),
+        daily_token_budget: parseBudget(v.daily_token_budget),
         framework: orNull(v.framework),
         platform: orNull(v.platform),
         models: parseList(v.models),
@@ -1978,6 +2012,38 @@ function permissionsCard(a) {
       broad ? callout('warning', 'triangle', 'This agent may call every tool on every server (*/*). Replace the wildcard with the tools it needs.') : null,
       list,
       own.size ? h('p', { class: 'hint' }, 'Highlighted patterns are granted to this agent directly; the others come from its blueprint.') : null,
+    ],
+  });
+}
+
+function agentModelsCard(a, usage) {
+  const access = a.effective_model_access || [];
+  const own = new Map((a.model_access || []).map((g) => [g.provider, new Set(g.models)]));
+  const budget = a.effective_daily_token_budget;
+  const today = usage instanceof Error ? null : (usage.today || []).find((b) => b.agent_id === a.id);
+  const used = today?.used_today ?? 0;
+  const totals = usage instanceof Error ? null : usage.totals;
+  const tone = budget != null && used >= budget ? 'critical' : 'accent';
+  return card({
+    title: 'Models',
+    sub: 'Models it may call through the gateway, and what it used in the last 7 days',
+    body: [
+      access.length
+        ? h('ul', { class: 'perm-list', role: 'list' }, access.map((g) => h('li', {},
+          h('span', { class: 'perm-server' }, g.provider),
+          h('div', { class: 'chip-row' }, g.models.map((m) => {
+            const direct = own.get(g.provider)?.has(m);
+            return plainChip(m, { mono: true, tone: direct ? 'accent' : null, title: direct ? 'Granted to this agent directly' : `From blueprint ${a.blueprint || ''}`.trim() });
+          })))))
+        : h('p', { class: 'muted small' }, 'No model access. Policy refuses its model calls through the gateway.'),
+      facts([
+        ['Daily token budget', budget == null ? h('span', { class: 'muted' }, 'None') : `${fmt(budget)} tokens${a.daily_token_budget == null ? ' (from its blueprint)' : ''}`],
+        ['Used today', budget == null ? `${fmt(used)} tokens`
+          : h('div', { class: 'stack', style: 'gap:4px' }, `${fmt(used)} of ${fmt(budget)} tokens`,
+            h('div', { class: 'meter', role: 'img', 'aria-label': `${fmt(used)} of ${fmt(budget)} tokens used today`, style: `background: var(--${tone === 'critical' ? 'critical' : 'neutral'}-tint)` },
+              h('span', { style: `width:${budget ? Math.min(100, (used / budget) * 100) : 100}%; background:${TONE_COLOR[tone]}` })))],
+        totals ? ['Last 7 days', `${plural(totals.calls, 'call')}, ${fmt(totals.input_tokens + totals.output_tokens)} tokens${totals.cost_usd ? `, $${totals.cost_usd.toFixed(2)}` : ''}${totals.refused ? `, ${fmt(totals.refused)} refused` : ''}`] : null,
+      ]),
     ],
   });
 }
@@ -3126,6 +3192,12 @@ async function blueprintFormFlow(b, servers) {
         { id: 'attestation_days', label: 'Review every (days)', type: 'number', min: 1, value: b ? (b.attestation_days ?? '') : '90', hint: 'Empty: no periodic review.' },
       ] },
       { id: 'require_sponsor', label: 'Require a sponsor before activation', type: 'checkbox', value: b ? b.require_sponsor : true },
+      { type: 'section', label: 'Models' },
+      {
+        id: 'model_access', label: 'Model access', type: 'code', rows: 2, value: formatModelAccess(b?.model_access), placeholder: 'openai: gpt-4o-mini, gpt-4.1*',
+        hint: 'Models its agents may call through the gateway: one provider per line; model names can use * wildcards.',
+      },
+      { id: 'daily_token_budget', label: 'Daily token budget per agent', type: 'number', min: 0, value: b?.daily_token_budget ?? '', hint: 'Input and output tokens per UTC day. Empty: no budget.' },
       { id: 'labels', label: 'Labels', value: formatLabels(b?.labels), placeholder: 'data=customer', mono: true },
     ].filter(Boolean),
     submit: (v) => {
@@ -3134,6 +3206,7 @@ async function blueprintFormFlow(b, servers) {
       const body = {
         description: v.description, permissions: parseGrants(v.permissions), risk_tier: v.risk_tier,
         attestation_days: days, require_sponsor: v.require_sponsor, labels: parseLabels(v.labels),
+        model_access: parseModelAccess(v.model_access), daily_token_budget: parseBudget(v.daily_token_budget),
       };
       if (editing) return api(`v1/blueprints/${encodeURIComponent(b.name)}`, { method: 'PATCH', body });
       return api('v1/blueprints', { method: 'POST', body: { name: v.name, ...body } });
@@ -4347,6 +4420,168 @@ async function chooseMode(f, mode) {
   } catch (err) {
     toast(err.message, { tone: 'critical' });
   }
+  await refresh();
+}
+
+/* ------------------------------------------------------------------ models */
+
+const PROVIDER_KINDS = [
+  ['openai', 'OpenAI'], ['anthropic', 'Anthropic'], ['gemini', 'Google Gemini'],
+  ['openai-compatible', 'OpenAI-compatible server (vLLM, Ollama, LiteLLM, hosted APIs)'],
+];
+
+async function renderModels() {
+  const [providers, usage, info, features] = await Promise.all([
+    api('v1/models/providers'), api('v1/models/usage?days=7'), getInfo(), featureModes().catch(() => ({})),
+  ]);
+  const gateway = (info?.gateway_url || '').replace(/\/$/, '');
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Models',
+      sub: "Model providers agents call through the gateway, at /llm/<provider>, with their AgentGov token instead of the provider's API key. Every prompt and answer is checked, and every call is metered.",
+      actions: [
+        can('admin') ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'add-provider', onclick: guarded(() => providerForm(null)) }, icon('plus'), 'Add provider') : null,
+        refreshButton(),
+      ],
+    }),
+    features['model-gateway'] === 'off' ? callout('warning', 'power', h('span', {},
+      h('strong', {}, 'The model gateway is off: '), 'no provider is published on the gateway. ', h('a', { href: '#/features' }, 'Features'), '.')) : null,
+    providersCard(providers, gateway),
+    budgetsCard(usage),
+    usageCard(usage));
+}
+
+function providersCard(providers, gateway) {
+  const body = providers.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('caption', { class: 'sr-only' }, 'Model providers'),
+    h('thead', {}, h('tr', {}, ['Provider', 'Status', 'Agents call', 'Prices (USD per 1M tokens)', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+    h('tbody', {}, providers.map((p) => h('tr', { 'data-provider': p.name },
+      h('td', { 'data-label': 'Provider' }, h('span', { class: 'cell-title' }, p.name),
+        h('div', { class: 'cell-sub' }, (PROVIDER_KINDS.find(([k]) => k === p.kind) || [p.kind, p.kind])[1], p.base_url ? ` at ${p.base_url}` : ''),
+        h('div', { class: 'cell-sub' }, `Key file: ${p.key_file}`)),
+      h('td', { 'data-label': 'Status' }, chip('server', p.status),
+        h('div', { class: 'cell-sub' }, p.trust_level === 'verified' ? 'Verified: may receive personal data' : 'Unverified: personal data is masked')),
+      h('td', { 'data-label': 'Agents call' }, copyable(`${gateway}${p.route}/v1/chat/completions`, `${p.name} endpoint`)),
+      h('td', { 'data-label': 'Prices' }, Object.keys(p.prices || {}).length
+        ? h('div', { class: 'chip-row' }, Object.entries(p.prices).map(([m, price]) => plainChip(`${m}: ${price.input} in, ${price.output} out`, { mono: true })))
+        : h('span', { class: 'muted' }, 'None: cost is not counted')),
+      h('td', { 'data-label': '' }, can('admin') ? h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `edit-${p.name}`, onclick: guarded(() => providerForm(p)) }, icon('edit'), 'Edit'),
+        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `block-${p.name}`, onclick: guarded(() => blockProvider(p)) },
+          icon(p.status === 'blocked' ? 'undo' : 'ban'), p.status === 'blocked' ? 'Unblock' : 'Block'),
+        h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `delete-${p.name}`, onclick: guarded(() => deleteProvider(p)) }, icon('trash'), 'Delete')) : null))))))
+    : emptyState('No model providers', "Add one, then put its API key where the gateway reads it. Agents call it with their own token and never see the key.");
+  return card({ title: 'Providers', flush: Boolean(providers.length), body });
+}
+
+function budgetsCard(usage) {
+  const rows = (usage.today || []).filter((b) => b.daily_token_budget != null);
+  if (!rows.length) return null;
+  return card({
+    title: 'Budgets today',
+    sub: `Tokens each agent used on ${usage.day} (UTC), against its daily budget`,
+    body: h('ul', { class: 'risk-list', role: 'list' }, rows.map((b) => {
+      const tone = b.over_budget ? 'critical' : 'accent';
+      return h('li', {},
+        h('a', { href: agentHref(b.agent_id), class: 'cell-title break' }, b.agent_name),
+        h('span', { class: 'small' }, `${fmt(b.used_today)} of ${fmt(b.daily_token_budget)} tokens`,
+          b.over_budget ? [' ', plainChip('Over budget', { tone: 'critical', iconName: 'ban', title: 'Its model calls are refused until the day ends (UTC)' })] : null),
+        h('div', { class: 'meter', role: 'img', 'aria-label': `${fmt(b.used_today)} of ${fmt(b.daily_token_budget)} tokens`, style: `background: var(--neutral-tint)` },
+          h('span', { style: `width:${b.daily_token_budget ? Math.min(100, (b.used_today / b.daily_token_budget) * 100) : 100}%; background:${TONE_COLOR[tone]}` })));
+    })),
+  });
+}
+
+function usageCard(usage) {
+  const t = usage.totals || {};
+  const rows = usage.rows || [];
+  return card({
+    title: 'Usage, last 7 days',
+    sub: rows.length ? `${plural(t.calls, 'call')}, ${fmt(t.refused)} refused · ${fmt(t.input_tokens)} tokens in, ${fmt(t.output_tokens)} out${t.cost_usd ? ` · $${t.cost_usd.toFixed(2)}` : ''}` : null,
+    flush: Boolean(rows.length),
+    body: rows.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, 'Model usage'),
+      h('thead', {}, h('tr', {}, ['Day', 'Agent', 'Model', 'Calls', 'Tokens in', 'Tokens out', 'Cost'].map((c) => h('th', { scope: 'col', class: ['Calls', 'Tokens in', 'Tokens out', 'Cost'].includes(c) ? 'num' : null }, c)))),
+      h('tbody', {}, rows.map((r) => h('tr', {},
+        h('td', { 'data-label': 'Day' }, r.day),
+        h('td', { 'data-label': 'Agent' }, r.agent_id ? agentLink(r.agent_id, r.agent_name) : h('span', { class: 'muted', title: 'Calls without an agent token (unknown callers in monitor mode)' }, 'Unidentified')),
+        h('td', { 'data-label': 'Model' }, h('code', {}, `${r.provider}/${r.model || '?'}`)),
+        h('td', { 'data-label': 'Calls', class: 'num' }, fmt(r.calls), r.refused ? h('div', { class: 'cell-sub' }, `${fmt(r.refused)} refused`) : null),
+        h('td', { 'data-label': 'Tokens in', class: 'num' }, fmt(r.input_tokens)),
+        h('td', { 'data-label': 'Tokens out', class: 'num' }, fmt(r.output_tokens)),
+        h('td', { 'data-label': 'Cost', class: 'num' }, r.cost_usd ? `$${r.cost_usd.toFixed(4)}` : h('span', { class: 'muted' }, '—')))))))
+      : emptyState('No model calls yet', 'Calls through the gateway show up here once the OpenTelemetry Collector forwards the gateway\'s access logs.'),
+  });
+}
+
+function parsePrices(text) {
+  const out = {};
+  for (const line of String(text || '').split('\n').map((l) => l.trim()).filter(Boolean)) {
+    const m = line.match(/^(.+?)\s*[:=]\s*([\d.]+)\s*,\s*([\d.]+)$/);
+    if (!m) throw new Error(`Write each price as "model: input, output" in USD per million tokens ("${line}").`);
+    out[m[1].trim()] = { input: Number(m[2]), output: Number(m[3]) };
+  }
+  return out;
+}
+
+function formatPrices(prices) {
+  return Object.entries(prices || {}).map(([m, p]) => `${m}: ${p.input}, ${p.output}`).join('\n');
+}
+
+async function providerForm(p) {
+  const editing = Boolean(p);
+  const saved = await ask({
+    title: editing ? `Edit ${p.name}` : 'Add a model provider',
+    text: "The gateway reads the provider's API key from a file mounted into it; the key never enters AgentGov. Changes are recorded in the evidence ledger.",
+    iconName: editing ? 'edit' : 'models', confirm: editing ? 'Save changes' : 'Add provider', wide: true,
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'openai', hint: `${NAME_HINT} Agents call it at /llm/<name>.` },
+      { id: 'kind', label: 'Kind', type: 'select', value: p?.kind || 'openai', options: PROVIDER_KINDS.map(([value, label]) => ({ value, label })) },
+      { id: 'base_url', label: 'Base URL', mono: true, value: p?.base_url || '', placeholder: 'http://vllm:8000/v1', hint: 'Only for an OpenAI-compatible server: its OpenAI API base, as an OpenAI SDK takes it.' },
+      { id: 'key_file', label: 'Key file', mono: true, value: p && p.key_file !== `/model-keys/${p.name}` ? p.key_file : '', placeholder: '/model-keys/<name>', hint: 'Where the gateway reads the API key. Empty: /model-keys/<name>.' },
+      { id: 'trust_level', label: 'Trust', type: 'select', value: p?.trust_level || 'unverified', options: [
+        { value: 'unverified', label: 'Unverified: personal data in prompts is masked' },
+        { value: 'verified', label: 'Verified (a data processing agreement covers it): personal data may be sent' },
+      ] },
+      { id: 'prices', label: 'Prices', type: 'code', rows: 2, value: formatPrices(p?.prices), placeholder: 'gpt-4o*: 2.5, 10', hint: 'One model pattern per line: USD per million input tokens, then output tokens.' },
+      { id: 'description', label: 'Description', type: 'textarea', value: p?.description || '' },
+    ].filter(Boolean),
+    submit: (v) => {
+      const body = {
+        kind: v.kind, base_url: v.kind === 'openai-compatible' ? orNull(v.base_url) : null, key_file: orNull(v.key_file),
+        trust_level: v.trust_level, prices: parsePrices(v.prices), description: v.description,
+      };
+      if (editing) return api(`v1/models/providers/${encodeURIComponent(p.name)}`, { method: 'PATCH', body });
+      return api('v1/models/providers', { method: 'POST', body: { name: v.name, ...body } });
+    },
+  });
+  if (!saved) return;
+  toast(editing ? `Saved ${saved.name}.` : `Added ${saved.name}. Agents call it at ${saved.route} once the gateway has its key.`);
+  await refresh();
+}
+
+async function blockProvider(p) {
+  const block = p.status !== 'blocked';
+  const done = await ask({
+    title: block ? `Block ${p.name}?` : `Unblock ${p.name}?`,
+    text: block ? 'Every model call to it is refused within a second, for every agent.' : 'Agents with access may call it again.',
+    tone: block ? 'danger' : 'primary', iconName: block ? 'ban' : 'undo', confirm: block ? 'Block' : 'Unblock',
+    submit: () => api(`v1/models/providers/${encodeURIComponent(p.name)}/${block ? 'block' : 'unblock'}`, { method: 'POST' }),
+  });
+  if (!done) return;
+  toast(block ? `Blocked ${p.name}.` : `Unblocked ${p.name}.`);
+  await refresh();
+}
+
+async function deleteProvider(p) {
+  const done = await ask({
+    title: `Delete ${p.name}?`,
+    text: 'Its route goes from the gateway. Its usage history stays.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete provider', busy: 'Deleting…',
+    submit: () => api(`v1/models/providers/${encodeURIComponent(p.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted ${p.name}.`);
   await refresh();
 }
 

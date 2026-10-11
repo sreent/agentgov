@@ -29,7 +29,7 @@ from agentgov import ids
 from agentgov.db import Database
 from agentgov.models import DELETED, Agent, ApprovedConnector, Blueprint, Policy, ToolServer
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import features
+from agentgov.registry import features, model_providers, model_usage
 
 log = logging.getLogger(__name__)
 
@@ -37,9 +37,9 @@ BUNDLE_CONTENT_TYPE = "application/vnd.openpolicyagent.bundles"
 ROOTS = ["agentgov", "agentos", "registry", "system"]
 
 # Decision-log hygiene, evaluated by OPA itself: never log raw tool arguments,
-# and skip gateway decisions (the governance processor records those in the
-# ledger with richer context) and reads of registry data (the processor reads
-# the feature modes). In-process (agentos) decisions are logged.
+# and skip gateway decisions on tool and model calls (the governance processor
+# records those in the ledger with richer context) and reads of registry data
+# (the processor reads the feature modes). In-process (agentos) decisions are logged.
 SYSTEM_LOG_REGO = """package system.log
 
 mask contains "/input/arguments"
@@ -47,6 +47,8 @@ mask contains "/input/arguments"
 mask contains "/input/tool_args"
 
 drop if startswith(input.path, "agentgov/mcp")
+
+drop if startswith(input.path, "agentgov/models")
 
 drop if startswith(input.path, "registry")
 """
@@ -75,8 +77,10 @@ def custom_package(name: str) -> str:
 def registry_snapshot(session: Session) -> dict[str, Any]:
     agents: dict[str, Any] = {}
     clients: dict[str, str] = {}
+    used = model_usage.tokens_used(session)
     for agent in session.scalars(select(Agent).where(Agent.status != DELETED)).unique():
         bp = agent.blueprint
+        budget = model_providers.effective_budget(agent)
         agents[agent.id] = {
             "id": agent.id,
             "name": agent.name,
@@ -91,6 +95,9 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
             "risk_level": agent.risk_level,
             "risk_score": agent.risk_score,
             "grants": agents_svc.effective_grants(agent),
+            "model_access": model_providers.effective_model_access(agent),
+            "daily_token_budget": budget,
+            "over_budget": model_usage.over_budget(budget, used.get(agent.id, 0)),
         }
         if agent.client_id:
             clients[agent.client_id] = agent.id
@@ -121,10 +128,21 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
     }
     # The connector allowlist for Copilot Studio agents (enforced through threat detection).
     approved = {c.connector_id: True for c in session.scalars(select(ApprovedConnector))}
+    providers = {
+        p.name: {
+            "name": p.name,
+            "kind": p.kind,
+            "status": p.status,
+            "trust_level": p.trust_level,
+            "labels": p.labels or {},
+        }
+        for p in model_providers.list_all(session)
+    }
     return {
         "agents": agents,
         "clients": clients,
         "toolservers": servers,
+        "model_providers": providers,
         "blueprints": blueprints,
         "connector_allowlist": {"active": bool(approved), "approved": approved},
         # The mode of each feature: the policies apply each control as its mode says.
@@ -186,7 +204,8 @@ class BundleServer:
         self._db = db
         self._lock = threading.Lock()
         self._generation = 0
-        self._cached: tuple[int, Bundle] | None = None
+        # Keyed by generation and UTC day: budgets start again when the day does.
+        self._cached: tuple[tuple[int, str], Bundle] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._changed: asyncio.Condition | None = None
         self._wakeups: set[asyncio.Future[None]] = set()
@@ -216,14 +235,14 @@ class BundleServer:
 
     def current(self) -> Bundle:
         with self._lock:
-            generation = self._generation
+            key = (self._generation, model_usage.today())
             cached = self._cached
-        if cached is not None and cached[0] == generation:
+        if cached is not None and cached[0] == key:
             return cached[1]
         with self._db.session() as session:
             bundle = build(session)
         with self._lock:
-            self._cached = (generation, bundle)
+            self._cached = (key, bundle)
         return bundle
 
     async def wait_for_change(self, etag: str | None, timeout: float) -> Bundle | None:

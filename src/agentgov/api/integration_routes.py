@@ -26,6 +26,7 @@ from agentgov.registry import (
     discovery,
     features,
     findings,
+    model_usage,
     toolservers,
 )
 from agentgov.registry.errors import NotFound, ValidationError
@@ -207,7 +208,7 @@ def internal_observe(
 # ---------------------------------------------------------------------- telemetry
 
 
-async def _otlp(request: Request) -> Response:
+async def _otlp(request: Request, signal: str = "traces") -> Response:
     rt = _rt(request)
     content_type = request.headers.get("content-type", "")
     raw = await request.body()
@@ -216,7 +217,7 @@ async def _otlp(request: Request) -> Response:
     protobuf = content_type.startswith("application/x-protobuf")
     if protobuf:
         try:
-            payload = decode_protobuf(raw)
+            payload = decode_protobuf(raw, signal)
         except ImportError as exc:
             raise HTTPException(
                 415, "OTLP protobuf needs the otlp-protobuf extra; use OTLP/HTTP JSON"
@@ -229,6 +230,8 @@ async def _otlp(request: Request) -> Response:
 
     def store() -> dict[str, Any]:
         with rt.db.session() as s:
+            if signal == "logs":
+                return model_usage.ingest_logs(s, payload)
             return ingest(s, payload, classify=rt.guardian is not None)
 
     await anyio.to_thread.run_sync(store)
@@ -240,3 +243,9 @@ async def _otlp(request: Request) -> Response:
 @router.post("/v1/otlp/v1/traces", tags=["telemetry"])
 async def otlp_traces(request: Request, _: Principal = Depends(service)) -> Response:
     return await _otlp(request)
+
+
+@router.post("/v1/otlp/v1/logs", tags=["telemetry"])
+async def otlp_logs(request: Request, _: Principal = Depends(service)) -> Response:
+    """agentgateway's access logs, through the OpenTelemetry Collector: model usage."""
+    return await _otlp(request, "logs")

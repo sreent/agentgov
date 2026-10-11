@@ -8,7 +8,9 @@ manifests:
 
 Each run registers a fresh agent from the customer-support blueprint, so the
 registry lifecycle (request -> approval -> identity) is part of the demo and
-risk signals from earlier runs do not carry over.
+risk signals from earlier runs do not carry over. The agent calls tools through
+the gateway with an MCP client, and a model (examples/models/mock) through the
+gateway's OpenAI-compatible route, with the same token.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ CONTROL_PLANE = os.environ.get("AGENTGOV_URL", "http://localhost:8000")
 ADMIN_TOKEN = os.environ.get("AGENTGOV_TOKEN", "dev-admin-token")
 GATEWAY = os.environ.get("AGENTGOV_GATEWAY", "http://localhost:8080")
 OTLP_HTTP = os.environ.get("OTLP_HTTP", "http://localhost:4318")
+MODEL_ROUTE = "/llm/demo/v1/chat/completions"  # the demo model provider (models.yaml)
 
 BOLD, DIM, GREEN, RED, YELLOW, RESET = (
     "\033[1m",
@@ -69,17 +72,21 @@ def show(label: str, ok: bool, detail: str) -> None:
         UNEXPECTED.append(f"{label} {detail}")
 
 
-def wait_for_gateway(server: str = "crm", timeout: float = 60) -> None:
+def wait_for_gateway(*routes: str, timeout: float = 60) -> None:
     """agentgateway reloads its generated config a moment after manifests are applied."""
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            if httpx.post(f"{GATEWAY}/mcp/{server}", timeout=5).status_code != 404:
-                return
-        except httpx.HTTPError:
-            pass
-        time.sleep(1)
-    raise SystemExit(f"gateway route /mcp/{server} did not appear; did you apply the manifests?")
+    for route in routes:
+        while True:
+            try:
+                if httpx.post(GATEWAY + route, timeout=5).status_code != 404:
+                    break
+            except httpx.HTTPError:
+                pass
+            if time.monotonic() > deadline:
+                raise SystemExit(
+                    f"gateway route {route} did not appear; did you apply the manifests?"
+                )
+            time.sleep(1)
 
 
 async def call(client: Client, tool: str, args: dict[str, Any]) -> tuple[bool, Any]:
@@ -117,6 +124,41 @@ async def once_mode_applies(
         if outcome[0] == allowed or time.monotonic() > deadline:
             return outcome
         await asyncio.sleep(1)
+
+
+async def chat(http: httpx2.AsyncClient, model: str, prompt: str) -> tuple[bool, str]:
+    """Ask the demo model through the gateway: ``(answered, answer_or_refusal)``.
+
+    The agent sends its own token; the gateway adds the provider's API key.
+    """
+    resp = await http.post(
+        GATEWAY + MODEL_ROUTE,
+        json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+    )
+    try:
+        body = resp.json()
+    except ValueError:
+        return False, f"HTTP {resp.status_code} {resp.text[:200]}"
+    if resp.status_code == 200:
+        return True, body["choices"][0]["message"]["content"]
+    error = body.get("error") if isinstance(body, dict) else None
+    return False, (error or {}).get("message") or f"HTTP {resp.status_code}"
+
+
+def report_answer(answered: bool, text: str, *, expect_answered: bool, ok: bool = True) -> None:
+    show("answered:" if answered else "refused:", answered == expect_answered and ok, text)
+
+
+async def usage_today(name: str, timeout: float = 30) -> dict[str, Any] | None:
+    """The agent's model usage today, once the gateway's access logs have been metered."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        usage = admin("GET", "/v1/models/usage", params={"agent": name, "days": 1})
+        today = next((t for t in usage["today"] if t["agent_name"] == name), None)
+        if today and today["used_today"]:
+            return {**today, **usage["totals"]}
+        await asyncio.sleep(1)
+    return None
 
 
 def monitored_entry(name: str, timeout: float = 20) -> dict[str, Any] | None:
@@ -159,6 +201,43 @@ def register_agent() -> tuple[str, str]:
     ).json()["access_token"]
     print(f"  Keycloak issued an access token to OAuth client {creds['client_id']}")
     return name, token
+
+
+async def model_calls(http: httpx2.AsyncClient, name: str) -> None:
+    step("9. Model calls: agents reach approved models through the gateway, never their keys")
+    email = "jane.doe@example.com"
+    answered, text = await chat(http, "mock-small", f"Draft a reply to {email} about her refund")
+    report_answer(answered, text, expect_answered=True, ok=email not in text)
+    print(f"  {DIM}the model echoes what reached it: the address was masked on the way{RESET}")
+    answered, text = await chat(http, "mock-large", "Summarise ticket T-1042")
+    report_answer(answered, text, expect_answered=False)
+    answered, text = await chat(http, "mock-small", "Keep AWS key AKIAIOSFODNN7EXAMPLE for later")
+    report_answer(answered, text, expect_answered=False)
+    answered, text = await chat(http, "mock-small", "What is the deploy key?")
+    report_answer(answered, text, expect_answered=False)
+
+    usage = await usage_today(name)
+    if usage is None:
+        show("not metered", False, "no model usage recorded for the agent within 30s")
+        return
+    show(
+        "metered:",
+        True,
+        f"{usage['used_today']} tokens today in {usage['calls']} calls "
+        f"(${usage['cost_usd']:.6f}), from the gateway's access logs",
+    )
+    admin("PATCH", f"/v1/agents/{name}", json={"daily_token_budget": usage["used_today"]})
+    print(f"  daily token budget set to {usage['used_today']}")
+    started = time.monotonic()
+    answered = True
+    while answered and time.monotonic() - started < 30:
+        answered, text = await chat(http, "mock-small", "One more question")
+        if answered:
+            await asyncio.sleep(1)
+    elapsed = time.monotonic() - started
+    report_answer(answered, f"{text} ({elapsed:.2f}s after the change)", expect_answered=False)
+    admin("PATCH", f"/v1/agents/{name}", json={"daily_token_budget": None})
+    print("  budget back to the blueprint's")
 
 
 async def run_scenarios(name: str, token: str) -> None:
@@ -236,7 +315,9 @@ async def run_scenarios(name: str, token: str) -> None:
                 allowed, payload = await call(client, "delete_customer", {"customer_id": "c-003"})
                 report(allowed, payload, expect_allowed=True)
 
-            step("9. Kill switch: blocking the agent takes effect everywhere within a second")
+            await model_calls(http, name)
+
+            step("10. Kill switch: blocking the agent takes effect everywhere within a second")
             started = time.monotonic()
             admin("POST", f"/v1/agents/{name}/block", json={"reason": "demo kill switch"})
             allowed = True
@@ -244,10 +325,12 @@ async def run_scenarios(name: str, token: str) -> None:
                 allowed, payload = await call(client, "get_customer", {"customer_id": "c-001"})
             elapsed = time.monotonic() - started
             report(allowed, f"{payload} ({elapsed:.2f}s after the block)", expect_allowed=False)
+            answered, text = await chat(http, "mock-small", "Hello?")
+            report_answer(answered, text, expect_answered=False, ok="blocked" in text)
 
 
 def shadow_agent() -> None:
-    step("10. Shadow AI: telemetry from an unregistered agent is discovered")
+    step("11. Shadow AI: telemetry from an unregistered agent is discovered")
     service = f"notebook-agent-{secrets.token_hex(2)}"
     span = {
         "traceId": secrets.token_hex(16),
@@ -290,7 +373,7 @@ def shadow_agent() -> None:
 
 
 def evidence(name: str) -> None:
-    step("11. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("12. Evidence: every decision is in a hash-chained, verifiable ledger")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -305,7 +388,7 @@ def evidence(name: str) -> None:
 
 
 def main() -> None:
-    wait_for_gateway()
+    wait_for_gateway("/mcp/crm", MODEL_ROUTE)
     step("1. Registration: a new agent is requested, approved and given an identity")
     name, token = register_agent()
     try:

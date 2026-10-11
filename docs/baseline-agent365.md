@@ -71,6 +71,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Agent map (agents, users, tools) | ✅ | `/v1/graph` and the UI map: people → agents → tool servers, with call volumes |
 | Telemetry via OpenTelemetry (invoke_agent / execute_tool / chat spans) | ✅ | **OTel Collector** → control plane; the same GenAI semantic conventions, so Agent 365-instrumented agents can report here |
 | Trace exploration | ✅ | Optional **Langfuse** (`deploy/compose/docker-compose.langfuse.yml`): the collector sends it every agent and gateway trace, and each gateway decision in the ledger links to its trace |
+| Usage and cost of agents' model calls | ✅ | Tokens and cost per agent, day, provider and model, metered from the gateway's access logs ([model calls](models.md)) |
 | Audit of agent activity | ✅ | Hash-chained evidence ledger with verification and JSONL export; the use of Microsoft 365 and Copilot Studio agents, and Copilot Studio makers' changes, read from the Purview audit log ([connections](microsoft-connections.md#microsoft-purview-audit-log)) |
 
 ### Interoperability
@@ -82,6 +83,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Bring-your-own MCP server with admin approval | ✅ | Registrar-submitted tool servers start `pending` |
 | MCP spec 2026-07-28 (stateless) | ✅ | Handled by agentgateway; decisions use the parsed body, never spoofable headers |
 | Frameworks: Agent Framework, Semantic Kernel, OpenAI Agents SDK, Claude Agent SDK, LangChain, … | ✅ | Any MCP client works through the gateway; in-process enforcement via the **Agent Governance Toolkit** querying OPA (`data.agentos.allow`) |
+| Governed model access, with token limits per consumer (Azure API Management's AI gateway) | ✅ | **agentgateway**'s LLM routes for approved model providers (OpenAI, Anthropic, Gemini, OpenAI-compatible), model grants on blueprints, provider keys held by the gateway and never by agents, and daily token budgets per agent ([model calls](models.md)) |
 | A2A traffic governance | ⏳ | agentgateway supports A2A routes |
 | Work IQ MCP servers (Mail, Calendar, Teams, …) | ➖ | Microsoft 365-specific; any MCP server can be registered |
 | CLI | ✅ | `agentgov` CLI |
@@ -92,9 +94,10 @@ users who delegate to agents), and much of it is preview with frequent API chang
 |---|---|---|
 | Real-time blocking of risky tool calls | ✅ | Governance processor via agentgateway's `ExtMcp` hook, fail-closed; Copilot Studio agents' tool calls through Copilot Studio's external threat detection, decided by the same OPA ([connections](microsoft-connections.md#copilot-studio-threat-detection)) |
 | Secret exfiltration detection | ✅ | Credential detectors on tool arguments (deny) and results (redact) |
-| Prompt injection (XPIA) protection | ✅ | Tool results with injected instructions are withheld; heuristics, ML classifier ⏳; jailbreak and XPIA attempts that Microsoft detects against Microsoft 365 and Copilot Studio agents become findings (Purview audit log) |
+| Prompt injection (XPIA) protection | ✅ | Tool results with injected instructions are withheld, and model calls whose conversation holds one are refused; heuristics, ML classifier ⏳; jailbreak and XPIA attempts that Microsoft detects against Microsoft 365 and Copilot Studio agents become findings (Purview audit log) |
 | Tool poisoning and definition drift | ✅ | Poisoned tools hidden; changed definitions refused until re-approved |
 | DLP / sensitivity of personal data | ✅ | **Presidio** detects PII; policy redacts it from results and from calls to unverified servers |
+| DLP for prompts (Purview DLP for Microsoft 365 Copilot) | ✅ | Personal data masked in prompts to model providers that aren't verified; prompts with credentials refused, and answers with them withheld ([model calls](models.md)) |
 | Posture assessment and recommendations | ✅ | Findings with remediation (ownerless, no sponsor, expired attestation, stale, broad grants, unverified servers, identity drift) |
 | Harmful or malicious agent instructions | ✅ | Agents' system prompts (registered, reported in telemetry, or read from Microsoft 365) are checked by rules and optionally by **IBM Granite Guardian**; problems become findings and add to the risk score ([instructions](instructions.md)) |
 | Connectors used by Copilot Studio agents; risky agent settings | ✅ | Connector allowlist with findings for agents that use other connectors, publish without authentication, use their maker's connections or are shared with everyone; enforced by pushing it into Power Platform's advanced connector policies, and by Copilot Studio threat detection ([connections](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform)) |
@@ -121,7 +124,9 @@ Microsoft documentation and announcements, checked October 2026:
 - Tools: [tooling servers](https://learn.microsoft.com/en-us/microsoft-agent-365/tooling-servers-overview),
   [bring-your-own MCP servers](https://learn.microsoft.com/en-us/microsoft-365/admin/manage/manage-byo-mcp-server)
 - Security: [Defender real-time protection](https://learn.microsoft.com/en-us/defender-xdr/security-for-ai/ai-agent-real-time-protection),
-  [Purview for Agent 365](https://learn.microsoft.com/en-us/purview/ai-agent-365)
+  [Purview for Agent 365](https://learn.microsoft.com/en-us/purview/ai-agent-365),
+  [Purview DLP for Microsoft 365 Copilot](https://learn.microsoft.com/en-us/purview/dlp-microsoft365-copilot-location-learn-about)
+- Models: [AI gateway capabilities in Azure API Management](https://learn.microsoft.com/en-us/azure/api-management/genai-gateway-capabilities)
 - Connections: [Entra agent identities](https://learn.microsoft.com/en-us/graph/api/resources/agentidentity),
   [Purview audit log queries](https://learn.microsoft.com/en-us/graph/api/security-auditcoreroot-post-auditlogqueries),
   [Defender alerts](https://learn.microsoft.com/en-us/graph/api/security-list-alerts_v2),

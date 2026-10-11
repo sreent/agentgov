@@ -21,7 +21,15 @@ from agentgov.models import (
     Agent,
     AgentInstructions,
 )
-from agentgov.registry import approvals, blueprints, features, findings, risk, validation
+from agentgov.registry import (
+    approvals,
+    blueprints,
+    features,
+    findings,
+    model_providers,
+    risk,
+    validation,
+)
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 
 # action -> (allowed source states, target state)
@@ -46,6 +54,8 @@ EDITABLE = (
     "environment",
     "risk_tier",
     "permissions",
+    "model_access",
+    "daily_token_budget",
     "agent_card",
     "external_ids",
     "blueprint",
@@ -118,6 +128,10 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
             value = validation.labels(value)
         elif key == "permissions":
             value = validation.permissions(value)
+        elif key == "model_access":
+            value = validation.model_access(value)
+        elif key == "daily_token_budget":
+            value = validation.token_budget(value)
         elif key == "risk_tier":
             value = validation.risk_tier(value)
         elif key in ("agent_card", "external_ids"):
@@ -158,6 +172,7 @@ def register(
         labels={},
         models=[],
         permissions=[],
+        model_access=[],
         external_ids={},
     )
     _apply(session, agent, data)
@@ -372,6 +387,10 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         },
         "permissions": agent.permissions or [],
         "effective_permissions": effective_grants(agent),
+        "model_access": agent.model_access or [],
+        "effective_model_access": model_providers.effective_model_access(agent),
+        "daily_token_budget": agent.daily_token_budget,
+        "effective_daily_token_budget": model_providers.effective_budget(agent),
         "agent_card": agent.agent_card,
         "external_ids": agent.external_ids or {},
         "source": agent.source,

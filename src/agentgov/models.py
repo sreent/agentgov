@@ -9,6 +9,7 @@ matrix in docs/baseline-agent365.md maps one-to-one:
 * ``Agent``      - one agent identity with owner, sponsors and lifecycle state.
                    Its credentials live in Keycloak, not here.
 * ``ToolServer`` - an MCP server published through agentgateway.
+* ``ModelProvider`` - a model provider agents call through agentgateway.
 * ``Policy``     - an organisation Rego module distributed to OPA.
 * ``FeatureSetting`` - which of AgentGov's features are used, and how strictly.
 """
@@ -18,7 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agentgov.db import Base, UTCDateTime
@@ -40,6 +41,9 @@ RISK_LEVELS = ("low", "medium", "high", "critical")
 TRUST_LEVELS = ("verified", "unverified")
 DATA_CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
 SEVERITIES = ("info", "low", "medium", "high", "critical")
+# Model providers agentgateway can call with an API key. "openai-compatible" is any
+# server that speaks OpenAI's API (vLLM, Ollama, LiteLLM, hosted APIs) at base_url.
+MODEL_PROVIDER_KINDS = ("openai", "anthropic", "gemini", "openai-compatible")
 
 
 def _created() -> Mapped[datetime]:
@@ -62,6 +66,10 @@ class Blueprint(Base):
     require_sponsor: Mapped[bool] = mapped_column(Boolean, default=True)
     attestation_days: Mapped[int | None] = mapped_column(Integer, nullable=True, default=90)
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Models its agents may call: [{"provider": "<name>", "models": ["<glob>", ...]}].
+    model_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    # Tokens (input and output) each of its agents may use per UTC day; None: no limit.
+    daily_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -96,6 +104,10 @@ class Agent(Base):
 
     # Agent-specific grants, in addition to the blueprint's.
     permissions: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Models it may call, in addition to the blueprint's (same shape as Blueprint's).
+    model_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    # Its own daily token budget, instead of the blueprint's.
+    daily_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # A2A AgentCard (v1.0) describing the agent's skills and interfaces.
     agent_card: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # Identifiers in other systems (OTel agent id, platform ids, fingerprints).
@@ -143,6 +155,55 @@ class ToolServer(Base):
     created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+
+
+class ModelProvider(Base):
+    """A model provider agents call through the gateway, at ``/llm/<name>``.
+
+    Its API key never enters AgentGov: the gateway reads it from ``key_file``, a
+    file mounted into the gateway (by default ``/model-keys/<name>``).
+    """
+
+    __tablename__ = "model_providers"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # Where an OpenAI-compatible server listens (http(s)://host[:port][/path]).
+    base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_file: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="approved")
+    # "verified": personal data may be sent to it (by agents labelled pii-access).
+    trust_level: Mapped[str] = mapped_column(String(16), default="unverified")
+    # USD per million tokens, by model glob: {"gpt-4o*": {"input": 2.5, "output": 10}}.
+    prices: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class ModelUsage(Base):
+    """Model calls through the gateway, per agent, UTC day, provider and model.
+
+    ``agent_id`` is empty for callers the gateway could not identify (only possible
+    when unknown agents are monitored rather than rejected).
+    """
+
+    __tablename__ = "model_usage"
+
+    agent_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)  # YYYY-MM-DD (UTC)
+    provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model: Mapped[str] = mapped_column(String(128), primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    refused: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+    __table_args__ = (Index("ix_model_usage_day", "day"),)
 
 
 class Policy(Base):

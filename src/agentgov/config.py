@@ -166,8 +166,10 @@ class Settings:
     gateway_config_path: str | None = None
     gateway_public_url: str = "http://localhost:8080"
     gateway_port: int = 8080
-    # Address agentgateway uses to reach the governance processor.
+    # Addresses agentgateway uses to reach the governance processor: for tool calls
+    # (gRPC) and for model calls (its guardrail webhook, HTTP).
     processor_address: str = "processor:50051"
+    processor_webhook_address: str = "processor:8091"
     # OTLP/gRPC endpoint for gateway traces, e.g. http://otel-collector:4317.
     gateway_otlp_endpoint: str | None = None
     # agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts.
@@ -180,6 +182,8 @@ class Settings:
 
     # --- Governance processor ----------------------------------------------------
     processor_listen: str = "0.0.0.0:50051"
+    # Where it answers agentgateway's guardrail webhook for model calls.
+    processor_webhook_listen: str = "0.0.0.0:8091"
     # Control plane URL as seen from the processor.
     control_plane_url: str = "http://localhost:8000"
     presidio_url: str | None = None

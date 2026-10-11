@@ -24,6 +24,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Iterable
 from typing import Any
 
 import grpc
@@ -49,6 +50,15 @@ DENIED = pb.AuthorizationError.PERMISSION_DENIED
 _TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$")
 
 
+def trace_id_from(traceparents: Iterable[str]) -> str | None:
+    """The W3C trace ID in the first valid ``traceparent`` value."""
+    for value in traceparents:
+        match = _TRACEPARENT.match(value.strip().lower())
+        if match and match.group(1) != "0" * 32:
+            return match.group(1)
+    return None
+
+
 def trace_id_of(context: Any, headers: Any = ()) -> str | None:
     """The W3C trace ID of the call, from agentgateway's ``traceparent``.
 
@@ -61,11 +71,7 @@ def trace_id_of(context: Any, headers: Any = ()) -> str | None:
     if callable(metadata):
         values += [str(v) for k, v in metadata() or () if k == "traceparent"]
     values += [h.value.decode("latin-1") for h in headers if h.key.lower() == "traceparent"]
-    for value in values:
-        match = _TRACEPARENT.match(value.strip().lower())
-        if match and match.group(1) != "0" * 32:
-            return match.group(1)
-    return None
+    return trace_id_from(values)
 
 
 def _struct(message: Any) -> dict[str, Any]:
@@ -538,19 +544,30 @@ async def serve(settings: Settings) -> None:
             ("grpc.max_send_message_length", 64 * 1024 * 1024),
         ]
     )
-    pb_grpc.add_ExtMcpServicer_to_server(
-        GovernanceProcessor(
-            settings, opa=opa, control_plane=control_plane, recorder=recorder, presidio=presidio
-        ),
-        server,
+    processor = GovernanceProcessor(
+        settings, opa=opa, control_plane=control_plane, recorder=recorder, presidio=presidio
     )
+    pb_grpc.add_ExtMcpServicer_to_server(processor, server)
     server.add_insecure_port(settings.processor_listen)
+    # Model calls: agentgateway's guardrail webhook, over HTTP.
+    from agentgov.processor import model_guard
+
+    webhook = model_guard.server(
+        model_guard.ModelGuard(processor), settings.processor_webhook_listen
+    )
     recorder.start()
     await server.start()
-    log.info("governance processor listening on %s", settings.processor_listen)
+    webhook_task = asyncio.create_task(webhook.serve())
+    log.info(
+        "governance processor listening on %s (tool calls) and %s (model calls)",
+        settings.processor_listen,
+        settings.processor_webhook_listen,
+    )
     try:
         await server.wait_for_termination()
     finally:
+        webhook.should_exit = True
+        await webhook_task
         await server.stop(grace=5)
         await recorder.stop()
         await http.aclose()

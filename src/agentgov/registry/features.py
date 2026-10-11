@@ -76,16 +76,32 @@ CATALOG: tuple[Feature, ...] = (
         },
     ),
     Feature(
+        "model-gateway",
+        "Model gateway",
+        "gateway",
+        "Approved model providers are published on agentgateway at /llm/<provider>, where "
+        "agents call models with their AgentGov token instead of the provider's API key, and "
+        "the controls below check every prompt and answer.",
+        SWITCH,
+        ON,
+        {
+            ON: "Approved model providers are reachable through the gateway.",
+            OFF: "No model provider is published on the gateway. The registry keeps them.",
+        },
+        needs="each provider's API key in a file the gateway reads",
+    ),
+    Feature(
         "least-privilege",
         "Least-privilege access",
         "controls",
-        "Agents call only the tools their blueprint and their own grants allow, and see only "
-        "those when they list a server's tools.",
+        "Agents call only the tools and models their blueprint and their own grants allow, and "
+        "see only those tools when they list a server's.",
         CONTROL,
         ENFORCE,
         {
-            ENFORCE: "Calls to tools an agent wasn't granted are denied.",
-            MONITOR: "Agents see and call every tool; calls they weren't granted are recorded.",
+            ENFORCE: "Calls to tools and models an agent wasn't granted are denied.",
+            MONITOR: "Agents see and call every tool and model; calls they weren't granted are "
+            "recorded.",
             OFF: "Grants aren't checked.",
         },
     ),
@@ -107,8 +123,9 @@ CATALOG: tuple[Feature, ...] = (
         "data-protection",
         "Data protection",
         "controls",
-        "Tool arguments and results are inspected for credentials and personal data: "
-        "credentials never reach a tool, and personal data is masked unless policy allows it.",
+        "Tool calls and model calls are inspected for credentials and personal data: "
+        "credentials never reach a tool or a model provider, and personal data is masked "
+        "unless policy allows it.",
         CONTROL,
         ENFORCE,
         {
@@ -123,7 +140,7 @@ CATALOG: tuple[Feature, ...] = (
         "Prompt-injection defence",
         "controls",
         "Tool results that carry instructions aimed at the agent (indirect prompt "
-        "injection) are kept from it.",
+        "injection) are kept from it, and model calls whose conversation holds one are refused.",
         CONTROL,
         ENFORCE,
         {
@@ -159,6 +176,20 @@ CATALOG: tuple[Feature, ...] = (
             MONITOR: "Their calls go through and are recorded; the automatic block only "
             "raises a finding.",
             OFF: "Risk is scored and shown but doesn't change what agents may do.",
+        },
+    ),
+    Feature(
+        "token-budgets",
+        "Token budgets",
+        "controls",
+        "Agents that have used their daily token budget (their own, or their blueprint's) are "
+        "refused further model calls until the next day (UTC).",
+        CONTROL,
+        ENFORCE,
+        {
+            ENFORCE: "Agents over their budget are refused.",
+            MONITOR: "Their calls go through and are recorded.",
+            OFF: "Budgets aren't checked. Usage is still metered.",
         },
     ),
     Feature(

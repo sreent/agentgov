@@ -1,5 +1,6 @@
 # Agents and agentgateway send OTLP here. GenAI spans go to the control plane,
 # which uses them for discovery (shadow agents), activity and detective controls.
+# agentgateway's access logs of model calls go there too: they meter tokens and cost.
 receivers:
   otlp:
     protocols:
@@ -11,6 +12,12 @@ receivers:
 processors:
   batch:
     timeout: 2s
+  # Only model calls: the gateway logs every request.
+  filter/model_calls:
+    error_mode: ignore
+    logs:
+      log_record:
+        - attributes["gen_ai.operation.name"] == nil
 
 exporters:
   otlp_http/agentgov:
@@ -27,4 +34,8 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
+      exporters: [otlp_http/agentgov]
+    logs:
+      receivers: [otlp]
+      processors: [filter/model_calls, batch]
       exporters: [otlp_http/agentgov]

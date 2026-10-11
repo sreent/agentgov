@@ -1,0 +1,5 @@
+# Model providers' API keys: one file per provider, named after it. Never commit them.
+# The demo provider's key is a placeholder the demo model accepts.
+*
+!.gitignore
+!demo

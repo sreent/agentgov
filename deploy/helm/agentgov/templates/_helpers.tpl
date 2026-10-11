@@ -129,3 +129,8 @@ off or on as a boolean: take it as the mode it was meant to be. */}}
 {{- end -}}
 {{- join "," $pins -}}
 {{- end -}}
+
+{{/* The Secret holding model providers' API keys. */}}
+{{- define "agentgov.modelKeysSecret" -}}
+{{- .Values.modelKeys.existingSecret | default (printf "%s-model-keys" (include "agentgov.fullname" .)) -}}
+{{- end -}}

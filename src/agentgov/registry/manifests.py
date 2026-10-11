@@ -2,7 +2,7 @@
 
 ```yaml
 apiVersion: agentgov/v1alpha1
-kind: Agent            # Feature | Blueprint | ToolServer | Policy | Agent
+kind: Agent            # Feature | Blueprint | ToolServer | ModelProvider | Policy | Agent
 metadata:
   name: support-bot
 spec:
@@ -31,11 +31,19 @@ from sqlalchemy.orm import Session
 
 from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
-from agentgov.registry import agents, blueprints, features, instructions, policies, toolservers
+from agentgov.registry import (
+    agents,
+    blueprints,
+    features,
+    instructions,
+    model_providers,
+    policies,
+    toolservers,
+)
 from agentgov.registry.errors import NotFound, ValidationError
 
 API_VERSION = "agentgov/v1alpha1"
-ORDER = ["Feature", "Blueprint", "ToolServer", "Policy", "Agent"]
+ORDER = ["Feature", "Blueprint", "ToolServer", "ModelProvider", "Policy", "Agent"]
 
 
 def parse(text: str) -> list[dict[str, Any]]:
@@ -81,6 +89,7 @@ def apply(
             "Feature": _feature,
             "Blueprint": _blueprint,
             "ToolServer": _toolserver,
+            "ModelProvider": _model_provider,
             "Policy": _policy,
             "Agent": _agent,
         }[kind](session, settings, spec, actor)
@@ -123,6 +132,24 @@ def _toolserver(session: Session, settings: Settings, spec: dict[str, Any], acto
             session, ts, "approve" if ts.status == PENDING else "unblock", actor=actor
         )
         action = "configured"
+    return action
+
+
+def _model_provider(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    desired = spec.pop("status", model_providers.APPROVED)
+    if desired not in (model_providers.APPROVED, BLOCKED):
+        raise ValidationError(f"model provider {spec['name']}: status must be approved or blocked")
+    try:
+        provider = model_providers.get(session, spec["name"])
+        changed = model_providers.update(session, provider, spec, actor=actor)
+        action = "configured" if changed else "unchanged"
+    except NotFound:
+        provider = model_providers.create(session, spec, actor=actor)
+        action = "created"
+    if provider.status != desired:
+        verb = "block" if desired == BLOCKED else "unblock"
+        model_providers.set_status(session, provider, verb, actor=actor)
+        action = "configured" if action == "unchanged" else action
     return action
 
 
@@ -193,6 +220,13 @@ def export(session: Session) -> list[dict[str, Any]]:
         spec = {k: d[k] for k in toolservers.FIELDS}
         spec["status"] = ts.status
         docs.append(_doc("ToolServer", ts.name, spec))
+    for provider in model_providers.list_all(session):
+        d = model_providers.to_dict(provider)
+        spec = {k: d[k] for k in model_providers.FIELDS if d[k] not in (None, "", {}, [])}
+        if not provider.key_file:
+            spec.pop("key_file", None)  # the default path follows the name
+        spec["status"] = provider.status
+        docs.append(_doc("ModelProvider", provider.name, spec))
     for policy in policies.list_all(session):
         docs.append(
             _doc(

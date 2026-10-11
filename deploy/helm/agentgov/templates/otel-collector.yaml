@@ -3,7 +3,8 @@
 {{- $v := .Values.otelCollector }}
 {{- $config := include "agentgov.otelConfig" . }}
 # Agents and the gateway send OTLP here. GenAI spans go to the control plane, which
-# uses them for discovery (shadow agents), activity and detective controls.
+# uses them for discovery (shadow agents), activity and detective controls; so do the
+# gateway's access logs of model calls, which meter tokens and cost.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -94,6 +95,12 @@ receivers:
 processors:
   batch:
     timeout: 2s
+  # Only model calls: the gateway logs every request.
+  filter/model_calls:
+    error_mode: ignore
+    logs:
+      log_record:
+        - attributes["gen_ai.operation.name"] == nil
 exporters:
   otlp_http/agentgov:
     endpoint: {{ include "agentgov.controlPlaneUrl" . }}/v1/otlp
@@ -109,5 +116,9 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
+      exporters: [otlp_http/agentgov]
+    logs:
+      receivers: [otlp]
+      processors: [filter/model_calls, batch]
       exporters: [otlp_http/agentgov]
 {{- end -}}

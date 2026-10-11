@@ -33,9 +33,11 @@ def _parse_ts(value: Any) -> datetime:
 def record_mcp_decisions(
     session: Session, settings: Settings, records: list[dict[str, Any]]
 ) -> int:
-    """Store decision records sent by the governance processor."""
+    """Store decision records sent by the governance processor: on tool calls, and on
+    model calls (``kind: "model"``), whose activity the gateway's access logs count."""
     touched: dict[str, Agent] = {}
     for rec in records:
+        model_call = rec.get("kind") == "model"
         agent_info = rec.get("agent") or {}
         agent = session.get(Agent, agent_info.get("id")) if agent_info.get("id") else None
         identity = rec.get("identity") or {}
@@ -55,7 +57,7 @@ def record_mcp_decisions(
             reason = "monitored: " + "; ".join(monitored)
         ledger.append(
             session,
-            type=f"decision.{phase}",
+            type=f"decision.model.{phase}" if model_call else f"decision.{phase}",
             actor=actor,
             agent=agent,
             agent_name=None if agent else identity.get("client_id"),
@@ -91,7 +93,9 @@ def record_mcp_decisions(
             continue
         agent.last_seen_at = when
         touched[agent.id] = agent
-        if phase == "request":
+        if model_call:
+            _model_signals(session, agent, phase, effect, detections, resource)
+        elif phase == "request":
             discovery.record_activity(
                 session, agent.id, when=when, tool_calls=1, denied=1 if effect == "deny" else 0
             )
@@ -139,6 +143,62 @@ def record_mcp_decisions(
     for agent in touched.values():
         agents_svc.refresh_risk(session, settings, agent)
     return len(records)
+
+
+def _model_signals(
+    session: Session,
+    agent: Agent,
+    phase: str,
+    effect: str | None,
+    detections: dict[str, Any],
+    resource: Any,
+) -> None:
+    """Risk signals and findings from a decision on a prompt or an answer."""
+    categories = set(detections.get("categories") or [])
+    if phase == "request" and effect == "deny":
+        risk.add_signal(session, agent.id, "policy_denied", resource)
+    if phase == "request" and "secret" in categories:
+        risk.add_signal(session, agent.id, "secret_detected", resource)
+        findings.raise_finding(
+            session,
+            type="agent.credential_exfiltration_attempt",
+            severity="high",
+            subject=agent.id,
+            agent_id=agent.id,
+            category=findings.THREAT,
+            title=f"{agent.name} tried to send credentials to a model provider",
+            description=f"Credentials ({', '.join(detections.get('entities') or [])}) were found "
+            f"in a prompt for {resource}; "
+            + (
+                "it was not sent."
+                if effect == "deny"
+                else "it was sent: data protection is not enforced."
+            ),
+            remediation="Check the agent's prompt and context sources for leaked secrets and "
+            "rotate them.",
+        )
+    if phase == "request" and detections.get("prompt_injection"):
+        risk.add_signal(session, agent.id, "prompt_injection", resource)
+        findings.raise_finding(
+            session,
+            type="agent.prompt_injection",
+            severity="high",
+            subject=agent.id,
+            agent_id=agent.id,
+            category=findings.THREAT,
+            title=f"A tool result tried to give {agent.name} instructions",
+            description="A tool result in one of its conversations contained instructions "
+            "aimed at the agent ("
+            + ", ".join(detections.get("injection_reasons") or [])
+            + (
+                "). The model call was refused."
+                if effect == "deny"
+                else "). The model call went through: prompt-injection defence is not enforced."
+            ),
+            remediation="Find which of the agent's tools returned it: untrusted content may be "
+            "targeting your agents. Tools called through the MCP gateway are checked as they "
+            "answer.",
+        )
 
 
 def record_opa_decisions(session: Session, events: list[dict[str, Any]]) -> int:

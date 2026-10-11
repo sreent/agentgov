@@ -3,7 +3,7 @@
 Authorization is decided by [Open Policy Agent](https://www.openpolicyagent.org) using
 the Rego library in `src/agentgov/policies/`. The control plane ships the library and
 the live registry to OPA as a bundle; the governance processor asks OPA for a decision on
-every governed MCP operation.
+every governed MCP operation, and on every prompt and answer of a [model call](models.md).
 
 ## How a decision is made
 
@@ -133,6 +133,63 @@ Before a policy is accepted, the control plane compiles it with the library
 `require_approval` and `redact` are sets. A module that would break the bundle — and with
 it every later registry change, including blocks — is rejected with the compiler's
 message instead of being shipped.
+
+## Model calls
+
+Agents' calls to models through the gateway are decided by
+`data.agentgov.models.decision`, for each prompt (`phase: "request"`) and for each answer
+that holds something to decide on (`phase: "response"`). Its built-in rules:
+
+| Rule | Effect | Control |
+|---|---|---|
+| Caller is not a registered agent | deny | `unknown-callers` |
+| Agent is not `active` | deny | always |
+| Model provider unknown or blocked | deny | always |
+| Model not granted to the agent (`model_access`) | deny | `least-privilege` |
+| Credentials in the prompt | deny | `data-protection` |
+| Credentials in the answer | answer withheld | `data-protection` |
+| Personal data in a prompt to a provider whose `trust_level` is not `verified` | redact `pii` (masked before the prompt leaves) | `data-protection` |
+| Personal data to mask in a conversation that holds tool calls | deny (masking would break them) | `data-protection` |
+| A tool result in the conversation contains a prompt-injection payload | deny | `prompt-injection` |
+| Agent risk level is `critical` | deny | `risk-based-access` |
+| Agent has used its daily token budget | deny | `token-budgets` |
+
+Organisation policies' `deny` applies to model calls, and their `redact` masks prompts
+as `data-protection` does. A model call can't wait for an approver, so
+`require_approval` doesn't apply. The input has `kind: "model"`:
+
+```json
+{
+  "kind": "model",
+  "phase": "request",                       // or "response"
+  "agent": {"client_id": "agent-support-bot", "agent_id": "agt_…"},
+  "provider": "openai",
+  "model": "gpt-4.1-mini",
+  "detections": {"categories": ["pii"], "entities": ["EMAIL_ADDRESS"],
+                 "prompt_injection": false, "injection_score": 0.0},
+  "tool_calls": false                       // the conversation holds tool calls or results
+}
+```
+
+`data.registry.model_providers` holds each provider's `kind`, `status`, `trust_level`
+and `labels`, and each agent in `data.registry.agents` its `model_access`,
+`daily_token_budget` and whether it is `over_budget` today. For example:
+
+```rego
+package agentgov.custom.prod_models
+
+import data.agentgov.context as ctx
+
+deny contains "Production agents may only use self-hosted models" if {
+	input.kind == "model"
+	ctx.agent.environment == "prod"
+	data.registry.model_providers[input.provider].labels.hosting != "self-hosted"
+}
+```
+
+Rules written for tool calls look at `input.resource`, which model calls don't have, so
+they don't apply to them. To ask the live OPA about a model call, send
+`"path": "agentgov/models/decision"` with the input to `POST /v1/policies/evaluate`.
 
 ## Copilot Studio's tool calls
 

@@ -318,7 +318,8 @@ end_to_end() {
     echo "  docker compose -f deploy/compose/docker-compose.yml down"
     return 1
   fi
-  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm ||
+  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm &&
+    docker_build agentgov-demo-model:local examples/models/mock ||
     return 1
   echo "starting the stack (project agentgov-ci)"
   if ! "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout 600 >/dev/null; then
@@ -351,11 +352,13 @@ chart_on_docker() {
     echo "ports in use: ${busy[*]}; stop what uses them first"
     return 1
   fi
-  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm ||
+  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm &&
+    docker_build agentgov-demo-model:local examples/models/mock ||
     return 1
   rendered=$(mktemp)
   helm template agentgov "$CHART" --set image.repository=agentgov --set image.tag=local \
-    --set image.pullPolicy=Never --set presidio.image.tag=2.2.364 >"$rendered" || return 1
+    --set image.pullPolicy=Never --set presidio.image.tag=2.2.364 \
+    --set modelKeys.keys.demo=demo-model-key >"$rendered" || return 1
   python scripts/chart-on-docker.py down
   if python scripts/chart-on-docker.py up "$rendered" --demo; then
     AGENTGOV_TOKEN=$(python scripts/chart-on-docker.py secret "$rendered" admin-token)
@@ -377,7 +380,8 @@ chart_on_docker() {
 }
 
 # The chart on a real cluster: kind, with every image loaded from the local
-# Docker, the demo MCP server beside it, and the same demo as the Compose run.
+# Docker, the demo MCP server and model beside it, and the same demo as the
+# Compose run.
 KIND_CLUSTER=agentgov-ci
 KIND_NAMESPACE=agentgov
 
@@ -408,13 +412,15 @@ kind_end_to_end() {
     --set image.repository=agentgov --set image.tag=local --set image.pullPolicy=Never
     # kind loads images by tag: the digest pin would make the node pull it.
     --set presidio.image.tag=2.2.364
+    --set modelKeys.keys.demo=demo-model-key
   )
   setup_chart_tools && setup_kind_tools || return 1
   kind delete cluster --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
-  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm ||
+  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm &&
+    docker_build agentgov-demo-model:local examples/models/mock ||
     return 1
   kind create cluster --name "$KIND_CLUSTER" --wait 180s || return 1
-  for image in agentgov-demo-crm:local $(helm template agentgov "$CHART" "${values[@]}" |
+  for image in agentgov-demo-crm:local agentgov-demo-model:local $(helm template agentgov "$CHART" "${values[@]}" |
     awk '$1 == "image:" { gsub(/"/, "", $2); print $2 }' | sort -u); do
     if ! { docker image inspect "$image" >/dev/null 2>&1 || docker pull --quiet "$image" >/dev/null; } ||
       ! kind load docker-image --name "$KIND_CLUSTER" "$image" >/dev/null; then
@@ -442,6 +448,28 @@ metadata: {name: crm-mcp}
 spec:
   selector: {app: crm-mcp}
   ports: [{port: 9000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: demo-model}
+spec:
+  selector: {matchLabels: {app: demo-model}}
+  template:
+    metadata: {labels: {app: demo-model}}
+    spec:
+      containers:
+        - name: model
+          image: "agentgov-demo-model:local"
+          imagePullPolicy: Never
+          ports: [{containerPort: 9100}]
+          env: [{name: MOCK_MODEL_KEY, value: demo-model-key}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: demo-model}
+spec:
+  selector: {app: demo-model}
+  ports: [{port: 9100}]
 EOF
   fi
   if [ "$rc" = 0 ]; then

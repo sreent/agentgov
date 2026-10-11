@@ -48,12 +48,24 @@ SMOKE_INPUTS: list[dict[str, Any]] = [
         "arguments": {"text": "hello", "amount": 10},
         "detections": {"categories": [], "entities": [], "prompt_injection": False},
     },
+    # A prompt to a model provider, decided by agentgov.models.
+    {
+        "kind": "model",
+        "phase": "request",
+        "agent": {"client_id": "agent-smoke-test"},
+        "provider": "smoke",
+        "model": "smoke-model",
+        "detections": {"categories": ["pii"], "entities": ["EMAIL_ADDRESS"]},
+        "tool_calls": False,
+    },
 ]
 
 
 def _decision_for(sample: dict[str, Any]) -> str:
     if sample.get("platform") == "copilot-studio":
         return "data.agentgov.copilotstudio.decision"
+    if sample.get("kind") == "model":
+        return "data.agentgov.models.decision"
     return "data.agentgov.mcp.decision"
 
 

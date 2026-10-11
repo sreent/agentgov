@@ -29,6 +29,14 @@ urls:
 # modes of the other features themselves.
 features: {}
 
+# Model providers' API keys (docs/models.md). The gateway reads each from
+# /model-keys/<provider>, so the keys never enter AgentGov. Name a Secret you manage,
+# whose keys are provider names, or, to evaluate, give the keys here and the chart
+# creates the Secret: keys: {openai: sk-...}.
+modelKeys:
+  existingSecret: ""
+  keys: {}
+
 secrets:
   # A Secret you manage, with the keys admin-token, service-token,
   # keycloak-client-secret, oidc-client-secret, demo-password,

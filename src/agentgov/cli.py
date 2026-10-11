@@ -79,6 +79,11 @@ db_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(db_app, name="db")
+models_app = typer.Typer(
+    help="Model providers agents call through the gateway, and what agents spend.",
+    no_args_is_help=True,
+)
+app.add_typer(models_app, name="models")
 features_app = typer.Typer(
     help="Which features are used, and how strictly (off, monitor or enforce).",
     no_args_is_help=True,
@@ -190,6 +195,29 @@ def _grants(values: list[str] | None) -> list[dict[str, Any]]:
             _fail(f"grants look like server:tool,tool (got {value!r}); use server:* for all tools")
         grants.append({"server": server.strip(), "tools": names})
     return grants
+
+
+def _model_access(values: list[str] | None) -> list[dict[str, Any]]:
+    """Model grants written as ``provider:model,model`` (``provider:*`` for every model)."""
+    grants = []
+    for value in values or []:
+        provider, sep, models = value.partition(":")
+        names = [m.strip() for m in models.split(",") if m.strip()]
+        if not sep or not provider.strip() or not names:
+            _fail(f"model access looks like provider:model,model (got {value!r}); use provider:*")
+        grants.append({"provider": provider.strip(), "models": names})
+    return grants
+
+
+def _model_fields(access: list[str] | None, budget: int | None, no_budget: bool) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if access is not None:
+        body["model_access"] = _model_access(access)
+    if no_budget:
+        body["daily_token_budget"] = None
+    elif budget is not None:
+        body["daily_token_budget"] = budget
+    return body
 
 
 def _given(**fields: Any) -> dict[str, Any]:
@@ -677,6 +705,11 @@ ENVIRONMENT = typer.Option(None, help="For example prod, staging or dev.")
 MODEL = typer.Option(None, "--model", help="Model the agent uses (repeatable).")
 GRANT = typer.Option(None, "--grant", help="Extra tool grant server:tool,tool (repeatable).")
 RISK_TIER = typer.Option(None, help="minimal, low, medium, high or critical.")
+MODEL_ACCESS = typer.Option(
+    None, "--model-access", help="Models it may call, provider:model,model (repeatable)."
+)
+TOKEN_BUDGET = typer.Option(None, help="Tokens it may use per day (UTC), in and out.")
+NO_TOKEN_BUDGET = typer.Option(False, "--no-token-budget", help="No daily token budget.")
 
 
 @agents_app.command("create")
@@ -691,12 +724,14 @@ def agents_create(
     platform: str | None = None,
     model: list[str] | None = MODEL,
     grant: list[str] | None = GRANT,
+    model_access: list[str] | None = MODEL_ACCESS,
+    token_budget: int | None = TOKEN_BUDGET,
     label: list[str] | None = LABEL,
     risk_tier: str | None = RISK_TIER,
     approve: bool = typer.Option(False, "--approve", help="Activate it now (admins only)."),
 ) -> None:
     """Register an agent. It waits in pending review unless --approve is given."""
-    body = _agent_fields(
+    body = _model_fields(model_access, token_budget, False) | _agent_fields(
         description=description,
         blueprint=blueprint,
         owner=owner,
@@ -730,11 +765,18 @@ def agents_update(
         None, "--grant", help="Extra grants server:tool,tool (replace the current ones)."
     ),
     clear_grants: bool = typer.Option(False, "--clear-grants", help="Remove the extra grants."),
+    model_access: list[str] | None = typer.Option(
+        None, "--model-access", help="Extra model access provider:model,model (replace it)."
+    ),
+    token_budget: int | None = TOKEN_BUDGET,
+    no_token_budget: bool = typer.Option(
+        False, "--no-token-budget", help="Use its blueprint's budget."
+    ),
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
     risk_tier: str | None = RISK_TIER,
 ) -> None:
     """Change an agent's details. Only the options you pass are changed."""
-    body = _agent_fields(
+    body = _model_fields(model_access, token_budget, no_token_budget) | _agent_fields(
         description=description,
         blueprint=blueprint,
         owner=owner,
@@ -1019,12 +1061,14 @@ def blueprints_create(
     review_days: int | None = REVIEW_DAYS,
     no_review: bool = NO_REVIEW,
     require_sponsor: bool | None = REQUIRE_SPONSOR,
+    model_access: list[str] | None = MODEL_ACCESS,
+    token_budget: int | None = TOKEN_BUDGET,
     label: list[str] | None = LABEL,
 ) -> None:
     """Create a blueprint."""
     body = _blueprint_fields(
         description, grant, risk_tier, review_days, no_review, require_sponsor, label
-    )
+    ) | _model_fields(model_access, token_budget, False)
     bp = _call("POST", "/v1/blueprints", json={"name": name, **body})
     _done("blueprint", bp["name"], "created")
 
@@ -1040,12 +1084,17 @@ def blueprints_update(
     review_days: int | None = REVIEW_DAYS,
     no_review: bool = NO_REVIEW,
     require_sponsor: bool | None = REQUIRE_SPONSOR,
+    model_access: list[str] | None = typer.Option(
+        None, "--model-access", help="Model access provider:model,model (replace it)."
+    ),
+    token_budget: int | None = TOKEN_BUDGET,
+    no_token_budget: bool = NO_TOKEN_BUDGET,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
 ) -> None:
     """Change a blueprint. Every agent on it gets the change."""
     body = _blueprint_fields(
         description, grant, risk_tier, review_days, no_review, require_sponsor, label
-    )
+    ) | _model_fields(model_access, token_budget, no_token_budget)
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
     bp = _call("PATCH", f"/v1/blueprints/{name}", json=body)
@@ -1772,3 +1821,178 @@ def features_set(
         )
     out = _call("PUT", f"/v1/features/{quote(key)}", json={"mode": mode})
     _done("feature", key, f"{out['mode']}: {out['effect']}")
+
+
+# -------------------------------------------------------------------- models
+
+
+def _prices(values: list[str] | None) -> dict[str, dict[str, float]]:
+    """Prices written as ``model-glob=input,output`` in USD per million tokens."""
+    prices = {}
+    for value in values or []:
+        model, sep, amounts = value.partition("=")
+        parts = [p.strip() for p in amounts.split(",")]
+        try:
+            input_usd, output_usd = (float(p) for p in parts)
+        except ValueError:
+            _fail(f"prices look like model=input,output in USD per million tokens (got {value!r})")
+        if not sep or not model.strip():
+            _fail(f"prices look like model=input,output in USD per million tokens (got {value!r})")
+        prices[model.strip()] = {"input": input_usd, "output": output_usd}
+    return prices
+
+
+def _provider_fields(
+    *,
+    kind: str | None,
+    description: str | None,
+    base_url: str | None,
+    key_file: str | None,
+    trust: str | None,
+    price: list[str] | None,
+    label: list[str] | None,
+) -> dict[str, Any]:
+    body = _given(kind=kind, description=description, trust_level=trust)
+    for key, value in (("base_url", base_url), ("key_file", key_file)):
+        if value is not None:
+            body[key] = value or None
+    if price is not None:
+        body["prices"] = _prices(price)
+    if label is not None:
+        body["labels"] = _labels(label)
+    return body
+
+
+PROVIDER_KIND = typer.Option(None, help="openai, anthropic, gemini or openai-compatible.")
+BASE_URL = typer.Option(
+    None, help="An openai-compatible server's OpenAI API base, e.g. http://vllm:8000/v1."
+)
+KEY_FILE = typer.Option(
+    None, help="Where the gateway reads its API key (default /model-keys/<name>)."
+)
+TRUST = typer.Option(None, "--trust", help="verified: personal data may be sent to it.")
+PRICE = typer.Option(
+    None, "--price", help="model=input,output in USD per million tokens (repeatable)."
+)
+
+
+@models_app.command("list")
+def models_list() -> None:
+    """Model providers, and where agents call them."""
+    rows = [
+        {**p, "trust": p["trust_level"], "gateway_path": p["route"]}
+        for p in _call("GET", "/v1/models/providers")
+    ]
+    _table(rows, ["name", "kind", "status", "trust", "gateway_path", "key_file"])
+
+
+@models_app.command("get")
+def models_get(name: str) -> None:
+    """A model provider, as JSON."""
+    _print(_call("GET", f"/v1/models/providers/{quote(name)}"))
+
+
+@models_app.command("create")
+def models_create(
+    name: str,
+    kind: str = typer.Option(..., help="openai, anthropic, gemini or openai-compatible."),
+    description: str | None = DESCRIPTION,
+    base_url: str | None = BASE_URL,
+    key_file: str | None = KEY_FILE,
+    trust: str | None = TRUST,
+    price: list[str] | None = PRICE,
+    label: list[str] | None = LABEL,
+) -> None:
+    """Approve a model provider. Put its API key where the gateway reads it."""
+    body = _provider_fields(
+        kind=kind,
+        description=description,
+        base_url=base_url,
+        key_file=key_file,
+        trust=trust,
+        price=price,
+        label=label,
+    )
+    out = _call("POST", "/v1/models/providers", json={"name": name, **body})
+    _done("model-provider", out["name"], f"approved; agents call it at {out['route']}")
+
+
+@models_app.command("update")
+def models_update(
+    name: str,
+    kind: str | None = PROVIDER_KIND,
+    description: str | None = DESCRIPTION,
+    base_url: str | None = BASE_URL,
+    key_file: str | None = KEY_FILE,
+    trust: str | None = TRUST,
+    price: list[str] | None = typer.Option(
+        None, "--price", help="Prices model=input,output (replace them)."
+    ),
+    label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+) -> None:
+    """Change a model provider."""
+    body = _provider_fields(
+        kind=kind,
+        description=description,
+        base_url=base_url,
+        key_file=key_file,
+        trust=trust,
+        price=price,
+        label=label,
+    )
+    if not body:
+        _fail("nothing to change: pass at least one option (see --help)")
+    out = _call("PATCH", f"/v1/models/providers/{quote(name)}", json=body)
+    _done("model-provider", out["name"], "updated")
+
+
+@models_app.command("block")
+def models_block(name: str) -> None:
+    """Stop every call to a model provider."""
+    out = _call("POST", f"/v1/models/providers/{quote(name)}/block")
+    _done("model-provider", out["name"], out["status"])
+
+
+@models_app.command("unblock")
+def models_unblock(name: str) -> None:
+    """Allow calls to a blocked model provider again."""
+    out = _call("POST", f"/v1/models/providers/{quote(name)}/unblock")
+    _done("model-provider", out["name"], out["status"])
+
+
+@models_app.command("delete")
+def models_delete(name: str, yes: bool = YES) -> None:
+    """Remove a model provider: its route goes from the gateway."""
+    _confirm(f"Delete model provider {name}?", yes)
+    _call("DELETE", f"/v1/models/providers/{quote(name)}")
+    _done("model-provider", name, "deleted")
+
+
+@models_app.command("usage")
+def models_usage(
+    days: int = typer.Option(7, help="How many days back, today included."),
+    agent: str | None = typer.Option(None, help="Only this agent."),
+    provider: str | None = typer.Option(None, help="Only this provider."),
+) -> None:
+    """Calls, tokens and cost per agent, day, provider and model; and budgets today."""
+    params = {"days": days, **_given(agent=agent, provider=provider)}
+    view = _call("GET", "/v1/models/usage", params=params)
+    rows = [
+        {
+            **r,
+            "agent": r["agent_name"] or "(unidentified)",
+            "tokens_in": r["input_tokens"],
+            "tokens_out": r["output_tokens"],
+            "cost_usd": f"{r['cost_usd']:.4f}",
+        }
+        for r in view["rows"]
+    ]
+    _table(rows, ["day", "agent", "provider", "model", "calls", "refused", "tokens_in",
+                  "tokens_out", "cost_usd"])  # fmt: skip
+    for b in view["today"]:
+        if b["daily_token_budget"] is not None:
+            state = "over budget" if b["over_budget"] else "within budget"
+            typer.echo(
+                f"agent/{b['agent_name']}: {b['used_today']} of {b['daily_token_budget']} "
+                f"tokens today ({state})"
+            )

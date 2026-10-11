@@ -82,6 +82,8 @@ spec:
                 secretKeyRef: {name: {{ $secret }}, key: oidc-client-secret}
             - name: AGENTGOV_PROCESSOR_ADDRESS
               value: "{{ include "agentgov.name" (list . "processor") }}:50051"
+            - name: AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS
+              value: "{{ include "agentgov.name" (list . "processor") }}:8091"
             {{- if .Values.otelCollector.enabled }}
             - name: AGENTGOV_GATEWAY_OTLP_ENDPOINT
               value: "http://{{ include "agentgov.name" (list . "otel-collector") }}:4317"

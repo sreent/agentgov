@@ -1,6 +1,7 @@
 {{- $name := include "agentgov.name" (list . "processor") }}
 {{- $v := .Values.processor }}
-# agentgateway's ExtMcp policy server: inspects every governed MCP call and asks OPA.
+# agentgateway's policy server: inspects every governed MCP call (ExtMcp, gRPC) and every
+# prompt and answer of a model call (its guardrail webhook, HTTP), and asks OPA.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,6 +36,8 @@ spec:
           ports:
             - name: grpc
               containerPort: 50051
+            - name: webhook
+              containerPort: 8091
           env:
             {{- include "agentgov.commonEnv" . | nindent 12 }}
             - name: AGENTGOV_CONTROL_PLANE_URL
@@ -75,3 +78,6 @@ spec:
       port: 50051
       targetPort: grpc
       appProtocol: grpc
+    - name: webhook
+      port: 8091
+      targetPort: webhook

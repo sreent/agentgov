@@ -1,0 +1,190 @@
+# Decisions for model calls passing through agentgateway (/llm/<provider>).
+#
+# The governance processor queries data.agentgov.models.decision for each prompt
+# (phase "request") and each answer (phase "response").
+#
+# Input:
+#   kind:       "model"
+#   phase:      "request" | "response"
+#   agent:      {"agent_id", "client_id"}      (from the validated JWT)
+#   provider:   the model provider's name in the registry
+#   model:      the model the agent asked for
+#   detections: {"categories": ["pii","secret"], "entities": [...],
+#                "prompt_injection": bool, "injection_score": number}
+#               (prompt_injection: in the tool results the conversation holds)
+#   tool_calls: true when the conversation holds tool calls or tool results
+#
+# Identity, lifecycle and the registry always apply; the controls apply as their
+# features say (see agentgov.mcp). Organisation policies under agentgov.custom.*
+# take part through deny (always) and redact (as data-protection); they can tell
+# model calls from tool calls by input.kind == "model".
+package agentgov.models
+
+import data.agentgov.context as ctx
+
+phase := object.get(input, "phase", "request")
+
+detections := object.get(input, "detections", {})
+
+categories contains c if some c in object.get(detections, "categories", [])
+
+provider := data.registry.model_providers[input.provider]
+
+model_id := sprintf("%s/%s", [input.provider, object.get(input, "model", "")])
+
+# ---------------------------------------------------------------------------
+# Always applied.
+# ---------------------------------------------------------------------------
+
+deny contains "Caller is not a registered agent" if not ctx.agent
+
+deny contains msg if {
+	ctx.agent.status != "active"
+	msg := sprintf("Agent %s is %s", [ctx.agent.name, ctx.agent.status])
+}
+
+deny contains msg if {
+	not provider
+	msg := sprintf("Model provider %q is not registered", [input.provider])
+}
+
+deny contains msg if {
+	provider.status != "approved"
+	msg := sprintf("Model provider %s is %s", [provider.name, provider.status])
+}
+
+deny contains msg if {
+	some name
+	some msg in data.agentgov.custom[name].deny
+}
+
+# ---------------------------------------------------------------------------
+# Controls.
+# ---------------------------------------------------------------------------
+
+model_granted if {
+	some grant in object.get(ctx.agent, "model_access", [])
+	grant.provider == input.provider
+	some pattern in grant.models
+	ctx.matches(pattern, object.get(input, "model", ""))
+}
+
+violation contains {"control": "least-privilege", "message": msg} if {
+	phase == "request"
+	ctx.agent.status == "active"
+	not model_granted
+	msg := sprintf("Model %s is not granted to agent %s", [model_id, ctx.agent.name])
+}
+
+violation contains {
+	"control": "data-protection",
+	"message": "The prompt contains credentials; they must not be sent to a model provider",
+} if {
+	phase == "request"
+	"secret" in categories
+}
+
+# An answer is withheld rather than masked: answers can arrive as a stream.
+violation contains {
+	"control": "data-protection",
+	"message": "The model's answer contained credentials and was withheld",
+} if {
+	phase == "response"
+	"secret" in categories
+}
+
+# Masking rewrites the conversation as text, which would drop its tool calls.
+violation contains {"control": "data-protection", "message": msg} if {
+	phase == "request"
+	input.tool_calls == true
+	some category in to_mask
+	category in categories
+	msg := sprintf("Personal data in this conversation must be masked before it goes to %s, but masking would break its tool calls", [input.provider])
+}
+
+violation contains {
+	"control": "prompt-injection",
+	"message": "A tool result in the conversation contains instructions aimed at the agent (possible prompt injection)",
+} if {
+	phase == "request"
+	detections.prompt_injection == true
+}
+
+violation contains {"control": "risk-based-access", "message": msg} if {
+	ctx.agent.risk_level == "critical"
+	msg := sprintf("Agent %s is critical risk (score %d) and is blocked until investigated", [ctx.agent.name, ctx.agent.risk_score])
+}
+
+violation contains {"control": "token-budgets", "message": msg} if {
+	phase == "request"
+	ctx.agent.over_budget == true
+	msg := sprintf("Agent %s has used its daily budget of %d tokens", [ctx.agent.name, ctx.agent.daily_token_budget])
+}
+
+deny contains v.message if {
+	some v in violation
+	ctx.enforced(v.control)
+}
+
+# ---------------------------------------------------------------------------
+# Masking personal data in prompts, the data-protection control.
+# ---------------------------------------------------------------------------
+
+# Personal data must not leave for providers that have not been verified.
+to_mask contains "pii" if {
+	phase == "request"
+	"pii" in categories
+	provider.trust_level != "verified"
+}
+
+to_mask contains category if {
+	phase == "request"
+	some name
+	some category in data.agentgov.custom[name].redact
+}
+
+redact contains category if {
+	ctx.enforced("data-protection")
+	some category in to_mask
+}
+
+# ---------------------------------------------------------------------------
+# What monitored controls would have done. The call goes through.
+# ---------------------------------------------------------------------------
+
+monitored contains sprintf("%s: %s", [v.control, v.message]) if {
+	some v in violation
+	ctx.monitored(v.control)
+}
+
+monitored contains sprintf("data-protection: would mask %s", [category]) if {
+	ctx.monitored("data-protection")
+	some category in to_mask
+	category in categories
+}
+
+# ---------------------------------------------------------------------------
+# Decision.
+# ---------------------------------------------------------------------------
+
+effect := "deny" if count(deny) > 0
+
+else := "allow"
+
+agent_summary := {
+	"id": ctx.agent_id,
+	"name": ctx.agent.name,
+	"status": ctx.agent.status,
+	"risk_level": ctx.agent.risk_level,
+} if {
+	ctx.agent
+} else := null
+
+decision := {
+	"effect": effect,
+	"allow": effect == "allow",
+	"reasons": sort(deny),
+	"redact": sort(redact),
+	"monitored": sort(monitored),
+	"agent": agent_summary,
+}

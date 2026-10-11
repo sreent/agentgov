@@ -1,0 +1,199 @@
+"""What agents spend on model calls through the gateway, and their daily token budgets.
+
+agentgateway logs every model call it serves: the route (so the provider), the
+model, the tokens in and out, and the agent's identity from its token. It sends
+these access logs over OTLP, through the OpenTelemetry Collector, to the control
+plane, which adds them up per agent, UTC day, provider and model (``ModelUsage``)
+and prices them with the provider's prices.
+
+An agent that reaches its daily token budget is over budget until the day ends:
+OPA learns it from the bundle (``over_budget``) and, while the token-budgets
+control is enforced, its further model calls are refused.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from agentgov import ids, ledger
+from agentgov.db import mark_changed
+from agentgov.models import Agent, ModelUsage
+from agentgov.registry import discovery, model_providers
+from agentgov.telemetry import attrs_of
+
+ROUTE_PREFIX = "llm-"  # agentgov.gateway names a provider's route llm-<provider>
+REFUSED = {401, 403}  # no valid agent token; refused by policy
+
+
+def today() -> str:
+    """The UTC day usage is counted in, as YYYY-MM-DD."""
+    return ids.utcnow().date().isoformat()
+
+
+def tokens_used(session: Session, day: str | None = None) -> dict[str, int]:
+    """Tokens (input and output) each agent used on ``day`` (today by default)."""
+    rows = session.execute(
+        select(
+            ModelUsage.agent_id,
+            func.sum(ModelUsage.input_tokens + ModelUsage.output_tokens),
+        )
+        .where(ModelUsage.day == (day or today()), ModelUsage.agent_id != "")
+        .group_by(ModelUsage.agent_id)
+    )
+    return {agent_id: int(total or 0) for agent_id, total in rows}
+
+
+def over_budget(budget: int | None, used: int) -> bool:
+    return budget is not None and used >= budget
+
+
+def to_dict(row: ModelUsage) -> dict[str, Any]:
+    return {
+        "agent_id": row.agent_id or None,
+        "day": row.day,
+        "provider": row.provider,
+        "model": row.model,
+        "calls": row.calls,
+        "refused": row.refused,
+        "input_tokens": row.input_tokens,
+        "output_tokens": row.output_tokens,
+        "cost_usd": round(row.cost_usd, 6),
+    }
+
+
+# ------------------------------------------------------------------ metering
+
+
+def iter_log_records(payload: dict[str, Any]) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
+    """(attributes, record) for each OTLP log record."""
+    for rl in payload.get("resourceLogs") or []:
+        for sl in rl.get("scopeLogs") or []:
+            for record in sl.get("logRecords") or []:
+                yield attrs_of(record.get("attributes")), record
+
+
+def _when(record: dict[str, Any]) -> datetime:
+    # agentgateway leaves the record's time unset; the collector stamps when it saw it.
+    for key in ("timeUnixNano", "observedTimeUnixNano"):
+        try:
+            nanos = int(record.get(key) or 0)
+        except (TypeError, ValueError):
+            nanos = 0
+        if nanos:
+            return datetime.fromtimestamp(nanos / 1e9, tz=UTC)
+    return ids.utcnow()
+
+
+def _int(value: Any) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def ingest_logs(session: Session, payload: dict[str, Any]) -> dict[str, int]:
+    """Meter the model calls in agentgateway's access logs (OTLP logs)."""
+    stats = {"records": 0, "model_calls": 0, "unidentified": 0}
+    providers = {p.name: p for p in model_providers.list_all(session)}
+    agents: dict[tuple[str | None, str | None], Agent | None] = {}
+    spent: dict[tuple[str, str], int] = {}  # tokens per (agent, day) in this batch
+    for attrs, record in iter_log_records(payload):
+        stats["records"] += 1
+        route = str(attrs.get("route") or "").rsplit("/", 1)[-1]
+        if not route.startswith(ROUTE_PREFIX) or not attrs.get("gen_ai.operation.name"):
+            continue  # not a model call through AgentGov's gateway
+        stats["model_calls"] += 1
+        provider = route.removeprefix(ROUTE_PREFIX)
+        model = str(attrs.get("gen_ai.response.model") or attrs.get("gen_ai.request.model") or "")
+        tokens_in = _int(attrs.get("gen_ai.usage.input_tokens"))
+        tokens_out = _int(attrs.get("gen_ai.usage.output_tokens"))
+        status = _int(attrs.get("http.response.status_code"))
+        when = _when(record)
+        identity = (attrs.get("agentgov.agent_id"), attrs.get("agentgov.client_id"))
+        if identity not in agents:
+            agents[identity] = (
+                discovery.find(session, agent_id=identity[0], client_id=identity[1])
+                if any(identity)
+                else None
+            )
+        agent = agents[identity]
+        if agent is None:
+            stats["unidentified"] += 1
+        day = when.date().isoformat()
+        key = (agent.id if agent else "", day, provider, model[:128])
+        row = session.get(ModelUsage, key)
+        if row is None:
+            row = ModelUsage(
+                agent_id=key[0], day=day, provider=provider, model=key[3],
+                calls=0, refused=0, input_tokens=0, output_tokens=0, cost_usd=0.0,
+            )  # fmt: skip
+            session.add(row)
+        row.calls += 1
+        row.refused += 1 if status in REFUSED else 0
+        row.input_tokens += tokens_in
+        row.output_tokens += tokens_out
+        price = model_providers.price_of(providers.get(provider), model)
+        if price:
+            row.cost_usd += (tokens_in * price["input"] + tokens_out * price["output"]) / 1e6
+        if agent is not None:
+            agent.last_seen_at = max(agent.last_seen_at or when, when)
+            discovery.record_activity(
+                session,
+                agent.id,
+                when=when,
+                model_calls=1,
+                input_tokens=tokens_in,
+                output_tokens=tokens_out,
+            )
+            spent[(agent.id, day)] = spent.get((agent.id, day), 0) + tokens_in + tokens_out
+    session.flush()
+    _budgets_reached(session, spent)
+    return stats
+
+
+def _budgets_reached(session: Session, spent: dict[tuple[str, str], int]) -> None:
+    """Record the agents whose usage today reached their budget in this batch, and have OPA
+    refuse their further calls."""
+    day = today()
+    used = tokens_used(session, day) if any(d == day for _, d in spent) else {}
+    for (agent_id, spent_day), tokens in spent.items():
+        agent = session.get(Agent, agent_id)
+        budget = model_providers.effective_budget(agent) if agent else None
+        if spent_day != day or budget is None:
+            continue
+        after = used.get(agent_id, 0)
+        if after - tokens < budget <= after:
+            ledger.append(
+                session,
+                type="model.budget_reached",
+                actor="system:usage",
+                agent=agent,
+                severity="warning",
+                reason=f"{after} of {budget} tokens used today",
+                details={"budget": budget, "used": after, "day": day},
+            )
+            mark_changed(session, "agents")
+
+
+def usage(
+    session: Session,
+    *,
+    days: int = 7,
+    agent_id: str | None = None,
+    provider: str | None = None,
+) -> list[ModelUsage]:
+    """Usage rows for the last ``days`` days (today included), newest first."""
+    since = (ids.utcnow().date() - timedelta(days=max(days, 1) - 1)).isoformat()
+    stmt = select(ModelUsage).where(ModelUsage.day >= since)
+    if agent_id is not None:
+        stmt = stmt.where(ModelUsage.agent_id == agent_id)
+    if provider:
+        stmt = stmt.where(ModelUsage.provider == provider)
+    return list(
+        session.scalars(stmt.order_by(ModelUsage.day.desc(), ModelUsage.provider, ModelUsage.model))
+    )
