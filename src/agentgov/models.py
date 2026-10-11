@@ -10,6 +10,7 @@ matrix in docs/baseline-agent365.md maps one-to-one:
                    Its credentials live in Keycloak, not here.
 * ``ToolServer`` - an MCP server published through agentgateway.
 * ``Policy``     - an organisation Rego module distributed to OPA.
+* ``FeatureSetting`` - which of AgentGov's features are used, and how strictly.
 """
 
 from __future__ import annotations
@@ -157,6 +158,22 @@ class Policy(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+
+
+class FeatureSetting(Base):
+    """The mode chosen for one of AgentGov's features (``agentgov.registry.features``).
+
+    Features nobody chose a mode for have no row and run in their default mode.
+    """
+
+    __tablename__ = "feature_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(16))
+    # Chosen by the deployment (AGENTGOV_FEATURES), so not changeable in the app.
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    changed_by: Mapped[str] = mapped_column(String(200))
+    changed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class ApiKey(Base):

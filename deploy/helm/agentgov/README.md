@@ -73,7 +73,7 @@ wire the parts together; set the rest with `controlPlane.env`, and the secret on
 ```yaml
 controlPlane:
   env:
-    AGENTGOV_UNKNOWN_AGENT_MODE: monitor
+    AGENTGOV_AUTO_BLOCK_RISK_SCORE: "80"
     AGENTGOV_M365_TENANT_ID: 00000000-0000-0000-0000-000000000000
     AGENTGOV_M365_CLIENT_ID: 00000000-0000-0000-0000-000000000000
   envFrom:
@@ -89,6 +89,7 @@ controlPlane:
 | `controlPlane.replicas` | `1` | Keep one (see [scaling notes](../../../docs/architecture.md#scaling-notes)) |
 | `controlPlane.autoMigrate` | `true` | Migrate the database when the control plane starts |
 | `controlPlane.env`, `controlPlane.envFrom` | — | More settings |
+| `features` | — | Features the deployment pins, such as `{least-privilege: monitor}` ([features.md](../../../docs/features.md)); administrators choose the rest in the app |
 | `controlPlane.ingress`, `gateway.ingress`, `keycloak.ingress` | off | Ingresses, at the hosts of the URLs above unless set |
 | `gateway.replicas` | `1` | agentgateway replicas; each fetches its configuration from the control plane |
 | `gateway.configInterval` | `5` | Seconds between checks for configuration changes |

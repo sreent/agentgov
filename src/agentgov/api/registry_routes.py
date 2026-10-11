@@ -14,6 +14,7 @@ from agentgov.registry import (
     agents,
     apikeys,
     blueprints,
+    features,
     instructions,
     platforms,
     policies,
@@ -71,9 +72,12 @@ def register_agent(
     create ``pending`` agents that need approval (Agent 365 "requests")."""
     rt = _rt(request)
     requested = bool(body.pop("approve", False))
-    approve = requested if principal.is_admin else not rt.settings.registration_requires_approval
     text = body.pop("instructions", None)
     with rt.db.session() as s:
+        if principal.is_admin:
+            approve = requested
+        else:
+            approve = not features.is_on(s, "registration-approval")
         agent = agents.register(s, rt.settings, body, actor=principal.actor, approve=approve)
         if text is not None:
             instructions.report(

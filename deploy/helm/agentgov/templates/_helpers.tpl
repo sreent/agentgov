@@ -116,3 +116,16 @@ affinity:
   {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- end -}}
+
+{{/* Pinned features as AGENTGOV_FEATURES ("feature=mode,..."). YAML reads an unquoted
+off or on as a boolean: take it as the mode it was meant to be. */}}
+{{- define "agentgov.features" -}}
+{{- $pins := list -}}
+{{- range $feature, $mode := .Values.features -}}
+{{- if kindIs "bool" $mode -}}
+{{- $mode = ternary "on" "off" $mode -}}
+{{- end -}}
+{{- $pins = append $pins (printf "%s=%s" $feature $mode) -}}
+{{- end -}}
+{{- join "," $pins -}}
+{{- end -}}

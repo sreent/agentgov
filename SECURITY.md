@@ -63,8 +63,12 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   cannot reach, so that the gateway is the only path to tools. On Kubernetes, turn on the
   Helm chart's network policies (`networkPolicy.enabled=true`) and its demo users off
   (`keycloak.demoUsers=false`), or use your own Keycloak.
-* Keep `AGENTGOV_UNKNOWN_AGENT_MODE=reject` (the default) and the processor fail-closed.
-  Use `monitor` only for discovery and only where that is acceptable.
+* Keep the controls at the gateway enforced, as they are by default, and the processor
+  fail-closed. Monitor mode and turning a control off are for rollout and evaluation
+  ([features](docs/features.md)). Both are recorded in the ledger as warnings, and only
+  administrators can choose them. To keep the choice with the deployment, pin the
+  features in `AGENTGOV_FEATURES` (the Helm value `features`). Monitor `unknown-callers`
+  only for discovery, and only where that is acceptable.
 * Back up PostgreSQL, before every upgrade too (upgrades migrate its schema), export the
   ledger regularly (`GET /v1/ledger/export`) and store the exports somewhere the platform
   cannot modify.

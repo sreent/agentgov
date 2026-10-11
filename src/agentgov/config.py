@@ -14,10 +14,14 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-UNKNOWN_AGENT_MODES = ("reject", "monitor")
-THREAT_DETECTION_MODES = ("off", "monitor", "enforce")
 _GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 M365_PACKAGE_TYPES = ("custom", "shared", "external", "microsoft")
+# Settings that became features (docs/features.md), and the feature that replaced each.
+RETIRED = {
+    "AGENTGOV_UNKNOWN_AGENT_MODE": "unknown-callers",
+    "AGENTGOV_REGISTRATION_REQUIRES_APPROVAL": "registration-approval",
+    "AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION": "copilot-studio-threat-detection",
+}
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
@@ -51,8 +55,9 @@ class Settings:
     # Shared token for internal components (OPA, governance processor, OTel
     # collector) calling the control plane.
     service_token: str | None = None
-    # Agents registered by non-admins start "pending" until approved.
-    registration_requires_approval: bool = True
+    # Features pinned by the deployment, e.g. "least-privilege=monitor,discovery=off"
+    # (docs/features.md). Administrators choose the others in the app.
+    features: str = ""
     approval_ttl_seconds: int = 86400
     # Soft-deleted agents can be restored for this many days (Agent 365 parity).
     soft_delete_retention_days: int = 30
@@ -123,9 +128,8 @@ class Settings:
     # --- Copilot Studio threat detection (optional) -------------------------------
     # Copilot Studio asks AgentGov before each tool call its agents make, once a
     # Power Platform admin connects AgentGov to an environment
-    # (docs/microsoft-connections.md):
-    # "off", "monitor" (decide and record, never block) or "enforce".
-    copilot_studio_threat_detection: str = "off"
+    # (docs/microsoft-connections.md). Turned on with the feature
+    # copilot-studio-threat-detection (monitor or enforce) once these are set.
     # The app registrations that may call (the one connected to Copilot Studio),
     # comma-separated application (client) IDs.
     copilot_studio_caller_app_ids: str = ""
@@ -190,16 +194,18 @@ class Settings:
     # When Presidio is unreachable: "closed" denies the call, "open" skips PII scanning.
     presidio_failure_mode: str = "closed"
     prompt_injection_threshold: float = 0.7
-    # How calls without a recognised agent identity are handled:
-    #   reject  - deny (default)
-    #   monitor - allow, record, and register the caller as a discovered agent
-    unknown_agent_mode: str = "reject"
 
     dev_mode: bool = False
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None, **overrides: Any) -> Settings:
         env = os.environ if environ is None else environ
+        for name, feature in RETIRED.items():
+            if env.get(name):
+                raise ValueError(
+                    f"{name} is now the {feature} feature: choose its mode in the app, or pin "
+                    f"it with AGENTGOV_FEATURES={feature}=<mode> (see docs/features.md)"
+                )
         values: dict[str, Any] = {}
         for field in dataclasses.fields(cls):
             raw = env.get(f"AGENTGOV_{field.name.upper()}")
@@ -212,8 +218,6 @@ class Settings:
         return settings
 
     def validate(self) -> None:
-        if self.unknown_agent_mode not in UNKNOWN_AGENT_MODES:
-            raise ValueError(f"AGENTGOV_UNKNOWN_AGENT_MODE must be one of {UNKNOWN_AGENT_MODES}")
         if not 0 < self.prompt_injection_threshold <= 1:
             raise ValueError("AGENTGOV_PROMPT_INJECTION_THRESHOLD must be in (0, 1]")
         if self.presidio_failure_mode not in ("open", "closed"):
@@ -233,30 +237,29 @@ class Settings:
                 "AGENTGOV_MICROSOFT_ADMIN_ACTIONS needs single sign-on through Microsoft Entra "
                 "ID: set AGENTGOV_OIDC_ISSUER and AGENTGOV_OIDC_CLIENT_SECRET"
             )
-        if self.copilot_studio_threat_detection not in THREAT_DETECTION_MODES:
-            raise ValueError(
-                f"AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION must be one of {THREAT_DETECTION_MODES}"
-            )
         if self.copilot_studio_on_error not in ("block", "allow"):
             raise ValueError("AGENTGOV_COPILOT_STUDIO_ON_ERROR must be 'block' or 'allow'")
         if self.copilot_studio_tenant_id and not _GUID.match(self.copilot_studio_tenant_id):
             raise ValueError("AGENTGOV_COPILOT_STUDIO_TENANT_ID must be the tenant ID (a GUID)")
-        if self.copilot_studio_threat_detection != "off":
-            if not self.copilot_studio_callers():
-                raise ValueError(
-                    "Copilot Studio threat detection needs AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS: "
-                    "the app registration connected to Copilot Studio"
-                )
-            if not self.copilot_studio_tenant():
-                raise ValueError(
-                    "Copilot Studio threat detection needs the tenant ID (a GUID): set "
-                    "AGENTGOV_COPILOT_STUDIO_TENANT_ID"
-                )
-            if self.copilot_studio_threat_detection == "enforce" and not self.opa_url:
-                raise ValueError("enforcing Copilot Studio threat detection needs AGENTGOV_OPA_URL")
+        self.feature_pins()  # raises on unknown features and modes
         self.m365_types()  # raises on unknown package types
         self.guardian_criteria_list()  # raises on unknown criteria
         self.pii_thresholds()  # raises on malformed entries
+
+    def feature_pins(self) -> dict[str, str]:
+        from agentgov.registry.features import parse_pins, unmet
+
+        pins = parse_pins(self.features)
+        for key, mode in pins.items():
+            reason = unmet(key, mode, self)
+            if reason:
+                raise ValueError(f"AGENTGOV_FEATURES: {reason}")
+        return pins
+
+    @property
+    def copilot_studio_configured(self) -> bool:
+        """Whether Copilot Studio's calls can be authenticated."""
+        return bool(self.copilot_studio_callers() and self.copilot_studio_tenant())
 
     def copilot_studio_callers(self) -> list[str]:
         return [a.strip() for a in self.copilot_studio_caller_app_ids.split(",") if a.strip()]

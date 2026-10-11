@@ -253,3 +253,120 @@ test_custom_approval_only_on_requests if {
 	d := mcp.decision with input as inp with data.registry as registry with data.agentgov.custom as custom
 	d.effect == "allow"
 }
+
+# ---------------------------------------------------------------------------
+# Feature modes: monitored controls only record; controls that are off don't apply.
+# ---------------------------------------------------------------------------
+
+with_modes(modes) := object.union(registry, {"features": modes})
+
+test_monitored_least_privilege_records_instead_of_denying if {
+	d := mcp.decision with input as call("agent-support-bot", "crm", "export_all")
+		with data.registry as with_modes({"least-privilege": "monitor"})
+	d.effect == "allow"
+	d.monitored == ["least-privilege: crm/export_all is not granted to agent support-bot"]
+}
+
+test_least_privilege_off_neither_denies_nor_records if {
+	d := mcp.decision with input as call("agent-support-bot", "crm", "export_all")
+		with data.registry as with_modes({"least-privilege": "off"})
+	d.effect == "allow"
+	d.monitored == []
+}
+
+test_monitored_approval_lets_destructive_calls_through if {
+	d := mcp.decision with input as call("agent-support-bot", "crm", "delete_customer")
+		with data.registry as with_modes({"approvals": "monitor"})
+	d.effect == "allow"
+	d.monitored == ["approvals: crm/delete_customer is marked destructive by its server"]
+}
+
+test_monitored_data_protection_neither_denies_nor_masks if {
+	inp := object.union(call("agent-support-bot", "crm", "update_customer"), {"detections": {"categories": ["secret"]}})
+	d := mcp.decision with input as inp with data.registry as with_modes({"data-protection": "monitor"})
+	d.effect == "allow"
+	d.redact == []
+	d.monitored == [
+		"data-protection: Arguments contain credentials; agents must not send secrets to tools",
+		"data-protection: would mask secret",
+	]
+}
+
+test_data_protection_off_masks_nothing if {
+	inp := object.union(call("agent-support-bot", "crm", "lookup_customer"), {"phase": "response", "detections": {"categories": ["pii"]}})
+	d := mcp.decision with input as inp with data.registry as with_modes({"data-protection": "off"})
+	d.redact == []
+	d.monitored == []
+}
+
+test_monitored_tool_integrity_lets_changed_tools_through if {
+	d := mcp.decision with input as call("agent-support-bot", "crm", "lookup_orders")
+		with data.registry as with_modes({"tool-integrity": "monitor"})
+	d.effect == "allow"
+	count(d.monitored) == 1
+}
+
+test_monitored_risk_lets_critical_agents_through if {
+	d := mcp.decision with input as call("agent-risky", "crm", "lookup_customer")
+		with data.registry as with_modes({"risk-based-access": "monitor"})
+	d.effect == "allow"
+	contains(d.monitored[0], "critical risk")
+}
+
+test_monitored_prompt_injection_passes_results if {
+	inp := object.union(call("agent-support-bot", "crm", "lookup_customer"), {"phase": "response", "detections": {"categories": [], "prompt_injection": true}})
+	d := mcp.decision with input as inp with data.registry as with_modes({"prompt-injection": "monitor"})
+	d.effect == "allow"
+	contains(d.monitored[0], "prompt-injection: Tool result withheld")
+}
+
+test_identity_and_lifecycle_apply_in_every_mode if {
+	modes := {k: "off" | some k in ["least-privilege", "approvals", "data-protection", "prompt-injection", "tool-integrity", "risk-based-access"]}
+	d := mcp.decision with input as call("agent-rogue", "crm", "lookup_customer")
+		with data.registry as with_modes(modes)
+	d.effect == "deny"
+	"Agent rogue is blocked" in d.reasons
+}
+
+test_custom_denials_apply_whatever_the_modes if {
+	custom := {"finance": {"deny": {"No payments on weekends"}, "require_approval": {"Large refund"}}}
+	d := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer")
+		with data.registry as with_modes({"approvals": "off"})
+		with data.agentgov.custom as custom
+	d.effect == "deny"
+	d.reasons == ["No payments on weekends"]
+}
+
+test_custom_approvals_follow_the_approvals_control if {
+	custom := {"finance": {"require_approval": {"Large refund"}}}
+	d := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer")
+		with data.registry as with_modes({"approvals": "monitor"})
+		with data.agentgov.custom as custom
+	d.effect == "allow"
+	d.monitored == ["approvals: Large refund"]
+}
+
+tool_list := {
+	"phase": "response",
+	"method": "tools/list",
+	"agent": {"client_id": "agent-support-bot"},
+	"resource": {"server": "crm"},
+	"tools": [{"name": "lookup_customer"}, {"name": "export_all"}, {"name": "lookup_notes"}],
+	"poisoned": {},
+}
+
+test_monitored_least_privilege_shows_every_tool if {
+	v := mcp.visible_tools with input as tool_list with data.registry as with_modes({"least-privilege": "monitor"})
+	v == {"lookup_customer", "export_all"}
+}
+
+test_monitored_tool_integrity_shows_quarantined_tools if {
+	v := mcp.visible_tools with input as tool_list with data.registry as with_modes({"tool-integrity": "monitor"})
+	v == {"lookup_customer", "lookup_notes"}
+}
+
+test_monitored_risk_shows_critical_agents_their_tools if {
+	inp := object.union(tool_list, {"agent": {"client_id": "agent-risky"}})
+	v := mcp.visible_tools with input as inp with data.registry as with_modes({"risk-based-access": "monitor"})
+	v == {"lookup_customer", "export_all"}
+}

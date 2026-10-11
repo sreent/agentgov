@@ -45,22 +45,28 @@ def record_mcp_decisions(
         categories = set(detections.get("categories") or [])
         when = _parse_ts(rec.get("ts"))
         resource = rec.get("resource")
+        # What controls in monitor mode would have done (the call went through).
+        monitored = [str(m) for m in rec.get("monitored") or []]
         actor = (
             f"agent:{agent.name}" if agent else f"client:{identity.get('client_id') or 'unknown'}"
         )
+        reason = "; ".join(rec.get("reasons") or []) or None
+        if reason is None and monitored:
+            reason = "monitored: " + "; ".join(monitored)
         ledger.append(
             session,
             type=f"decision.{phase}",
             actor=actor,
             agent=agent,
             agent_name=None if agent else identity.get("client_id"),
-            severity="warning" if effect in ("deny", "require_approval") else "info",
+            severity="warning" if effect in ("deny", "require_approval") or monitored else "info",
             action=rec.get("method"),
             resource=resource,
             decision=effect,
-            reason="; ".join(rec.get("reasons") or []) or None,
+            reason=reason,
             details={
                 "redacted": rec.get("redacted") or [],
+                "monitored": monitored,
                 "detections": {
                     k: detections.get(k)
                     for k in (
@@ -102,7 +108,12 @@ def record_mcp_decisions(
                     category=findings.THREAT,
                     title=f"{agent.name} tried to send credentials to a tool",
                     description=f"Credentials ({', '.join(detections.get('entities') or [])}) were "
-                    f"found in arguments for {resource}; the call was blocked.",
+                    f"found in arguments for {resource}; "
+                    + (
+                        "the call was blocked."
+                        if effect == "deny"
+                        else "the call went through: data protection is not enforced."
+                    ),
                     remediation="Check the agent's prompt and context sources for leaked secrets "
                     "and rotate them.",
                 )
@@ -117,7 +128,11 @@ def record_mcp_decisions(
                 title=f"Prompt-injection payload returned by {resource}",
                 description="A tool result contained instructions aimed at the agent ("
                 + ", ".join(detections.get("injection_reasons") or [])
-                + "). It was withheld.",
+                + (
+                    "). It was withheld."
+                    if effect == "deny"
+                    else "). It reached the agent: prompt-injection defence is not enforced."
+                ),
                 remediation="Find where the tool's data came from; untrusted content may be "
                 "targeting your agents.",
             )

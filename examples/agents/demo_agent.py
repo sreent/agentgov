@@ -105,6 +105,33 @@ def report(allowed: bool, payload: Any, *, expect_allowed: bool) -> None:
     show(label, allowed == expect_allowed, text)
 
 
+async def once_mode_applies(
+    client: Client, tool: str, args: dict[str, Any], *, allowed: bool, timeout: float = 30
+) -> tuple[bool, Any]:
+    """Call ``tool`` until the outcome is ``allowed``: a feature's new mode reaches OPA at
+    once, and the governance processor within a few seconds."""
+    deadline = time.monotonic() + timeout
+    await asyncio.sleep(6)
+    while True:
+        outcome = await call(client, tool, args)
+        if outcome[0] == allowed or time.monotonic() > deadline:
+            return outcome
+        await asyncio.sleep(1)
+
+
+def monitored_entry(name: str, timeout: float = 20) -> dict[str, Any] | None:
+    """The ledger entry of the agent's latest call a monitored control let through."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        entries = admin(
+            "GET", "/v1/ledger", params={"agent": name, "decision": "monitored", "limit": 1}
+        )
+        if entries:
+            return entries[0]
+        time.sleep(1)
+    return None
+
+
 def register_agent() -> tuple[str, str]:
     name = f"demo-agent-{secrets.token_hex(3)}"
     agent = admin(
@@ -170,7 +197,29 @@ async def run_scenarios(name: str, token: str) -> None:
             allowed, payload = await call(client, "export_customers", {})
             report(allowed, payload, expect_allowed=False)
 
-            step("7. Human in the loop: destructive tools wait for an approver")
+            step("7. Monitor mode: try a control on real traffic before enforcing it")
+            admin("PUT", "/v1/features/least-privilege", json={"mode": "monitor"})
+            print("  least-privilege set to monitor")
+            try:
+                allowed, payload = await once_mode_applies(
+                    client, "export_customers", {}, allowed=True
+                )
+                report(allowed, payload, expect_allowed=True)
+                entry = monitored_entry(name)
+                show(
+                    "recorded:" if entry else "not recorded",
+                    entry is not None,
+                    (entry or {}).get("reason") or "",
+                )
+            finally:
+                admin("PUT", "/v1/features/least-privilege", json={"mode": "enforce"})
+                print("  least-privilege set back to enforce")
+            allowed, payload = await once_mode_applies(
+                client, "export_customers", {}, allowed=False
+            )
+            report(allowed, payload, expect_allowed=False)
+
+            step("8. Human in the loop: destructive tools wait for an approver")
             allowed, payload = await call(client, "delete_customer", {"customer_id": "c-003"})
             report(allowed, payload, expect_allowed=False)
             match = re.search(r"apr_[0-9a-f]{16}", str(payload))
@@ -187,7 +236,7 @@ async def run_scenarios(name: str, token: str) -> None:
                 allowed, payload = await call(client, "delete_customer", {"customer_id": "c-003"})
                 report(allowed, payload, expect_allowed=True)
 
-            step("8. Kill switch: blocking the agent takes effect everywhere within a second")
+            step("9. Kill switch: blocking the agent takes effect everywhere within a second")
             started = time.monotonic()
             admin("POST", f"/v1/agents/{name}/block", json={"reason": "demo kill switch"})
             allowed = True
@@ -198,7 +247,7 @@ async def run_scenarios(name: str, token: str) -> None:
 
 
 def shadow_agent() -> None:
-    step("9. Shadow AI: telemetry from an unregistered agent is discovered")
+    step("10. Shadow AI: telemetry from an unregistered agent is discovered")
     service = f"notebook-agent-{secrets.token_hex(2)}"
     span = {
         "traceId": secrets.token_hex(16),
@@ -241,7 +290,7 @@ def shadow_agent() -> None:
 
 
 def evidence(name: str) -> None:
-    step("10. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("11. Evidence: every decision is in a hash-chained, verifiable ledger")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",

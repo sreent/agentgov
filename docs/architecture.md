@@ -95,6 +95,12 @@ sequenceDiagram
   client that downgrades to an older protocol cannot spoof the tool name.
 * agentgateway reports a refused **call** as an `isError` tool result (so the model can
   read why and adapt) and a withheld **result** as a JSON-RPC error.
+* Each control on this path (least privilege, approvals, data protection,
+  prompt-injection defence, tool integrity, risk-based access) applies as its
+  [feature](features.md) says: enforced, monitored or off. A monitored control lets the
+  call through and its decision says what it would have done, which the ledger records
+  as a warning. The bundle carries the modes (`data.registry.features`), and the
+  processor reads them from OPA, so a change reaches every gateway within seconds.
 
 ## Keeping components in sync
 
@@ -105,7 +111,7 @@ The registry is the source of truth. Every committed change notifies three recon
 |---|---|---|
 | Agent approved, blocked, deleted, restored | Identity | Keycloak client created, enabled or disabled; level-triggered, retried every 60 s |
 | Anything OPA needs (agents, grants, risk, tool catalog, policies) | Bundle server | New bundle revision; long-polling OPA instances receive it immediately |
-| Tool server added, approved, blocked | Gateway config | `agentgateway` config rewritten atomically; agentgateway reloads it. Where the gateway doesn't share a volume with the control plane (Kubernetes), a sidecar fetches it from `GET /v1/gateway/config` every few seconds instead |
+| Tool server added, approved, blocked; a feature's mode changed | Gateway config | `agentgateway` config rewritten atomically; agentgateway reloads it. Where the gateway doesn't share a volume with the control plane (Kubernetes), a sidecar fetches it from `GET /v1/gateway/config` every few seconds instead |
 
 **Kill switch.** Blocking an agent changes the bundle; OPA, which holds a long-poll
 request open on the control plane, activates the new bundle at once, and the next call

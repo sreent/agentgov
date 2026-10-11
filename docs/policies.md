@@ -16,23 +16,28 @@ Every rule contributes to one of three sets, and the outcome follows a fixed pre
 Grants are the ceiling: an agent can only call tools that its blueprint (or its own
 `permissions`) grants. Policies can only take permissions away or add conditions.
 
+Most rules belong to a control that an administrator can switch
+([features](features.md)): enforced, the rule applies; monitored, it only adds what it
+would have done to **`monitored`**, and the call goes through; off, it doesn't apply.
+The decision carries `monitored`, and the ledger records it.
+
 ## Built-in rules
 
-| Rule | Effect |
-|---|---|
-| Caller is not a registered agent | deny |
-| Agent is not `active` (pending, blocked, deleted) | deny |
-| Tool server unknown, pending review or blocked | deny |
-| Tool not granted to the agent (least privilege) | deny, and hidden from `tools/list` |
-| Tool definition changed since it was approved (MCP rug pull) | deny until an admin approves the new definition |
-| Tool description contains hidden instructions (tool poisoning) | deny, and hidden from `tools/list` |
-| Credentials in tool arguments | deny |
-| Agent risk level is `critical` | deny (risk-based access) |
-| Tool result contains a prompt-injection payload | result withheld |
-| Tool annotated `destructiveHint: true` | require approval |
-| Credentials in a tool result | redact `secret` |
-| Personal data in a tool result, agent lacks the `pii-access: "true"` label | redact `pii` |
-| Personal data sent to a server whose `trust_level` is not `verified` | redact `pii` |
+| Rule | Effect | Control |
+|---|---|---|
+| Caller is not a registered agent | deny | `unknown-callers` |
+| Agent is not `active` (pending, blocked, deleted) | deny | always |
+| Tool server unknown, pending review or blocked | deny | always |
+| Tool not granted to the agent (least privilege) | deny, and hidden from `tools/list` | `least-privilege` |
+| Tool definition changed since it was approved (MCP rug pull) | deny until an admin approves the new definition | `tool-integrity` |
+| Tool description contains hidden instructions (tool poisoning) | deny, and hidden from `tools/list` | `tool-integrity` |
+| Credentials in tool arguments | deny | `data-protection` |
+| Agent risk level is `critical` | deny (risk-based access) | `risk-based-access` |
+| Tool result contains a prompt-injection payload | result withheld | `prompt-injection` |
+| Tool annotated `destructiveHint: true` | require approval | `approvals` |
+| Credentials in a tool result | redact `secret` | `data-protection` |
+| Personal data in a tool result, agent lacks the `pii-access: "true"` label | redact `pii` | `data-protection` |
+| Personal data sent to a server whose `trust_level` is not `verified` | redact `pii` | `data-protection` |
 
 ## What a policy sees
 
@@ -70,17 +75,22 @@ Grants are the ceiling: an agent can only call tools that its blueprint (or its 
                           "data_classification": "confidential", "labels": {},
                           "tools": {"delete_customer": {"annotations": {"destructiveHint": true},
                                                         "changed": false, "poisoned": false}}}},
-  "blueprints": {"customer-support": {"risk_tier": "medium", "permissions": [...], "labels": {}}}
+  "blueprints": {"customer-support": {"risk_tier": "medium", "permissions": [...], "labels": {}}},
+  "features": {"least-privilege": "enforce", "approvals": "monitor", "discovery": "on", ...}
 }
 ```
 
 `data.agentgov.context` resolves the common lookups for you: `ctx.agent`, `ctx.server`,
-`ctx.tool`, `ctx.annotations`, `ctx.granted(server, tool)` and `ctx.label(name)`.
+`ctx.tool`, `ctx.annotations`, `ctx.granted(server, tool)`, `ctx.label(name)`, and a
+feature's mode with `ctx.mode(feature)`, `ctx.enforced(feature)` and
+`ctx.monitored(feature)`.
 
 ## Writing an organisation policy
 
 Organisation policies are Rego modules in package `agentgov.custom.<name>` (dashes in the
-name become underscores). They may define any of the three sets:
+name become underscores). They may define any of the three sets. Their `deny` always
+applies; their `require_approval` applies as the `approvals` control does, and their
+`redact` as `data-protection` does:
 
 ```rego
 package agentgov.custom.payments_limits

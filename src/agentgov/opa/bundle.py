@@ -29,6 +29,7 @@ from agentgov import ids
 from agentgov.db import Database
 from agentgov.models import DELETED, Agent, ApprovedConnector, Blueprint, Policy, ToolServer
 from agentgov.registry import agents as agents_svc
+from agentgov.registry import features
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +38,8 @@ ROOTS = ["agentgov", "agentos", "registry", "system"]
 
 # Decision-log hygiene, evaluated by OPA itself: never log raw tool arguments,
 # and skip gateway decisions (the governance processor records those in the
-# ledger with richer context). In-process (agentos) decisions are logged.
+# ledger with richer context) and reads of registry data (the processor reads
+# the feature modes). In-process (agentos) decisions are logged.
 SYSTEM_LOG_REGO = """package system.log
 
 mask contains "/input/arguments"
@@ -45,6 +47,8 @@ mask contains "/input/arguments"
 mask contains "/input/tool_args"
 
 drop if startswith(input.path, "agentgov/mcp")
+
+drop if startswith(input.path, "registry")
 """
 
 
@@ -123,6 +127,8 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
         "toolservers": servers,
         "blueprints": blueprints,
         "connector_allowlist": {"active": bool(approved), "approved": approved},
+        # The mode of each feature: the policies apply each control as its mode says.
+        "features": features.modes(session),
     }
 
 

@@ -57,6 +57,10 @@ spec:
             {{- end }}
             - name: AGENTGOV_DATABASE_AUTO_MIGRATE
               value: {{ $v.autoMigrate | quote }}
+            {{- with .Values.features }}
+            - name: AGENTGOV_FEATURES
+              value: {{ include "agentgov.features" $ | quote }}
+            {{- end }}
             - name: AGENTGOV_PUBLIC_URL
               value: {{ .Values.urls.controlPlane | trimSuffix "/" | quote }}
             - name: AGENTGOV_GATEWAY_PUBLIC_URL

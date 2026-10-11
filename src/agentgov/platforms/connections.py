@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from agentgov import ids
 from agentgov.config import Settings
 from agentgov.models import ApprovedConnector, IntegrationState, PlatformSync
+from agentgov.registry import features
 
 # Where the permissions granted to AgentGov's app registration are remembered.
 APP_STATE = "microsoft-app"
@@ -145,7 +146,9 @@ def state(
         )
         needs: list[str] = []
         if c.via == "app":
-            if not settings.m365_enabled:
+            if not features.is_on(session, c.key):
+                status = "turned_off"  # in Features
+            elif not settings.m365_enabled:
                 status = "off"
                 needs.append(
                     "AgentGov's app registration (AGENTGOV_M365_TENANT_ID, "

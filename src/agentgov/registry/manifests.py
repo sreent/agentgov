@@ -2,7 +2,7 @@
 
 ```yaml
 apiVersion: agentgov/v1alpha1
-kind: Agent            # Blueprint | ToolServer | Policy | Agent
+kind: Agent            # Feature | Blueprint | ToolServer | Policy | Agent
 metadata:
   name: support-bot
 spec:
@@ -14,9 +14,12 @@ spec:
     You help customers with their orders...
 ```
 
+A ``Feature`` sets how strictly one of AgentGov's features applies
+(docs/features.md): ``metadata.name`` is the feature, ``spec.mode`` its mode.
+
 Applying is idempotent: unchanged resources are reported as ``unchanged``.
-Resources are applied in dependency order (blueprints and tool servers
-before the agents and policies that reference them).
+Resources are applied in dependency order (features first, then blueprints and
+tool servers before the agents and policies that reference them).
 """
 
 from __future__ import annotations
@@ -28,11 +31,11 @@ from sqlalchemy.orm import Session
 
 from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
-from agentgov.registry import agents, blueprints, instructions, policies, toolservers
+from agentgov.registry import agents, blueprints, features, instructions, policies, toolservers
 from agentgov.registry.errors import NotFound, ValidationError
 
 API_VERSION = "agentgov/v1alpha1"
-ORDER = ["Blueprint", "ToolServer", "Policy", "Agent"]
+ORDER = ["Feature", "Blueprint", "ToolServer", "Policy", "Agent"]
 
 
 def parse(text: str) -> list[dict[str, Any]]:
@@ -75,6 +78,7 @@ def apply(
         kind, spec = doc["kind"], _spec(doc)
         name = spec["name"]
         action = {
+            "Feature": _feature,
             "Blueprint": _blueprint,
             "ToolServer": _toolserver,
             "Policy": _policy,
@@ -82,6 +86,16 @@ def apply(
         }[kind](session, settings, spec, actor)
         results.append({"kind": kind, "name": name, "action": action})
     return results
+
+
+def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    if set(spec) - {"name", "mode", "labels"}:
+        raise ValidationError(f"feature {spec['name']}: spec takes only mode")
+    try:
+        changed = features.set_mode(session, settings, spec["name"], spec.get("mode"), actor=actor)
+    except NotFound as exc:
+        raise ValidationError(str(exc)) from None
+    return "configured" if changed else "unchanged"
 
 
 def _blueprint(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
@@ -167,7 +181,10 @@ def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: st
 
 
 def export(session: Session) -> list[dict[str, Any]]:
-    docs: list[dict[str, Any]] = []
+    # Features administrators chose; the deployment's pins belong to the deployment.
+    docs: list[dict[str, Any]] = [
+        _doc("Feature", key, {"mode": mode}) for key, mode in features.chosen(session).items()
+    ]
     for bp in blueprints.list_all(session):
         d = blueprints.to_dict(bp)
         docs.append(_doc("Blueprint", bp.name, {k: d[k] for k in blueprints.FIELDS}))

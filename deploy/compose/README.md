@@ -125,8 +125,8 @@ sign in through Microsoft Entra ID instead of Keycloak (see `.env.example`), the
 sync the Copilot Studio inventory, quarantine Copilot Studio agents, block Microsoft 365
 agents and push the connector allowlist into Power Platform from AgentGov.
 
-Copilot Studio threat detection (`AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION`) has Copilot
-Studio ask AgentGov's policies before each tool call its agents make. Microsoft calls the
+Copilot Studio threat detection (the feature `copilot-studio-threat-detection`) has
+Copilot Studio ask AgentGov's policies before each tool call its agents make. Microsoft calls the
 control plane, so `AGENTGOV_PUBLIC_URL` must be an HTTPS address it can reach.
 [Agents on Microsoft 365 and Copilot Studio](../../docs/platforms.md) and [Connecting
 AgentGov to Microsoft's services](../../docs/microsoft-connections.md) have the details.

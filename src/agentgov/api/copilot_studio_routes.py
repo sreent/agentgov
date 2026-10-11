@@ -29,10 +29,10 @@ MAX_BODY_BYTES = 4 * 1024 * 1024
 
 
 def _detection(request: Request) -> ThreatDetection:
-    detection = request.app.state.rt.threat_detection
-    if detection is None:
+    rt = request.app.state.rt
+    if rt.threat_detection is None or rt.threat_detection.mode(rt.db) == "off":
         raise HTTPException(404, "Copilot Studio threat detection is off")
-    return detection
+    return rt.threat_detection
 
 
 def _refused(detection: ThreatDetection, request: Request) -> JSONResponse | None:
@@ -54,7 +54,8 @@ def validate(request: Request) -> Any:
     refused = _refused(detection, request)
     if refused is not None:
         return refused
-    return {"isSuccessful": True, "status": f"OK: AgentGov is in {detection.mode} mode"}
+    mode = detection.mode(request.app.state.rt.db)
+    return {"isSuccessful": True, "status": f"OK: AgentGov is in {mode} mode"}
 
 
 async def _payload(request: Request) -> dict[str, Any]:
@@ -83,7 +84,7 @@ async def analyze_tool_execution(request: Request, background: BackgroundTasks) 
     The endpoint faces the internet, so the caller's token is checked before the
     body is read.
     """
-    detection = _detection(request)
+    detection = await run_in_threadpool(_detection, request)
     refused = await run_in_threadpool(_refused, detection, request)
     if refused is not None:
         return refused

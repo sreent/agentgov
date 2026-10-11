@@ -129,6 +129,7 @@ const ICONS = {
   upload: 'M12 15V4M7 9l5-5 5 5M5 20h14',
   access: 'M5 8a4 4 0 1 0 8 0a4 4 0 1 0-8 0M3 21c0-3.3 2.7-6 6-6 1.2 0 2.3.3 3.2.9M17 14a2 2 0 1 0 0 4a2 2 0 1 0 0-4M18.4 15.6L22 12M20.5 13.5l1.5 1.5',
   platforms: 'M7 19h10.5a4.5 4.5 0 0 0 .5-8.98A6 6 0 0 0 6.34 9.03 5 5 0 0 0 7 19z',
+  features: 'M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4',
 };
 
 function icon(name, { label, cls } = {}) {
@@ -405,6 +406,13 @@ const STATUS = {
     out_of_date: ['warning', 'triangle', 'Out of date'],
     monitor: ['neutral', 'eye', 'Monitoring'],
     enforce: ['good', 'shield-check', 'Enforcing'],
+    turned_off: ['neutral', 'power', 'Turned off in Features'],
+  },
+  mode: {
+    enforce: ['good', 'shield-check', 'Enforce'],
+    monitor: ['warning', 'eye', 'Monitor'],
+    on: ['good', 'check-circle', 'On'],
+    off: ['neutral', 'minus', 'Off'],
   },
 };
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
@@ -793,6 +801,7 @@ const PAGES = [
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
   { re: /^\/access$/, nav: 'access', title: 'Access', render: renderAccess },
   { re: /^\/platforms$/, nav: 'platforms', title: 'Platforms', render: renderPlatforms },
+  { re: /^\/features$/, nav: 'features', title: 'Features', render: renderFeatures },
 ];
 
 let renderSeq = 0;
@@ -1079,7 +1088,7 @@ async function start() {
 /* ---------------------------------------------------------------- overview */
 
 async function renderOverview() {
-  const [ov, info] = await Promise.all([api('v1/overview'), getInfo()]);
+  const [ov, info, features] = await Promise.all([api('v1/overview'), getInfo(), api('v1/features').then((v) => v.features).catch(() => null)]);
   updateBadges({ pendingApprovals: ov.approvals?.pending ?? 0, findings: ov.findings });
   return h('div', { class: 'page' },
     pageHead({
@@ -1090,7 +1099,7 @@ async function renderOverview() {
     kpiTiles(ov),
     h('div', { class: 'grid-2 grid-2--even' }, activityCard(ov.activity || []), decisionsCard(ov.decisions_24h || {})),
     h('div', { class: 'grid-2 grid-2--even' }, recentBlocksCard(ov.recent_blocks || []), riskyCard(ov.top_risky || [])),
-    controlPlaneCard(ov, info));
+    controlPlaneCard(ov, info, features));
 }
 
 function ledgerBadge(lg) {
@@ -1410,7 +1419,7 @@ function riskyCard(list) {
   });
 }
 
-function controlPlaneCard(ov, info) {
+function controlPlaneCard(ov, info, features) {
   const ts = ov.toolservers || {};
   const cell = (title, value, note, href) => h('div', {},
     h('span', { class: 'cp-title' }, title),
@@ -1428,7 +1437,10 @@ function controlPlaneCard(ov, info) {
       cell('Evidence ledger', ov.ledger ? plural(ov.ledger.checked, 'entry', 'entries') : 'Not verified',
         ov.ledger?.head ? ['Head ', h('span', { class: 'hash', title: ov.ledger.head }, shortHash(ov.ledger.head))] : null, '#/ledger'),
       cell('Gateway', info?.gateway_url ? copyable(info.gateway_url, 'gateway URL') : 'Not configured',
-        info ? `Unregistered callers: ${info.unknown_agent_mode}` : null)));
+        features ? [
+          features.find((f) => f.key === 'unknown-callers')?.mode === 'monitor' ? 'Unknown callers let through' : 'Unknown callers refused',
+          ' · ', h('a', { href: '#/features' }, featureSummary(features)),
+        ] : null)));
 }
 
 /* ------------------------------------------------------------------ agents */
@@ -1631,8 +1643,8 @@ async function renderAgent({ match }) {
   const where = views.length && agent.status !== 'deleted' ? await platformActionTarget(agent) : null;
   const main = views.length ? views.map((v) => platformCard(agent, v, where)) : [permissionsCard(agent)];
   // With threat detection enforcing, AgentGov's policies decide about its tool calls.
-  const enforced = (await getInfo())?.copilot_studio_threat_detection === 'enforce'
-    && views.some((v) => v.source === 'copilot-studio');
+  const enforced = views.some((v) => v.source === 'copilot-studio')
+    && (await featureModes().catch(() => ({})))['copilot-studio-threat-detection'] === 'enforce';
   return h('div', { class: 'page', 'data-title': agent.name },
     agentHeader(agent),
     h('div', { class: 'detail-grid' },
@@ -2116,6 +2128,10 @@ const INSTRUCTION_SOURCES = {
 };
 
 function classifierLine(c, settings) {
+  if (c.state === 'unchecked') {
+    return callout('neutral', 'minus', h('span', {}, "Not checked: instruction checks were off when these arrived. They are checked once instruction checks are on (",
+      h('a', { href: '#/features' }, 'Features'), ')).'));
+  }
   if (!settings?.enabled) return h('p', { class: 'hint' }, 'Checked by AgentGov\'s rules. No classifier is configured.');
   const model = c.model || settings.model;
   if (c.state === 'pending') return h('p', { class: 'hint' }, icon('clock'), ` The classifier (${model}) is still checking these instructions.`);
@@ -2153,7 +2169,7 @@ function instructionsCard(a, view) {
       admin ? h('div', { class: 'btn-row' },
         x.source === 'registered' ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'edit-instructions', onclick: guarded(() => editInstructions(a, x)) }, icon('edit'), 'Edit') : null,
         h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `forget-${x.source}`, onclick: guarded(() => forgetInstructions(a, x)) }, icon('trash'), 'Forget')) : null),
-    issueList(x.issues || []),
+    x.classifier?.state === 'unchecked' ? null : issueList(x.issues || []),
     classifierLine(x.classifier || {}, view.classifier),
     h('details', { class: 'disclosure' }, h('summary', {}, icon('chevron'), 'Show the instructions'),
       h('pre', { class: 'kv-pre instructions-text', tabindex: '0' }, x.text),
@@ -2595,6 +2611,7 @@ async function renderApprovals({ match }) {
   const pending = all.filter((r) => r.status === 'pending');
   const history = all.filter((r) => r.status !== 'pending');
   updateBadges({ pendingApprovals: pending.length });
+  const approvalsMode = (await featureModes().catch(() => ({}))).approvals;
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'Approval views' },
     h('a', { class: 'tab', href: '#/approvals', 'aria-current': tab === 'pending' ? 'page' : null },
       'Pending', h('span', { class: 'nav-badge', 'data-tone': pending.length ? 'warning' : '' }, fmt(pending.length))),
@@ -2616,6 +2633,10 @@ async function renderApprovals({ match }) {
       sub: 'Tool calls that policy held for a human decision. An approval is single-use: the agent retries the identical call and it goes through once.',
       actions: [refreshButton()],
     }),
+    approvalsMode && approvalsMode !== 'enforce' ? callout('warning', 'eye', h('span', {},
+      h('strong', {}, `Human approval is ${approvalsMode === 'off' ? 'off' : 'in monitor mode'}: `),
+      approvalsMode === 'off' ? 'no call waits for approval. ' : 'calls that need approval go through, and the ledger records them. ',
+      h('a', { href: '#/features' }, 'Features'), '.')) : null,
     tabs, content);
 }
 
@@ -3407,8 +3428,12 @@ const LEDGER_TYPES = [
   ['', 'All events'], ['decision.*', 'Policy decisions'], ['approval.*', 'Approvals'], ['agent.*', 'Agent lifecycle'],
   ['toolserver.*', 'Tool servers'], ['policy.*', 'Organisation policies'], ['blueprint.*', 'Blueprints'], ['apikey.*', 'API keys'],
   ['admin.*', 'Sign-ins and sessions'], ['platform.*', 'Platform syncs and imports'], ['connector.*', 'Connector allowlist'],
+  ['feature.*', 'Features'],
 ];
-const LEDGER_DECISIONS = [['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval']];
+const LEDGER_DECISIONS = [
+  ['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval'],
+  ['monitored', 'Monitored: would have been stopped'],
+];
 const PAGE_SIZE = 100;
 
 // The trace viewer (Langfuse, Jaeger, ...) is another app: open it in a new tab.
@@ -3827,10 +3852,11 @@ const CONNECTION_COUNTS = {
 function connectionHelp(c, view) {
   if (c.status === 'missing_permission') return `Grant AgentGov's app registration the application permission ${c.permission}, with admin consent, then sync.`;
   if (c.status === 'out_of_date') return 'The allowlist changed since it was pushed: push it again.';
+  if (c.status === 'turned_off') return 'Turn it on again on the Features page.';
   if (c.key === 'threat-detection') {
     const origin = new URL(API_ROOT).origin;
     return c.status === 'off'
-      ? `Needs ${c.needs.join(', ')}. Connect ${origin}/integrations/copilot-studio in the Power Platform admin center, then set AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION.`
+      ? `Needs ${c.needs.join(', ')}. Connect ${origin}/integrations/copilot-studio in the Power Platform admin center, then turn on Copilot Studio threat detection on the Features page.`
       : `Endpoint: ${origin}/integrations/copilot-studio`;
   }
   if (c.status === 'off' || c.status === 'import') return `Needs ${c.needs.join(', and ')}.`;
@@ -3853,7 +3879,7 @@ function connectionLastRun(c, view) {
 
 function connectionsCard(view) {
   const rows = view.connections || [];
-  const appReady = rows.some((c) => c.via === 'app' && c.status !== 'off');
+  const appReady = rows.some((c) => c.via === 'app' && !['off', 'turned_off'].includes(c.status));
   const actions = can('admin') && appReady
     ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'sync-all', onclick: (e) => syncConnections(e.currentTarget) }, icon('refresh'), 'Sync all')]
     : null;
@@ -3867,7 +3893,7 @@ function connectionsCard(view) {
       h('thead', {}, h('tr', {}, ['Connection', 'Status', 'Last run', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
       h('tbody', {}, rows.map((c) => {
         const help = connectionHelp(c, view);
-        const syncable = can('admin') && c.via === 'app' && c.status !== 'off';
+        const syncable = can('admin') && c.via === 'app' && !['off', 'turned_off'].includes(c.status);
         return h('tr', { 'data-connection': c.key },
           h('td', { 'data-label': 'Connection' }, h('span', { class: 'cell-title' }, c.name), h('div', { class: 'cell-sub' }, c.gives)),
           h('td', { 'data-label': 'Status' }, chip('connection', c.status), help ? h('div', { class: 'cell-sub break' }, help) : null),
@@ -4228,6 +4254,100 @@ function connectorList(v) {
     connectors.some((c) => (c.operations || []).some((op) => op.maker_connection))
       ? h('p', { class: 'hint' }, "Highlighted tools run with their maker's connection, so every user reaches data with the maker's access.") : null,
     v.allowlist_active ? null : h('p', { class: 'hint' }, h('a', { href: '#/platforms' }, 'The connector allowlist'), ' is empty, so connectors are not checked yet.'));
+}
+
+/* ---------------------------------------------------------------- features */
+
+const MODE_WORDS = { off: 'Off', on: 'On', monitor: 'Monitor', enforce: 'Enforce' };
+
+async function featureModes() {
+  const view = await api('v1/features');
+  return Object.fromEntries(view.features.map((f) => [f.key, f.mode]));
+}
+
+// What differs from the defaults: features monitored, and features turned off.
+function featureSummary(list) {
+  const monitored = list.filter((f) => f.mode === 'monitor' && f.default !== 'monitor').length;
+  const off = list.filter((f) => f.mode === 'off' && f.default !== 'off').length;
+  const parts = [monitored ? `${fmt(monitored)} monitored` : null, off ? `${fmt(off)} turned off` : null].filter(Boolean);
+  return parts.length ? `Features: ${parts.join(', ')}` : 'Features: the defaults';
+}
+
+async function renderFeatures() {
+  const view = await api('v1/features');
+  const monitored = view.features.filter((f) => f.mode === 'monitor' && f.group === 'controls');
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Features',
+      sub: 'Choose which parts of AgentGov you use, and how strictly. In monitor mode a control decides and records what it would have done, but lets the call through: try it on real traffic before you enforce it.',
+      actions: [refreshButton()],
+    }),
+    monitored.length ? callout('warning', 'eye', h('span', {},
+      h('strong', {}, `${plural(monitored.length, 'control')} in monitor mode. `),
+      'Calls they would have stopped go through, and the ledger records them as warnings. ',
+      h('a', { href: '#/ledger?decision=monitored' }, 'See what they would have stopped'), '.')) : null,
+    Object.entries(view.groups).map(([group, title]) => {
+      const list = view.features.filter((f) => f.group === group);
+      return list.length ? featuresCard(title, list) : null;
+    }));
+}
+
+function featuresCard(title, list) {
+  return card({
+    title,
+    flush: true,
+    body: h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable features-table' },
+      h('caption', { class: 'sr-only' }, title),
+      h('thead', {}, h('tr', {}, ['Feature', 'Mode', 'Now'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, list.map((f) => h('tr', { 'data-feature': f.key },
+        h('td', { 'data-label': 'Feature' },
+          h('span', { class: 'cell-title' }, f.title), h('div', { class: 'cell-sub' }, f.description),
+          f.needs ? h('div', { class: 'cell-sub' }, `Needs ${f.needs}.`) : null),
+        h('td', { 'data-label': 'Mode' }, modeControl(f)),
+        h('td', { 'data-label': 'Now' }, h('div', {}, f.effect), featureProvenance(f))))))),
+  });
+}
+
+function featureProvenance(f) {
+  if (f.set_by === 'deployment') {
+    return h('div', { class: 'cell-sub' }, icon('lock'), ' Set by the deployment (AGENTGOV_FEATURES)');
+  }
+  if (f.set_by === 'admin') return h('div', { class: 'cell-sub' }, `Set by ${f.changed_by} `, timeEl(f.changed_at));
+  return h('div', { class: 'cell-sub' }, 'The default');
+}
+
+function modeControl(f) {
+  if (!can('admin') || f.set_by === 'deployment') return chip('mode', f.mode);
+  const name = `mode-${f.key}`;
+  return h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': `${f.title}: mode` },
+    f.modes.map((m) => {
+      const id = `${name}-${m}`;
+      const unavailable = f.unavailable?.[m];
+      const input = h('input', {
+        type: 'radio', id, name, value: m, checked: m === f.mode,
+        disabled: Boolean(unavailable) && m !== f.mode, 'data-focus-key': id,
+      });
+      input.addEventListener('change', guarded(() => chooseMode(f, m)));
+      return h('label', { for: id, title: unavailable || f.effects[m] || null }, input, h('span', {}, MODE_WORDS[m] || humanize(m)));
+    }));
+}
+
+async function chooseMode(f, mode) {
+  if (f.modes.indexOf(mode) < f.modes.indexOf(f.mode)) {
+    const ok = await ask({
+      title: `${f.title}: ${(MODE_WORDS[mode] || mode).toLowerCase()}?`,
+      text: f.effects[mode],
+      tone: 'danger', iconName: 'triangle', confirm: `Set to ${(MODE_WORDS[mode] || mode).toLowerCase()}`,
+    });
+    if (!ok) { await refresh(); return; }
+  }
+  try {
+    const out = await api(`v1/features/${encodeURIComponent(f.key)}`, { method: 'PUT', body: { mode } });
+    toast(`${f.title}: ${(MODE_WORDS[out.mode] || out.mode).toLowerCase()}. ${out.effect}`);
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+  }
+  await refresh();
 }
 
 /* -------------------------------------------------------------------- go */

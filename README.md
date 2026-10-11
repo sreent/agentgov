@@ -67,6 +67,10 @@ them needs the AI administrator or Power Platform administrator role
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
 | **Security** | PII redaction, secret blocking, prompt-injection and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger | Presidio, OPA, AgentGov processor, Granite Guardian (optional) |
 
+Use only the parts you need. Each [feature](docs/features.md) can be turned off, and each
+control at the gateway can run in monitor mode first: it records what it would have
+stopped, without stopping anything, until you enforce it.
+
 ## How it works
 
 ```mermaid
@@ -130,11 +134,13 @@ shows each control in turn:
 4. **Credentials never leave**: a secret in tool arguments is blocked.
 5. **Indirect prompt injection**: a poisoned tool result is withheld.
 6. **Ungranted tools** are refused even when called directly.
-7. **Human in the loop**: a destructive tool waits for an approver; once approved, the
+7. **Monitor mode**: with least privilege monitored, the same call goes through and the
+   ledger records what would have stopped it; enforced again, it is refused.
+8. **Human in the loop**: a destructive tool waits for an approver; once approved, the
    agent's retry goes through.
-8. **Kill switch**: blocking the agent takes effect everywhere within a second.
-9. **Shadow AI**: telemetry from an unregistered agent is discovered.
-10. **Evidence**: every decision is in a ledger whose hash chain verifies.
+9. **Kill switch**: blocking the agent takes effect everywhere within a second.
+10. **Shadow AI**: telemetry from an unregistered agent is discovered.
+11. **Evidence**: every decision is in a ledger whose hash chain verifies.
 
 Then look around:
 
@@ -244,6 +250,7 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Agent 365 baseline and parity matrix](docs/baseline-agent365.md)
 * [Architecture](docs/architecture.md)
 * [Administration](docs/administration.md): the same tasks in the admin UI, the CLI and the API
+* [Features](docs/features.md): choose which parts of AgentGov you use, and how strictly
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin

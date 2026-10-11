@@ -19,7 +19,15 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from agentgov.api.auth import Principal, require
 from agentgov.gateway import etag_of
 from agentgov.opa.bundle import BUNDLE_CONTENT_TYPE, parse_prefer_wait
-from agentgov.registry import agents, approvals, decisions, discovery, findings, toolservers
+from agentgov.registry import (
+    agents,
+    approvals,
+    decisions,
+    discovery,
+    features,
+    findings,
+    toolservers,
+)
 from agentgov.registry.errors import NotFound, ValidationError
 from agentgov.telemetry import decode_protobuf, ingest
 
@@ -191,6 +199,7 @@ def internal_observe(
             client_id=body.get("client_id"),
             name=body.get("name"),
             details=body.get("details"),
+            discover=features.is_on(s, "discovery"),
         )
         return {"agent": agent.id if agent else None}
 

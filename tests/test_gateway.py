@@ -82,10 +82,13 @@ def test_every_route_is_authenticated_and_governed() -> None:
 
 
 def test_monitor_mode_relaxes_authentication() -> None:
-    policies = routes(render(servers(), SETTINGS.with_overrides(unknown_agent_mode="monitor")))[
-        "mcp-crm"
-    ]["policies"]
-    assert policies["jwtAuth"]["mode"] == "optional"
+    config = render(servers(), SETTINGS, {"unknown-callers": "monitor"})
+    assert routes(config)["mcp-crm"]["policies"]["jwtAuth"]["mode"] == "optional"
+
+
+def test_mcp_gateway_off_publishes_no_tool_servers() -> None:
+    config = render(servers(), SETTINGS, {"mcp-gateway": "off"})
+    assert list(routes(config)) == ["agentgov-health"]
 
 
 def test_tracing_and_ipv6() -> None:

@@ -92,3 +92,19 @@ test_organisation_policies_apply if {
 		with data.agentgov.custom.freeze.deny as {"Change freeze until Monday"}
 	d.reasons == ["Change freeze until Monday"]
 }
+
+test_monitored_controls_only_record if {
+	reg := object.union(registry, {"features": {"data-protection": "monitor", "risk-based-access": "monitor"}})
+	inp := object.union(call("agt_it", email), {"detections": {"categories": ["secret"]}})
+	d := copilotstudio.decision with input as inp with data.registry as reg
+	d.effect == "allow"
+	count(d.monitored) == 2
+}
+
+test_controls_that_are_off_do_not_apply if {
+	reg := object.union(registry, {"features": {"prompt-injection": "off"}})
+	inp := object.union(call("agt_sales", email), {"detections": {"prompt_injection": true}})
+	d := copilotstudio.decision with input as inp with data.registry as reg
+	d.effect == "allow"
+	d.monitored == []
+}

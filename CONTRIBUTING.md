@@ -76,6 +76,16 @@ that change code or the deployment.
 If you change the ExtMcp protocol definition, regenerate the stubs with
 `scripts/gen-protos.sh`.
 
+## Adding a feature
+
+Organisations choose which features they use ([features](docs/features.md)), so a new
+capability is a feature they can turn off. Add it to the catalog in
+`src/agentgov/registry/features.py`, with its modes and what each does, and describe it in
+`docs/features.md` (a test checks both). Then check its mode where it acts: in Rego with
+`ctx.enforced(...)`, in the processor with the modes it reads from OPA, and in the control
+plane with `features.mode(session, ...)`. A control that decides about calls should
+support monitor mode: decide, record what it would have done, and let the call through.
+
 ## Changing the database schema
 
 Every change to `src/agentgov/models.py` needs a migration in

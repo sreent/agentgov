@@ -92,6 +92,9 @@ services:
       AGENTGOV_GATEWAY_OTLP_ENDPOINT: http://otel-collector:4317
       AGENTGOV_PROCESSOR_ADDRESS: processor:50051
       AGENTGOV_POSTURE_INTERVAL_SECONDS: "60"
+      # Features the deployment pins, e.g. "least-privilege=monitor" (docs/features.md).
+      # Administrators choose the others on the Features page.
+      AGENTGOV_FEATURES: ${AGENTGOV_FEATURES:-}
       # AgentGov's Microsoft app registration: the Microsoft 365 agent catalog, Entra Agent
       # ID, the Purview audit log and Defender alerts, each with its own permission
       # (docs/microsoft-connections.md). Off while these are empty.
@@ -99,8 +102,8 @@ services:
       AGENTGOV_M365_CLIENT_ID: ${AGENTGOV_M365_CLIENT_ID:-}
       AGENTGOV_M365_CLIENT_SECRET: ${AGENTGOV_M365_CLIENT_SECRET:-}
       AGENTGOV_M365_SYNC_INTERVAL_SECONDS: ${AGENTGOV_M365_SYNC_INTERVAL_SECONDS:-3600}
-      # Copilot Studio asks AgentGov's policies before each tool call (off, monitor, enforce).
-      AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION: ${AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION:-off}
+      # Copilot Studio asks AgentGov's policies before each tool call, once the feature
+      # copilot-studio-threat-detection is on (monitor or enforce).
       AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS: ${AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS:-}
       AGENTGOV_COPILOT_STUDIO_TENANT_ID: ${AGENTGOV_COPILOT_STUDIO_TENANT_ID:-}
       AGENTGOV_COPILOT_STUDIO_AUDIENCES: ${AGENTGOV_COPILOT_STUDIO_AUDIENCES:-}

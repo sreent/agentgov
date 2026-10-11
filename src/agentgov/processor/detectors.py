@@ -356,11 +356,14 @@ def scan_tool_definitions(
 # ---------------------------------------------------------------------------
 
 
-def scan_local(value: Any, *, check_injection: bool) -> tuple[ScanResult, list[tuple[Path, str]]]:
+def scan_local(
+    value: Any, *, check_injection: bool, check_secrets: bool = True
+) -> tuple[ScanResult, list[tuple[Path, str]]]:
     strings, truncated = collect_strings(value)
     result = ScanResult(truncated=truncated)
-    for path, text in strings:
-        result.spans.extend(find_secrets(path, text))
+    if check_secrets:
+        for path, text in strings:
+            result.spans.extend(find_secrets(path, text))
     if check_injection:
         result.injection_score, result.injection_reasons = score_injection([t for _, t in strings])
     return result, strings

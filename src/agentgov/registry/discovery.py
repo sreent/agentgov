@@ -70,12 +70,14 @@ def observe(
     model: str | None = None,
     details: dict[str, Any] | None = None,
     seen_at: datetime | None = None,
+    discover: bool = True,
 ) -> Agent | None:
-    """Match an observation to an agent, registering a discovered one if needed."""
+    """Match an observation to an agent, registering a discovered one if needed (and
+    ``discover``: the discovery feature is on)."""
     agent = find(session, agent_id=agent_id, client_id=client_id, name=name)
     if agent is None:
         label = name or client_id or agent_id
-        if not label:
+        if not label or not discover:
             return None
         agent = Agent(
             id=ids.new_id(ids.AGENT),

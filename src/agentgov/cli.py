@@ -2,8 +2,8 @@
 
 The administration commands are a thin layer over the HTTP API and follow the
 admin UI's pages: agents, blueprints, tool servers, policies, approvals,
-findings, the ledger, access (API keys) and platforms, plus a checker for agent
-instructions. Whatever the UI can change, the CLI can change too, through the
+findings, the ledger, access (API keys), platforms and features, plus a checker
+for agent instructions. Whatever the UI can change, the CLI can change too, through the
 same endpoints and with the same role checks.
 """
 
@@ -79,6 +79,11 @@ db_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(db_app, name="db")
+features_app = typer.Typer(
+    help="Which features are used, and how strictly (off, monitor or enforce).",
+    no_args_is_help=True,
+)
+app.add_typer(features_app, name="features")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -899,9 +904,11 @@ def _classifier_state(classifier: dict[str, Any]) -> str:
         )
     if state == "error":
         return f"classifier failed: {classifier.get('error')}"
-    return {"off": "classifier: not configured", "pending": "classifier: pending"}.get(
-        state, f"classifier: {state}"
-    )
+    return {
+        "off": "classifier: not configured",
+        "pending": "classifier: pending",
+        "unchecked": "not checked: instruction checks were off",
+    }.get(state, f"classifier: {state}")
 
 
 @agents_app.command("instructions")
@@ -917,7 +924,8 @@ def agents_instructions(
             f"{src['source_name']} instructions, from {src['reported_by']}, "
             f"changed {src['updated_at']}"
         )
-        _issues(src["issues"])
+        if src["classifier"].get("state") != "unchecked":
+            _issues(src["issues"])
         typer.echo(f"  {_classifier_state(src['classifier'])}")
         if text:
             typer.echo("")
@@ -1719,3 +1727,48 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ------------------------------------------------------------------ features
+
+
+@features_app.command("list")
+def features_list() -> None:
+    """Every feature, its mode and what that mode does."""
+    view = _call("GET", "/v1/features")
+    rows = [
+        {
+            "feature": f["key"],
+            "mode": f["mode"],
+            "set_by": f["set_by"],
+            "does": f["effect"],
+        }
+        for f in view["features"]
+    ]
+    _table(rows, ["feature", "mode", "set_by", "does"])
+
+
+@features_app.command("get")
+def features_get(key: str) -> None:
+    """One feature: its modes, what each does, and who chose the current one."""
+    _print(_call("GET", f"/v1/features/{quote(key)}"))
+
+
+@features_app.command("set")
+def features_set(
+    key: str,
+    mode: str = typer.Argument(..., help="off, monitor or enforce (off or on for some)."),
+    yes: bool = YES,
+) -> None:
+    """Choose how strictly a feature applies."""
+    current = _call("GET", f"/v1/features/{quote(key)}")
+    modes = current["modes"]
+    if mode not in modes:
+        _fail(f"{key} takes {', '.join(modes)} (got {mode!r})")
+    if mode != current["mode"] and modes.index(mode) < modes.index(current["mode"]):
+        _confirm(
+            f"{current['title']}: {current['mode']} to {mode}? {current['effects'].get(mode, '')}",
+            yes,
+        )
+    out = _call("PUT", f"/v1/features/{quote(key)}", json={"mode": mode})
+    _done("feature", key, f"{out['mode']}: {out['effect']}")

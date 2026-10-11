@@ -38,6 +38,7 @@ from agentgov.processor.control_plane import (
     ControlPlaneError,
     DecisionRecorder,
 )
+from agentgov.processor.modes import FeatureModes
 from agentgov.processor.presidio import PresidioClient, PresidioError
 from agentgov.processor.proto import ext_mcp_pb2 as pb
 from agentgov.processor.proto import ext_mcp_pb2_grpc as pb_grpc
@@ -131,6 +132,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         self.cp = control_plane
         self.recorder = recorder
         self.presidio = presidio
+        self.features = FeatureModes(opa)
         self._background: set[asyncio.Task[Any]] = set()
 
     # ------------------------------------------------------------------ helpers
@@ -139,9 +141,13 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    async def _inspect(self, payload: Any, *, check_injection: bool) -> Inspection:
-        scan, strings = detectors.scan_local(payload, check_injection=check_injection)
-        if self.presidio is not None and strings:
+    async def _inspect(self, payload: Any, *, protect: bool, check_injection: bool) -> Inspection:
+        """Look for credentials and personal data (``protect``: data protection is on)
+        and, with ``check_injection``, for instructions aimed at the agent."""
+        scan, strings = detectors.scan_local(
+            payload, check_injection=check_injection, check_secrets=protect
+        )
+        if protect and self.presidio is not None and strings:
             try:
                 pii, skipped = await self.presidio.find_pii(strings)
                 scan.spans.extend(pii)
@@ -153,6 +159,14 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
 
     def _record(self, **fields: Any) -> None:
         self.recorder.record({"ts": ids.isoformat(ids.utcnow()), **fields})
+
+    def _fail_closed(self, modes: dict[str, str]) -> bool:
+        """Whether a call must stop when personal data can't be looked for: only while
+        data protection is enforced, and AGENTGOV_PRESIDIO_FAILURE_MODE says so."""
+        return (
+            modes["data-protection"] == "enforce"
+            and self.settings.presidio_failure_mode == "closed"
+        )
 
     @staticmethod
     def _identity(meta: dict[str, Any]) -> dict[str, Any]:
@@ -197,8 +211,12 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         if target is None:
             return _pass_request()
         identity = self._identity(meta)
-        inspection = await self._inspect(payload, check_injection=False)
+        modes = await self.features.current()
+        inspection = await self._inspect(
+            payload, protect=modes["data-protection"] != "off", check_injection=False
+        )
         resource = f"{server}/{target}"
+        monitored: list[str] = []  # what monitored controls would have done
 
         def finish(
             effect: str,
@@ -222,6 +240,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 redacted=redacted or [],
                 detections=inspection.summary,
                 approval_id=approval_id,
+                monitored=monitored,
                 opa_decision_id=decision_id,
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 trace_id=trace_id,
@@ -238,7 +257,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 )
             )
 
-        if inspection.scan.pii_error and self.settings.presidio_failure_mode == "closed":
+        if inspection.scan.pii_error and self._fail_closed(modes):
             reasons = ["Content inspection is unavailable, so the call was not forwarded"]
             finish("deny", reasons)
             return reject("deny", reasons)
@@ -262,8 +281,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         effect = decision.get("effect", "deny")
         reasons = list(decision.get("reasons") or [])
         agent = decision.get("agent")
+        monitored = list(decision.get("monitored") or [])
 
-        if agent is None and self.settings.unknown_agent_mode == "monitor":
+        if agent is None and modes["unknown-callers"] == "monitor":
             self._spawn(self._observe_unknown(identity, server, method))
             finish(
                 "allow", ["monitor mode: caller is not a registered agent"], decision_id=decision_id
@@ -365,7 +385,13 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
 
         started = time.perf_counter()
         target = (meta.get("request") or {}).get("agentgov_target") or "unknown"
-        inspection = await self._inspect(result, check_injection=True)
+        modes = await self.features.current()
+        inspection = await self._inspect(
+            result,
+            protect=modes["data-protection"] != "off",
+            check_injection=modes["prompt-injection"] != "off",
+        )
+        monitored: list[str] = []
 
         def finish(
             effect: str,
@@ -387,6 +413,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 reasons=reasons,
                 redacted=redacted or [],
                 detections=inspection.summary,
+                monitored=monitored,
                 opa_decision_id=decision_id,
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 trace_id=trace_id,
@@ -401,7 +428,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 )
             )
 
-        if inspection.scan.pii_error and self.settings.presidio_failure_mode == "closed":
+        if inspection.scan.pii_error and self._fail_closed(modes):
             reasons = ["Content inspection is unavailable, so the result was withheld"]
             finish("deny", reasons)
             return withhold(reasons)
@@ -422,7 +449,8 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             return withhold(reasons)
 
         agent = decision.get("agent")
-        if agent is None and self.settings.unknown_agent_mode == "monitor":
+        monitored = list(decision.get("monitored") or [])
+        if agent is None and modes["unknown-callers"] == "monitor":
             finish(
                 "allow", ["monitor mode: caller is not a registered agent"], decision_id=decision_id
             )
@@ -443,7 +471,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         self, server: str, identity: dict[str, Any], result: dict[str, Any]
     ) -> pb.McpResponseResult:
         tools = [t for t in result.get("tools") or [] if isinstance(t, dict)]
-        poisoned = detectors.scan_tool_definitions(tools)
+        modes = await self.features.current()
+        integrity = modes["tool-integrity"]
+        poisoned = detectors.scan_tool_definitions(tools) if integrity != "off" else {}
         self._spawn(self._report_catalog(server, tools, poisoned))
         opa_input = {
             "phase": "response",
@@ -458,9 +488,10 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         except OpaError as exc:
             log.error("policy evaluation failed for tools/list: %s", exc)
             view = {"agent": None, "visible": []}
-        if view.get("agent") is None and self.settings.unknown_agent_mode == "monitor":
+        if view.get("agent") is None and modes["unknown-callers"] == "monitor":
             self._spawn(self._observe_unknown(identity, server, "tools/list"))
-            visible = {t.get("name") for t in tools} - set(poisoned)
+            quarantined = set(poisoned) if integrity == "enforce" else set()
+            visible = {t.get("name") for t in tools} - quarantined
         else:
             visible = set(view.get("visible") or [])
         filtered = [t for t in tools if t.get("name") in visible]

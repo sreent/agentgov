@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from agentgov import ledger
 from agentgov.models import ACTIVE
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import discovery, findings, instructions
+from agentgov.registry import discovery, features, findings, instructions
 from agentgov.registry.errors import ValidationError
 
 GENAI_OPERATIONS = {
@@ -153,6 +153,7 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
     }
     seen_agents: set[str] = set()
     reported: dict[str, str] = {}
+    modes = features.modes(session)
     for resource, scope, span in iter_spans(payload):
         stats["spans"] += 1
         attrs = _attrs(span.get("attributes"))
@@ -177,6 +178,7 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
             model=model,
             details={"service.name": service} if service else None,
             seen_at=when,
+            discover=modes["discovery"] != features.OFF,
         )
         if agent is None:
             continue
@@ -202,8 +204,10 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
             tool = attrs.get("gen_ai.tool.name") or "unknown"
             server = attrs.get("agentgov.server") or "local"
             discovery.record_activity(session, agent.id, when=when, tool_calls=1)
-            if agent.status == ACTIVE and not granted(
-                agents_svc.effective_grants(agent), server, tool
+            if (
+                modes["least-privilege"] != features.OFF
+                and agent.status == ACTIVE
+                and not granted(agents_svc.effective_grants(agent), server, tool)
             ):
                 stats["ungranted"] += 1
                 ledger.append(

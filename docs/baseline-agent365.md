@@ -56,6 +56,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Credential rotation | ✅ | `POST /v1/agents/{id}/credentials {"rotate": true}` |
 | Entra Agent ID identities of agents built on Microsoft's platforms | ✅ | Read from Microsoft Graph and linked to their registry agents; an identity Microsoft disabled raises a finding ([connections](microsoft-connections.md#microsoft-entra-agent-id)) |
 | Conditional Access for agents | ✅ | **OPA** policies evaluated on every tool call, with registry context |
+| Report-only mode for access policies | ✅ | Each control at the gateway can run in monitor mode: it decides and records, but doesn't stop the call ([features](features.md)) |
 | Risk-based access (ID Protection "risky agents") | ✅ | Risk score from posture and runtime signals; critical risk is blocked by the baseline policy; optional auto-block |
 | Access reviews / sponsor attestation | ✅ | Periodic attestation by sponsors; expiry raises findings |
 | Access packages for agents | ⏳ | — |

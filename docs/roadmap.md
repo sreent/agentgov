@@ -18,6 +18,7 @@ come second: they report, but they don't enforce.
 | | Theme | Item | Building block |
 |---|---|---|---|
 | 0 | Deployment | **Upgradeable and deployable**: database migrations and a [Helm chart](../deploy/helm/agentgov/README.md) (done) | Alembic, Helm |
+| | Administration | **Choose the features you use** (done): each one on or off, and the controls at the gateway in monitor mode to try them before enforcing them ([features](features.md)). Every item below arrives as a feature | — |
 | 1 | Model calls | **Govern agents' calls to models**: provider keys held by the gateway, the models each blueprint allows, personal data and secrets masked before prompts leave, jailbreak and injection checks, token budgets, spend per agent and sponsor, and callers the gateway doesn't know discovered as shadow agents | agentgateway's LLM routes and guardrail webhook |
 | 2 | Developer tools | **An enterprise MCP registry**: the approved tool servers in the MCP registry format, for GitHub Copilot and VS Code in "registry only" mode, and discovery of the MCP servers configured on developer machines | MCP Registry API |
 | 3 | Identity | **Who the agent acts for**: user-delegated tokens at the gateway, the user and their groups in policy, the user in the ledger, approvals sent to the user | Keycloak token exchange (RFC 8693), MCP enterprise-managed authorization (ID-JAG) |

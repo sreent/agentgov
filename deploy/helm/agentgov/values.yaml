@@ -23,6 +23,12 @@ urls:
   # The bundled Keycloak, as browsers and agents reach it. Tokens name it as issuer.
   keycloak: http://localhost:8180
 
+# Features the deployment pins (docs/features.md), for example
+#   features: {least-privilege: monitor, discovery: "off"}
+# Administrators see them in the app but can't change them there; they choose the
+# modes of the other features themselves.
+features: {}
+
 secrets:
   # A Secret you manage, with the keys admin-token, service-token,
   # keycloak-client-secret, oidc-client-secret, demo-password,
@@ -39,7 +45,7 @@ controlPlane:
   # migrate one at a time.
   autoMigrate: true
   # More settings, as AGENTGOV_* environment variables (see src/agentgov/config.py),
-  # for example AGENTGOV_UNKNOWN_AGENT_MODE or AGENTGOV_M365_TENANT_ID.
+  # for example AGENTGOV_AUTO_BLOCK_RISK_SCORE or AGENTGOV_M365_TENANT_ID.
   env: {}
   # Secrets or ConfigMaps to read settings from, for example one holding
   # AGENTGOV_M365_CLIENT_SECRET: [{secretRef: {name: agentgov-microsoft}}].

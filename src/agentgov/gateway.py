@@ -1,7 +1,7 @@
 """Generates agentgateway's configuration from the registry.
 
-Every registered MCP server becomes a route ``/mcp/<server>`` with three
-policies, all enforced by agentgateway:
+Every registered MCP server becomes a route ``/mcp/<server>`` (while the
+mcp-gateway feature is on) with three policies, all enforced by agentgateway:
 
 * ``jwtAuth``       - the caller must present a Keycloak-issued agent token
                       for the gateway audience.
@@ -37,6 +37,7 @@ from sqlalchemy import select
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.models import PENDING, ToolServer
+from agentgov.registry import features
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ IDENTITY_METADATA = {
 }
 
 
-def route_for(ts: ToolServer, settings: Settings) -> dict[str, Any]:
+def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
     policies: dict[str, Any] = {
         "cors": {
             "allowOrigins": ["*"],
@@ -83,9 +84,9 @@ def route_for(ts: ToolServer, settings: Settings) -> dict[str, Any]:
     }
     if settings.keycloak_issuer and settings.keycloak_jwks_url:
         policies["jwtAuth"] = {
-            # "optional" lets unauthenticated callers reach the processor, which
-            # records them as discovered agents when unknown_agent_mode=monitor.
-            "mode": "optional" if settings.unknown_agent_mode == "monitor" else "strict",
+            # "optional" lets unauthenticated callers reach the processor, which lets
+            # them through and records them while unknown callers are monitored.
+            "mode": "optional" if modes["unknown-callers"] == features.MONITOR else "strict",
             "issuer": settings.keycloak_issuer,
             "audiences": [settings.gateway_audience],
             "jwks": {"url": settings.keycloak_jwks_url},
@@ -98,8 +99,13 @@ def route_for(ts: ToolServer, settings: Settings) -> dict[str, Any]:
     }
 
 
-def render(servers: list[ToolServer], settings: Settings) -> dict[str, Any]:
-    routes = [route_for(ts, settings) for ts in servers if ts.status != PENDING]
+def render(
+    servers: list[ToolServer], settings: Settings, modes: dict[str, str] | None = None
+) -> dict[str, Any]:
+    modes = {**{f.key: f.default for f in features.CATALOG}, **(modes or {})}
+    routes = []
+    if modes["mcp-gateway"] != features.OFF:
+        routes = [route_for(ts, settings, modes) for ts in servers if ts.status != PENDING]
     # A static health route keeps the listener valid when no servers exist yet.
     routes.append(
         {
@@ -157,7 +163,7 @@ class GatewayConfigWriter:
     def render_current(self) -> str:
         with self.db.session() as session:
             servers = list(session.scalars(select(ToolServer).order_by(ToolServer.name)))
-            return to_yaml(render(servers, self.settings))
+            return to_yaml(render(servers, self.settings, features.modes(session)))
 
     def sync(self) -> bool:
         if not self.settings.gateway_config_path:

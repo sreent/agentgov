@@ -43,3 +43,13 @@ test_result_is_boolean if {
 	r := agentos.allow with input as req("stranger", "search_docs") with data.registry as registry
 	r == false
 }
+
+test_least_privilege_not_enforced_allows_ungranted_tools if {
+	reg := object.union(registry, {"features": {"least-privilege": "monitor"}})
+	agentos.allow with input as req("sales-bot", "crm/delete_customer") with data.registry as reg
+}
+
+test_blocked_agents_stay_denied_whatever_the_modes if {
+	reg := object.union(registry, {"features": {"least-privilege": "off", "risk-based-access": "off"}})
+	not agentos.allow with input as req("old-bot", "anything") with data.registry as reg
+}

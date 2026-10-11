@@ -28,8 +28,8 @@ from agentgov import ids, ledger
 from agentgov.db import mark_changed
 from agentgov.models import Agent, AgentInstructions, Finding
 from agentgov.processor import detectors
-from agentgov.registry import findings
-from agentgov.registry.errors import NotFound, ValidationError
+from agentgov.registry import features, findings
+from agentgov.registry.errors import Conflict, NotFound, ValidationError
 from agentgov.scanners import guardian
 from agentgov.scanners import instructions as rules
 
@@ -44,6 +44,9 @@ MAX_STORED_CHARS = 32_000
 MAX_TEXT_CHARS = 200_000
 # How often a source that keeps reporting the same text refreshes "last reported".
 REPORT_EVERY = timedelta(minutes=10)
+# The classifier state of instructions that arrived while instruction checks were
+# off: neither the rules nor the classifier looked at them yet.
+UNCHECKED = "unchecked"
 
 
 def _digest(text: str) -> str:
@@ -94,8 +97,11 @@ def report(
     stored = _redact(text)
     row.text, row.truncated = stored[:MAX_STORED_CHARS], len(stored) > MAX_STORED_CHARS
     row.sha256, row.reported_by, row.updated_at, row.reported_at = digest, actor, now, now
-    row.issues = [i.to_dict() for i in rules.scan(text)]
-    row.classifier_state, row.classifier = ("pending" if classify else "off"), {}
+    checking = features.is_on(session, "instruction-checks")
+    if checking:
+        _scan(row, classify)
+    else:
+        row.issues, row.classifier_state, row.classifier = [], UNCHECKED, {}
     session.flush()
     found = sorted({i["rule"] for i in row.issues})
     # Agents may report changing text all day: the ledger records what changes the outcome.
@@ -106,11 +112,17 @@ def report(
             actor=actor,
             agent=agent,
             severity="warning" if found else "info",
-            details={"source": source, "sha256": digest, "issues": found},
+            details={"source": source, "sha256": digest, "issues": found, "checked": checking},
         )
-    evaluate(session, agent)
+    if checking:
+        evaluate(session, agent)
     mark_changed(session, "instructions")
     return row
+
+
+def _scan(row: AgentInstructions, classify: bool) -> None:
+    row.issues = [i.to_dict() for i in rules.scan(row.text)]
+    row.classifier_state, row.classifier = ("pending" if classify else "off"), {}
 
 
 def clear(session: Session, agent: Agent, *, source: str, actor: str) -> None:
@@ -131,12 +143,13 @@ def clear(session: Session, agent: Agent, *, source: str, actor: str) -> None:
 
 def rescan(session: Session, agent: Agent, *, actor: str, classify: bool) -> int:
     """Check the stored instructions again (after a rules update, or for the classifier)."""
+    if not features.is_on(session, "instruction-checks"):
+        raise Conflict("instruction checks are off: turn them on in Features first")
     rows = list(
         session.scalars(select(AgentInstructions).where(AgentInstructions.agent_id == agent.id))
     )
     for row in rows:
-        row.issues = [i.to_dict() for i in rules.scan(row.text)]
-        row.classifier_state, row.classifier = ("pending" if classify else "off"), {}
+        _scan(row, classify)
     if rows:
         ledger.append(
             session,
@@ -148,6 +161,27 @@ def rescan(session: Session, agent: Agent, *, actor: str, classify: bool) -> int
         evaluate(session, agent)
         mark_changed(session, "instructions")
     return len(rows)
+
+
+def check_unchecked(session: Session, *, classify: bool) -> list[Agent]:
+    """Check the instructions that arrived while instruction checks were off; returns
+    the agents they belong to."""
+    rows = list(
+        session.scalars(
+            select(AgentInstructions).where(AgentInstructions.classifier_state == UNCHECKED)
+        )
+    )
+    for row in rows:
+        _scan(row, classify)
+    checked = []
+    for agent_id in sorted({row.agent_id for row in rows}):
+        agent = session.get(Agent, agent_id)
+        if agent is not None:
+            evaluate(session, agent)
+            checked.append(agent)
+    if rows:
+        mark_changed(session, "instructions")
+    return checked
 
 
 # ---------------------------------------------------------------- classifier

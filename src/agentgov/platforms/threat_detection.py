@@ -37,7 +37,7 @@ from agentgov.identity.entra_calls import EntraCallers
 from agentgov.models import Agent, IntegrationState
 from agentgov.processor.detectors import scan_local
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import discovery, findings, microsoft_signals, risk
+from agentgov.registry import discovery, features, findings, microsoft_signals, risk
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ DECISION_PATH = "agentgov/copilotstudio/decision"
 # Of Copilot Studio's second: what the policy engine may take.
 OPA_TIMEOUT_SECONDS = 0.5
 STATE_KEY = "threat-detection"
+FEATURE = "copilot-studio-threat-detection"
 # Reason codes in AgentGov's answers (Copilot Studio passes them on as they are).
 REASON_POLICY = 100
 REASON_UNAVAILABLE = 500
@@ -65,6 +66,8 @@ class Verdict:
     agent_name: str | None = None
     detections: dict[str, Any] = field(default_factory=dict)
     latency_ms: int = 0
+    # What controls in monitor mode would have done.
+    monitored: list[str] = field(default_factory=list)
 
     def answer(self) -> dict[str, Any]:
         if not self.block:
@@ -168,7 +171,6 @@ class ThreatDetection:
         keys_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
-        self.mode = settings.copilot_studio_threat_detection
         self.callers = EntraCallers(
             tenant_id=settings.copilot_studio_tenant() or "",
             audiences=settings.copilot_studio_token_audiences(),
@@ -179,15 +181,33 @@ class ThreatDetection:
         self._opa = opa_http or httpx.Client(timeout=OPA_TIMEOUT_SECONDS)
         self.agents = AgentLookup()
 
+    @staticmethod
+    def mode(db: Database) -> str:
+        """The feature's mode: "off", "monitor" or "enforce"."""
+        with db.session() as session:
+            return features.mode(session, FEATURE)
+
     def decide(self, db: Database, payload: dict[str, Any]) -> Verdict:
         started = time.monotonic()
         call = _call(payload)
+        with db.session() as session:
+            modes = features.modes(session)
+        mode = modes[FEATURE]
         # Short reads: no transaction stays open while OPA decides.
         known = self.agents.find(db, call["agent"]["platform_id"])
-        # AgentGov's own detectors: credentials in the inputs, and instructions aimed at
-        # the agent in what earlier tools returned (indirect prompt injection).
-        secrets, _ = scan_local(call["arguments"], check_injection=False)
-        injected, _ = scan_local(call["earlier_results"], check_injection=True)
+        # AgentGov's own detectors, as far as their controls are on: credentials in the
+        # inputs, and instructions aimed at the agent in what earlier tools returned
+        # (indirect prompt injection).
+        secrets, _ = scan_local(
+            call["arguments"],
+            check_injection=False,
+            check_secrets=modes["data-protection"] != features.OFF,
+        )
+        injected, _ = scan_local(
+            call["earlier_results"] if modes["prompt-injection"] != features.OFF else [],
+            check_injection=True,
+            check_secrets=False,
+        )
         threshold = self.settings.prompt_injection_threshold
         detections = {
             "categories": sorted(secrets.categories()),
@@ -204,12 +224,13 @@ class ThreatDetection:
             "arguments": call["arguments"],
             "detections": detections,
         }
+        monitored: list[str] = []
         try:
-            effect, reasons = self._evaluate(policy_input)
+            effect, reasons, monitored = self._evaluate(policy_input)
         except RuntimeError as exc:
             log.warning("threat detection could not decide: %s", exc)
             effect, reasons = "error", [str(exc)]
-        if self.mode == "enforce":
+        if mode == features.ENFORCE:
             block = effect == "deny" or (
                 effect == "error" and self.settings.copilot_studio_on_error == "block"
             )
@@ -219,15 +240,16 @@ class ThreatDetection:
             block=block,
             effect=effect,
             reasons=reasons,
-            mode=self.mode,
+            mode=mode,
             call=call,
             agent_id=known[0] if known else None,
             agent_name=known[1] if known else None,
             detections=detections,
             latency_ms=int((time.monotonic() - started) * 1000),
+            monitored=monitored,
         )
 
-    def _evaluate(self, policy_input: dict[str, Any]) -> tuple[str, list[str]]:
+    def _evaluate(self, policy_input: dict[str, Any]) -> tuple[str, list[str], list[str]]:
         if not self.settings.opa_url:
             raise RuntimeError("OPA is not configured (AGENTGOV_OPA_URL)")
         try:
@@ -243,7 +265,11 @@ class ThreatDetection:
         result = resp.json().get("result")
         if not isinstance(result, dict) or result.get("effect") not in ("allow", "deny"):
             raise RuntimeError(f"data.{DECISION_PATH.replace('/', '.')} is undefined")
-        return result["effect"], [str(r) for r in result.get("reasons") or []]
+        return (
+            result["effect"],
+            [str(r) for r in result.get("reasons") or []],
+            [str(m) for m in result.get("monitored") or []],
+        )
 
 
 def record(session: Session, settings: Settings, verdict: Verdict, *, correlation_id: str) -> None:
@@ -255,17 +281,25 @@ def record(session: Session, settings: Settings, verdict: Verdict, *, correlatio
     when = ids.utcnow()
     resource = f"{tool.get('connector') or 'copilot-studio'}/{tool['name']}"
     would_block = verdict.effect == "deny" and not verdict.block
+    # A call that went through only because something is monitored says so.
+    reason = "; ".join(verdict.reasons) or None
+    if would_block:
+        reason = f"monitored: {reason}"
+    elif verdict.monitored and not verdict.block:
+        reason = "monitored: " + "; ".join(verdict.monitored)
     ledger.append(
         session,
         type="decision.copilot_studio",
         actor=f"agent:{agent.name}" if agent else f"copilot-studio:{platform_id or 'unknown'}",
         agent=agent,
         agent_name=None if agent else platform_id or None,
-        severity="warning" if verdict.block or verdict.effect != "allow" else "info",
+        severity="warning"
+        if verdict.block or verdict.effect != "allow" or verdict.monitored
+        else "info",
         action="tool_call",
         resource=resource,
         decision="deny" if verdict.block else "allow",
-        reason="; ".join(verdict.reasons) or None,
+        reason=reason,
         details={
             "mode": verdict.mode,
             "policy": verdict.effect,
@@ -278,6 +312,7 @@ def record(session: Session, settings: Settings, verdict: Verdict, *, correlatio
             "correlation_id": correlation_id,
             "latency_ms": verdict.latency_ms,
             "detections": verdict.detections,
+            "monitored": verdict.monitored,
         },
     )
     _count(session, blocked=verdict.block, would_block=would_block)
