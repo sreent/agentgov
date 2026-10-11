@@ -1,0 +1,49 @@
+# The teams responsible for agents, and where their issues go (docs/issues.md). An issue
+# about an agent goes to its owner, then its sponsors, then its team (its blueprint's here),
+# each told in their channel; issues about nothing else go to the default team. Here the
+# demo sink (examples/secops/sink) stands in for the teams' Slack and Teams channels.
+#
+# A team's own channel is a chat destination that takes no security alerts (events: []),
+# only the issues its team posts there. Its webhook URL is the file named after it in the
+# destination secrets (deploy/compose/destination-secrets, or the chart's
+# destinationSecrets).
+apiVersion: agentgov/v1alpha1
+kind: Destination
+metadata:
+  name: cx-slack
+spec:
+  kind: slack
+  events: []
+  description: "#cx-platform, the support agents' team (here the demo sink)."
+---
+apiVersion: agentgov/v1alpha1
+kind: Destination
+metadata:
+  name: governance-teams
+spec:
+  kind: teams
+  events: []
+  description: The AI governance team's channel in Microsoft Teams (here the demo sink).
+---
+# Owns the support agents (as their owner, and their blueprint's team). Its members see
+# its issues in AgentGov, and acknowledge them.
+apiVersion: agentgov/v1alpha1
+kind: Team
+metadata:
+  name: cx-platform
+spec:
+  description: Customer experience platform, which builds and runs the support agents.
+  members: [alice@example.com]
+  destinations: [cx-slack]
+---
+# Takes the issues that have no team of their own: about AgentGov itself, and about the
+# MCP servers developers set up.
+apiVersion: agentgov/v1alpha1
+kind: Team
+metadata:
+  name: ai-governance
+spec:
+  description: Runs AgentGov, and takes the issues no other team does.
+  members: [admin@example.com]
+  destinations: [governance-teams]
+  default: true

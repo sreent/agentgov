@@ -190,7 +190,8 @@ def _url(value: Any) -> str:
 def _events(value: Any, kind: str) -> list[str]:
     allowed = CHAT_EVENTS if kind in CHAT else SIEM_EVENTS
     events = validation.string_list(value, "events")
-    if not events:
+    # A chat may take no alerts at all: a team's channel, for the issues its team posts.
+    if not events and kind not in CHAT:
         raise ValidationError(f"events takes one or more of {', '.join(allowed)}")
     unknown = [e for e in events if e not in allowed]
     if unknown:

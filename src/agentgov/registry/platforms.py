@@ -68,6 +68,7 @@ SYNCED_FINDINGS = {
     "copilot-studio": FINDING_TYPES,
     "entra-agent-id": {"entra.disabled_by_microsoft"},
     "defender": {"defender.alert"},
+    "entra-access-packages": {"entra.access_expiring", "entra.access_failed"},
 }
 SYSTEM_ACTOR = "system:platforms"
 INVENTORY_TYPE = "microsoft.copilotstudio/agents"

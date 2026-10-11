@@ -173,8 +173,9 @@ class Settings:
     # AgentGov's Entra app registration, for the connections to Microsoft's services
     # (docs/microsoft-connections.md), each turned on by the application permission it
     # needs: CopilotPackages.Read.All for the agent catalog (which also needs a Microsoft
-    # Agent 365 licence), AgentIdentity.Read.All, AuditLogsQuery.Read.All and
-    # SecurityAlert.Read.All. The connections are on when all three are set.
+    # Agent 365 licence), AgentIdentity.Read.All, AuditLogsQuery.Read.All,
+    # SecurityAlert.Read.All and EntitlementManagement.Read.All. The connections are on
+    # when all three are set.
 
     # The Microsoft Entra tenant (directory) ID.
     m365_tenant_id: str | None = None

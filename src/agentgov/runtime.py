@@ -30,6 +30,7 @@ from agentgov.platforms.microsoft import (
 from agentgov.platforms.threat_detection import ThreatDetection
 from agentgov.registry import (
     access_packages,
+    entra_access,
     features,
     instructions,
     issues,
@@ -394,6 +395,7 @@ class Runtime:
             "entra-agent-id": self.sync_agent_identities,
             "purview-audit": self.sync_audit,
             "defender": self.sync_defender,
+            "entra-access-packages": self.sync_entra_access_packages,
         }
         for key in wanted:
             connection = connections.BY_KEY[key]
@@ -517,6 +519,26 @@ class Runtime:
             counts = microsoft_signals.record_alerts(session, self.settings, alerts)
             connections.save_state(session, "defender", {"since": latest})
             platforms.set_sync(session, "defender", ok=True, counts=counts, actor=actor)
+            return counts
+
+    def sync_entra_access_packages(self, *, actor: str | None = None) -> dict[str, int]:
+        """Read the access packages agents can hold in Microsoft Entra, and what their
+        identities hold, raising issues for those about to expire."""
+        assert self.m365 is not None
+        try:
+            # Network calls before the transaction: a package's assignments page by page.
+            packages = [p for p in self.m365.access_packages() if entra_access.agent_policies(p)][
+                : entra_access.MAX_PACKAGES
+            ]
+            assignments = {p["id"]: self.m365.package_assignments(p["id"]) for p in packages}
+        except PlatformError as exc:
+            self._failed("entra-access-packages", exc, actor)
+            raise
+        with self.db.session() as session:
+            counts = entra_access.record(session, packages, assignments)
+            platforms.set_sync(
+                session, "entra-access-packages", ok=True, counts=counts, actor=actor
+            )
             return counts
 
     def classify_pending_instructions(self, limit: int = 100) -> int:

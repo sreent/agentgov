@@ -11,7 +11,7 @@ from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.identity.delegation import GRAPH, POWER_PLATFORM, DelegationError
 from agentgov.platforms import connections, threat_detection
 from agentgov.platforms.microsoft import PlatformError
-from agentgov.registry import agents, connector_policy, features, platforms
+from agentgov.registry import agents, connector_policy, entra_access, features, platforms
 
 router = APIRouter(prefix="/v1/platforms", tags=["platforms"])
 agent_router = APIRouter(prefix="/v1/agents", tags=["platforms"])
@@ -340,3 +340,80 @@ def platform_block(request: Request, ref: str, principal: Principal = Depends(ad
 def platform_unblock(request: Request, ref: str, principal: Principal = Depends(admin)) -> dict:
     """Undo a block in the agent's own platform, as the signed-in administrator."""
     return _platform_block(request, ref, principal, blocked=False)
+
+
+# ------------------------------------------------------ Entra access packages
+
+
+@router.get("/entra-access-packages")
+def entra_access_packages(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+    """The Microsoft Entra access packages agents can hold, and what each agent's Entra
+    identity holds, as last read."""
+    with request.app.state.rt.db.session() as s:
+        return entra_access.view(s)
+
+
+@agent_router.get("/{ref}/entra-access-packages")
+def agent_entra_access(request: Request, ref: str, _: Principal = Depends(read)) -> dict:
+    """The Entra access packages the agent's Entra identity holds, and those it could."""
+    with request.app.state.rt.db.session() as s:
+        return entra_access.for_agent(s, agents.get(s, ref))
+
+
+@agent_router.post("/{ref}/entra-access-packages/assign")
+def assign_entra_package(
+    request: Request,
+    ref: str,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(admin),
+) -> dict[str, Any]:
+    """Ask Entra to assign an access package to the agent's identity (manage mode). Entra
+    delivers it, or refuses; the next sync shows which."""
+    rt = request.app.state.rt
+    if rt.m365 is None:
+        raise HTTPException(409, NOT_CONFIGURED)
+    package = body.get("package")
+    if not isinstance(package, str) or not package:
+        raise HTTPException(422, "package is required: an Entra access package's ID or name")
+    with rt.db.session() as s:
+        agent = agents.get(s, ref)
+        name = agent.name
+        identity, package_id, policy_id = entra_access.target(s, agent, package)
+    try:
+        made = rt.m365.assign_package(
+            target_id=identity, policy_id=policy_id, package_id=package_id
+        )
+    except PlatformError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    out = {"request_id": made.get("id"), "state": made.get("state"), "status": made.get("status")}
+    with rt.db.session() as s:
+        entra_access.requested(
+            s, agents.get(s, ref), change="requested", package=package_id, actor=principal.actor,
+            policy_id=policy_id, **out,
+        )  # fmt: skip
+    return {"agent": name, "package_id": package_id, **out}
+
+
+@agent_router.delete("/{ref}/entra-access-packages/{assignment_id}")
+def remove_entra_package(
+    request: Request, ref: str, assignment_id: str, principal: Principal = Depends(admin)
+) -> dict[str, Any]:
+    """Ask Entra to remove one of the agent identity's assignments (manage mode)."""
+    rt = request.app.state.rt
+    if rt.m365 is None:
+        raise HTTPException(409, NOT_CONFIGURED)
+    with rt.db.session() as s:
+        agent = agents.get(s, ref)
+        name = agent.name
+        held = entra_access.holding(s, agent, assignment_id)
+    try:
+        made = rt.m365.remove_assignment(assignment_id)
+    except PlatformError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    out = {"request_id": made.get("id"), "state": made.get("state"), "status": made.get("status")}
+    with rt.db.session() as s:
+        entra_access.requested(
+            s, agents.get(s, ref), change="removal_requested", package=held["package_id"],
+            actor=principal.actor, assignment_id=assignment_id, **out,
+        )  # fmt: skip
+    return {"agent": name, "assignment_id": assignment_id, **out}

@@ -245,7 +245,7 @@ The Compose stack, and CI's runs of the Helm chart (`scripts/ci.sh --e2e` and `-
 include a stand-in Kubernetes cluster
 ([`examples/identity/workload-issuer`](../examples/identity/workload-issuer/server.py))
 whose service account tokens agents authenticate with, and its issuer, `demo-cluster`, in
-the example manifests. In step 13 of the demo, `python examples/agents/demo_agent.py`
+the example manifests. In step 14 of the demo, `python examples/agents/demo_agent.py`
 registers an agent with no secret, gets its access token with a service account token, calls
 a tool, and blocks and unblocks the issuer.
 

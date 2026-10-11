@@ -119,6 +119,15 @@ an agent loses an expired package's access even before the control plane's next 
 it expired. Packages only matter where they are what grants the access, so while
 `least-privilege` is enforced ([policies](policies.md)).
 
+## In the demo
+
+The example manifests define `crm-export`
+([examples/manifests/access-packages.yaml](../examples/manifests/access-packages.yaml)),
+which lets support agents export customer records for up to a week. In step 9 of the demo,
+`python examples/agents/demo_agent.py`, alice, the agent's sponsor, asks for it; she can't
+approve her own request, an administrator does, the agent's export goes through, and once
+the package is revoked it is refused again.
+
 ## In the ledger
 
 | Entry | When |

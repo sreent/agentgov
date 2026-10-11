@@ -33,6 +33,7 @@ token is renewed (tokens last about an hour), or at once when an admin asks for 
 | [Microsoft Entra Agent ID](#microsoft-entra-agent-id) | Agents' Entra identities, linked to their agents; agents only Entra knows about | App permission `AgentIdentity.Read.All` |
 | [Microsoft Purview audit log](#microsoft-purview-audit-log) | Who uses each agent; jailbreak and cross-prompt injection attempts; makers' changes | App permission `AuditLogsQuery.Read.All` |
 | [Microsoft Defender alerts](#microsoft-defender-alerts) | Microsoft's threat detections for agents, as findings | App permission `SecurityAlert.Read.All`; a Microsoft Agent 365 licence for agent detections |
+| [Microsoft Entra access packages](#microsoft-entra-access-packages) | The access packages Entra assigns agents' identities, and issues before they expire; in manage mode, assigning and removing them | App permission `EntitlementManagement.Read.All` (to manage: `EntitlementManagement.ReadWrite.All`, or a catalog role); a Microsoft Agent 365 licence |
 | [Power Platform connector policies](#pushing-the-connector-allowlist-into-power-platform) | The connector allowlist enforced by Power Platform | An admin signed in through Entra ID with the Power Platform administrator role |
 | [Copilot Studio threat detection](#copilot-studio-threat-detection) | A decision from AgentGov's policies before each tool call a Copilot Studio agent makes | An HTTPS address Microsoft can reach; a Power Platform admin to connect it |
 
@@ -50,6 +51,7 @@ admin consent:
 | `AgentIdentity.Read.All` | Microsoft Entra Agent ID |
 | `AuditLogsQuery.Read.All` | Microsoft Purview audit log |
 | `SecurityAlert.Read.All` | Microsoft Defender alerts |
+| `EntitlementManagement.Read.All` | Microsoft Entra access packages (`EntitlementManagement.ReadWrite.All` also does, and lets AgentGov manage them) |
 
 They run every `AGENTGOV_M365_SYNC_INTERVAL_SECONDS` (an hour by default). **Sync all**,
 each connection's **Sync now**, or `agentgov platforms sync [CONNECTION]` run them at
@@ -117,6 +119,55 @@ risk score. When Defender resolves an alert, AgentGov resolves the finding.
 Since 1 July 2026, Microsoft's threat detections for Copilot Studio and Foundry agents
 need a Microsoft Agent 365 licence. Without one, this connection still works, but finds no
 alerts about agents.
+
+## Microsoft Entra access packages
+
+Microsoft Entra ID Governance can give agents' Entra identities access for a while, as it
+does people: an access package bundles security group memberships, API permissions and
+Entra roles, and an assignment of it ends on a date unless someone extends it. Agents'
+sponsors and owners ask for packages for their agents in My Access, and administrators
+assign them directly ([Microsoft's documentation][agent-access-packages]). This is
+separate from AgentGov's own [access packages](access-packages.md), which grant what
+AgentGov's gateway governs.
+
+The **entra-access-packages** feature decides what AgentGov does with them:
+
+| Mode | What AgentGov does |
+|---|---|
+| `inform` (default) | Reads the packages agents can hold and what each agent's identity holds, and raises issues. It writes nothing into Entra |
+| `manage` | Also lets administrators assign packages to agents and remove them, from AgentGov |
+| `off` | Nothing, even where it could read them |
+
+**Reading.** Each sync lists the access packages with their assignment policies
+(`GET /v1.0/identityGovernance/entitlementManagement/accessPackages?$expand=assignmentPolicies`),
+keeps those with a policy for agents (all agents, or service principals), and reads each
+one's assignments (`GET …/assignments?$filter=accessPackage/id eq '…'&$expand=target`). An
+assignment whose target is an agent's Entra identity shows on the agent's page, with its
+state and when it ends. Assignments to identities no agent is linked to are counted, not
+kept.
+
+**Issues.** Two weeks before an assignment ends, AgentGov raises an `entra.access_expiring`
+[issue](issues.md) about the agent, from low severity to high on its last day, which goes
+to the agent's owner, then its sponsors, then its team. One Entra couldn't deliver raises
+`entra.access_failed`. They close once two syncs in a row find them gone (extended,
+removed or delivered after all), and are marked unverified while the sync fails. Entra
+also tells sponsors before an assignment expires; AgentGov's issue goes up the chain until
+someone acts.
+
+**Managing.** In manage mode, an administrator assigns a package to an agent (the agent's
+page → *Entra access packages* → **Assign**, or `agentgov platforms entra-assign AGENT
+PACKAGE`) and removes one (**Remove in Entra**, or `agentgov platforms entra-remove AGENT
+ASSIGNMENT`). AgentGov asks Entra as its app, through the package's policy for agents
+(`POST …/assignmentRequests` with `adminAdd` or `adminRemove`), and records each request
+in the ledger (`entra.access_requested`, `entra.access_removal_requested`). Entra delivers
+it or refuses, and the next sync shows which. The app needs
+`EntitlementManagement.ReadWrite.All`, or the **Access package assignment manager** role in
+the packages' catalogs, which Entra doesn't put in the app's token: then the Microsoft
+connections card says AgentGov can't tell, and Entra's answer says whether it may.
+
+Agent identities in access packages need a Microsoft Agent 365 licence, with at least
+Microsoft Entra P1 or Microsoft 365 E3, or Microsoft 365 E7; Microsoft lists it as a
+preview ([licensing][entra-licensing]).
 
 ## Pushing the connector allowlist into Power Platform
 
@@ -249,7 +300,9 @@ for AgentGov's API, and for one of the apps in `AGENTGOV_COPILOT_STUDIO_CALLER_A
 |---|---|---|---|
 | See every connection and its state | Platforms > Microsoft connections | `agentgov platforms status` | `connections` in `GET /v1/platforms` |
 | Sync every app connection | Microsoft connections > **Sync all** | `agentgov platforms sync` | `POST /v1/platforms/sync` |
-| Sync one | Microsoft connections > **Sync now** | `agentgov platforms sync entra-agent-id\|purview-audit\|defender\|microsoft-365` | `POST /v1/platforms/{connection}/sync` |
+| Sync one | Microsoft connections > **Sync now** | `agentgov platforms sync entra-agent-id\|purview-audit\|defender\|entra-access-packages\|microsoft-365` | `POST /v1/platforms/{connection}/sync` |
+| See agents' Entra access packages | The agent's page > *Entra access packages* | `agentgov platforms entra-access [--agent A]` | `GET /v1/platforms/entra-access-packages`, `GET /v1/agents/{ref}/entra-access-packages` |
+| Assign or remove one (manage mode) | *Entra access packages* > **Assign**, **Remove in Entra** | `agentgov platforms entra-assign AGENT PACKAGE`, `agentgov platforms entra-remove AGENT ASSIGNMENT` | `POST /v1/agents/{ref}/entra-access-packages/assign`, `DELETE /v1/agents/{ref}/entra-access-packages/{assignment}` |
 | See what pushing the allowlist would do | Connectors > **Push to Power Platform** | `agentgov platforms connector-policy` | `GET /v1/platforms/connector-policy` |
 | Push the allowlist to Power Platform | Connectors > **Push to Power Platform** | `agentgov platforms push-connector-policy --group ID [--environment ID]` | `POST /v1/platforms/connector-policy` |
 | See threat detection's decisions | Ledger, type `decision.copilot_studio` | `agentgov ledger tail --type decision.copilot_studio` | `GET /v1/ledger?type=decision.copilot_studio` |
@@ -258,4 +311,6 @@ Syncing and pushing need an admin. Pushing, like the Copilot Studio inventory sy
 an admin signed in through Microsoft Entra ID (`agentgov login` in the CLI).
 
 [acp]: https://learn.microsoft.com/en-us/power-platform/admin/advanced-connector-policies
+[agent-access-packages]: https://learn.microsoft.com/en-us/entra/agent-id/agent-access-packages
+[entra-licensing]: https://learn.microsoft.com/en-us/entra/id-governance/licensing-fundamentals
 [threat-detection]: https://learn.microsoft.com/en-us/microsoft-copilot-studio/external-security-provider

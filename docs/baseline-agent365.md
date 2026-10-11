@@ -59,7 +59,8 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Report-only mode for access policies | ✅ | Each control at the gateway can run in monitor mode: it decides and records, but doesn't stop the call ([features](features.md)) |
 | Risk-based access (ID Protection "risky agents") | ✅ | Risk score from posture and runtime signals; critical risk is blocked by the baseline policy; optional auto-block |
 | Access reviews / sponsor attestation | ✅ | Periodic attestation by sponsors; expiry raises findings |
-| Access packages for agents | ⏳ | — |
+| Access packages for agents | ✅ | AgentGov's own [access packages](access-packages.md): tools, models and agents to call, held for a while once someone other than the requester approves, with reminders, renewals, reviews and expiry at the gateway (monitored by default, enforced when you choose); and Microsoft Entra's access packages for agents' Entra identities, read with issues before they expire, and assigned or removed from AgentGov in manage mode ([connections](microsoft-connections.md#microsoft-entra-access-packages)) |
+| Sponsors and owners told about their agents' problems | ✅ | Findings go to an agent's owner, then its sponsors, then its team, by email and in their Teams or Slack channels, and escalate when nobody acknowledges them; people without an AgentGov role sign in to see and acknowledge their own ([issues](issues.md)) |
 | Kill switch | ✅ | `block` disables the Keycloak client and denies at the gateway within a second (OPA long polling) |
 | Administrators sign in with their organisation account; delegated admin roles | ✅ | Single sign-on to the admin UI and API through **Keycloak** (which can federate an existing directory); provider roles map to `admin`, `approver`, `secops`, `auditor`, `registrar` |
 

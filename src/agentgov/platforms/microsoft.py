@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 from typing import Any
 from urllib.parse import quote
@@ -31,6 +32,8 @@ from agentgov.config import Settings
 AGENTS_FILTER = "supportedHosts/any(h:h eq 'Copilot')"
 MAX_PAGES = 200
 DECLARATIVE_AGENT = "declarativeagent"
+# Entra object IDs: what may go into a Graph $filter.
+GUID = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 
 
 class PlatformError(Exception):
@@ -218,6 +221,58 @@ class MicrosoftApp:
             hint=" (the app needs AgentIdentity.Read.All with admin consent)",
             what="agent identities",
         )
+
+    # -- Microsoft Entra ID Governance: access packages -----------------------------------
+
+    ENTITLEMENT_HINT = (
+        " (the app needs EntitlementManagement.Read.All with admin consent, and the tenant a "
+        "Microsoft Agent 365 licence)"
+    )
+    MANAGE_HINT = (
+        " (managing needs EntitlementManagement.ReadWrite.All with admin consent, or the "
+        "Access package assignment manager role in the package's catalog)"
+    )
+
+    @property
+    def _entitlement(self) -> str:
+        return f"{self.graph}/v1.0/identityGovernance/entitlementManagement"
+
+    def access_packages(self) -> list[dict[str, Any]]:
+        """Every access package, with its assignment policies (who may hold it)."""
+        return self.all_pages(
+            f"{self._entitlement}/accessPackages",
+            {"$expand": "assignmentPolicies"},
+            hint=self.ENTITLEMENT_HINT,
+            what="access packages",
+        )
+
+    def package_assignments(self, package_id: str) -> list[dict[str, Any]]:
+        """A package's assignments, with whom each is for (expired ones included)."""
+        if not GUID.match(package_id):
+            raise PlatformError(f"{package_id!r} is not an access package ID")
+        return self.all_pages(
+            f"{self._entitlement}/assignments",
+            {"$filter": f"accessPackage/id eq '{package_id}'", "$expand": "target"},
+            hint=self.ENTITLEMENT_HINT,
+            what="access package assignments",
+        )
+
+    def assign_package(self, *, target_id: str, policy_id: str, package_id: str) -> dict[str, Any]:
+        """Ask Entra to assign a package to a directory object (adminAdd)."""
+        body = {
+            "requestType": "adminAdd",
+            "assignment": {
+                "targetId": target_id,
+                "assignmentPolicyId": policy_id,
+                "accessPackageId": package_id,
+            },
+        }
+        return self.post(f"{self._entitlement}/assignmentRequests", body, hint=self.MANAGE_HINT)
+
+    def remove_assignment(self, assignment_id: str) -> dict[str, Any]:
+        """Ask Entra to remove an assignment (adminRemove)."""
+        body = {"requestType": "adminRemove", "assignment": {"id": assignment_id}}
+        return self.post(f"{self._entitlement}/assignmentRequests", body, hint=self.MANAGE_HINT)
 
     # -- Microsoft Purview audit log -----------------------------------------------------
 

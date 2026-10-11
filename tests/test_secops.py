@@ -741,6 +741,29 @@ class TestDelivery:
         assert events and all(e["severity_id"] >= 3 for e in events)
         assert "toolserver.block" in {e["unmapped"]["agentgov"]["type"] for e in events}
 
+    def test_a_teams_own_channel_gets_no_alerts(self, secops, sink, secrets) -> None:
+        """A chat that takes no alerts: a team's channel, for the issues it is sent."""
+        destination(secops, name="cx", kind="slack", events=[])
+        (secrets / "cx").write_text("https://hooks.slack.com/services/T0/B1/s3cret")
+        agent = seed(secops)
+        with rt_of(secops).db.session() as s:
+            findings.raise_finding(
+                s,
+                type="agent.prompt_injection",
+                severity="critical",
+                subject=agent["id"],
+                agent_id=agent["id"],
+                title="Prompt injection in a tool result",
+                category=findings.THREAT,
+            )
+        level(secops, "inform")
+        rt_of(secops).delivery.run()
+        assert sink.requests == []
+        siem = secops.post(
+            "/v1/destinations", json={"name": "siem", "kind": "otlp", "events": []}, headers=ADMIN
+        )
+        assert siem.status_code == 422  # a SIEM gets something
+
     def test_chats_get_alerts(self, secops, sink, secrets) -> None:
         destination(secops, name="soc", kind="slack")
         (secrets / "soc").write_text("https://hooks.slack.com/services/T0/B0/s3cret")
@@ -790,7 +813,7 @@ class TestDelivery:
             "Agent support-bot blocked",
         ]
         button = slack[0]["blocks"][-2]["elements"][0]
-        assert button["url"] == "https://agentgov.example.com/ui/#/findings"
+        assert button["url"].startswith("https://agentgov.example.com/ui/#/findings/fnd_")
         teams = [json.loads(r.content) for r in sink.requests if r.url.host != "hooks.slack.com"]
         assert len(teams) == 1
         card = teams[0]["attachments"][0]["content"]

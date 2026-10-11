@@ -175,6 +175,16 @@ These go to the security team's tools like every ledger entry
 ([security operations](secops.md)): an issue is an OCSF Detection Finding whose status is New
 until someone acknowledges it, then In Progress; an accepted risk is Suppressed.
 
+## In the demo
+
+The example manifests ([examples/manifests/teams.yaml](../examples/manifests/teams.yaml))
+add two teams, each with its own channel at the demo sink: `cx-platform`, which owns the
+support agents, and `ai-governance`, the default team. In step 18 of the demo,
+`python examples/agents/demo_agent.py` shows the agent's issues in cx-platform's Slack
+channel, the issues no team owns in ai-governance's Teams channel, and alice, a member of
+cx-platform, acknowledging one. The sink's `/received?path=/slack/T0000/B0001/cx-platform`
+lists what that channel got.
+
 ## Turning it off
 
 `agentgov features set issues off`, or **Features** in the UI. Then nothing is routed or sent,

@@ -409,6 +409,12 @@ const STATUS = {
     revoked: ['neutral', 'minus', 'Revoked'],
     renewed: ['neutral', 'check-double', 'Renewed'],
   },
+  entra_access: {
+    delivered: ['good', 'check-circle', 'Delivered'],
+    delivering: ['warning', 'clock', 'Delivering'],
+    partiallyDelivered: ['warning', 'triangle', 'Partly delivered'],
+    deliveryFailed: ['critical', 'octagon', 'Delivery failed'],
+  },
   notification: {
     pending: ['neutral', 'clock', 'Sending'],
     sent: ['good', 'check-circle', 'Sent'],
@@ -1731,6 +1737,10 @@ async function renderAgent({ match }) {
     api('v1/access-packages').catch(() => []),
     featureModes().catch(() => ({})),
   ]);
+  // What Microsoft Entra ID Governance assigns its Entra identity, when it has one.
+  const entra = agent.external_ids?.entra_agent_id
+    ? await api(`v1/agents/${encodeURIComponent(agent.id)}/entra-access-packages`).catch((e) => e)
+    : null;
   // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
   const views = agent.platforms || [];
   const where = views.length && agent.status !== 'deleted' ? await platformActionTarget(agent) : null;
@@ -1744,6 +1754,7 @@ async function renderAgent({ match }) {
       h('div', { class: 'stack' }, main, instructionsCard(agent, instructions), agentLedgerCard(agent, entries),
         views.length ? null : agentCardCard(agent)),
       h('div', { class: 'stack' }, riskCard(agent, enforced), peopleCard(agent), attestationCard(agent), identityCard(agent),
+        entra instanceof Error || !entra ? null : entraAccessCard(agent, entra),
         agentFindingsCard(openFindings))));
 }
 
@@ -4211,6 +4222,47 @@ function assignmentButtons(row, packages, agent) {
   return buttons;
 }
 
+function entraAccessCard(agent, view) {
+  const manage = view.mode === 'manage' && can('admin');
+  const rows = view.held || [];
+  const remove = (row) => guarded(async () => {
+    const done = await ask({
+      title: `Remove ${row.package} from ${agent.name} in Entra?`,
+      text: "AgentGov asks Microsoft Entra to remove the assignment, as its app. Entra removes what it grants the agent's identity, or refuses; the next sync shows which.",
+      tone: 'danger', iconName: 'ban', confirm: 'Ask Entra to remove it',
+      submit: () => api(`v1/agents/${encodeURIComponent(agent.id)}/entra-access-packages/${encodeURIComponent(row.id)}`, { method: 'DELETE' }),
+    });
+    if (done) { toast(`Asked Entra to remove ${row.package} from ${agent.name}.`); await refresh(); }
+  });
+  const assign = guarded(async () => {
+    const done = await ask({
+      title: `Assign an Entra access package to ${agent.name}`,
+      text: "AgentGov asks Microsoft Entra to assign it to the agent's Entra identity, as its app, through the package's policy for agents. The next sync shows it delivered.",
+      iconName: 'key', confirm: 'Ask Entra to assign it',
+      fields: [{ id: 'package', label: 'Access package', type: 'select', value: view.packages[0]?.id, options: view.packages.map((p) => ({ value: p.id, label: p.name })) }],
+      submit: (v) => api(`v1/agents/${encodeURIComponent(agent.id)}/entra-access-packages/assign`, { method: 'POST', body: { package: v.package } }),
+    });
+    if (done) { toast(`Asked Entra to assign it to ${agent.name}.`); await refresh(); }
+  });
+  let body;
+  if (view.mode === 'off') body = emptyState('Turned off', h('span', {}, 'Turn on Microsoft Entra access packages on the ', h('a', { href: '#/features' }, 'Features'), ' page.'));
+  else if (!view.synced_at) body = emptyState('Not read yet', h('span', {}, 'The connection runs on a schedule, once AgentGov\'s app can read them (', h('a', { href: '#/platforms' }, 'Platforms'), ').'));
+  else if (!rows.length) body = emptyState('None', 'Its Entra identity holds no access package.');
+  else {
+    body = h('ul', { class: 'access-list', role: 'list' }, rows.map((row) => h('li', { class: 'access-row' },
+      h('div', { class: 'access-main' },
+        h('div', { class: 'cell-title' }, row.package, ' ', chip('entra_access', row.state)),
+        h('div', { class: 'cell-sub' }, row.expires_at ? ['Expires ', timeEl(row.expires_at)] : 'No end date')),
+      manage ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: remove(row) }, icon('ban'), 'Remove in Entra')) : null)));
+  }
+  return card({
+    title: 'Entra access packages',
+    sub: view.mode === 'manage' ? 'What Microsoft Entra ID Governance assigns its Entra identity. Administrators assign and remove them here.' : 'What Microsoft Entra ID Governance assigns its Entra identity, read by AgentGov.',
+    actions: manage && view.packages.length ? [h('button', { type: 'button', class: 'btn btn--sm', onclick: assign }, icon('plus'), 'Assign')] : null,
+    body,
+  });
+}
+
 function agentAccessCard(agent, rows, packages, mode) {
   if (rows instanceof Error) return null;
   const current = rows.filter((r) => ['requested', 'active', 'expired'].includes(r.status));
@@ -5088,6 +5140,7 @@ const CONNECTION_COUNTS = {
   'purview-audit': (c) => [`${plural(c.interactions, 'interaction')}`, `${plural(c.maker_events, 'maker change')}`,
     c.searching ? `${plural(c.searching, 'search', 'searches')} running` : null].filter(Boolean).join(', '),
   defender: (c) => `${plural(c.alerts, 'alert')} about agents, ${fmt(c.matched)} matched, ${fmt(c.resolved)} resolved`,
+  'entra-access-packages': (c) => `${plural(c.packages, 'package')} agents can hold, ${plural(c.assignments, 'assignment')} to agents, ${fmt(c.expiring)} expiring`,
   'connector-policies': (c) => `${plural(c.connectors, 'connector')} applied to ${plural(c.targets, 'group or environment', 'groups or environments')}`,
 };
 
@@ -5102,6 +5155,9 @@ function connectionHelp(c, view) {
       : `Endpoint: ${origin}/integrations/copilot-studio`;
   }
   if (c.status === 'off' || c.status === 'import') return `Needs ${c.needs.join(', and ')}.`;
+  if (c.manage === 'unknown') {
+    return "Managing: the app's token holds no EntitlementManagement.ReadWrite.All, so Entra takes AgentGov's requests only for catalogs where its app is an Access package assignment manager.";
+  }
   return null;
 }
 
@@ -5786,7 +5842,8 @@ async function destinationForm(d) {
       const kind = editing ? d.kind : v.kind;
       const family = destFamily(kind);
       const events = DEST_EVENTS[family].map(([key]) => key).filter((key) => v[`ev-${family}-${key}`]);
-      if (!events.length) throw new Error('Choose at least one kind of event to send it.');
+      // A chat may take no alerts: a team's channel, for the issues its team posts there.
+      if (!events.length && family !== 'chat') throw new Error('Choose at least one kind of event to send it.');
       const body = {
         events, min_severity: v.min_severity, description: v.description, labels: parseLabels(v.labels),
         ...(family === 'siem' ? { url: orNull(v.url) } : {}),

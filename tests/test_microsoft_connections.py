@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
@@ -28,7 +29,10 @@ ALL = (
     "AgentIdentity.Read.All",
     "AuditLogsQuery.Read.All",
     "SecurityAlert.Read.All",
+    "EntitlementManagement.Read.All",
 )
+ENTRA_PACKAGE = "ffffffff-1111-2222-3333-444444444444"
+PEOPLE_PACKAGE = "eeeeeeee-1111-2222-3333-444444444444"
 STUDIO_BLUEPRINT = "25664c89-cea5-4ab6-b924-a54fd8a19ae0"
 SALES_ENTRA_ID = "aaaaaaaa-1111-2222-3333-444444444444"
 
@@ -74,6 +78,20 @@ def maker_event(operation: str, bot_id: str, user: str) -> dict[str, Any]:
         "operation": operation,
         "userPrincipalName": user,
         "auditData": {"BotId": bot_id, "BotSchemaName": "cr123_salesHelper"},
+    }
+
+
+def assignment(id_: str, target: str, days: float, state: str = "delivered") -> dict[str, Any]:
+    end = ids.utcnow() + timedelta(days=days)
+    return {
+        "id": id_,
+        "state": state,
+        "status": "Delivered",
+        "schedule": {
+            "startDateTime": "2026-09-01T00:00:00Z",
+            "expiration": {"type": "afterDateTime", "endDateTime": ids.isoformat(end)},
+        },
+        "target": {"objectId": target, "subjectType": "servicePrincipal"},
     }
 
 
@@ -132,6 +150,31 @@ class FakeGraph:
                   detectionSource="antivirus"),  # not about agents
         ]  # fmt: skip
         self.alert_filters: list[str] = []
+        self.packages = [
+            {
+                "id": ENTRA_PACKAGE,
+                "displayName": "Sales data",
+                "description": "Read the sales SharePoint and the CRM API",
+                "isHidden": False,
+                "assignmentPolicies": [
+                    {"id": "pol-people", "allowedTargetScope": "allMemberUsers"},
+                    {"id": "pol-agents", "displayName": "Agents",
+                     "allowedTargetScope": "allDirectoryAgentIdentities"},
+                ],
+            },
+            {
+                "id": PEOPLE_PACKAGE,
+                "displayName": "People only",
+                "assignmentPolicies": [{"id": "pol-x", "allowedTargetScope": "allMemberUsers"}],
+            },
+        ]  # fmt: skip
+        self.assignments = {
+            ENTRA_PACKAGE: [
+                assignment("asg-1", SALES_ENTRA_ID, days=5),
+                assignment("asg-2", "99999999-1111-2222-3333-444444444444", days=60),
+            ]
+        }
+        self.requests: list[dict[str, Any]] = []
         self.fail: set[str] = set()
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -172,6 +215,21 @@ class FakeGraph:
                     200, json={"value": self.usage_records if usage else self.maker_records}
                 )
             return httpx.Response(200, json={**body, "id": query_id, "status": self.query_status})
+        if path == "/identityGovernance/entitlementManagement/accessPackages":
+            assert request.url.params["$expand"] == "assignmentPolicies"
+            return httpx.Response(200, json={"value": self.packages})
+        if path == "/identityGovernance/entitlementManagement/assignments":
+            assert request.url.params["$expand"] == "target"
+            package_id = request.url.params["$filter"].split("'")[1]
+            return httpx.Response(200, json={"value": self.assignments.get(package_id, [])})
+        if path == "/identityGovernance/entitlementManagement/assignmentRequests":
+            body = json.loads(request.content)
+            self.requests.append(body)
+            return httpx.Response(
+                201,
+                json={"id": f"req-{len(self.requests)}", "requestType": body["requestType"],
+                      "state": "submitted", "status": "Accepted"},
+            )  # fmt: skip
         if path == "/security/alerts_v2":
             assert request.headers["prefer"] == "include-unknown-enum-members"
             self.alert_filters.append(request.url.params["$filter"])
@@ -222,6 +280,7 @@ class TestWhatAgentGovHas:
             "entra-agent-id": "off",
             "purview-audit": "off",
             "defender": "off",
+            "entra-access-packages": "off",
         }
         assert state["threat-detection"]["status"] == "off"
         assert state["copilot-studio"]["status"] == "import"
@@ -430,4 +489,95 @@ class TestCli:
         )
         status = runner.invoke(cli.app, ["platforms", "status"]).output
         assert "grant AuditLogsQuery.Read.All" in status
-        assert "entra-agent-id      ok" in status
+        assert re.search(r"^entra-agent-id +ok\b", status, re.M)
+
+
+class TestEntraAccessPackages:
+    def _issue(self, client: TestClient) -> dict[str, Any] | None:
+        rows = client.get(
+            "/v1/findings", params={"type": "entra.access_expiring", "status": "all"}, headers=ADMIN
+        ).json()
+        return rows[0] if rows else None
+
+    def test_what_agents_hold_is_read_and_expiry_raises_an_issue(self, ms, graph) -> None:
+        counts = sync(ms, "entra-access-packages").json()
+        assert counts == {"packages": 1, "assignments": 1, "unlinked": 1, "expiring": 1}
+        mine = ms.get("/v1/agents/sales-helper/entra-access-packages", headers=ADMIN).json()
+        assert mine["mode"] == "inform" and mine["entra_agent_id"] == SALES_ENTRA_ID
+        (held,) = mine["held"]
+        assert (held["id"], held["package"], held["state"]) == ("asg-1", "Sales data", "delivered")
+        assert [p["policies"][0]["id"] for p in mine["packages"]] == ["pol-agents"]
+        issue = self._issue(ms)
+        assert issue["status"] == "open" and issue["severity"] == "medium"
+        assert issue["title"] == "sales-helper's Entra access package Sales data expires in 4 days"
+        # Extended in Entra: two clean syncs close it.
+        graph.assignments[ENTRA_PACKAGE][0] = assignment("asg-1", SALES_ENTRA_ID, days=90)
+        sync(ms, "entra-access-packages").raise_for_status()
+        assert self._issue(ms)["status"] == "open"
+        sync(ms, "entra-access-packages").raise_for_status()
+        assert self._issue(ms)["status"] == "resolved"
+
+    def test_a_failed_sync_leaves_its_issues_unverified(self, ms, graph) -> None:
+        sync(ms, "entra-access-packages").raise_for_status()
+        graph.fail.add("/identityGovernance")
+        failed = sync(ms, "entra-access-packages")
+        assert failed.status_code == 502 and "EntitlementManagement.Read.All" in failed.text
+        issue = self._issue(ms)
+        assert (issue["status"], issue["verified"]) == ("open", False)
+        assert connections(ms)["entra-access-packages"]["status"] == "failing"
+
+    def test_entra_isnt_written_unless_managed(self, ms, graph) -> None:
+        sync(ms, "entra-access-packages").raise_for_status()
+        url = "/v1/agents/sales-helper/entra-access-packages"
+        refused = ms.post(f"{url}/assign", json={"package": "Sales data"}, headers=ADMIN)
+        assert refused.status_code == 409 and "manage" in refused.json()["detail"]
+        assert ms.delete(f"{url}/asg-1", headers=ADMIN).status_code == 409
+        assert graph.requests == []
+        assert "manage" not in connections(ms)["entra-access-packages"]
+
+    def test_managed_administrators_assign_and_remove(self, ms, graph) -> None:
+        sync(ms, "entra-access-packages").raise_for_status()
+        ms.put(
+            "/v1/features/entra-access-packages", json={"mode": "manage"}, headers=ADMIN
+        ).raise_for_status()
+        state = connections(ms)["entra-access-packages"]
+        assert state["manage"] == "unknown"  # no ReadWrite: maybe a catalog role
+        assert any("Access package assignment manager" in n for n in state["needs"])
+        url = "/v1/agents/sales-helper/entra-access-packages"
+        made = ms.post(f"{url}/assign", json={"package": "Sales data"}, headers=ADMIN)
+        assert made.status_code == 200, made.text
+        assert made.json()["request_id"] == "req-1"
+        assert graph.requests[0] == {
+            "requestType": "adminAdd",
+            "assignment": {
+                "targetId": SALES_ENTRA_ID,
+                "assignmentPolicyId": "pol-agents",
+                "accessPackageId": ENTRA_PACKAGE,
+            },
+        }
+        other = ms.post(f"{url}/assign", json={"package": "People only"}, headers=ADMIN)
+        assert other.status_code == 404
+        removed = ms.delete(f"{url}/asg-1", headers=ADMIN)
+        assert removed.status_code == 200
+        assert graph.requests[1] == {"requestType": "adminRemove", "assignment": {"id": "asg-1"}}
+        assert ms.delete(f"{url}/asg-9", headers=ADMIN).status_code == 404
+        types = [e["type"] for e in ms.get("/v1/ledger?type=entra.*", headers=ADMIN).json()]
+        assert types == ["entra.access_removal_requested", "entra.access_requested"]
+        graph.roles = (*ALL, "EntitlementManagement.ReadWrite.All")
+        ms.app.state.rt.m365._token = None  # a new token: Entra puts the new grant in it
+        ms.post("/v1/platforms/sync", headers=ADMIN).raise_for_status()
+        assert connections(ms)["entra-access-packages"]["manage"] == "ok"
+
+    def test_from_the_cli(self, ms, graph, monkeypatch) -> None:
+        sync(ms, "entra-access-packages").raise_for_status()
+        monkeypatch.setattr(cli, "_client", lambda: _Shared(ms, "test-admin"))
+        everyone = runner.invoke(cli.app, ["platforms", "entra-access"])
+        assert everyone.exit_code == 0, everyone.output
+        assert "1 packages agents can hold" in everyone.output
+        assert re.search(r"^sales-helper +Sales data +delivered", everyone.output, re.M)
+        one = runner.invoke(cli.app, ["platforms", "entra-access", "--agent", "sales-helper"])
+        assert f"Entra identity: {SALES_ENTRA_ID}" in one.output
+        refused = runner.invoke(
+            cli.app, ["platforms", "entra-assign", "sales-helper", "Sales data"]
+        )
+        assert refused.exit_code == 1 and "manage" in refused.output

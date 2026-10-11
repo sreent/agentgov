@@ -1,0 +1,15 @@
+# Access the support agents can hold for a while, once an approver agrees
+# (docs/access-packages.md). Their sponsors ask for it, saying why; it expires after the
+# days asked, a week at most, and the agent's team is reminded before then.
+apiVersion: agentgov/v1alpha1
+kind: AccessPackage
+metadata:
+  name: crm-export
+spec:
+  description: Export every customer record, for an audit or a migration.
+  permissions:
+    - server: crm
+      tools: [export_customers]
+  duration_days: 7
+  approval: true
+  blueprints: [customer-support]

@@ -38,6 +38,9 @@ SWITCH = (OFF, ON)
 CONTROL = (OFF, MONITOR, ENFORCE)
 # How much is handed to the security team's tools (agentgov.secops.handoff).
 HANDOFF = (OFF, "inform", "triage", "contain", "decide")
+# Microsoft Entra's access packages for agents' identities: read, or also changed.
+INFORM, MANAGE = "inform", "manage"
+READ_OR_MANAGE = (OFF, INFORM, MANAGE)
 DEPLOYMENT = "deployment"  # the actor of pinned modes
 
 GROUPS = {
@@ -457,6 +460,27 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "Not read, even where it could be.",
         },
         needs="AgentGov's Microsoft app registration, with SecurityAlert.Read.All",
+    ),
+    Feature(
+        "entra-access-packages",
+        "Microsoft Entra access packages",
+        "microsoft",
+        "The access packages Microsoft Entra ID Governance assigns agents' Entra identities "
+        "(groups, API permissions, Entra roles), and when each expires: an issue reminds the "
+        "agent's people before one does. Managed, administrators also assign and remove them "
+        "from AgentGov.",
+        READ_OR_MANAGE,
+        INFORM,
+        {
+            MANAGE: "Read, and administrators assign and remove them from AgentGov, as Entra "
+            "requests made by AgentGov's app.",
+            INFORM: "Read where AgentGov's app registration has the permission. Nothing is "
+            "written into Entra.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AgentGov's Microsoft app registration, with EntitlementManagement.Read.All "
+        "(EntitlementManagement.ReadWrite.All, or the Access package assignment manager role "
+        "in the packages' catalogs, to manage), and a Microsoft Agent 365 licence",
     ),
     Feature(
         "copilot-studio-threat-detection",

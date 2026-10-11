@@ -8,6 +8,8 @@ hands off, as a SIEM, Slack and Microsoft Teams would, and shows what arrived.
     POST /teams/<anything>           a Teams workflow's webhook (an Adaptive Card message)
     GET  /received?kind=<kind>       what arrived, newest last (kind: otlp, hec, webhook,
                                      slack or teams; all of them without)
+    GET  /received?path=<path>       what one webhook got: one channel, such as
+                                     /slack/T0000/B0000/demo-only
 
 Not for real use: it keeps everything in memory and anyone can read it.
 """
@@ -24,13 +26,19 @@ PORT = int(os.environ.get("PORT", "9300"))
 HEC_TOKEN = os.environ.get("HEC_TOKEN", "demo-hec-token")
 MAX = 2000  # kept per kind
 received: dict[str, list] = {"otlp": [], "hec": [], "webhook": [], "slack": [], "teams": []}
+# The chats' messages by webhook path too: each path is a channel.
+by_path: dict[str, list] = {}
 lock = threading.Lock()
 
 
-def keep(kind: str, items: list) -> None:
+def keep(kind: str, items: list, path: str | None = None) -> None:
     with lock:
         received[kind].extend(items)
         del received[kind][:-MAX]
+        if path:
+            channel = by_path.setdefault(path, [])
+            channel.extend(items)
+            del channel[:-MAX]
 
 
 def otlp_records(body: dict) -> list:
@@ -88,9 +96,13 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/healthz":
             self._send(200, {"status": "ok"})
         elif url.path == "/received":
-            kind = parse_qs(url.query).get("kind", [None])[0]
+            query = parse_qs(url.query)
+            kind, path = query.get("kind", [None])[0], query.get("path", [None])[0]
             with lock:
-                self._send(200, received.get(kind, []) if kind else received)
+                if path:
+                    self._send(200, by_path.get(path, []))
+                else:
+                    self._send(200, received.get(kind, []) if kind else received)
         else:
             self._send(404, {"error": "not found"})
 
@@ -112,10 +124,10 @@ class Handler(BaseHTTPRequestHandler):
                 keep("webhook", data)
                 self._send(200, {"received": len(data)})
             elif path.startswith("/slack/"):
-                keep("slack", [json.loads(raw)])
+                keep("slack", [json.loads(raw)], path)
                 self._send(200, "ok", "text/plain")
             elif path.startswith("/teams/"):
-                keep("teams", [json.loads(raw)])
+                keep("teams", [json.loads(raw)], path)
                 self._send(202, "", "text/plain")
             else:
                 self._send(404, {"error": "not found"})

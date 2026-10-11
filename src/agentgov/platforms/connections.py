@@ -24,6 +24,9 @@ from agentgov.registry import features
 
 # Where the permissions granted to AgentGov's app registration are remembered.
 APP_STATE = "microsoft-app"
+ENTRA_ACCESS = "entra-access-packages"
+# What managing Entra's access packages takes, besides a catalog role.
+WRITE = "EntitlementManagement.ReadWrite.All"
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,8 @@ class Connection:
     via: str
     permission: str | None = None
     licence: str | None = None
+    # Permissions that include ``permission``: holding one of them is enough.
+    also: tuple[str, ...] = ()
 
 
 CONNECTIONS: tuple[Connection, ...] = (
@@ -78,6 +83,16 @@ CONNECTIONS: tuple[Connection, ...] = (
         via="app",
         permission="SecurityAlert.Read.All",
         licence="Microsoft Agent 365",
+    ),
+    Connection(
+        "entra-access-packages",
+        "Microsoft Entra access packages",
+        "The access packages Entra ID Governance assigns agents' Entra identities, and when "
+        "each expires; managed, administrators assign and remove them from AgentGov",
+        via="app",
+        permission="EntitlementManagement.Read.All",
+        licence="Microsoft Agent 365",
+        also=("EntitlementManagement.ReadWrite.All",),
     ),
     Connection(
         "connector-policies",
@@ -123,7 +138,7 @@ def granted(session: Session) -> frozenset[str] | None:
 
 def runnable(connection: Connection, roles: frozenset[str] | None) -> bool:
     """Whether to try an app connection: its permission is granted, or Entra didn't say."""
-    return roles is None or connection.permission in roles
+    return roles is None or bool({connection.permission, *connection.also} & roles)
 
 
 def state(
@@ -154,7 +169,7 @@ def state(
                     "AgentGov's app registration (AGENTGOV_M365_TENANT_ID, "
                     "AGENTGOV_M365_CLIENT_ID and AGENTGOV_M365_CLIENT_SECRET)"
                 )
-            elif roles is not None and c.permission not in roles:
+            elif not runnable(c, roles):
                 status = "missing_permission"
             elif last is None:
                 status = "waiting"
@@ -187,17 +202,24 @@ def state(
             )
         if c.licence:
             needs.append(f"a {c.licence} licence")
-        rows.append(
-            {
-                "key": c.key,
-                "name": c.name,
-                "gives": c.gives,
-                "via": c.via,
-                "permission": c.permission,
-                "licence": c.licence,
-                "status": status,
-                "needs": needs,
-                "last_run": last,
-            }
-        )
+        row = {
+            "key": c.key,
+            "name": c.name,
+            "gives": c.gives,
+            "via": c.via,
+            "permission": c.permission,
+            "licence": c.licence,
+            "status": status,
+            "needs": needs,
+            "last_run": last,
+        }
+        if c.key == ENTRA_ACCESS and features.mode(session, c.key) == features.MANAGE:
+            # Managing writes into Entra: with the permission, or a catalog role Entra
+            # doesn't put in the app's token (so AgentGov tries, and says what Entra said).
+            row["manage"] = "unknown" if roles is None or WRITE not in roles else "ok"
+            needs.append(
+                f"to manage: {WRITE}, or the Access package assignment manager role in the "
+                "packages' catalogs"
+            )
+        rows.append(row)
     return rows

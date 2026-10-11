@@ -32,6 +32,9 @@ spec:
   # Other agents its agents may hand work to over A2A, through the gateway
   # (docs/agent-to-agent.md): names, or patterns such as billing-*.
   agent_access: [billing-agent]
+  # The team that issues about its agents go to after their owners and sponsors
+  # (docs/issues.md, and teams.yaml).
+  team: cx-platform
 ---
 apiVersion: agentgov/v1alpha1
 kind: Blueprint

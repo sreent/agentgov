@@ -354,6 +354,8 @@ DEMO_DESTINATION_SECRETS=(
   --set destinationSecrets.values.soc-slack=http://demo-sink:9300/slack/T0000/B0000/demo-only
   --set destinationSecrets.values.soc-teams=http://demo-sink:9300/teams/workflows/demo-only
   --set destinationSecrets.values.soc-splunk=demo-hec-token
+  --set destinationSecrets.values.cx-slack=http://demo-sink:9300/slack/T0000/B0001/cx-platform
+  --set destinationSecrets.values.governance-teams=http://demo-sink:9300/teams/workflows/governance
 )
 
 end_to_end() {

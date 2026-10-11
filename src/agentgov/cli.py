@@ -639,7 +639,8 @@ def gateway_config(
 def apply(
     files: list[Path] = typer.Option(..., "--file", "-f", help="Manifest file or directory."),
 ) -> None:
-    """Apply declarative manifests (Blueprint, ToolServer, Policy, Agent)."""
+    """Apply declarative manifests (Feature, Destination, Team, IdentityIssuer, Blueprint,
+    ToolServer, ModelProvider, AccessPackage, Policy, Agent)."""
     docs: list[str] = []
     for path in files:
         targets = (
@@ -2204,6 +2205,45 @@ def platforms_unapprove_connector(connector_id: str) -> None:
     """Take a connector off the allowlist."""
     out = _call("DELETE", f"/v1/platforms/connectors/{_connector(connector_id)}/approval")
     _done("connector", out["connector_id"], "no longer approved")
+
+
+@platforms_app.command("entra-access")
+def platforms_entra_access(
+    agent: str | None = typer.Option(None, help="Only this agent's (with what it could hold)."),
+) -> None:
+    """The Microsoft Entra access packages agents' Entra identities hold, and until when."""
+    if agent:
+        view = _call("GET", f"/v1/agents/{quote(agent)}/entra-access-packages")
+        rows = view["held"]
+        for row in rows:
+            row["agent"] = agent
+        typer.echo(f"mode: {view['mode']}; Entra identity: {view['entra_agent_id'] or 'none'}")
+    else:
+        view = _call("GET", "/v1/platforms/entra-access-packages")
+        names = view["agents"]
+        rows = [{**row, "agent": names.get(agent_id, agent_id)}
+                for agent_id, held in view["held"].items() for row in held]  # fmt: skip
+        typer.echo(f"mode: {view['mode']}; {len(view['packages'])} packages agents can hold")
+    _table(rows, ["agent", "package", "state", "expires_at", "id"])
+
+
+@platforms_app.command("entra-assign")
+def platforms_entra_assign(
+    agent: str, package: str = typer.Argument(..., help="The package's ID or name.")
+) -> None:
+    """Ask Entra to assign an access package to the agent's Entra identity (manage mode)."""
+    out = _call(
+        "POST", f"/v1/agents/{quote(agent)}/entra-access-packages/assign", json={"package": package}
+    )
+    _done("entra-request", out["request_id"] or "?", out["state"] or "submitted")
+
+
+@platforms_app.command("entra-remove")
+def platforms_entra_remove(agent: str, assignment_id: str, yes: bool = YES) -> None:
+    """Ask Entra to remove one of the agent identity's assignments (manage mode)."""
+    _confirm(f"Ask Entra to remove {assignment_id} from {agent}?", yes)
+    out = _call("DELETE", f"/v1/agents/{quote(agent)}/entra-access-packages/{quote(assignment_id)}")
+    _done("entra-request", out["request_id"] or "?", out["state"] or "submitted")
 
 
 # -------------------------------------------------------------- instructions

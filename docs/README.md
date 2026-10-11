@@ -49,8 +49,8 @@
 * [Agents on Microsoft 365 and Copilot Studio](platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and acting as the signed-in admin
 * [Connecting AgentGov to Microsoft's services](microsoft-connections.md): Entra Agent ID,
-  the Purview audit log, Defender alerts, connector policies and Copilot Studio threat
-  detection
+  the Purview audit log, Defender alerts, Entra access packages, connector policies and
+  Copilot Studio threat detection
 * [Agent 365 baseline](baseline-agent365.md): what Microsoft Agent 365 does, and how
   AgentGov compares
 

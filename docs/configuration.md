@@ -213,7 +213,7 @@ The control plane signs administrators in with an OIDC provider (Keycloak by def
 
 ### Microsoft 365 agent inventory
 
-AgentGov's Entra app registration, for the connections to Microsoft's services ([microsoft-connections](microsoft-connections.md)), each turned on by the application permission it needs: CopilotPackages.Read.All for the agent catalog (which also needs a Microsoft Agent 365 licence), AgentIdentity.Read.All, AuditLogsQuery.Read.All and SecurityAlert.Read.All. The connections are on when all three are set.
+AgentGov's Entra app registration, for the connections to Microsoft's services ([microsoft-connections](microsoft-connections.md)), each turned on by the application permission it needs: CopilotPackages.Read.All for the agent catalog (which also needs a Microsoft Agent 365 licence), AgentIdentity.Read.All, AuditLogsQuery.Read.All, SecurityAlert.Read.All and EntitlementManagement.Read.All. The connections are on when all three are set.
 
 | Variable | Default | What it does |
 |---|---|---|

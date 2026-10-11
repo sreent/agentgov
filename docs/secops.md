@@ -91,8 +91,9 @@ many SIEMs map it.
 **What a chat gets** (`events`): `findings` (raised or reopened, from `min_severity` up,
 which is `high` for chats by default), `approvals` (requests, whatever their severity) and
 `blocks` (agents, tool servers, model providers and identity issuers blocked, agents
-deleted, and agents blocked in their own platform). Each alert links to the page where
-someone acts on it. Alerts older than an hour, from a chat that was paused or failing, are
+deleted, and agents blocked in their own platform); or none (`events: []`), for a team's
+channel that gets only the [issues](issues.md) its team posts there. Each alert links to the
+page where someone acts on it. Alerts older than an hour, from a chat that was paused or failing, are
 not sent; a chat gets at most ten alerts at once, the tenth counting the rest. Text from
 agents (names, tool names, reasons) is escaped, so it can't mention anyone or hide a link.
 
@@ -214,7 +215,7 @@ A blocked tool call, for example:
 The reference stack's demo sink (`examples/secops/sink`, port 9300) stands in for a SIEM,
 Splunk, Slack and Teams. `agentgov apply -f examples/manifests` turns the hand-off on at
 `inform` with four destinations ([secops.yaml](../examples/manifests/secops.yaml)), and the
-demo's step 16 shows what each got, then has a SOAR's `secops` key block a shadow agent:
+demo's step 17 shows what each got, then has a SOAR's `secops` key block a shadow agent:
 refused at `inform`, done at `contain`. See what arrived at
 `http://localhost:9300/received?kind=otlp` (or `hec`, `slack`, `teams`).
 

@@ -223,7 +223,7 @@ that person only, not for someone else or on its own.
 
 The Compose stack and the Helm chart (with `keycloak.demoUsers`) come with a demo app
 client, `agentgov-demo-chat`, and a person, **sam**, in the group `support`, whose password
-is the demo users'. In step 10 of the demo, `python examples/agents/demo_agent.py` signs sam
+is the demo users'. In step 11 of the demo, `python examples/agents/demo_agent.py` signs sam
 in to the demo app,
 has its agent act for sam through the gateway, and has sam sign in to AgentGov to approve
 what the agent wants to do.
