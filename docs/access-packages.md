@@ -101,6 +101,9 @@ The control plane checks assignments every `AGENTGOV_ISSUES_INTERVAL_SECONDS` (6
 * **For packages with `review_days`**, an `access.review_due` issue asks, that often, whether
   the agent still needs it. **Keep it** marks it reviewed; **Remove it** revokes it.
 
+A deleted agent's packages wait for it: nothing about them is checked, approved or asked for
+until the agent is restored, and they go with it when it is purged.
+
 ## What an expired package does
 
 How strictly expiry applies is the **access-packages** feature ([features](features.md)):

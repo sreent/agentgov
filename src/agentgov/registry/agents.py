@@ -19,6 +19,7 @@ from agentgov.models import (
     DELETED,
     DISCOVERED,
     PENDING,
+    AccessAssignment,
     Agent,
     AgentInstructions,
 )
@@ -402,8 +403,10 @@ def purge(session: Session, agent: Agent, *, actor: str) -> None:
     if agent.status != DELETED:
         raise InvalidTransition("only deleted agents can be purged")
     ledger.append(session, type="agent.purged", actor=actor, agent=agent, severity="warning")
-    # Its instructions go too: the ledger keeps their hashes, not their text.
+    # Its instructions and access packages go too: the ledger keeps their history (and the
+    # instructions' hashes, not their text).
     session.execute(delete(AgentInstructions).where(AgentInstructions.agent_id == agent.id))
+    session.execute(delete(AccessAssignment).where(AccessAssignment.agent_id == agent.id))
     session.delete(agent)
     mark_changed(session, "agents")
 

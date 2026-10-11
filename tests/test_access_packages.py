@@ -213,6 +213,45 @@ class TestLifecycle:
             assert new.expires_at == old.expires_at  # 7 days from now would be sooner
         assert len(_held(client, agent["id"])) == 1
 
+    def test_a_deleted_agents_packages_wait_for_it(self, client, agent) -> None:
+        rt = _rt(client)
+        assignment_id = self._active(client, days=30)
+        pending = _ask(client, _key(client, "registrar"), days=7).json()
+        deleted = client.post("/v1/agents/support-bot/delete", json={}, headers=ADMIN)
+        assert deleted.status_code == 200, deleted.text
+        later = ids.utcnow() + timedelta(days=31)
+        with rt.db.session() as s:
+            # No reminders, expiry or reviews about an agent that is gone.
+            assert access_packages.check(s, rt.settings, later) == {
+                "expired": 0,
+                "expiring": 0,
+                "reviews": 0,
+            }
+            assert s.scalar(select(findings.Finding.id)) is None
+        approver = _key(client, "approver", "ann")
+        refused = client.post(f"/v1/access-assignments/{pending['id']}/approve", headers=approver)
+        assert refused.status_code == 409 and "restore it first" in refused.text
+        assert (
+            client.post(f"/v1/access-assignments/{pending['id']}/deny", headers=approver).json()[
+                "status"
+            ]
+            == "denied"
+        )
+        assert _ask(client, ADMIN, approve=True).status_code == 409
+        # Restored, they are checked again.
+        client.post("/v1/agents/support-bot/restore", json={}, headers=ADMIN)
+        with rt.db.session() as s:
+            assert access_packages.check(s, rt.settings, later)["expired"] == 1
+            assert s.get(AccessAssignment, assignment_id).status == "expired"
+        # Purged, they go with it, and the package can be deleted.
+        client.post("/v1/agents/support-bot/delete", json={}, headers=ADMIN)
+        assert client.delete("/v1/agents/support-bot", headers=ADMIN).status_code in (200, 204)
+        assert _held(client, agent["id"]) == []
+        assert client.delete("/v1/access-packages/crm-write", headers=ADMIN).status_code in (
+            200,
+            204,
+        )
+
     def test_revoking_takes_it_away(self, client, agent) -> None:
         assignment_id = self._active(client)
         approver = _key(client, "approver")

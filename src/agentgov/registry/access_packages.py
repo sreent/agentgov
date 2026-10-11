@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import mark_changed
-from agentgov.models import AccessAssignment, AccessPackage, Agent, Blueprint
+from agentgov.models import DELETED, AccessAssignment, AccessPackage, Agent, Blueprint
 from agentgov.registry import features, findings, issues, validation
 from agentgov.registry.errors import (
     Conflict,
@@ -326,6 +326,11 @@ def _record(
     )
 
 
+def _not_deleted(agent: Agent | None) -> None:
+    if agent is not None and agent.status == DELETED:
+        raise InvalidTransition(f"{agent.name} is deleted: restore it first")
+
+
 def _held(session: Session, agent_id: str, package_id: str) -> AccessAssignment | None:
     return session.scalar(
         select(AccessAssignment).where(
@@ -350,6 +355,7 @@ def request(
     needs no approval, or when an administrator assigns it (``approve``)."""
     if not features.is_on(session, FEATURE):
         raise InvalidTransition("access packages are off: turn them on in Features first")
+    _not_deleted(agent)
     days = _days(package.duration_days if days is None else days, "days")
     if days > package.duration_days:
         raise ValidationError(
@@ -421,6 +427,7 @@ def decide(
         raise Forbidden("someone other than who asked for it decides a request")
     note = str(note).strip()[:2000] if note else None
     if approve:
+        _not_deleted(session.get(Agent, row.agent_id))
         _grant(session, row, actor=actor, note=note)
     else:
         row.status = DENIED
@@ -504,7 +511,8 @@ def check(session: Session, settings: Settings, now: datetime | None = None) -> 
             session.get(AccessPackage, row.package_id),
             session.get(Agent, row.agent_id),
         )
-        if package is None or agent is None or row.expires_at is None:
+        # A deleted agent's packages wait for it to be restored (or purged).
+        if package is None or agent is None or agent.status == DELETED or row.expires_at is None:
             continue
         left = row.expires_at - now
         if left <= timedelta(0):
