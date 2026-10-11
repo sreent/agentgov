@@ -18,6 +18,7 @@ FINDING = "fnd"
 EVENT = "evt"
 SESSION = "ses"
 SIGNAL = "sig"
+SIGHTING = "mcs"
 
 
 def new_id(prefix: str) -> str:

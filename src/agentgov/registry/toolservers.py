@@ -5,12 +5,18 @@ governance processor. Each tool definition is fingerprinted the first time it
 is seen (trust on first use). If a server later changes a definition (an MCP
 "rug pull"), the tool is flagged and the baseline policy refuses calls to it
 until an administrator approves the new definition.
+
+A tool server can also be listed for developers (``developers``), in the MCP
+registry their MCP clients read (``agentgov.registry.mcp_registry``): through
+the gateway, or, for a server only developers use (``gateway`` off), at its own
+address or as packages they run on their machines.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -23,7 +29,23 @@ from agentgov.registry import findings, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 
 APPROVED = "approved"
-FIELDS = ("url", "description", "owner", "trust_level", "data_classification", "labels")
+FIELDS = (
+    "url",
+    "description",
+    "owner",
+    "trust_level",
+    "data_classification",
+    "labels",
+    "gateway",
+    "developers",
+    "registry_name",
+    "packages",
+)
+# What developers' MCP clients see in the registry: a change bumps the server's version there.
+REGISTRY_FIELDS = {"url", "description", "gateway", "developers", "registry_name", "packages"}
+PACKAGE_TYPES = ("npm", "pypi", "oci", "nuget", "cargo", "mcpb")
+# The MCP registry's server names: a namespace, one slash, a name.
+REGISTRY_NAME = re.compile(r"^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$")
 
 
 def get(session: Session, ref: str) -> ToolServer:
@@ -42,6 +64,39 @@ def list_all(session: Session, status: str | None = None) -> list[ToolServer]:
     return list(session.scalars(stmt))
 
 
+def _package(i: int, value: Any) -> dict[str, Any]:
+    where = f"packages[{i}]"
+    if not isinstance(value, dict) or set(value) - {
+        "registry_type",
+        "identifier",
+        "version",
+        "command",
+    }:
+        raise ValidationError(f"{where} takes registry_type, identifier, version and command")
+    kind = validation.one_of(value.get("registry_type"), PACKAGE_TYPES, f"{where}.registry_type")
+    identifier = value.get("identifier")
+    if not isinstance(identifier, str) or not identifier.strip() or len(identifier) > 255:
+        raise ValidationError(
+            f"{where}.identifier must be the package's name, such as @playwright/mcp"
+        )
+    package: dict[str, Any] = {"registry_type": kind, "identifier": identifier.strip()}
+    version = value.get("version")
+    if version not in (None, ""):
+        if not isinstance(version, str) or version == "latest" or len(version) > 255:
+            raise ValidationError(f"{where}.version must be an exact version, not latest")
+        package["version"] = version.strip()
+    command = value.get("command")
+    if command not in (None, []):
+        if (
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(c, str) and c for c in command)
+        ):
+            raise ValidationError(f"{where}.command must be the command line as a list")
+        package["command"] = command
+    return package
+
+
 def _apply(ts: ToolServer, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in FIELDS:
@@ -49,10 +104,30 @@ def _apply(ts: ToolServer, data: dict[str, Any]) -> list[str]:
             continue
         value = data[key]
         if key == "url":
-            if not isinstance(value, str) or not value.startswith(("http://", "https://")):
+            value = value or ""
+            if not isinstance(value, str) or (
+                value and not value.startswith(("http://", "https://"))
+            ):
                 raise ValidationError(
                     "url must be an http(s) URL of a Streamable HTTP MCP endpoint"
                 )
+        elif key in ("gateway", "developers"):
+            if not isinstance(value, bool):
+                raise ValidationError(f"{key} must be true or false")
+        elif key == "registry_name":
+            value = value or None
+            if value is not None and (
+                not isinstance(value, str) or len(value) > 200 or not REGISTRY_NAME.match(value)
+            ):
+                raise ValidationError(
+                    "registry_name looks like namespace/name, such as com.contoso/crm"
+                )
+        elif key == "packages":
+            if value is None:
+                value = []
+            if not isinstance(value, list) or len(value) > 20:
+                raise ValidationError("packages must be a list of at most 20 packages")
+            value = [_package(i, p) for i, p in enumerate(value)]
         elif key == "trust_level":
             value = validation.trust_level(value)
         elif key == "data_classification":
@@ -64,7 +139,33 @@ def _apply(ts: ToolServer, data: dict[str, Any]) -> list[str]:
         if getattr(ts, key) != value:
             setattr(ts, key, value)
             changed.append(key)
+    _check(ts)
+    if REGISTRY_FIELDS & set(changed) and ts.revision is not None:
+        ts.revision += 1
     return changed
+
+
+def _check(ts: ToolServer) -> None:
+    """What a tool server must have, whoever uses it."""
+    if not ts.gateway and not ts.developers:
+        raise ValidationError(
+            "a tool server is published on the gateway, listed for developers, or both"
+        )
+    if ts.gateway and not ts.url:
+        raise ValidationError("url is required for a server published on the gateway")
+    if not ts.gateway and not (ts.url or ts.packages):
+        raise ValidationError("a server only for developers needs its url or the packages they run")
+    if ts.packages and not ts.developers:
+        raise ValidationError("packages are for servers listed for developers (developers: true)")
+
+
+def _unique_registry_name(session: Session, ts: ToolServer) -> None:
+    if ts.registry_name and session.scalar(
+        select(ToolServer).where(
+            ToolServer.registry_name == ts.registry_name, ToolServer.id != ts.id
+        )
+    ):
+        raise Conflict(f"another tool server is already {ts.registry_name!r} in the registry")
 
 
 def create(session: Session, data: dict[str, Any], *, actor: str, approve: bool) -> ToolServer:
@@ -72,17 +173,22 @@ def create(session: Session, data: dict[str, Any], *, actor: str, approve: bool)
     name = validation.slug(data.get("name"), "name")
     if session.scalar(select(ToolServer).where(ToolServer.name == name)):
         raise Conflict(f"tool server {name!r} already exists")
-    if "url" not in data:
-        raise ValidationError("url is required")
     ts = ToolServer(
         id=ids.new_id(ids.TOOL_SERVER),
         name=name,
+        url="",
         status=APPROVED if approve else PENDING,
         labels={},
         tools=[],
+        gateway=True,
+        developers=False,
+        packages=[],
+        revision=0,
         created_by=actor,
     )
     _apply(ts, data)
+    ts.revision = 0
+    _unique_registry_name(session, ts)
     session.add(ts)
     session.flush()
     ledger.append(
@@ -90,7 +196,13 @@ def create(session: Session, data: dict[str, Any], *, actor: str, approve: bool)
         type="toolserver.registered",
         actor=actor,
         resource=f"toolserver/{name}",
-        details={"url": ts.url, "status": ts.status, "trust_level": ts.trust_level},
+        details={
+            "url": ts.url or None,
+            "status": ts.status,
+            "trust_level": ts.trust_level,
+            "gateway": ts.gateway,
+            "developers": ts.developers,
+        },
     )
     mark_changed(session, "toolservers")
     return ts
@@ -98,6 +210,7 @@ def create(session: Session, data: dict[str, Any], *, actor: str, approve: bool)
 
 def update(session: Session, ts: ToolServer, data: dict[str, Any], *, actor: str) -> list[str]:
     changed = _apply(ts, data)
+    _unique_registry_name(session, ts)
     if changed:
         ledger.append(
             session,
@@ -270,8 +383,15 @@ def to_dict(ts: ToolServer, gateway_url: str | None = None) -> dict[str, Any]:
     return {
         "id": ts.id,
         "name": ts.name,
-        "url": ts.url,
-        "gateway_url": f"{gateway_url.rstrip('/')}/mcp/{ts.name}" if gateway_url else None,
+        "url": ts.url or None,
+        "gateway_url": (
+            f"{gateway_url.rstrip('/')}/mcp/{ts.name}" if gateway_url and ts.gateway else None
+        ),
+        "gateway": ts.gateway,
+        "developers": ts.developers,
+        "registry_name": ts.registry_name,
+        "packages": ts.packages or [],
+        "revision": ts.revision or 0,
         "description": ts.description,
         "owner": ts.owner,
         "status": ts.status,

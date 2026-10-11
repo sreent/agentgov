@@ -213,7 +213,12 @@ def render(
     modes = {**{f.key: f.default for f in features.CATALOG}, **(modes or {})}
     routes = []
     if modes["mcp-gateway"] != features.OFF:
-        routes = [route_for(ts, settings, modes) for ts in servers if ts.status != PENDING]
+        # Servers only for developers aren't published: they run elsewhere.
+        routes = [
+            route_for(ts, settings, modes)
+            for ts in servers
+            if ts.status != PENDING and ts.gateway is not False
+        ]
     if modes["model-gateway"] != features.OFF:
         routes += [model_route_for(p, settings, modes) for p in providers or []]
     # A static health route keeps the listener valid when no servers exist yet.

@@ -1,4 +1,5 @@
-# MCP servers published through the gateway at http://<gateway>/mcp/<name>.
+# MCP servers published through the gateway at http://<gateway>/mcp/<name>, and listed
+# for developers in the MCP registry their MCP clients read (docs/developer-tools.md).
 apiVersion: agentgov/v1alpha1
 kind: ToolServer
 metadata:
@@ -9,4 +10,22 @@ spec:
   owner: crm-team
   trust_level: verified
   data_classification: confidential
+  developers: true
+  status: approved
+---
+# Only for developers: not published on the gateway, listed in the MCP registry as the
+# package developers run on their machines.
+apiVersion: agentgov/v1alpha1
+kind: ToolServer
+metadata:
+  name: playwright
+spec:
+  description: Browser automation for coding assistants.
+  owner: developer-experience
+  gateway: false
+  developers: true
+  packages:
+    - registry_type: npm
+      identifier: "@playwright/mcp"
+      version: 0.0.41
   status: approved

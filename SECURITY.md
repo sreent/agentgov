@@ -107,6 +107,13 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   page.
 * If you run the instruction classifier, keep it on the private network: it receives
   agents' instructions (with credentials already redacted).
+* The MCP registry (`mcp-registry`, off by default) is served without credentials, as
+  developers' MCP clients read it: anyone who can reach the control plane can read the
+  names, descriptions and addresses of the servers listed for developers. Serve it where
+  only your developers can reach it, and list there only what they may see.
+* Reports of developers' MCP servers (`agentgov mcp scan --report`) need an API key of
+  the `registrar` role. Give device management its own key, and revoke it if the
+  machines it runs on are lost.
 * Model providers' API keys are files that the gateway and its config sidecar read
   (`deploy/compose/model-keys`, or the Helm chart's `modelKeys` Secret). Keep them out of
   version control (the Compose directory ignores everything but the demo's key). To

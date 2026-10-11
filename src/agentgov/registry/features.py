@@ -42,6 +42,7 @@ GROUPS = {
     "gateway": "Gateway",
     "controls": "Controls at the gateway",
     "detection": "Detection",
+    "developers": "Developer tools",
     "lifecycle": "Lifecycle",
     "microsoft": "Microsoft",
 }
@@ -257,6 +258,35 @@ CATALOG: tuple[Feature, ...] = (
         {
             ON: "Instructions are checked when they arrive or change.",
             OFF: "Instructions are kept but not checked.",
+        },
+    ),
+    Feature(
+        "mcp-registry",
+        "MCP registry",
+        "developers",
+        "The tool servers listed for developers are served as an MCP registry at "
+        "<control plane>/registry, which GitHub Copilot and VS Code read, without "
+        "credentials, to offer developers only approved MCP servers.",
+        SWITCH,
+        OFF,
+        {
+            ON: "Developers' MCP clients read the registry at <control plane>/registry.",
+            OFF: "The registry isn't served. Tool servers keep their listing.",
+        },
+        needs="the control plane reachable from developers' machines",
+    ),
+    Feature(
+        "mcp-discovery",
+        "Developers' MCP servers",
+        "developers",
+        "The MCP servers developers have set up on their machines, as agentgov mcp scan "
+        "reports them, are compared with the approved tool servers, and those that aren't "
+        "approved raise findings.",
+        SWITCH,
+        ON,
+        {
+            ON: "Reports are taken, and unapproved servers raise findings.",
+            OFF: "Reports are refused. Findings already raised stay until resolved.",
         },
     ),
     Feature(

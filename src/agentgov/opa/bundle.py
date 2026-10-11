@@ -102,7 +102,8 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
         if agent.client_id:
             clients[agent.client_id] = agent.id
     servers: dict[str, Any] = {}
-    for ts in session.scalars(select(ToolServer)):
+    # Servers only for developers never reach the gateway, so OPA never decides on them.
+    for ts in session.scalars(select(ToolServer).where(ToolServer.gateway.is_(True))):
         servers[ts.name] = {
             "name": ts.name,
             "status": ts.status,

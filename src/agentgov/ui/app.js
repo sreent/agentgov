@@ -131,6 +131,7 @@ const ICONS = {
   platforms: 'M7 19h10.5a4.5 4.5 0 0 0 .5-8.98A6 6 0 0 0 6.34 9.03 5 5 0 0 0 7 19z',
   features: 'M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4',
   models: 'M7 7h10v10H7zM10 10h4v4h-4zM10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4',
+  developers: 'M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14',
 };
 
 function icon(name, { label, cls } = {}) {
@@ -827,6 +828,7 @@ const PAGES = [
   { re: /^\/platforms$/, nav: 'platforms', title: 'Platforms', render: renderPlatforms },
   { re: /^\/features$/, nav: 'features', title: 'Features', render: renderFeatures },
   { re: /^\/models$/, nav: 'models', title: 'Models', render: renderModels },
+  { re: /^\/developers$/, nav: 'developers', title: 'Developer tools', render: renderDevelopers },
 ];
 
 let renderSeq = 0;
@@ -2803,21 +2805,41 @@ async function renderToolservers() {
 }
 
 const TRUST_LEVELS = [['unverified', 'Unverified'], ['verified', 'Verified']];
+
+// Packages developers run, one per line as type:identifier@version (the CLI's --package).
+function formatPackages(packages) {
+  return (packages || []).map((p) => `${p.registry_type}:${p.identifier}${p.version ? `@${p.version}` : ''}`).join('\n');
+}
+
+function parsePackages(text) {
+  return text.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const colon = line.indexOf(':');
+    if (colon < 1) throw new Error(`"${line}" isn't a package: write type:identifier@version, such as npm:@playwright/mcp@0.0.41.`);
+    const kind = line.slice(0, colon);
+    const rest = line.slice(colon + 1);
+    const at = rest.lastIndexOf('@');
+    return at > 0
+      ? { registry_type: kind, identifier: rest.slice(0, at), version: rest.slice(at + 1) }
+      : { registry_type: kind, identifier: rest };
+  });
+}
 const CLASSIFICATIONS = [['public', 'Public'], ['internal', 'Internal'], ['confidential', 'Confidential'], ['restricted', 'Restricted']];
 
-/** Register a tool server (no `ts`) or edit one. Resolves to the saved server, or null. */
-function toolserverForm(ts) {
+/** Register a tool server (no `ts`, starting from `draft` if given) or edit one. Resolves
+ * to the saved server, or null. */
+function toolserverForm(ts, draft = null) {
   const editing = Boolean(ts);
+  ts = ts || draft;
   const options = (pairs) => pairs.map(([value, label]) => ({ value, label }));
   return ask({
     title: editing ? `Edit ${ts.name}` : 'Register a tool server',
     text: editing
       ? 'Changes are recorded in the evidence ledger. A new upstream URL takes effect when the gateway reloads its generated configuration.'
-      : 'The server is published through the gateway at /mcp/<name>, and agents whose grants cover it can call its tools.',
+      : 'Published on the gateway, the server is at /mcp/<name>, where agents whose grants cover it call its tools. Listed for developers, it is in the MCP registry their MCP clients read.',
     iconName: editing ? 'edit' : 'toolservers', confirm: editing ? 'Save changes' : 'Register server',
     fields: [
-      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'crm', hint: `${NAME_HINT} It becomes the gateway path /mcp/<name>.` },
-      { id: 'url', label: 'Upstream URL', required: true, mono: true, value: ts?.url || '', placeholder: 'http://crm-mcp:8000/mcp', hint: 'The streamable HTTP MCP endpoint. Agents never call it directly, only through the gateway.' },
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, value: ts?.name || '', placeholder: 'crm', hint: `${NAME_HINT} It becomes the gateway path /mcp/<name>.` },
+      { id: 'url', label: 'Upstream URL', mono: true, value: ts?.url || '', placeholder: 'http://crm-mcp:8000/mcp', hint: 'The streamable HTTP MCP endpoint, required on the gateway. Agents never call it directly, only through the gateway.' },
       { id: 'description', label: 'Description', type: 'textarea', value: ts?.description || '' },
       { id: 'owner', label: 'Owner', value: ts?.owner || '', placeholder: 'Team or person' },
       { type: 'row', fields: [
@@ -2825,11 +2847,17 @@ function toolserverForm(ts) {
         { id: 'data_classification', label: 'Data classification', type: 'select', value: ts?.data_classification || 'internal', options: options(CLASSIFICATIONS) },
       ] },
       { id: 'labels', label: 'Labels', value: formatLabels(ts?.labels), placeholder: 'team=cx', mono: true },
+      { type: 'section', label: 'Who uses it' },
+      { id: 'gateway', label: 'Agents, through the gateway', type: 'checkbox', value: ts ? ts.gateway : true, hint: 'Published at /mcp/<name>, with every control.' },
+      { id: 'developers', label: "Developers, in the MCP registry", type: 'checkbox', value: Boolean(ts?.developers), hint: 'Listed in the registry GitHub Copilot and VS Code read (Developer tools).' },
+      { id: 'packages', label: 'Packages developers run', type: 'code', rows: 2, value: formatPackages(ts?.packages), placeholder: 'npm:@playwright/mcp@0.0.41', hint: 'For a server developers run on their machines: one per line, type:identifier@version (npm, pypi, oci, nuget, cargo, mcpb).' },
+      { id: 'registry_name', label: 'Name in the registry', mono: true, value: ts?.registry_name || '', placeholder: 'com.contoso/crm', hint: 'By default <namespace>/<name>.' },
     ].filter(Boolean),
     submit: (v) => {
       const body = {
         url: v.url, description: v.description, owner: orNull(v.owner),
         trust_level: v.trust_level, data_classification: v.data_classification, labels: parseLabels(v.labels),
+        gateway: v.gateway, developers: v.developers, packages: parsePackages(v.packages), registry_name: orNull(v.registry_name),
       };
       if (editing) return api(`v1/toolservers/${encodeURIComponent(ts.name)}`, { method: 'PATCH', body });
       return api('v1/toolservers', { method: 'POST', body: { name: v.name, ...body } });
@@ -2840,7 +2868,9 @@ function toolserverForm(ts) {
 async function registerToolserver() {
   const created = await toolserverForm(null);
   if (!created) return;
-  toast(`Registered ${created.name}. Agents reach it at ${created.gateway_url || `/mcp/${created.name}`}.`);
+  toast(created.gateway
+    ? `Registered ${created.name}. Agents reach it at ${created.gateway_url || `/mcp/${created.name}`}.`
+    : `Registered ${created.name} for developers.`);
   await refresh();
 }
 
@@ -2902,7 +2932,8 @@ function serverCard(ts) {
       h('div', { class: 'server-head' },
         h('div', { class: 'server-title' },
           h('div', { class: 'title-row' }, h('h2', { id: headingId, class: 'tool-name' }, ts.name), chip('server', ts.status), trustChip,
-            plainChip(humanize(ts.data_classification || 'unclassified'), { iconName: 'lock', title: 'Data classification' })),
+            plainChip(humanize(ts.data_classification || 'unclassified'), { iconName: 'lock', title: 'Data classification' }),
+            ts.developers ? plainChip(ts.gateway ? 'Listed for developers' : 'Developers only', { iconName: 'developers', title: 'In the MCP registry developers\' MCP clients read' }) : null),
           ts.description ? h('p', { style: 'color:var(--ink-2)' }, ts.description) : null),
         h('div', { class: 'btn-row' }, actions)),
       poisoned.length ? callout('critical', 'octagon', h('span', {}, h('strong', {}, `${plural(poisoned.length, 'tool')} quarantined. `),
@@ -2910,14 +2941,15 @@ function serverCard(ts) {
       changed.length ? callout('warning', 'triangle', h('span', {}, h('strong', {}, `${plural(changed.length, 'tool')} changed since approval. `),
         'Calls are refused until an administrator approves the new definition.')) : null,
       facts([
-        ['Gateway URL', ts.gateway_url ? copyable(ts.gateway_url, 'gateway URL') : h('span', { class: 'muted' }, 'Gateway public URL not configured')],
-        ['Upstream', h('code', { class: 'break' }, ts.url || '—')],
+        ts.gateway ? ['Gateway URL', ts.gateway_url ? copyable(ts.gateway_url, 'gateway URL') : h('span', { class: 'muted' }, 'Gateway public URL not configured')] : ['Gateway', h('span', { class: 'muted' }, 'Not published: only for developers')],
+        ['Upstream', ts.url ? h('code', { class: 'break' }, ts.url) : null],
+        (ts.packages || []).length ? ['Packages', h('div', { class: 'chip-row' }, ts.packages.map((pk) => plainChip(formatPackages([pk]), { mono: true })))] : null,
         ['Owner', ts.owner],
-        ['Catalog', `${plural(tools.length, 'tool')} · ${fmt(poisoned.length)} poisoned · ${fmt(changed.length)} changed`],
-        ['Catalog synced', timeEl(ts.tools_synced_at, { empty: 'Not yet observed' })],
+        ts.gateway ? ['Catalog', `${plural(tools.length, 'tool')} · ${fmt(poisoned.length)} poisoned · ${fmt(changed.length)} changed`] : null,
+        ts.gateway ? ['Catalog synced', timeEl(ts.tools_synced_at, { empty: 'Not yet observed' })] : null,
       ]),
-      h('div', {}, toggle)),
-    catalog);
+      ts.gateway ? h('div', {}, toggle) : null),
+    ts.gateway ? catalog : null);
 }
 
 function toolTable(ts) {
@@ -3569,6 +3601,7 @@ const LEDGER_TYPES = [
   ['toolserver.*', 'Tool servers'], ['policy.*', 'Organisation policies'], ['blueprint.*', 'Blueprints'], ['apikey.*', 'API keys'],
   ['admin.*', 'Sign-ins and sessions'], ['platform.*', 'Platform syncs and imports'], ['connector.*', 'Connector allowlist'],
   ['feature.*', 'Features'], ['model_provider.*', 'Model providers'], ['model.*', 'Model budgets'],
+  ['mcp.*', "Developers' MCP servers"],
 ];
 const LEDGER_DECISIONS = [
   ['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval'],
@@ -4686,3 +4719,114 @@ async function deleteProvider(p) {
 /* -------------------------------------------------------------------- go */
 
 boot();
+
+/* ---------------------------------------------------------- developer tools */
+
+const SIGHTING_STATUS = {
+  approved: ['Approved', 'good', 'check-circle', 'An approved tool server'],
+  bypass: ['Past the gateway', 'critical', 'triangle', "A gateway server's own address: calls skip the gateway's controls"],
+  blocked: ['Blocked', 'critical', 'ban', 'A blocked tool server'],
+  unapproved: ['Not approved', 'warning', 'triangle', 'Not an approved tool server'],
+};
+
+async function renderDevelopers() {
+  const [registry, sightings, features] = await Promise.all([
+    api('v1/mcp/registry'), api('v1/mcp/sightings'), featureModes().catch(() => ({})),
+  ]);
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Developer tools',
+      sub: "Which MCP servers developers' MCP clients may use, served as an MCP registry for GitHub Copilot and VS Code, and which ones developers have set up on their machines.",
+      actions: [refreshButton()],
+    }),
+    registryCard(registry),
+    sightingsCard(sightings, features));
+}
+
+function registryCard(registry) {
+  const servers = registry.servers || [];
+  const where = (server) => [
+    ...(server.remotes || []).map((r) => h('code', { class: 'break' }, r.url)),
+    ...(server.packages || []).map((pk) => plainChip(`${pk.registryType}:${pk.identifier}${pk.version ? `@${pk.version}` : ''}`, { mono: true })),
+  ];
+  const download = h('button', { type: 'button', class: 'btn', 'data-focus-key': 'managed-settings' }, icon('download'), 'managed-settings.json');
+  download.addEventListener('click', guarded(async () => {
+    await saveDownload('v1/mcp/managed-settings', 'managed-settings.json');
+    toast('Saved managed-settings.json: the same servers as an allowlist, by URL and command.');
+  }));
+  return card({
+    title: 'MCP registry',
+    sub: "Tool servers listed for developers. In GitHub's AI controls (MCP), set this as the MCP registry URL and choose Registry only: Copilot then runs only these servers.",
+    actions: [download],
+    body: [
+      registry.enabled ? null : callout('warning', 'power', h('span', {}, h('strong', {}, 'The registry is off: '),
+        "developers' clients can't read it. It is served without credentials, as they read it; turn on ", h('code', {}, 'mcp-registry'), ' on the ', h('a', { href: '#/features' }, 'Features'), ' page.')),
+      facts([
+        ['Registry URL', copyable(registry.url, 'registry URL')],
+        ['Names', h('span', {}, h('code', {}, `${registry.namespace}/<server>`))],
+      ]),
+      servers.length
+        ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+          h('caption', { class: 'sr-only' }, 'Servers in the MCP registry'),
+          h('thead', {}, h('tr', {}, ['Name', 'Version', 'Developers connect to', 'Status'].map((c) => h('th', { scope: 'col' }, c)))),
+          h('tbody', {}, servers.map((entry) => h('tr', {},
+            h('td', { 'data-label': 'Name' }, h('code', { class: 'break' }, entry.server.name)),
+            h('td', { 'data-label': 'Version' }, entry.server.version),
+            h('td', { 'data-label': 'Developers connect to' }, h('div', { class: 'stack', style: 'gap:4px' }, where(entry.server))),
+            h('td', { 'data-label': 'Status' }, entry.server._meta?.['dev.agentgov/server']?.throughGateway
+              ? plainChip('Through the gateway', { tone: 'good', iconName: 'shield' })
+              : plainChip('Developers only', { iconName: 'developers' })))))))
+        : emptyState('No tool servers are listed for developers', 'Edit a tool server and tick Developers, or register one only for developers, with its address or its packages.'),
+    ],
+  });
+}
+
+function sightingsCard(groups, features) {
+  const command = 'agentgov mcp scan --report';
+  const body = groups.length
+    ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, "MCP servers on developers' machines"),
+      h('thead', {}, h('tr', {}, ['Status', 'Server', 'Set up as', 'Machines', 'Last reported', ''].map((c) => h('th', { scope: 'col', class: c === 'Machines' ? 'num' : null }, c || h('span', { class: 'sr-only' }, 'Actions'))))),
+      h('tbody', {}, groups.map((g) => {
+        const [label, tone, ic, title] = SIGHTING_STATUS[g.status] || [humanize(g.status), 'neutral', 'info', ''];
+        const what = g.url || (g.command || []).join(' ') || g.identity;
+        return h('tr', {},
+          h('td', { 'data-label': 'Status' }, plainChip(label, { tone, iconName: ic, title }), g.server ? h('div', { class: 'cell-sub' }, g.server) : null),
+          h('td', { 'data-label': 'Server' }, h('code', { class: 'break' }, what)),
+          h('td', { 'data-label': 'Set up as' }, h('span', { class: 'break' }, g.names.join(', ')), h('div', { class: 'cell-sub' }, g.clients.join(', '))),
+          h('td', { 'data-label': 'Machines', class: 'num' }, fmt(g.machines), h('div', { class: 'cell-sub' }, plural(g.users, 'person', 'people'))),
+          h('td', { 'data-label': 'Last reported' }, timeEl(g.last_seen_at)),
+          h('td', { 'data-label': '' }, g.status === 'unapproved' && can('admin') && registerDraft(g)
+            ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `register-${g.identity}`, onclick: guarded(() => registerSighting(g)) }, icon('plus'), 'Register')
+            : null));
+      }))))
+    : emptyState('No reports yet', h('span', {}, 'Developers, or your device management, run ', h('code', {}, command), ' with an API key of the registrar role.'));
+  return card({
+    title: "Set up on developers' machines",
+    sub: 'The MCP servers in VS Code, Copilot, Claude, Cursor and other clients, as developers report them, against the approved tool servers. Credentials never leave their machines.',
+    actions: [copyable(command, 'scan command')],
+    flush: Boolean(groups.length),
+    body: [
+      features['mcp-discovery'] === 'off' ? callout('warning', 'power', h('span', {}, h('strong', {}, 'Reports are off. '), 'Turn on ', h('code', {}, 'mcp-discovery'), ' on the ', h('a', { href: '#/features' }, 'Features'), ' page.')) : null,
+      body,
+    ],
+  });
+}
+
+// A tool server registration started from what developers set up: their address, or
+// the package they run.
+function registerDraft(g) {
+  const [kind, ...rest] = g.identity.split(':');
+  const value = rest.join(':');
+  const name = (g.names[0] || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
+  if (kind === 'url') return { name, url: g.url || value, gateway: false, developers: true };
+  if (['npm', 'pypi', 'oci'].includes(kind)) return { name, gateway: false, developers: true, packages: [{ registry_type: kind, identifier: value }] };
+  return null;
+}
+
+async function registerSighting(g) {
+  const created = await toolserverForm(null, registerDraft(g));
+  if (!created) return;
+  toast(`Registered ${created.name}. Its finding resolves once AgentGov compares the reports again.`);
+  await refresh();
+}

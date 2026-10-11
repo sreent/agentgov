@@ -118,6 +118,16 @@ the OpenTelemetry Collector to the control plane, which meters it per agent agai
 agent's daily budget; an agent over budget is in the next bundle, and OPA refuses its
 calls. [Model calls](models.md) has the details.
 
+## Developers' MCP clients
+
+The tool servers listed for developers are also served as an MCP registry, at
+`<control plane>/registry` (the MCP Registry API, version 0.1), which GitHub Copilot in
+VS Code and other editors reads to offer developers only approved MCP servers.
+`agentgov mcp scan --report`, run on developers' machines, reports the MCP servers set
+up there, without their credentials, and the control plane raises findings for those
+that aren't approved or that skip the gateway. [Developer tools](developer-tools.md)
+has the details.
+
 ## Keeping components in sync
 
 The registry is the source of truth. Every committed change notifies three reconcilers
@@ -203,10 +213,11 @@ src/agentgov/
                   calls, detectors, Presidio client
   gateway.py      agentgateway config generator
   telemetry.py    OTLP ingestion (discovery, activity, detective controls; model usage)
+  mcp_scan.py     the MCP servers set up on a developer's machine (agentgov mcp scan)
   ledger.py       hash-chained evidence ledger
   migrations/     the database schema's migrations (Alembic)
   ui/             admin UI (static)
 deploy/compose/   reference stack (Docker Compose)
 deploy/helm/      Helm chart for Kubernetes
-examples/         manifests, demo MCP server, demo model, demo agent
+examples/         manifests, demo MCP server, demo model, a developer's machine, demo agent
 ```

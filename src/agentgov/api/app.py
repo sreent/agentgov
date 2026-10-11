@@ -28,6 +28,7 @@ from agentgov.api import (
     governance_routes,
     instruction_routes,
     integration_routes,
+    mcp_routes,
     model_routes,
     platform_routes,
     registry_routes,
@@ -152,6 +153,8 @@ def create_app(
     app.include_router(copilot_studio_routes.router)
     app.include_router(feature_routes.router)
     app.include_router(model_routes.router)
+    app.include_router(mcp_routes.router)
+    app.include_router(mcp_routes.public)
 
     ui_dir = Path(str(resources.files("agentgov") / "ui"))
     if (ui_dir / "index.html").exists():

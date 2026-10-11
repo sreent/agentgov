@@ -215,9 +215,14 @@ def export(session: Session) -> list[dict[str, Any]]:
     for bp in blueprints.list_all(session):
         d = blueprints.to_dict(bp)
         docs.append(_doc("Blueprint", bp.name, {k: d[k] for k in blueprints.FIELDS}))
+    # How a server is used is written out only where it differs from the default: on the
+    # gateway, not listed for developers.
+    unless = {"gateway": True, "developers": False, "registry_name": None, "packages": []}
     for ts in toolservers.list_all(session):
         d = toolservers.to_dict(ts)
-        spec = {k: d[k] for k in toolservers.FIELDS}
+        spec = {k: d[k] for k in toolservers.FIELDS if k not in unless or d[k] != unless[k]}
+        if not d["url"]:
+            spec.pop("url")
         spec["status"] = ts.status
         docs.append(_doc("ToolServer", ts.name, spec))
     for provider in model_providers.list_all(session):

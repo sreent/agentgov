@@ -26,7 +26,7 @@ python examples/agents/demo_agent.py
 
 | Port | Service | Notes |
 |---|---|---|
-| 8000 | Control plane | API (`/docs`), admin UI (`/ui`), OPA bundles, OTLP ingest |
+| 8000 | Control plane | API (`/docs`), admin UI (`/ui`), OPA bundles, OTLP ingest, the MCP registry for developers' tools (`/registry`, once `mcp-registry` is on) |
 | 8080 | agentgateway | MCP routes at `/mcp/<server>` and model routes at `/llm/<provider>`; requires a Keycloak-issued token |
 | 8180 | Keycloak | Admin console user `admin`, password `KEYCLOAK_ADMIN_PASSWORD` (default `admin`); realm `agentgov` |
 | 8181 | OPA | Query API, handy for debugging policies |

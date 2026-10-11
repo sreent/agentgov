@@ -62,7 +62,7 @@ them needs the AI administrator or Power Platform administrator role
 
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
-| **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist | AgentGov control plane |
+| **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
 | **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call and model call using live registry context; the models each blueprint allows, with daily token budgets; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
@@ -151,7 +151,11 @@ the gateway. It shows each control in turn:
    goes through but is recorded: jailbreak detection starts in monitor mode.
 10. **Kill switch**: blocking the agent takes effect everywhere within a second.
 11. **Shadow AI**: telemetry from an unregistered agent is discovered.
-12. **Evidence**: every decision is in a ledger whose hash chain verifies.
+12. **Developer tools**: the MCP servers approved for developers are served as an MCP
+    registry for GitHub Copilot, and a developer's laptop
+    ([examples/developer-machine](examples/developer-machine)) reports its MCP servers:
+    those that aren't approved, or skip the gateway, raise findings.
+13. **Evidence**: every decision is in a ledger whose hash chain verifies.
 
 Then look around:
 
@@ -230,6 +234,9 @@ what-if evaluation.
 * **Models**: point any OpenAI client at `http://<gateway>/llm/<provider>/v1`, with the
   same token as its API key. The gateway adds the provider's key
   ([model calls](docs/models.md)).
+* **Developers' coding assistants**: GitHub Copilot reads the approved MCP servers from
+  the MCP registry at `http://<control plane>/registry`, and `agentgov mcp scan --report`
+  reports the ones developers set up ([developer tools](docs/developer-tools.md)).
 * **Telemetry**: point the agent's OpenTelemetry exporter at the collector
   (`:4317` gRPC, `:4318` HTTP). Spans that follow the GenAI semantic conventions
   (`invoke_agent`, `execute_tool`, `chat`) feed activity, discovery and detective
@@ -267,6 +274,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Features](docs/features.md): choose which parts of AgentGov you use, and how strictly
 * [Model calls](docs/models.md): model providers, which agents may call which models,
   usage, cost and token budgets
+* [Developer tools](docs/developer-tools.md): an MCP registry for GitHub Copilot and VS
+  Code, and the MCP servers developers set up on their machines
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin
@@ -297,9 +306,11 @@ src/agentgov/
   migrations/   database schema migrations (Alembic)
   api/  ui/     HTTP API and admin UI
   cli.py        the agentgov command
+  mcp_scan.py   the MCP servers set up on a developer's machine (agentgov mcp scan)
 deploy/compose/ reference deployment
 deploy/helm/    Helm chart
-examples/       manifests, a demo MCP server, a demo model and the demo agent
+examples/       manifests, a demo MCP server, a demo model, a developer's machine and the
+                demo agent
 docs/           design documents and ADRs
 tests/          unit and integration tests
 ```

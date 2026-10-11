@@ -84,6 +84,11 @@ models_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(models_app, name="models")
+mcp_app = typer.Typer(
+    help="The MCP registry for developers' MCP clients, and the MCP servers developers set up.",
+    no_args_is_help=True,
+)
+app.add_typer(mcp_app, name="mcp")
 features_app = typer.Typer(
     help="Which features are used, and how strictly (off, monitor or enforce).",
     no_args_is_help=True,
@@ -1131,6 +1136,27 @@ TRUST = typer.Option(None, "--trust", help="verified or unverified.")
 CLASSIFICATION = typer.Option(None, help="public, internal, confidential or restricted.")
 
 
+def _packages(values: list[str]) -> list[dict[str, Any]]:
+    """Packages written as ``type:identifier[@version]``: npm:@playwright/mcp@0.0.41."""
+    packages = []
+    for value in values:
+        kind, sep, rest = value.partition(":")
+        identifier, at, version = rest.rpartition("@")
+        if not at or not identifier:  # no version, or only a scope's "@"
+            identifier, version = rest, ""
+        if not sep or not identifier:
+            _fail(f"packages look like type:identifier@version, e.g. npm:@playwright/mcp@0.0.41 "
+                  f"(got {value!r})")  # fmt: skip
+        packages.append(
+            {
+                "registry_type": kind,
+                "identifier": identifier,
+                **({"version": version} if version else {}),
+            }
+        )
+    return packages
+
+
 def _toolserver_fields(
     url: str | None,
     description: str | None,
@@ -1138,31 +1164,75 @@ def _toolserver_fields(
     trust: str | None,
     classification: str | None,
     label: list[str] | None,
+    *,
+    gateway: bool | None = None,
+    developers: bool | None = None,
+    package: list[str] | None = None,
+    registry_name: str | None = None,
 ) -> dict[str, Any]:
     body = _given(
-        url=url, description=description, trust_level=trust, data_classification=classification
+        url=url,
+        description=description,
+        trust_level=trust,
+        data_classification=classification,
+        gateway=gateway,
+        developers=developers,
     )
     if owner is not None:
         body["owner"] = owner or None
     if label is not None:
         body["labels"] = _labels(label)
+    if package is not None:
+        body["packages"] = _packages(package)
+    if registry_name is not None:
+        body["registry_name"] = registry_name or None
     return body
+
+
+GATEWAY = typer.Option(
+    None, "--gateway/--no-gateway", help="Publish it on the gateway for agents (default)."
+)
+DEVELOPERS = typer.Option(
+    None,
+    "--developers/--no-developers",
+    help="List it for developers, in the MCP registry their MCP clients read.",
+)
+PACKAGE = typer.Option(
+    None,
+    "--package",
+    help="A package developers run, type:identifier@version (repeatable; replaces them).",
+)
+REGISTRY_NAME = typer.Option(
+    None, help="Its name in the MCP registry (default <namespace>/<name>)."
+)
 
 
 @toolservers_app.command("create")
 def toolservers_create(
     name: str,
-    url: str = typer.Option(..., help="The server's streamable HTTP MCP endpoint."),
+    url: str | None = typer.Option(
+        None, help="The server's streamable HTTP MCP endpoint (for the gateway: required)."
+    ),
     description: str | None = DESCRIPTION,
     owner: str | None = OWNER,
     trust: str | None = TRUST,
     classification: str | None = CLASSIFICATION,
     label: list[str] | None = LABEL,
+    gateway: bool | None = GATEWAY,
+    developers: bool | None = DEVELOPERS,
+    package: list[str] | None = PACKAGE,
+    registry_name: str | None = REGISTRY_NAME,
 ) -> None:
     """Register a tool server (admins: approved at once; registrars: pending review)."""
-    body = _toolserver_fields(url, description, owner, trust, classification, label)
+    body = _toolserver_fields(
+        url, description, owner, trust, classification, label,
+        gateway=gateway, developers=developers, package=package, registry_name=registry_name,
+    )  # fmt: skip
     ts = _call("POST", "/v1/toolservers", json={"name": name, **body})
-    _done("toolserver", ts["name"], f"{ts['status']}, published at {ts['gateway_url']}")
+    where = [f"published at {ts['gateway_url']}"] if ts["gateway_url"] else []
+    if ts["developers"]:
+        where.append("listed for developers")
+    _done("toolserver", ts["name"], ", ".join([ts["status"], *where]))
 
 
 @toolservers_app.command("update")
@@ -1174,9 +1244,16 @@ def toolservers_update(
     trust: str | None = TRUST,
     classification: str | None = CLASSIFICATION,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+    gateway: bool | None = GATEWAY,
+    developers: bool | None = DEVELOPERS,
+    package: list[str] | None = PACKAGE,
+    registry_name: str | None = REGISTRY_NAME,
 ) -> None:
     """Change a tool server's details."""
-    body = _toolserver_fields(url, description, owner, trust, classification, label)
+    body = _toolserver_fields(
+        url, description, owner, trust, classification, label,
+        gateway=gateway, developers=developers, package=package, registry_name=registry_name,
+    )  # fmt: skip
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
     ts = _call("PATCH", f"/v1/toolservers/{name}", json=body)
@@ -1855,6 +1932,92 @@ def features_set(
         )
     out = _call("PUT", f"/v1/features/{quote(key)}", json={"mode": mode})
     _done("feature", key, f"{out['mode']}: {out['effect']}")
+
+
+# ----------------------------------------------------------------------- mcp
+
+
+@mcp_app.command("registry")
+def mcp_registry() -> None:
+    """What developers' MCP clients see in the MCP registry, and where they read it."""
+    view = _call("GET", "/v1/mcp/registry")
+    rows = []
+    for entry in view["servers"]:
+        server = entry["server"]
+        where = [r["url"] for r in server.get("remotes") or []]
+        where += [
+            f"{p['registryType']}:{p['identifier']}"
+            + (f"@{p['version']}" if p.get("version") else "")
+            for p in server.get("packages") or []
+        ]
+        rows.append({**server, "where": ", ".join(where)})
+    _table(rows, ["name", "version", "where"])
+    state = "on" if view["enabled"] else "off (agentgov features set mcp-registry on)"
+    typer.echo(f"registry: {view['url']} ({state})")
+
+
+@mcp_app.command("managed-settings")
+def mcp_managed_settings(
+    output: Path | None = typer.Option(None, "--output", "-o", help="Write it to this file."),
+) -> None:
+    """The registry as GitHub Copilot's managed-settings.json allowlist."""
+    text = json.dumps(_call("GET", "/v1/mcp/managed-settings"), indent=2) + "\n"
+    if output is None:
+        typer.echo(text, nl=False)
+    else:
+        output.write_text(text)
+        typer.echo(f"wrote {output}")
+
+
+@mcp_app.command("scan")
+def mcp_scan_command(
+    directory: list[Path] | None = typer.Option(
+        None, "--dir", help="A project to look in too (repeatable; default: this directory)."
+    ),
+    home: Path | None = typer.Option(None, help="Scan this home directory instead of yours."),
+    report: bool = typer.Option(False, "--report", help="Send what was found to AgentGov."),
+    as_json: bool = typer.Option(False, "--json", help="Print what was found as JSON."),
+) -> None:
+    """The MCP servers set up on this machine, in VS Code, Copilot, Claude, Cursor and
+    other clients. Credentials are left out: environment variables and headers by name."""
+    from agentgov import mcp_scan
+
+    found = mcp_scan.scan(directory or [Path.cwd()], home=home)
+    servers = [s.to_dict() for s in found]
+    if as_json:
+        _print(servers)
+    else:
+        rows = [{**s, "where": s["url"] or " ".join(s["command"])} for s in servers]
+        _table(rows, ["name", "client", "scope", "transport", "where"])
+    if report:
+        here = mcp_scan.machine()
+        # Which file a server came from stays here: it names the person's home directory.
+        sent = [{k: v for k, v in s.items() if k != "file"} for s in servers]
+        outcome = _call(
+            "POST",
+            "/v1/mcp/sightings",
+            json={"machine": here["machine"], "user": here["user"], "servers": sent},
+        )
+        typer.echo(
+            f"reported {outcome['servers']} servers: {outcome['approved']} approved, "
+            f"{outcome['unapproved']} not approved, {outcome['bypass']} past the gateway, "
+            f"{outcome['blocked']} blocked"
+        )
+
+
+@mcp_app.command("sightings")
+def mcp_sightings() -> None:
+    """The MCP servers developers reported, and whether each is approved."""
+    rows = [
+        {
+            **g,
+            "names": ", ".join(g["names"]),
+            "clients": ", ".join(g["clients"]),
+            "server": g["server"] or "",
+        }
+        for g in _call("GET", "/v1/mcp/sightings")
+    ]
+    _table(rows, ["status", "server", "identity", "names", "clients", "machines", "users"])
 
 
 # -------------------------------------------------------------------- models

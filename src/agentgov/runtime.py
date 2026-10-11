@@ -29,7 +29,14 @@ from agentgov.platforms.microsoft import (
 )
 from agentgov.platforms.threat_detection import ThreatDetection
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import features, instructions, microsoft_signals, platforms, posture
+from agentgov.registry import (
+    features,
+    instructions,
+    mcp_sightings,
+    microsoft_signals,
+    platforms,
+    posture,
+)
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
 
 log = logging.getLogger(__name__)
@@ -172,6 +179,8 @@ class Runtime:
         self._recheck_worker = _Worker(
             "instruction-recheck", self.check_unchecked_instructions, 3600
         )
+        # Developers' MCP servers against the approved ones, again when tool servers change.
+        self._mcp_worker = _Worker("developer-mcp", self.refresh_developer_mcp, 3600)
         self._m365_worker = (
             _Worker(
                 "microsoft-sync",
@@ -211,6 +220,7 @@ class Runtime:
                 instructions.queue_unclassified(session)
             self._classifier_worker.start()
         self._recheck_worker.start()
+        self._mcp_worker.start()
         self._started = True
 
     def stop(self) -> None:
@@ -224,6 +234,7 @@ class Runtime:
         if self._classifier_worker is not None:
             self._classifier_worker.stop()
         self._recheck_worker.stop()
+        self._mcp_worker.stop()
         self.db.dispose()
 
     # -- reconciliation triggers -----------------------------------------------
@@ -235,6 +246,8 @@ class Runtime:
             self._gateway_worker.trigger()
         if "feature:instruction-checks" in topics:
             self._recheck_worker.trigger()
+        if topics & {"toolservers", "feature:mcp-discovery"}:
+            self._mcp_worker.trigger()
         if "instructions" in topics and self._classifier_worker is not None:
             self._classifier_worker.trigger()
 
@@ -244,6 +257,14 @@ class Runtime:
             if not features.is_on(session, "posture-checks"):
                 return None
             return posture.scan(session, self.settings)
+
+    def refresh_developer_mcp(self) -> int:
+        """Re-check the MCP servers developers reported against the approved tool servers;
+        returns how many findings resolved."""
+        with self.db.session() as session:
+            if not features.is_on(session, "mcp-discovery"):
+                return 0
+            return mcp_sightings.refresh(session, self.settings)
 
     def check_unchecked_instructions(self) -> int:
         """Check instructions that arrived while instruction checks were off."""

@@ -84,6 +84,8 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | MCP spec 2026-07-28 (stateless) | ✅ | Handled by agentgateway; decisions use the parsed body, never spoofable headers |
 | Frameworks: Agent Framework, Semantic Kernel, OpenAI Agents SDK, Claude Agent SDK, LangChain, … | ✅ | Any MCP client works through the gateway; in-process enforcement via the **Agent Governance Toolkit** querying OPA (`data.agentos.allow`) |
 | Governed model access, with token limits per consumer (Azure API Management's AI gateway) | ✅ | **agentgateway**'s LLM routes for approved model providers (OpenAI, Anthropic, Gemini, OpenAI-compatible), model grants on blueprints, provider keys held by the gateway and never by agents, and daily token budgets per agent ([model calls](models.md)) |
+| Enterprise MCP registry for developers' MCP clients (GitHub Copilot with Azure API Center) | ✅ | Tool servers listed for developers, served as the MCP Registry API v0.1 for Copilot's *Registry only* mode, and as a managed-settings.json allowlist ([developer tools](developer-tools.md)) |
+| Shadow MCP servers on developers' machines | ✅ | `agentgov mcp scan --report` inventories VS Code, Copilot, Claude, Cursor, Windsurf, Gemini CLI and Codex configurations without their credentials; servers that aren't approved, or that skip the gateway, raise findings |
 | A2A traffic governance | ⏳ | agentgateway supports A2A routes |
 | Work IQ MCP servers (Mail, Calendar, Teams, …) | ➖ | Microsoft 365-specific; any MCP server can be registered |
 | CLI | ✅ | `agentgov` CLI |
@@ -127,6 +129,8 @@ Microsoft documentation and announcements, checked October 2026:
 - Security: [Defender real-time protection](https://learn.microsoft.com/en-us/defender-xdr/security-for-ai/ai-agent-real-time-protection),
   [Purview for Agent 365](https://learn.microsoft.com/en-us/purview/ai-agent-365),
   [Purview DLP for Microsoft 365 Copilot](https://learn.microsoft.com/en-us/purview/dlp-microsoft365-copilot-location-learn-about)
+- Developer tools: [restricting Copilot to an MCP registry](https://docs.github.com/en/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-mcp-server-access),
+  [MCP allowlists in enterprise managed settings](https://docs.github.com/en/enterprise-cloud@latest/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-enterprise-allowlist)
 - Models: [AI gateway capabilities in Azure API Management](https://learn.microsoft.com/en-us/azure/api-management/genai-gateway-capabilities),
   [Prompt Shields](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/concepts/jailbreak-detection)
 - Connections: [Entra agent identities](https://learn.microsoft.com/en-us/graph/api/resources/agentidentity),

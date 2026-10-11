@@ -41,7 +41,7 @@ pipelines, use an API key instead.
 | `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, model providers, policies, credentials, API keys, platform syncs, the connector allowlist and which [features](features.md) are used |
 | `approver` | Read everything; decide approval requests; resolve, dismiss and reopen findings; attest the agents it sponsors |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
-| `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers); it cannot read the registry |
+| `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), and report the MCP servers set up on developers' machines; it cannot read the registry |
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector |
 
 People who sign in with single sign-on get their roles from the identity provider (see the
@@ -67,6 +67,11 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Register, edit, delete tool servers | Tool servers → **Register tool server**, **Edit**, **Delete** | `agentgov toolservers create\|update\|delete` | `POST /v1/toolservers`, `PATCH`/`DELETE /v1/toolservers/{name}` |
 | Approve, block, unblock a tool server | Tool servers → **Approve**, **Block server**, **Unblock** | `agentgov toolservers approve\|block\|unblock NAME` | `POST /v1/toolservers/{name}/{action}` |
 | Accept a changed tool definition | Tool catalog → **Approve new definition** | `agentgov toolservers approve-tool NAME TOOL` | `POST /v1/toolservers/{name}/tools/{tool}/approve` |
+| List a tool server for developers, or register one only for developers ([developer tools](developer-tools.md)) | Tool servers → **Edit** / **Register tool server** → *Who uses it* | `agentgov toolservers update crm --developers`, `agentgov toolservers create NAME --no-gateway --developers --package npm:PKG@VERSION` | `developers`, `gateway`, `packages` in `POST`/`PATCH /v1/toolservers` |
+| See the MCP registry and its address for GitHub Copilot | Developer tools | `agentgov mcp registry` | `GET /v1/mcp/registry`; the registry itself at `/registry/v0.1/servers` |
+| Get the managed-settings.json allowlist | Developer tools → **managed-settings.json** | `agentgov mcp managed-settings -o managed-settings.json` | `GET /v1/mcp/managed-settings` |
+| Report the MCP servers on a machine | — | `agentgov mcp scan --report` | `POST /v1/mcp/sightings` |
+| See the MCP servers developers set up | Developer tools → *Set up on developers' machines* | `agentgov mcp sightings` | `GET /v1/mcp/sightings` |
 | Approve, edit, delete model providers ([model calls](models.md)) | Models → **Add provider**, **Edit**, **Delete** | `agentgov models create\|update\|delete` | `POST /v1/models/providers`, `PATCH`/`DELETE /v1/models/providers/{ref}` |
 | Block or unblock a model provider | Models → **Block**, **Unblock** | `agentgov models block\|unblock NAME` | `POST /v1/models/providers/{ref}/block\|unblock` |
 | Give a blueprint or an agent models, and a daily token budget | Blueprint or agent → **Edit** → Models | `agentgov blueprints update B --model-access 'openai:gpt-4.1*' --token-budget N` (agents: the same options) | `model_access`, `daily_token_budget` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |

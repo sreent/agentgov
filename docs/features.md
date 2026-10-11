@@ -59,6 +59,13 @@ Modes run from the weakest to the strongest. The default is in bold.
 | `posture-checks` | off, **on** | Scans regularly and raises findings: agents without owners or sponsors, attestations that are due, stale agents, broad grants and tool servers awaiting review. Off, nothing is scanned, and findings already raised stay until resolved |
 | `instruction-checks` | off, **on** | Checks agents' instructions (their system prompts) for unsafe content, with AgentGov's rules and with IBM Granite Guardian where it is configured. Off, instructions are kept but not checked; they are checked as soon as checks are on again |
 
+### Developer tools
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `mcp-registry` | **off**, on | Serves the tool servers listed for developers as an MCP registry at `<control plane>/registry`, which GitHub Copilot and VS Code read to offer developers only approved MCP servers ([developer tools](developer-tools.md)). Its readers have no credentials, so the registry is served without them: it is off until you turn it on |
+| `mcp-discovery` | off, **on** | Takes reports of the MCP servers set up on developers' machines (`agentgov mcp scan --report`), compares them with the approved tool servers, and raises findings for those that aren't approved, that skip the gateway or that are blocked. Off, reports are refused; findings already raised stay until resolved |
+
 ### Lifecycle
 
 | Feature | Modes | What it does |

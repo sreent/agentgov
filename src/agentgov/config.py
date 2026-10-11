@@ -165,6 +165,9 @@ class Settings:
     # Where the generated agentgateway config is written (shared volume).
     gateway_config_path: str | None = None
     gateway_public_url: str = "http://localhost:8080"
+    # The namespace of tool servers' names in the MCP registry ("<namespace>/<name>"); by
+    # default the control plane's host name reversed, such as com.contoso.agentgov.
+    mcp_registry_namespace: str = ""
     gateway_port: int = 8080
     # Addresses agentgateway uses to reach the governance processor: for tool calls
     # (gRPC) and for model calls (its guardrail webhook, HTTP).

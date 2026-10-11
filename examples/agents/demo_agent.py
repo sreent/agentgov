@@ -22,6 +22,7 @@ import re
 import secrets
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -35,6 +36,8 @@ ADMIN_TOKEN = os.environ.get("AGENTGOV_TOKEN", "dev-admin-token")
 GATEWAY = os.environ.get("AGENTGOV_GATEWAY", "http://localhost:8080")
 OTLP_HTTP = os.environ.get("OTLP_HTTP", "http://localhost:4318")
 MODEL_ROUTE = "/llm/demo/v1/chat/completions"  # the demo model provider (models.yaml)
+# MCP clients set up as on a developer's laptop (examples/developer-machine).
+DEVELOPER_MACHINE = Path(__file__).resolve().parent.parent / "developer-machine"
 
 BOLD, DIM, GREEN, RED, YELLOW, RESET = (
     "\033[1m",
@@ -393,8 +396,52 @@ def shadow_agent() -> None:
     show("not discovered", False, service)
 
 
+def developer_tools() -> None:
+    from agentgov import mcp_scan
+
+    step("12. Developer tools: approved MCP servers as a registry, and what developers set up")
+    admin("PUT", "/v1/features/mcp-registry", json={"mode": "on"})
+    print("  mcp-registry set to on: GitHub Copilot and VS Code can read it")
+    page = httpx.get(f"{CONTROL_PLANE}/registry/v0.1/servers", timeout=10).json()
+    for entry in page["servers"]:
+        server = entry["server"]
+        where = [r["url"] for r in server.get("remotes", [])] + [
+            f"{p['registryType']}:{p['identifier']}@{p.get('version')}"
+            for p in server.get("packages", [])
+        ]
+        show("listed:", True, f"{server['name']} {server['version']} -> {', '.join(where)}")
+    # What `agentgov mcp scan --report` does on a developer's laptop.
+    found = mcp_scan.scan([DEVELOPER_MACHINE / "project"], home=DEVELOPER_MACHINE / "home")
+    servers = [{k: v for k, v in s.to_dict().items() if k != "file"} for s in found]
+    outcome = admin(
+        "POST",
+        "/v1/mcp/sightings",
+        json={"machine": "demo-laptop", "user": "dev", "servers": servers},
+    )
+    show(
+        "reported:",
+        (outcome["approved"], outcome["unapproved"], outcome["bypass"]) == (2, 2, 1),
+        f"{outcome['servers']} servers on demo-laptop: {outcome['approved']} approved, "
+        f"{outcome['unapproved']} not approved, {outcome['bypass']} past the gateway",
+    )
+    for group in admin("GET", "/v1/mcp/sightings"):
+        if group["status"] != "approved":
+            what = group["url"] or " ".join(group["command"])
+            print(f"  {YELLOW}{group['status']}{RESET} {', '.join(group['names'])}: {what}")
+    raised = [
+        f
+        for f in admin("GET", "/v1/findings")
+        if f["type"].startswith("mcp.") and f["status"] == "open"
+    ]
+    show(
+        "findings:",
+        len(raised) >= 3,
+        f"{len(raised)} open, such as: {raised[0]['title'] if raised else ''}",
+    )
+
+
 def evidence(name: str) -> None:
-    step("12. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("13. Evidence: every decision is in a hash-chained, verifiable ledger")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -416,6 +463,7 @@ def main() -> None:
         asyncio.run(run_scenarios(name, token))
     finally:
         shadow_agent()
+        developer_tools()
         evidence(name)
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")

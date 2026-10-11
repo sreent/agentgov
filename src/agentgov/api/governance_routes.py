@@ -286,7 +286,7 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
-        servers = s.scalars(select(ToolServer)).all()
+        servers = s.scalars(select(ToolServer).where(ToolServer.gateway.is_(True))).all()
         for ts in servers:
             nodes[f"server:{ts.name}"] = {
                 "id": f"server:{ts.name}",

@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "crm": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp/crm",
+      "headers": {
+        "Authorization": "Bearer ${AGENT_TOKEN}"
+      }
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.41"
+      ]
+    }
+  }
+}
