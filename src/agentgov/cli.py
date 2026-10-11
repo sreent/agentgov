@@ -115,6 +115,11 @@ teams_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(teams_app, name="teams")
+packages_app = typer.Typer(
+    help="Access packages: grants agents hold for a while once approved.",
+    no_args_is_help=True,
+)
+app.add_typer(packages_app, name="access-packages")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -2855,6 +2860,217 @@ def destinations_delete(name: str, yes: bool = YES) -> None:
     _confirm(f"Delete destination {name}?", yes)
     _call("DELETE", f"/v1/destinations/{quote(name)}")
     _done("destination", name, "deleted")
+
+
+# ------------------------------------------------------------- access packages
+
+PKG_GRANT = typer.Option(None, "--grant", help="Tool grant server:tool,tool (repeatable).")
+PKG_MODEL = typer.Option(
+    None, "--model-access", help="Models it grants, provider:model,model (repeatable)."
+)
+PKG_AGENTS = typer.Option(
+    None, "--agent-access", help="Agents it lets call, by name or pattern (repeatable)."
+)
+PKG_BLUEPRINTS = typer.Option(
+    None, "--blueprint", help="Only agents on these blueprints may hold it (repeatable)."
+)
+PKG_DAYS = typer.Option(None, "--days", help="How many days it lasts at most (1 to 365).")
+PKG_REVIEW = typer.Option(None, "--review-days", help="Review who holds it every N days.")
+PKG_APPROVAL = typer.Option(
+    None, "--approval/--no-approval", help="Whether an approver decides requests."
+)
+
+
+def _package_fields(
+    description: str | None,
+    grant: list[str] | None,
+    model_access: list[str] | None,
+    agent_access: list[str] | None,
+    blueprint: list[str] | None,
+    days: int | None,
+    review_days: int | None,
+    no_review: bool,
+    approval: bool | None,
+) -> dict[str, Any]:
+    body = _given(description=description, duration_days=days, approval=approval)
+    if grant is not None:
+        body["permissions"] = _grants(grant)
+    if model_access is not None:
+        body["model_access"] = _model_access(model_access)
+    if agent_access is not None:
+        body["agent_access"] = _split(agent_access)
+    if blueprint is not None:
+        body["blueprints"] = _split(blueprint)
+    if no_review:
+        body["review_days"] = None
+    elif review_days is not None:
+        body["review_days"] = review_days
+    return body
+
+
+def _grant_summary(p: dict[str, Any]) -> str:
+    parts = [f"{g['server']}:{','.join(g['tools'])}" for g in p["permissions"]]
+    parts += [f"{m['provider']}:{','.join(m['models'])}" for m in p["model_access"]]
+    if p["agent_access"]:
+        parts.append(f"agents:{','.join(p['agent_access'])}")
+    return "; ".join(parts)
+
+
+@packages_app.command("list")
+def packages_list() -> None:
+    """List access packages, and how many agents hold each."""
+    rows = _call("GET", "/v1/access-packages")
+    for row in rows:
+        row["grants"] = _grant_summary(row)
+        row["days"] = row["duration_days"]
+        row["held"] = row["assignments"]["active"] + row["assignments"]["expired"]
+        row["waiting"] = row["assignments"]["requested"]
+    _table(rows, ["name", "days", "grants", "held", "waiting"])
+
+
+@packages_app.command("get")
+def packages_get(name: str) -> None:
+    """Show an access package."""
+    _print(_call("GET", f"/v1/access-packages/{quote(name)}"))
+
+
+@packages_app.command("create")
+def packages_create(
+    name: str,
+    description: str | None = DESCRIPTION,
+    grant: list[str] | None = PKG_GRANT,
+    model_access: list[str] | None = PKG_MODEL,
+    agent_access: list[str] | None = PKG_AGENTS,
+    blueprint: list[str] | None = PKG_BLUEPRINTS,
+    days: int | None = PKG_DAYS,
+    review_days: int | None = PKG_REVIEW,
+    approval: bool | None = PKG_APPROVAL,
+) -> None:
+    """Add an access package: what it grants, to which agents, for how long."""
+    body = _package_fields(
+        description,
+        grant,
+        model_access,
+        agent_access,
+        blueprint,
+        days,
+        review_days,
+        False,
+        approval,
+    )
+    out = _call("POST", "/v1/access-packages", json={"name": name, **body})
+    _done("access-package", out["name"], "created")
+
+
+@packages_app.command("update")
+def packages_update(
+    name: str,
+    description: str | None = DESCRIPTION,
+    grant: list[str] | None = typer.Option(
+        None, "--grant", help="Tool grants server:tool,tool (replace them; repeatable)."
+    ),
+    model_access: list[str] | None = typer.Option(
+        None, "--model-access", help="Models it grants (replace them; repeatable)."
+    ),
+    agent_access: list[str] | None = typer.Option(
+        None, "--agent-access", help="Agents it lets call (replace them; repeatable)."
+    ),
+    blueprint: list[str] | None = typer.Option(
+        None, "--blueprint", help="The blueprints whose agents may hold it (replace them)."
+    ),
+    days: int | None = PKG_DAYS,
+    review_days: int | None = PKG_REVIEW,
+    no_review: bool = typer.Option(False, "--no-review", help="No periodic reviews."),
+    approval: bool | None = PKG_APPROVAL,
+) -> None:
+    """Change an access package: every agent that holds it gets the change."""
+    body = _package_fields(
+        description, grant, model_access, agent_access, blueprint, days, review_days, no_review,
+        approval,
+    )  # fmt: skip
+    if not body:
+        _fail("nothing to change: pass at least one option (see --help)")
+    out = _call("PATCH", f"/v1/access-packages/{quote(name)}", json=body)
+    _done("access-package", out["name"], "updated")
+
+
+@packages_app.command("delete")
+def packages_delete(name: str, yes: bool = YES) -> None:
+    """Delete an access package no agent holds or asks for."""
+    _confirm(f"Delete access package {name}?", yes)
+    _call("DELETE", f"/v1/access-packages/{quote(name)}")
+    _done("access-package", name, "deleted")
+
+
+@packages_app.command("request")
+def packages_request(
+    agent: str,
+    package: str,
+    reason: str = typer.Option(..., help="Why the agent needs it."),
+    days: int | None = typer.Option(None, help="For how many days (the package's most)."),
+    approve: bool = typer.Option(
+        False, "--approve", help="Assign it at once (administrators only)."
+    ),
+) -> None:
+    """Ask for an access package for an agent; asked again while it holds one, it renews."""
+    body: dict[str, Any] = {"agent": agent, "package": package, "reason": reason}
+    if days is not None:
+        body["days"] = days
+    if approve:
+        body["approve"] = True
+    out = _call("POST", "/v1/access-assignments", json=body)
+    until = f" until {out['expires_at']}" if out["expires_at"] else ""
+    _done("access", out["id"], f"{out['status']}{until}")
+
+
+@packages_app.command("assignments")
+def packages_assignments(
+    status: str | None = typer.Option(
+        None, help="requested, active, expired, denied, revoked, renewed or all."
+    ),
+    agent: str | None = typer.Option(None, help="Only this agent's."),
+    package: str | None = typer.Option(None, help="Only this package's."),
+) -> None:
+    """List who holds and asks for access packages."""
+    params = _given(status=status, agent=agent, package=package)
+    rows = _call("GET", "/v1/access-assignments", params=params)
+    _table(rows, ["id", "agent_name", "package", "status", "expires_at", "requested_by", "reason"])
+
+
+def _assignment_action(assignment_id: str, action: str, body: dict[str, Any]) -> None:
+    out = _call("POST", f"/v1/access-assignments/{quote(assignment_id)}/{action}", json=body)
+    _done("access", out["id"], out["status"])
+
+
+@packages_app.command("approve")
+def packages_approve(assignment_id: str, note: str | None = None) -> None:
+    """Approve a request (someone other than who asked)."""
+    _assignment_action(assignment_id, "approve", _given(note=note))
+
+
+@packages_app.command("deny")
+def packages_deny(assignment_id: str, note: str | None = None) -> None:
+    """Deny a request."""
+    _assignment_action(assignment_id, "deny", _given(note=note))
+
+
+@packages_app.command("revoke")
+def packages_revoke(assignment_id: str, reason: str | None = None, yes: bool = YES) -> None:
+    """Take an access package away from an agent, now."""
+    _confirm(f"Revoke {assignment_id}?", yes)
+    _assignment_action(assignment_id, "revoke", _given(reason=reason))
+
+
+@packages_app.command("review")
+def packages_review(
+    assignment_id: str,
+    keep: bool = typer.Option(
+        ..., "--keep/--remove", help="Whether the agent still needs it (remove revokes it)."
+    ),
+    note: str | None = None,
+) -> None:
+    """Review an agent's access package: keep it, or remove it."""
+    _assignment_action(assignment_id, "review", {"keep": keep, **_given(note=note)})
 
 
 # ---------------------------------------------------------------------- teams

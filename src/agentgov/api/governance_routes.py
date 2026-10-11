@@ -27,7 +27,15 @@ from agentgov.models import (
     LedgerEntry,
     ToolServer,
 )
-from agentgov.registry import agents, approvals, discovery, findings, issues, manifests
+from agentgov.registry import (
+    access_packages,
+    agents,
+    approvals,
+    discovery,
+    findings,
+    issues,
+    manifests,
+)
 from agentgov.registry.errors import ValidationError
 from agentgov.secops import handoff
 
@@ -444,7 +452,8 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
                 nodes.setdefault(pid, {"id": pid, "kind": "person", "label": person})
                 edges.append({"from": pid, "to": f"agent:{a.id}", "kind": relation})
             granted_servers = set()
-            for grant in agents.effective_grants(a):
+            held = access_packages.current(s, a.id)["permissions"]
+            for grant in [*agents.effective_grants(a), *held]:
                 for ts in servers:
                     if _glob(grant["server"], ts.name):
                         granted_servers.add(ts.name)

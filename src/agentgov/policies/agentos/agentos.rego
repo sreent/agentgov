@@ -37,12 +37,20 @@ tool := t if {
 	t := concat("/", array.slice(parts, 1, count(parts)))
 } else := input.tool_name
 
+granted if ctx.covers_tool(agent.grants, server, tool)
+
+# Access packages it holds grant too. Expired ones only while the access-packages
+# control isn't enforced: the toolkit can't record what it would have done.
 granted if {
-	some grant in agent.grants
-	ctx.matches(grant.server, server)
-	some pattern in grant.tools
-	ctx.matches(pattern, tool)
+	ctx.mode("access-packages") != "off"
+	some held in object.get(agent, "packages", [])
+	in_force(held)
+	ctx.covers_tool(object.get(held, "grants", []), server, tool)
 }
+
+in_force(held) if not ctx.expired(held)
+
+in_force(_) if not ctx.enforced("access-packages")
 
 # The least-privilege and risk-based access controls apply here only when they
 # are enforced: the toolkit can't record what a monitored control would do.

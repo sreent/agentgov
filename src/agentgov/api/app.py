@@ -31,6 +31,7 @@ from agentgov.api import (
     integration_routes,
     mcp_routes,
     model_routes,
+    package_routes,
     platform_routes,
     registry_routes,
     secops_routes,
@@ -144,6 +145,7 @@ def create_app(
         return describe(rt, principal)
 
     app.include_router(registry_routes.router)
+    app.include_router(package_routes.router)
     app.include_router(governance_routes.router)
     app.include_router(integration_routes.router)
     app.include_router(sso_routes.router)

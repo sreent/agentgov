@@ -83,7 +83,8 @@ through and the ledger records what they would have done.
 
 | Control | On a call between agents |
 |---|---|
-| `least-privilege` | The caller's `agent_access` |
+| `least-privilege` | The caller may call the agents its `agent_access` names, or an [access package](access-packages.md) it holds |
+| `access-packages` | Calls only an access package that has expired allows are refused (enforced) or recorded (monitored) |
 | `data-protection` | A message with credentials is refused. Personal data is found and recorded |
 | `acting-for-people` | The caller acts for the person as its blueprint allows, and so must the agent called, which acts for that person from then on |
 | `risk-based-access` | No agent at critical risk calls another, or is called |

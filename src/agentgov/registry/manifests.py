@@ -3,7 +3,7 @@
 ```yaml
 apiVersion: agentgov/v1alpha1
 kind: Agent            # Feature | Destination | Team | IdentityIssuer | Blueprint |
-                       # ToolServer | ModelProvider | Policy | Agent
+                       # ToolServer | ModelProvider | AccessPackage | Policy | Agent
 metadata:
   name: support-bot
 spec:
@@ -20,8 +20,8 @@ A ``Feature`` sets how strictly one of AgentGov's features applies
 
 Applying is idempotent: unchanged resources are reported as ``unchanged``.
 Resources are applied in dependency order (features first, then destinations, the teams
-that post to them, identity issuers, blueprints and tool servers, before the agents and
-policies that reference them).
+that post to them, identity issuers, blueprints, tool servers, model providers and the access
+packages that name blueprints, before the agents and policies that reference them).
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
 from agentgov.registry import (
+    access_packages,
     agents,
     blueprints,
     destinations,
@@ -56,6 +57,7 @@ ORDER = [
     "Blueprint",
     "ToolServer",
     "ModelProvider",
+    "AccessPackage",
     "Policy",
     "Agent",
 ]
@@ -108,6 +110,7 @@ def apply(
             "Blueprint": _blueprint,
             "ToolServer": _toolserver,
             "ModelProvider": _model_provider,
+            "AccessPackage": _access_package,
             "Policy": _policy,
             "Agent": _agent,
         }[kind](session, settings, spec, actor)
@@ -217,6 +220,16 @@ def _model_provider(session: Session, settings: Settings, spec: dict[str, Any], 
     return action
 
 
+def _access_package(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    try:
+        package = access_packages.get(session, spec["name"])
+    except NotFound:
+        access_packages.create(session, spec, actor=actor)
+        return "created"
+    changed = access_packages.update(session, package, spec, actor=actor)
+    return "configured" if changed else "unchanged"
+
+
 def _policy(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     try:
         policy = policies.get(session, spec["name"])
@@ -322,6 +335,11 @@ def export(session: Session) -> list[dict[str, Any]]:
             spec.pop("key_file", None)  # the default path follows the name
         spec["status"] = provider.status
         docs.append(_doc("ModelProvider", provider.name, spec))
+    for package in access_packages.list_all(session):
+        d = access_packages.to_dict(session, package)
+        spec = {k: d[k] for k in access_packages.FIELDS if d[k] not in ("", [], {}, None)}
+        spec["approval"] = d["approval"]
+        docs.append(_doc("AccessPackage", package.name, spec))
     for policy in policies.list_all(session):
         docs.append(
             _doc(

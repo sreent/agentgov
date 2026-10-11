@@ -372,6 +372,23 @@ CATALOG: tuple[Feature, ...] = (
         },
     ),
     Feature(
+        "access-packages",
+        "Access packages",
+        "lifecycle",
+        "Agents hold extra tools, models and agents to call for a while: an access package, "
+        "requested by their owners, sponsors or approvers, approved, reminded before it "
+        "expires, renewed or reviewed.",
+        CONTROL,
+        MONITOR,
+        {
+            ENFORCE: "Expired access packages grant nothing: calls that need them are denied.",
+            MONITOR: "Agents keep the access of expired packages: each call that needs it is "
+            "recorded, and an issue asks for it to be renewed or revoked.",
+            OFF: "Access packages grant nothing and can't be requested. Assignments are kept.",
+        },
+        needs="least-privilege enforced, for packages to be what grants the access",
+    ),
+    Feature(
         "issues",
         "Issues to the people responsible",
         "lifecycle",

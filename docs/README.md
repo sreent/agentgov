@@ -37,6 +37,8 @@
   delegation
 * [Agent instructions](instructions.md): checking agents' system prompts for harmful or
   malicious content
+* [Access packages](access-packages.md): tools, models and agents an agent holds for a
+  while once approved, with reminders, renewals and reviews
 * [Issues](issues.md): findings sent to the people responsible for each agent (its owner,
   its sponsors, its team), escalated until someone takes them on
 * [Security operations](secops.md): the ledger to SIEMs as OCSF events, alerts in Teams and

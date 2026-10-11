@@ -98,16 +98,23 @@ deny contains msg if {
 # Controls.
 # ---------------------------------------------------------------------------
 
-granted if {
-	some pattern in object.get(ctx.agent, "agent_access", [])
-	ctx.matches(pattern, input.target)
-}
+# Granted by the agent's blueprint, its own agent access, or an access package it holds.
+granted if ctx.agent_granted(input.target)
 
 violation contains {"control": "least-privilege", "effect": "deny", "message": msg} if {
 	ctx.agent.status == "active"
 	target
 	not granted
 	msg := sprintf("Agent %s may not call agent %s", [ctx.agent.name, input.target])
+}
+
+# Access packages: an agent only an expired package lets it call.
+violation contains {"control": "access-packages", "effect": "deny", "message": msg} if {
+	ctx.agent.status == "active"
+	target
+	names := ctx.expired_agent_grants(input.target)
+	count(names) > 0
+	msg := sprintf("Agent %s was let call agent %s by access package %s, which has expired", [ctx.agent.name, input.target, concat(", ", sort(names))])
 }
 
 violation contains {

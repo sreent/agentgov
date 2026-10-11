@@ -401,6 +401,14 @@ const STATUS = {
     dismissed: ['neutral', 'minus', 'Dismissed'],
     accepted: ['neutral', 'shield-check', 'Risk accepted'],
   },
+  access: {
+    requested: ['warning', 'clock', 'Requested'],
+    active: ['good', 'check-circle', 'Active'],
+    expired: ['serious', 'triangle', 'Expired'],
+    denied: ['neutral', 'ban', 'Denied'],
+    revoked: ['neutral', 'minus', 'Revoked'],
+    renewed: ['neutral', 'check-double', 'Renewed'],
+  },
   notification: {
     pending: ['neutral', 'clock', 'Sending'],
     sent: ['good', 'check-circle', 'Sent'],
@@ -1713,21 +1721,23 @@ const ATTESTABLE = new Set(['active', 'blocked', 'pending']);
 async function renderAgent({ match }) {
   const ref = decodeURIComponent(match[1]);
   const agent = await api(`v1/agents/${encodeURIComponent(ref)}`);
-  const [entries, openFindings, instructions, usage, a2a] = await Promise.all([
+  const [entries, openFindings, instructions, usage, a2a, held, packages, modes] = await Promise.all([
     api(`v1/ledger?agent=${encodeURIComponent(agent.id)}&limit=12`).catch((e) => e),
     api(`v1/findings?status=open&agent=${encodeURIComponent(agent.id)}`).catch((e) => e),
     api(`v1/agents/${encodeURIComponent(agent.id)}/instructions`).catch((e) => e),
     api(`v1/models/usage?agent=${encodeURIComponent(agent.id)}&days=7`).catch((e) => e),
     api(`v1/agents/${encodeURIComponent(agent.id)}/a2a`).catch((e) => e),
+    api(`v1/agents/${encodeURIComponent(agent.id)}/access-packages`).catch((e) => e),
+    api('v1/access-packages').catch(() => []),
+    featureModes().catch(() => ({})),
   ]);
   // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
   const views = agent.platforms || [];
   const where = views.length && agent.status !== 'deleted' ? await platformActionTarget(agent) : null;
   const main = views.length ? views.map((v) => platformCard(agent, v, where))
-    : [permissionsCard(agent), agentModelsCard(agent, usage), agentA2ACard(agent, a2a)];
+    : [permissionsCard(agent), agentAccessCard(agent, held, packages, modes['access-packages']), agentModelsCard(agent, usage), agentA2ACard(agent, a2a)];
   // With threat detection enforcing, AgentGov's policies decide about its tool calls.
-  const enforced = views.some((v) => v.source === 'copilot-studio')
-    && (await featureModes().catch(() => ({})))['copilot-studio-threat-detection'] === 'enforce';
+  const enforced = views.some((v) => v.source === 'copilot-studio') && modes['copilot-studio-threat-detection'] === 'enforce';
   return h('div', { class: 'page', 'data-title': agent.name },
     agentHeader(agent),
     h('div', { class: 'detail-grid' },
@@ -2908,10 +2918,12 @@ async function renderApprovals({ match }) {
   const tab = match[1] === 'history' ? 'history' : 'pending';
   const person = isPerson();
   // Requests sent to the person signed in: agents acted for them.
-  const [all, agents, mine] = await Promise.all([
+  const [all, agents, mine, asked, packages] = await Promise.all([
     person ? api('v1/me/approvals') : api('v1/approvals'),
     person ? [] : api('v1/agents?include_deleted=true').catch(() => []),
     api('v1/me/approvals?status=pending').catch(() => []),
+    person ? [] : api('v1/access-assignments?status=requested').catch(() => []),
+    person ? [] : api('v1/access-packages').catch(() => []),
   ]);
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const mineIds = new Set(mine.map((r) => r.id));
@@ -2919,7 +2931,7 @@ async function renderApprovals({ match }) {
   const history = all.filter((r) => r.status !== 'pending');
   updateBadges({ pendingApprovals: pending.length });
   const approvalsMode = person ? 'enforce' : (await featureModes().catch(() => ({}))).approvals;
-  const card = (r) => approvalCard(r, agentsById.get(r.agent_id), mineIds.has(r.id));
+  const approval = (r) => approvalCard(r, agentsById.get(r.agent_id), mineIds.has(r.id));
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'Approval views' },
     h('a', { class: 'tab', href: '#/approvals', 'aria-current': tab === 'pending' ? 'page' : null },
       'Pending', h('span', { class: 'nav-badge', 'data-tone': pending.length ? 'warning' : '' }, fmt(pending.length))),
@@ -2933,13 +2945,24 @@ async function renderApprovals({ match }) {
     content = pending.length
       ? h('div', { class: 'stack' },
         yours.length && !person ? h('div', { class: 'section-title' }, h('h2', {}, 'Waiting for you')) : null,
-        yours.length ? h('div', { class: 'approval-list' }, yours.map(card)) : null,
+        yours.length ? h('div', { class: 'approval-list' }, yours.map(approval)) : null,
         yours.length && others.length ? h('div', { class: 'section-title' }, h('h2', {}, "Everyone else's")) : null,
-        others.length ? h('div', { class: 'approval-list' }, others.map(card)) : null)
+        others.length ? h('div', { class: 'approval-list' }, others.map(approval)) : null)
       : h('section', { class: 'card' }, person
         ? emptyState('Nothing is waiting for you', 'When an agent acting for you needs your approval to do something, it appears here.')
         : emptyState('Nothing is waiting for approval',
           'When policy holds a tool call for a human (for example a tool its server marks destructive), it appears here.'));
+    if (asked.length) {
+      content = h('div', { class: 'stack' }, content, card({
+        title: 'Access requests',
+        sub: 'Access packages asked for agents. Someone other than who asked decides.',
+        body: h('ul', { class: 'access-list', role: 'list' }, asked.map((r) => h('li', { class: 'access-row' },
+          h('div', { class: 'access-main' },
+            h('div', { class: 'cell-title' }, r.package, ' for ', agentLink(r.agent_id, r.agent_name)),
+            h('div', { class: 'cell-sub break' }, `${r.requested_by}, for ${plural(r.days, 'day')}: ${r.reason} · `, timeEl(r.requested_at))),
+          h('div', { class: 'btn-row' }, assignmentButtons(r, packages, { id: r.agent_id, name: r.agent_name }))))),
+      }));
+    }
   } else {
     content = h('section', { class: 'card', 'aria-label': 'Approval history' },
       history.length ? approvalHistoryTable(history) : emptyState('No decided approvals yet'));
@@ -3555,9 +3578,39 @@ async function renderFinding({ match }) {
         ].map((row) => row && [row[0], Array.isArray(row[1]) ? h('span', {}, row[1]) : h('span', {}, ...row.slice(1))])),
         h('div', { class: 'btn-row' }, findingActions(f, act, { yours: f.yours, detail: true }))),
     }),
+    f.type.startsWith('access.') ? await findingAccessCard(f) : null,
     chainCard(f),
     notificationsCard(f),
     historyCard(f));
+}
+
+// An issue about an access package: what it is, and renewing, keeping or removing it.
+async function findingAccessCard(f) {
+  const row = await api(`v1/access-assignments/${encodeURIComponent(f.subject)}`).catch(() => null);
+  if (!row) return null;
+  const packages = await api('v1/access-packages').catch(() => []);
+  const pk = packages.find((x) => x.name === row.package);
+  const agent = { id: row.agent_id, name: row.agent_name };
+  const held = ['active', 'expired'].includes(row.status);
+  const after = guarded(async (done) => { if (done) { refreshBadges(); await refresh(); } });
+  const buttons = held ? [
+    pk && f.type !== 'access.review_due' ? h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: async () => after(await requestPackage(agent, packages, pk)) }, icon('refresh'), 'Renew') : null,
+    f.type === 'access.review_due' ? h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: async () => after(await reviewAssignment(row, true)) }, icon('check'), 'Keep it') : null,
+    f.type === 'access.review_due' ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: async () => after(await reviewAssignment(row, false)) }, icon('ban'), 'Remove it') : null,
+    can('approve') || can('contain') ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: async () => after(await assignmentAction(row, 'revoke')) }, icon('ban'), 'Revoke') : null,
+  ].filter(Boolean) : [];
+  return card({
+    title: 'Access package',
+    body: h('div', { class: 'stack' },
+      facts([
+        ['Package', h('span', {}, row.package, ' ', chip('access', row.status))],
+        ['Agent', isPerson() ? row.agent_name : agentLink(row.agent_id, row.agent_name)],
+        row.expires_at ? ['Expires', timeEl(row.expires_at, { absolute: true })] : null,
+        ['Asked for by', `${row.requested_by}: ${row.reason}`],
+        pk ? ['Grants', [...pk.permissions.map((g) => `${g.server}: ${g.tools.join(', ')}`), ...pk.model_access.map((m) => `${m.provider}: ${m.models.join(', ')}`), ...pk.agent_access.map((x) => `agent ${x}`)].join('; ')] : null,
+      ]),
+      buttons.length ? h('div', { class: 'btn-row' }, buttons) : null),
+  });
 }
 
 function chainCard(f) {
@@ -3701,8 +3754,9 @@ async function deleteTeam(t) {
 /* ---------------------------------------------------------------- policies */
 
 async function renderPolicies() {
-  const [blueprints, policies, agents, servers, providers] = await Promise.all([
+  const [blueprints, policies, agents, servers, providers, packages] = await Promise.all([
     api('v1/blueprints'), api('v1/policies'), api('v1/agents'), api('v1/toolservers'), api('v1/models/providers'),
+    api('v1/access-packages').catch(() => []),
   ]);
   const usage = countBy(agents, (a) => a.blueprint || '');
   const exportBtn = h('button', { type: 'button', class: 'btn', 'data-focus-key': 'export-yaml' }, icon('download'), 'Export manifests');
@@ -3739,6 +3793,16 @@ async function renderPolicies() {
           blueprints.length
             ? h('div', { class: 'bp-grid' }, blueprints.map((b) => blueprintCard(b, usage[b.name] || 0, servers)))
             : h('section', { class: 'card' }, emptyState('No blueprints yet', admin ? 'Create one to give a class of agents its tools.' : 'An admin creates blueprints here, with the CLI or with a Blueprint manifest.'))),
+        h('section', { class: 'stack', 'aria-labelledby': 'pkg-title' },
+          h('div', { class: 'section-title' },
+            h('div', {}, h('h2', { id: 'pkg-title' }, 'Access packages'),
+              h('p', {}, 'Grants agents hold for a while once approved: asked for, reminded before they expire, renewed or reviewed')),
+            sectionAction('New package', 'new-package', () => packageForm(null, servers, blueprints))),
+          packages.length
+            ? h('div', { class: 'bp-grid' }, packages.map((pk) => packageCard(pk, servers, blueprints)))
+            : h('section', { class: 'card' }, emptyState('No access packages', admin
+              ? 'Create one for access agents need for a while: a project, an incident, a pilot.'
+              : 'An admin creates access packages here, with the CLI or with an AccessPackage manifest.'))),
         h('section', { class: 'stack', 'aria-labelledby': 'rego-title' },
           h('div', { class: 'section-title' },
             h('div', {}, h('h2', { id: 'rego-title' }, 'Organisation policies'),
@@ -3980,6 +4044,199 @@ function blueprintCard(b, used, servers) {
       ]),
       h('div', { class: 'field-label' }, 'Permissions'),
       permissionList(b.permissions),
+    ],
+  });
+}
+
+function packageCard(pk, servers, blueprints) {
+  const held = pk.assignments.active + pk.assignments.expired;
+  return card({
+    title: pk.name, level: 'h3', id: `pkg-${pk.id}`,
+    sub: pk.description,
+    actions: [plainChip(`Up to ${plural(pk.duration_days, 'day')}`, { iconName: 'clock' })],
+    foot: can('admin') ? h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `pkg-edit-${pk.name}`, onclick: guarded(() => packageForm(pk, servers, blueprints)) }, icon('edit'), 'Edit'),
+      h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `pkg-delete-${pk.name}`, onclick: guarded(() => deletePackage(pk)) }, icon('trash'), 'Delete')) : null,
+    body: [
+      facts([
+        ['Held by', held ? plural(held, 'agent') : h('span', { class: 'muted' }, 'No agents'), pk.assignments.requested ? ` · ${fmt(pk.assignments.requested)} waiting` : ''],
+        ['Requests', pk.approval ? 'An approver decides' : 'Granted at once'],
+        ['Reviews', pk.review_days ? `Every ${plural(pk.review_days, 'day')}` : 'None'],
+        ['For agents on', pk.blueprints.length ? pk.blueprints.join(', ') : 'Any blueprint'],
+        pk.model_access.length ? ['Models', h('div', { class: 'chip-row' }, pk.model_access.map((m) => plainChip(`${m.provider}: ${m.models.join(', ')}`, { mono: true })))] : null,
+        pk.agent_access.length ? ['May call agents', h('div', { class: 'chip-row' }, pk.agent_access.map((x) => plainChip(x, { mono: true })))] : null,
+      ].map((row) => row && [row[0], h('span', {}, ...row.slice(1))])),
+      pk.permissions.length ? [h('div', { class: 'field-label' }, 'Tools'), permissionList(pk.permissions)] : null,
+    ],
+  });
+}
+
+async function packageForm(pk, servers, blueprints) {
+  const editing = Boolean(pk);
+  const saved = await ask({
+    title: editing ? `Edit access package ${pk.name}` : 'New access package',
+    text: editing
+      ? 'Every agent that holds it gets the change as soon as OPA loads the updated policy bundle.'
+      : 'Agents hold what it grants for a while once a request is approved. Before it expires, the people responsible for the agent are told, so they can renew it.',
+    iconName: editing ? 'edit' : 'policies', confirm: editing ? 'Save changes' : 'Create package', wide: true,
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'crm-write', hint: NAME_HINT },
+      { id: 'description', label: 'Description', type: 'textarea', value: pk?.description || '' },
+      {
+        id: 'permissions', label: 'Tool grants', type: 'code', rows: 3, value: formatGrants(pk?.permissions), placeholder: 'crm: update_customer',
+        hint: `One server per line; tool names can use * wildcards.${servers.length ? ` Registered servers: ${servers.map((ts) => ts.name).join(', ')}.` : ''}`,
+      },
+      { id: 'model_access', label: 'Model access', type: 'code', rows: 2, value: formatModelAccess(pk?.model_access), placeholder: 'openai: gpt-4.1', hint: 'One provider per line.' },
+      { id: 'agent_access', label: 'Agents it lets call', value: (pk?.agent_access || []).join(', '), placeholder: 'billing-agent', mono: true, hint: 'Over A2A, separated by commas; names can use * wildcards.' },
+      { type: 'row', fields: [
+        { id: 'duration_days', label: 'Lasts at most (days)', type: 'number', min: 1, value: pk?.duration_days ?? 90, required: true },
+        { id: 'review_days', label: 'Review every (days)', type: 'number', min: 1, value: pk?.review_days ?? '', hint: 'Empty: no reviews.' },
+      ] },
+      { id: 'approval', label: 'An approver decides each request', type: 'checkbox', value: pk ? pk.approval : true, hint: 'Otherwise it is granted as soon as someone allowed asks for it.' },
+      {
+        id: 'blueprints', label: 'For agents on these blueprints', value: (pk?.blueprints || []).join(', '), mono: true,
+        hint: `Separated by commas. Empty: any agent.${blueprints.length ? ` Blueprints: ${blueprints.map((b) => b.name).join(', ')}.` : ''}`,
+      },
+    ].filter(Boolean),
+    submit: (v) => {
+      const whole = (text, label) => {
+        if (!text) return null;
+        const n = Number(text);
+        if (!(Number.isInteger(n) && n > 0 && n <= 365)) throw new Error(`${label} is a whole number of days from 1 to 365.`);
+        return n;
+      };
+      const body = {
+        description: v.description, permissions: parseGrants(v.permissions), model_access: parseModelAccess(v.model_access),
+        agent_access: parseList(v.agent_access), blueprints: parseList(v.blueprints), approval: v.approval,
+        duration_days: whole(v.duration_days, 'How long it lasts'), review_days: whole(v.review_days, 'The review period'),
+      };
+      if (editing) return api(`v1/access-packages/${encodeURIComponent(pk.name)}`, { method: 'PATCH', body });
+      return api('v1/access-packages', { method: 'POST', body: { name: v.name, ...body } });
+    },
+  });
+  if (!saved) return;
+  toast(editing ? `Saved access package ${saved.name}.` : `Created access package ${saved.name}.`);
+  await refresh();
+}
+
+async function deletePackage(pk) {
+  const done = await ask({
+    title: `Delete access package ${pk.name}?`,
+    text: 'Packages that agents hold or ask for cannot be deleted: revoke or deny those first.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete package', busy: 'Deleting…',
+    submit: () => api(`v1/access-packages/${encodeURIComponent(pk.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted access package ${pk.name}.`);
+  await refresh();
+}
+
+/* -------------------------------------------- access packages on agents */
+
+// Ask for a package for an agent; asked again while it holds one, it is a renewal.
+async function requestPackage(agent, packages, current) {
+  const choices = current ? [current] : packages;
+  if (!choices.length) { toast('There are no access packages yet: an admin creates them on the Policies page.', { tone: 'warning' }); return null; }
+  const first = choices[0];
+  const done = await ask({
+    title: current ? `Renew ${current.name} for ${agent.name}?` : `Request access for ${agent.name}`,
+    text: current
+      ? 'It carries on from now for the days you ask, and never ends sooner than it would have. An approver decides, unless the package needs no approval.'
+      : 'An approver decides, unless the package needs no approval. The agent holds what it grants until it expires.',
+    iconName: 'key', confirm: current ? 'Ask to renew' : 'Request access',
+    fields: [
+      current ? null : { id: 'package', label: 'Access package', type: 'select', value: first.name, options: choices.map((pk) => ({ value: pk.name, label: `${pk.name} (up to ${plural(pk.duration_days, 'day')})` })) },
+      { id: 'days', label: 'For how many days', type: 'number', min: 1, value: first.duration_days, required: true },
+      { id: 'reason', label: 'Why the agent needs it', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown to the approver.' },
+    ].filter(Boolean),
+    submit: (v) => api('v1/access-assignments', {
+      method: 'POST', body: { agent: agent.id || agent.agent_id, package: current ? current.name : v.package, days: Number(v.days), reason: v.reason },
+    }),
+  });
+  if (!done) return null;
+  toast(done.status === 'active' ? `${done.package} is granted to ${done.agent_name} until ${done.expires_at.slice(0, 10)}.` : `Asked for ${done.package} for ${done.agent_name}: an approver decides.`);
+  return done;
+}
+
+async function assignmentAction(row, action) {
+  const words = { approve: ['Approve', 'primary', 'check'], deny: ['Deny', 'danger', 'ban'], revoke: ['Revoke', 'danger', 'ban'] }[action];
+  const done = await ask({
+    title: `${words[0]} ${row.package} for ${row.agent_name}?`,
+    text: action === 'revoke'
+      ? 'The agent loses what it grants as soon as OPA loads the updated policy bundle.'
+      : `Asked by ${row.requested_by} for ${plural(row.days, 'day')}: ${row.reason}`,
+    tone: words[1], iconName: words[2], confirm: words[0],
+    fields: [{ id: 'note', label: action === 'revoke' ? 'Reason' : 'Note', type: 'textarea', hint: 'Recorded in the evidence ledger.' }],
+    submit: (v) => api(`v1/access-assignments/${encodeURIComponent(row.id)}/${action}`, {
+      method: 'POST', body: action === 'revoke' ? { reason: v.note || null } : { note: v.note || null },
+    }),
+  });
+  if (!done) return null;
+  toast(`${{ approve: 'Approved', deny: 'Denied', revoke: 'Revoked' }[action]}: ${row.package} for ${row.agent_name}.`);
+  return done;
+}
+
+async function reviewAssignment(row, keep) {
+  const done = await ask({
+    title: keep ? `Keep ${row.package} for ${row.agent_name}?` : `Remove ${row.package} from ${row.agent_name}?`,
+    text: keep ? 'The agent still needs it: it holds it until it expires, and is asked again at its next review.' : 'The agent loses what it grants as soon as OPA loads the updated policy bundle.',
+    tone: keep ? 'primary' : 'danger', iconName: keep ? 'check' : 'ban', confirm: keep ? 'Keep it' : 'Remove it',
+    fields: [{ id: 'note', label: 'Note', type: 'textarea', hint: 'Recorded in the evidence ledger.' }],
+    submit: (v) => api(`v1/access-assignments/${encodeURIComponent(row.id)}/review`, { method: 'POST', body: { keep, note: v.note || null } }),
+  });
+  if (done) toast(keep ? `Kept ${row.package} for ${row.agent_name}.` : `Removed ${row.package} from ${row.agent_name}.`);
+  return done;
+}
+
+function assignmentButtons(row, packages, agent) {
+  const buttons = [];
+  const decider = can('approve');
+  if (row.status === 'requested' && decider && row.requested_by === me?.actor) {
+    buttons.push(h('span', { class: 'muted small' }, 'You asked for it: another approver decides.'));
+  }
+  if (row.status === 'requested' && decider && row.requested_by !== me?.actor) {
+    buttons.push(
+      h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: guarded(async () => { if (await assignmentAction(row, 'approve')) await refresh(); }) }, icon('check'), 'Approve'),
+      h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: guarded(async () => { if (await assignmentAction(row, 'deny')) await refresh(); }) }, icon('ban'), 'Deny'));
+  }
+  if (['active', 'expired'].includes(row.status)) {
+    const pk = packages.find((x) => x.name === row.package);
+    if (pk && decider) {
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: guarded(async () => { if (await requestPackage(agent, packages, pk)) await refresh(); }) }, icon('refresh'), 'Renew'));
+    }
+    if (decider || can('contain')) {
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: guarded(async () => { if (await assignmentAction(row, 'revoke')) await refresh(); }) }, icon('ban'), 'Revoke'));
+    }
+  }
+  return buttons;
+}
+
+function agentAccessCard(agent, rows, packages, mode) {
+  if (rows instanceof Error) return null;
+  const current = rows.filter((r) => ['requested', 'active', 'expired'].includes(r.status));
+  const earlier = rows.filter((r) => !current.includes(r));
+  const line = (r) => h('li', { class: 'access-row' },
+    h('div', { class: 'access-main' },
+      h('div', { class: 'cell-title' }, r.package, ' ', chip('access', r.status)),
+      h('div', { class: 'cell-sub break' },
+        r.status === 'requested' ? [`Asked by ${r.requested_by} for ${plural(r.days, 'day')}: ${r.reason}`]
+          : r.expires_at ? [r.status === 'expired' ? 'Expired ' : ['active'].includes(r.status) ? 'Expires ' : 'Ended ', timeEl(r.status === 'active' || r.status === 'expired' ? r.expires_at : r.ended_at || r.decided_at)]
+            : [`${humanize(r.status)} by ${r.decided_by || 'unknown'}`])),
+    h('div', { class: 'btn-row' }, assignmentButtons(r, packages, agent)));
+  const expiredNote = current.some((r) => r.status === 'expired') && mode !== 'enforce'
+    ? callout('warning', 'triangle', h('span', {}, h('strong', {}, 'Expired, still used: '),
+      mode === 'off' ? 'access packages are off, so they grant nothing.' : 'expired packages are monitored, so the agent keeps the access. Renew or revoke them.'))
+    : null;
+  return card({
+    title: 'Access packages',
+    sub: 'Extra tools, models and agents it holds for a while once approved.',
+    actions: can('approve') && packages.length ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'request-access', onclick: guarded(async () => { if (await requestPackage(agent, packages, null)) await refresh(); }) }, icon('plus'), 'Request access')] : null,
+    body: [
+      expiredNote,
+      current.length ? h('ul', { class: 'access-list', role: 'list' }, current.map(line))
+        : emptyState('No access packages', packages.length ? 'Request one when the agent needs more for a while.' : null),
+      earlier.length ? h('details', { class: 'disclosure' }, h('summary', {}, icon('chevron'), `Earlier (${fmt(earlier.length)})`),
+        h('ul', { class: 'access-list', role: 'list' }, earlier.map(line))) : null,
     ],
   });
 }

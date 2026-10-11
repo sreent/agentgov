@@ -28,8 +28,8 @@ from agentgov.platforms.microsoft import (
     is_declarative,
 )
 from agentgov.platforms.threat_detection import ThreatDetection
-from agentgov.registry import agents as agents_svc
 from agentgov.registry import (
+    access_packages,
     features,
     instructions,
     issues,
@@ -38,6 +38,7 @@ from agentgov.registry import (
     platforms,
     posture,
 )
+from agentgov.registry import agents as agents_svc
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
 from agentgov.secops.delivery import Delivery
 
@@ -277,14 +278,17 @@ class Runtime:
         return purged
 
     def run_issues(self) -> dict[str, Any]:
-        """Route findings to the people responsible, escalate those nobody acknowledged,
-        open accepted risks whose time ran out, and send what is due."""
+        """Expire access packages and raise their reminders and reviews; route findings to
+        the people responsible, escalate those nobody acknowledged, open accepted risks
+        whose time ran out, and send what is due."""
+        with self.db.session() as session:
+            access = access_packages.check(session, self.settings)
         with self.db.session() as session:
             reopened = issues.reopen_accepted(session)
             if not features.is_on(session, "issues"):
-                return {"reopened": reopened}
+                return {"reopened": reopened, **access}
             routed = issues.route(session, self.settings)
-        return {"reopened": reopened, **routed, **self.notifier.run()}
+        return {"reopened": reopened, **access, **routed, **self.notifier.run()}
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;

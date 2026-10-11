@@ -39,12 +39,12 @@ pipelines, use an API key instead.
 
 | Role | Can |
 |---|---|
-| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations, teams and which [features](features.md) are used |
-| `approver` | Read everything; decide approval requests; resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks; attest the agents it sponsors |
+| `admin` | Everything below, plus agent lifecycle, blueprints, access packages, tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations, teams and which [features](features.md) are used |
+| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks; attest the agents it sponsors |
 | `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings, acknowledge issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
-| `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), and report the MCP servers set up on developers' machines; it cannot read the registry |
-| `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)); sees nothing else |
+| `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
+| `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)); sees nothing else |
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector |
 
 People who sign in with single sign-on get their roles from the identity provider each time
@@ -99,6 +99,9 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | See the issues sent to you, as an owner, a sponsor or a team member | Findings → *Yours* (people without a role: *Your issues*) | `agentgov findings list --mine` | `GET /v1/me/issues` |
 | Acknowledge an issue, or accept its risk until a date | Findings → **Acknowledge**, **Accept risk** | `agentgov findings acknowledge ID`, `agentgov findings accept ID --reason R --until DATE` | `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` |
 | Add, edit and delete teams, and choose the default team | Findings → Teams | `agentgov teams create\|update\|delete`, `agentgov teams list` | `POST /v1/teams`, `PATCH`/`DELETE /v1/teams/{name}` |
+| Add, edit and delete access packages ([access packages](access-packages.md)) | Policies → *Access packages* | `agentgov access-packages create\|update\|delete`, `agentgov access-packages list` | `POST /v1/access-packages`, `PATCH`/`DELETE /v1/access-packages/{name}` |
+| Ask for an access package for an agent, or renew one | Agent → *Access packages* → **Request access**, **Renew** | `agentgov access-packages request AGENT PACKAGE --reason R` | `POST /v1/access-assignments` |
+| Decide, revoke or review an agent's access package | Approvals → *Access requests*; agent → *Access packages* | `agentgov access-packages approve\|deny\|revoke ID`, `agentgov access-packages review ID --keep\|--remove` | `POST /v1/access-assignments/{id}/approve\|deny\|revoke\|review` |
 | Name the team issues about an agent escalate to | Blueprint or agent → **Edit** → *Team* | `agentgov blueprints update B --team T` (agents: the same option) | `team` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |
 | Browse, verify and export the ledger | Ledger → filters, **Verify chain**, **Export JSONL** | `agentgov ledger tail --agent A`, `ledger verify`, `ledger export` | `GET /v1/ledger`, `/v1/ledger/verify`, `/v1/ledger/export` |
 | See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |

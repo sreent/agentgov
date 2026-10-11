@@ -596,6 +596,41 @@ class TestIssuesForPeople:
         )
 
 
+class TestAccessPackagesForPeople:
+    def test_owners_ask_for_and_review_their_agents_packages(self, sso, provider) -> None:
+        seed(sso)
+        sso.patch(
+            "/v1/agents/support-bot", json={"owner": "alice@example.com"}, headers=ADMIN
+        ).raise_for_status()
+        sso.post(
+            "/v1/access-packages",
+            json={"name": "crm-write", "permissions": [{"server": "crm", "tools": ["update_*"]}]},
+            headers=ADMIN,
+        ).raise_for_status()
+        sign_in(sso, provider, sub="user-1", roles=[])
+        body = {"agent": "support-bot", "package": "crm-write", "reason": "Incident INC-1"}
+        asked = sso.post("/v1/access-assignments", json=body, headers=CSRF)
+        assert asked.status_code == 201, asked.text
+        assert asked.json()["requested_by"] == "person:alice@example.com"
+        assert sso.get("/v1/agents/support-bot/access-packages").status_code == 200
+        # They ask; approvers decide.
+        approve = f"/v1/access-assignments/{asked.json()['id']}/approve"
+        assert sso.post(approve, headers=CSRF).status_code == 403
+        assert sso.post(approve, headers=ADMIN).status_code == 200
+        review = f"/v1/access-assignments/{asked.json()['id']}/review"
+        kept = sso.post(review, json={"keep": True}, headers=CSRF)
+        assert kept.status_code == 200 and kept.json()["reviewed_at"]
+        # Nobody else's agents.
+        sso.post(
+            "/v1/agents",
+            json={"name": "other-bot", "owner": "bob@example.com", "sponsors": ["bob@example.com"]},
+            headers=ADMIN,
+        ).raise_for_status()
+        other = {**body, "agent": "other-bot"}
+        assert sso.post("/v1/access-assignments", json=other, headers=CSRF).status_code == 403
+        assert sso.get("/v1/agents/other-bot/access-packages").status_code == 403
+
+
 class TestCliSignIn:
     def test_the_cli_gets_a_session_of_its_own(self, sso, provider) -> None:
         verifier, back = cli_sign_in(sso, provider, roles=["agentgov-admin"])
