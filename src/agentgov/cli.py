@@ -539,6 +539,8 @@ def gateway_config(
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    # One request every few seconds: log what changes, not each check.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = Settings.from_env()
     if not settings.service_token:
         _fail("set AGENTGOV_SERVICE_TOKEN (the control plane's service token)")
