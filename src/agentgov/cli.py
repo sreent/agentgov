@@ -120,6 +120,11 @@ packages_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(packages_app, name="access-packages")
+rules_app = typer.Typer(
+    help="Management rules: what to do about agents that meet some conditions for long enough.",
+    no_args_is_help=True,
+)
+app.add_typer(rules_app, name="rules")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -2275,17 +2280,6 @@ def instructions_check(
         raise typer.Exit(1)
 
 
-def main() -> None:
-    try:
-        app()
-    except KeyboardInterrupt:
-        sys.exit(130)
-
-
-if __name__ == "__main__":
-    main()
-
-
 # ------------------------------------------------------------------ features
 
 
@@ -3262,3 +3256,274 @@ def models_usage(
                 f"agent/{b['agent_name']}: {b['used_today']} of {b['daily_token_budget']} "
                 f"tokens today ({state})"
             )
+
+
+# --------------------------------------------------------------- management rules
+
+RULE_ACTION = typer.Option(
+    None, help="issue, assign_owner, block, delete or revoke_access (issue by default)."
+)
+RULE_OWNER = typer.Option(None, "--owner", help="assign_owner: the team or email to make owner.")
+RULE_AFTER = typer.Option(
+    None, "--after-days", help="Days an agent matches before the action (14 by default)."
+)
+RULE_SEVERITY = typer.Option(None, help="Its issues' severity: low, medium, high or critical.")
+RULE_MAX = typer.Option(None, "--max-actions", help="Agents it acts on at once, at most.")
+RULE_MODE = typer.Option(None, help="off, monitor (the default) or enforce.")
+INACTIVE_DAYS = typer.Option(None, "--inactive-days", help="Condition: no activity for N days.")
+MISSING = typer.Option(
+    None,
+    "--missing",
+    help="Condition: lacks owner, sponsors, team, blueprint or workload_identity (repeatable).",
+)
+OVERDUE = typer.Option(
+    None, "--attestation-overdue-days", help="Condition: attestation overdue for N days."
+)
+FINDING = typer.Option(
+    None, "--finding", help="Condition: an open finding of this type, * allowed (repeatable)."
+)
+FINDING_SEVERITY = typer.Option(
+    None, "--finding-severity", help="Condition: the finding is at least this severe."
+)
+RISK_LEVEL = typer.Option(None, "--risk-level", help="Condition: at least this risk level.")
+STATUS = typer.Option(
+    None, "--status", help="Condition: pending, active, blocked or discovered (repeatable)."
+)
+IN_BLUEPRINT = typer.Option(None, "--blueprint", help="Scope: agents on these blueprints.")
+IN_TEAM = typer.Option(None, "--team", help="Scope: agents of these teams.")
+IN_ENVIRONMENT = typer.Option(None, "--environment", help="Scope: agents in these environments.")
+IN_PLATFORM = typer.Option(
+    None, "--platform", help="Scope: gateway, microsoft-365 or copilot-studio (repeatable)."
+)
+IN_LABEL = typer.Option(None, "--scope-label", help="Scope: agents with this label, key=value.")
+
+
+def _rule_fields(
+    *,
+    description: str | None,
+    inactive_days: int | None,
+    missing: list[str] | None,
+    attestation_overdue_days: int | None,
+    finding: list[str] | None,
+    finding_severity: str | None,
+    risk_level: str | None,
+    status: list[str] | None,
+    blueprint: list[str] | None,
+    team: list[str] | None,
+    environment: list[str] | None,
+    platform: list[str] | None,
+    scope_label: list[str] | None,
+    action: str | None,
+    owner: str | None,
+    after_days: int | None,
+    severity: str | None,
+    max_actions: int | None,
+    mode: str | None,
+    label: list[str] | None,
+) -> dict[str, Any]:
+    """A rule's fields from the options passed. Conditions, and scope, are replaced as a
+    whole when any of theirs is passed."""
+    conditions = _given(
+        inactive_days=inactive_days,
+        missing=_split(missing) or None,
+        attestation_overdue_days=attestation_overdue_days,
+        findings=_split(finding) or None,
+        finding_severity=finding_severity,
+        risk_level=risk_level,
+        status=_split(status) or None,
+    )
+    scope = _given(
+        blueprints=_split(blueprint) or None,
+        teams=_split(team) or None,
+        environments=_split(environment) or None,
+        platforms=_split(platform) or None,
+        labels=_labels(scope_label) or None,
+    )
+    body = _given(
+        description=description,
+        action=action,
+        after_days=after_days,
+        severity=severity,
+        max_actions=max_actions,
+        mode=mode,
+    )
+    if conditions:
+        body["conditions"] = conditions
+    if scope:
+        body["scope"] = scope
+    if owner is not None:
+        body["params"] = {"owner": owner}
+    if label is not None:
+        body["labels"] = _labels(label)
+    return body
+
+
+def _conditions_text(conditions: dict[str, Any]) -> str:
+    return "; ".join(
+        f"{k}={','.join(v) if isinstance(v, list) else v}" for k, v in conditions.items()
+    )
+
+
+@rules_app.command("list")
+def rules_list() -> None:
+    """List management rules: what each looks for, does, and how many agents it matches."""
+    rows = _call("GET", "/v1/rules")
+    for row in rows:
+        row["when"] = _conditions_text(row["conditions"])
+        row["after"] = f"{row['after_days']}d"
+        row["mode"] = (
+            row["mode"]
+            if row["effective_mode"] == row["mode"]
+            else f"{row['mode']} ({row['effective_mode']})"
+        )
+        row["matching"] = row["matches"]["matching"]
+    _table(rows, ["name", "mode", "action", "after", "when", "matching"])
+
+
+@rules_app.command("get")
+def rules_get(name: str) -> None:
+    """Show a management rule."""
+    _print(_call("GET", f"/v1/rules/{quote(name)}"))
+
+
+def _show_preview(view: dict[str, Any]) -> None:
+    head = f"{view['matching']} agent(s) match, {view['due']} due now ({view['mode']})"
+    if view["held_back"]:
+        head += f": more than {view['max_actions']} at once, so it would act on none"
+    if not view["running"]:
+        head += f"; not running: {view['why_not']}"
+    typer.echo(head)
+    rows = [{**e, "why": "; ".join(e["reasons"])} for e in view["agents"]]
+    if rows:
+        _table(rows, ["agent", "state", "detail", "why"])
+    for u in view["unknown"]:
+        typer.echo(f"agent/{u['agent']}: can't tell: {u['why']}")
+
+
+@rules_app.command("create")
+def rules_create(
+    name: str,
+    description: str | None = DESCRIPTION,
+    inactive_days: int | None = INACTIVE_DAYS,
+    missing: list[str] | None = MISSING,
+    attestation_overdue_days: int | None = OVERDUE,
+    finding: list[str] | None = FINDING,
+    finding_severity: str | None = FINDING_SEVERITY,
+    risk_level: str | None = RISK_LEVEL,
+    status: list[str] | None = STATUS,
+    blueprint: list[str] | None = IN_BLUEPRINT,
+    team: list[str] | None = IN_TEAM,
+    environment: list[str] | None = IN_ENVIRONMENT,
+    platform: list[str] | None = IN_PLATFORM,
+    scope_label: list[str] | None = IN_LABEL,
+    action: str | None = RULE_ACTION,
+    owner: str | None = RULE_OWNER,
+    after_days: int | None = RULE_AFTER,
+    severity: str | None = RULE_SEVERITY,
+    max_actions: int | None = RULE_MAX,
+    mode: str | None = RULE_MODE,
+    label: list[str] | None = LABEL,
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what it would match and do, without saving it."
+    ),
+) -> None:
+    """Add a management rule: conditions, the agents it looks at, and what it does."""
+    body = _rule_fields(
+        description=description, inactive_days=inactive_days, missing=missing,
+        attestation_overdue_days=attestation_overdue_days, finding=finding,
+        finding_severity=finding_severity, risk_level=risk_level, status=status,
+        blueprint=blueprint, team=team, environment=environment, platform=platform,
+        scope_label=scope_label, action=action, owner=owner, after_days=after_days,
+        severity=severity, max_actions=max_actions, mode=mode, label=label,
+    )  # fmt: skip
+    if dry_run:
+        _show_preview(_call("POST", "/v1/rules/preview", json={"name": name, **body}))
+        return
+    out = _call("POST", "/v1/rules", json={"name": name, **body})
+    _done("rule", out["name"], f"created ({out['effective_mode']})")
+
+
+@rules_app.command("update")
+def rules_update(
+    name: str,
+    description: str | None = DESCRIPTION,
+    inactive_days: int | None = INACTIVE_DAYS,
+    missing: list[str] | None = MISSING,
+    attestation_overdue_days: int | None = OVERDUE,
+    finding: list[str] | None = FINDING,
+    finding_severity: str | None = FINDING_SEVERITY,
+    risk_level: str | None = RISK_LEVEL,
+    status: list[str] | None = STATUS,
+    blueprint: list[str] | None = IN_BLUEPRINT,
+    team: list[str] | None = IN_TEAM,
+    environment: list[str] | None = IN_ENVIRONMENT,
+    platform: list[str] | None = IN_PLATFORM,
+    scope_label: list[str] | None = IN_LABEL,
+    action: str | None = RULE_ACTION,
+    owner: str | None = RULE_OWNER,
+    after_days: int | None = RULE_AFTER,
+    severity: str | None = RULE_SEVERITY,
+    max_actions: int | None = RULE_MAX,
+    mode: str | None = RULE_MODE,
+    label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+) -> None:
+    """Change a management rule. Passing any condition replaces its conditions, and any
+    scope option its scope."""
+    body = _rule_fields(
+        description=description, inactive_days=inactive_days, missing=missing,
+        attestation_overdue_days=attestation_overdue_days, finding=finding,
+        finding_severity=finding_severity, risk_level=risk_level, status=status,
+        blueprint=blueprint, team=team, environment=environment, platform=platform,
+        scope_label=scope_label, action=action, owner=owner, after_days=after_days,
+        severity=severity, max_actions=max_actions, mode=mode, label=label,
+    )  # fmt: skip
+    if not body:
+        _fail("nothing to change: pass at least one option (see --help)")
+    out = _call("PATCH", f"/v1/rules/{quote(name)}", json=body)
+    _done("rule", out["name"], f"updated ({out['effective_mode']})")
+
+
+@rules_app.command("delete")
+def rules_delete(name: str, yes: bool = YES) -> None:
+    """Delete a management rule: its issues are resolved; what it did stays done."""
+    _confirm(f"Delete management rule {name}?", yes)
+    _call("DELETE", f"/v1/rules/{quote(name)}")
+    _done("rule", name, "deleted")
+
+
+@rules_app.command("preview")
+def rules_preview(name: str) -> None:
+    """The agents a rule matches now, since when, and what it will do to each."""
+    _show_preview(_call("GET", f"/v1/rules/{quote(name)}/preview"))
+
+
+@rules_app.command("evaluate")
+def rules_evaluate() -> None:
+    """Run the rules now, instead of after the next posture scan."""
+    out = _call("POST", "/v1/rules/evaluate")
+    if out.get("off"):
+        typer.echo(f"management rules are off: {out['resolved']} issue(s) resolved")
+        return
+    for name, counts in out.items():
+        typer.echo(
+            f"rule/{name}: {counts['matching']} matching, {counts['acted']} acted on, "
+            f"{counts['would_act']} would have been, {counts['held_back']} held back"
+        )
+
+
+@rules_app.command("agent")
+def rules_agent(agent: str) -> None:
+    """The rules that match an agent, and what each will do or did."""
+    rows = _call("GET", f"/v1/agents/{quote(agent)}/rules")
+    _table(rows, ["rule", "action", "mode", "since", "state", "detail"])
+
+
+def main() -> None:
+    try:
+        app()
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

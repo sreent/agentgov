@@ -3,7 +3,8 @@
 ```yaml
 apiVersion: agentgov/v1alpha1
 kind: Agent            # Feature | Destination | Team | IdentityIssuer | Blueprint |
-                       # ToolServer | ModelProvider | AccessPackage | Policy | Agent
+                       # ToolServer | ModelProvider | AccessPackage | Policy |
+                       # ManagementRule | Agent
 metadata:
   name: support-bot
 spec:
@@ -21,7 +22,8 @@ A ``Feature`` sets how strictly one of AgentGov's features applies
 Applying is idempotent: unchanged resources are reported as ``unchanged``.
 Resources are applied in dependency order (features first, then destinations, the teams
 that post to them, identity issuers, blueprints, tool servers, model providers and the access
-packages that name blueprints, before the agents and policies that reference them).
+packages that name blueprints, policies, and the management rules that name teams, before
+the agents that reference them).
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from agentgov.registry import (
     instructions,
     model_providers,
     policies,
+    rules,
     teams,
     toolservers,
 )
@@ -59,6 +62,7 @@ ORDER = [
     "ModelProvider",
     "AccessPackage",
     "Policy",
+    "ManagementRule",
     "Agent",
 ]
 
@@ -112,6 +116,7 @@ def apply(
             "ModelProvider": _model_provider,
             "AccessPackage": _access_package,
             "Policy": _policy,
+            "ManagementRule": _rule,
             "Agent": _agent,
         }[kind](session, settings, spec, actor)
         results.append({"kind": kind, "name": name, "action": action})
@@ -228,6 +233,15 @@ def _access_package(session: Session, settings: Settings, spec: dict[str, Any], 
         return "created"
     changed = access_packages.update(session, package, spec, actor=actor)
     return "configured" if changed else "unchanged"
+
+
+def _rule(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    try:
+        rule = rules.get(session, spec["name"])
+    except NotFound:
+        rules.create(session, spec, actor=actor)
+        return "created"
+    return "configured" if rules.update(session, rule, spec, actor=actor) else "unchanged"
 
 
 def _policy(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
@@ -348,6 +362,14 @@ def export(session: Session) -> list[dict[str, Any]]:
                 {"description": policy.description, "enabled": policy.enabled, "rego": policy.rego},
             )
         )
+    for rule in rules.list_all(session):
+        d = rules.to_dict(session, rule)
+        spec = {
+            k: d[k]
+            for k in rules.FIELDS
+            if k in ("conditions", "action") or d[k] != rules.DEFAULTS.get(k)
+        }
+        docs.append(_doc("ManagementRule", rule.name, spec))
     for agent in agents.list_agents(session):
         if agent.status not in (ACTIVE, PENDING, BLOCKED):
             continue

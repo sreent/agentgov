@@ -62,7 +62,7 @@ them needs the AI administrator or Power Platform administrator role
 
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
-| **Registry** | Inventory with owners, sponsors and teams; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings, sent as issues to each agent's owner, sponsors and team until someone takes them on; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
+| **Registry** | Inventory with owners, sponsors and teams; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings, sent as issues to each agent's owner, sponsors and team until someone takes them on; management rules that act on inactive, ownerless or long-blocked agents after telling their people; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
 | **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tool servers and other agents), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; calls between agents (A2A 1.0) through the gateway, with who may call whom, and the chain of agents that handed work down, from the person at its head, in policy and the ledger; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
@@ -183,7 +183,10 @@ the gateway. It shows each control in turn:
 18. **Issues**: the agent's findings went to its owner, the cx-platform team, in its own
     Slack channel, and the issues no team owns to the AI governance team's Teams channel;
     alice, in cx-platform, sees them in AgentGov and acknowledges one.
-19. **Evidence**: every decision is in a ledger whose hash chain verifies.
+19. **Management rules**: a rule that deletes agents blocked for 30 days matches the demo
+    agent, blocked in step 13. Enforced, it tells the agent's owner and sponsor first, with
+    the date; alice accepts the risk until a later one, and the rule leaves the agent be.
+20. **Evidence**: every decision is in a ledger whose hash chain verifies.
 
 Then look around:
 
@@ -208,10 +211,10 @@ and load balancer.
 ## Governance as code
 
 Blueprints, tool servers, model providers, identity issuers, access packages, teams, agents,
-policies, destinations and feature modes are declarative manifests, applied with
-`agentgov apply -f <dir>`, the UI's **Import manifests** or the API. They can also be
-created and edited one at a time in the admin UI or with the CLI, and **Export manifests**
-(`agentgov export`) writes everything back out as YAML:
+policies, management rules, destinations and feature modes are declarative manifests,
+applied with `agentgov apply -f <dir>`, the UI's **Import manifests** or the API. They can
+also be created and edited one at a time in the admin UI or with the CLI, and **Export
+manifests** (`agentgov export`) writes everything back out as YAML:
 
 ```yaml
 apiVersion: agentgov/v1alpha1
@@ -335,6 +338,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   while once approved, with reminders, renewals and reviews
 * [Issues](docs/issues.md): findings sent to each agent's owner, sponsors and team, by email
   and in their chats, until someone takes them on
+* [Management rules](docs/management-rules.md): what to do about agents that meet some
+  conditions for long enough, such as blocking agents nobody uses, after telling their people
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin

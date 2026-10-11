@@ -36,7 +36,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Agents without owners, agents at risk (registry tiles) | ✅ | Overview tiles and posture findings |
 | Unmanaged / shadow agents | ✅ | Discovery from OpenTelemetry spans, gateway callers (monitor mode) and scanner imports (`/v1/discovery/import`, e.g. the Agent Governance Toolkit's `agent-discovery`) |
 | IT-approved agent blueprints | ✅ | `Blueprint`: permissions, risk tier, sponsor requirement, attestation period, labels |
-| Management rules (e.g. block ownerless agents) | 🟡 | Posture findings + optional auto-block on risk; rule engine ⏳ |
+| Management rules (e.g. block ownerless agents without usage) | ✅ | [Management rules](management-rules.md): conditions (no activity, no owner or sponsor, attestation overdue, open findings, risk, status) and an action (an issue, an owner, block, delete, revoke access packages), previewed before they run; beyond Agent 365's (preview), each agent's people are told before a rule acts, rules can be monitored first, and a rule acts on a few agents at once at most. Agents on Microsoft 365 are told about, not blocked: blocking them needs a signed-in administrator |
 | Agents built in Microsoft 365 Copilot, Copilot Studio and Agent Builder | ✅ | The Microsoft 365 agent catalog synced from Microsoft Graph, the Copilot Studio inventory imported from the Power Platform inventory or synced as the signed-in admin, and agent identities from Microsoft Entra Agent ID ([platforms](platforms.md)) |
 | Block Microsoft 365 and Copilot Studio agents | 🟡 | Admins signed in through Entra ID quarantine Copilot Studio agents and block Microsoft 365 agents from AgentGov, which calls Microsoft's admin APIs as them ([platforms](platforms.md#acting-as-the-signed-in-admin)); with Copilot Studio threat detection enforcing, a Copilot Studio agent blocked in AgentGov can't call tools ([connections](microsoft-connections.md#copilot-studio-threat-detection)); otherwise, block them in Microsoft's admin centers |
 | Registry sync from AWS, Google, Salesforce, Databricks, … | ⏳ | More platform connectors on the roadmap; OTel discovery covers instrumented agents today |
@@ -118,6 +118,7 @@ Microsoft documentation and announcements, checked October 2026:
   [GA announcement](https://www.microsoft.com/en-us/security/blog/2026/05/01/microsoft-agent-365-now-generally-available-expands-capabilities-and-integrations/)
 - Registry: [agent registry](https://learn.microsoft.com/en-us/microsoft-365/admin/manage/agent-registry),
   [agent actions](https://learn.microsoft.com/en-us/microsoft-365/admin/manage/agent-actions),
+  [agent settings and management rules](https://learn.microsoft.com/en-us/microsoft-365/admin/manage/agent-settings),
   [connected platforms](https://learn.microsoft.com/en-us/microsoft-agent-365/admin/connected-platforms)
 - Identity: [Entra agent blueprints](https://learn.microsoft.com/en-us/entra/agent-id/agent-blueprint),
   [owners, sponsors, managers](https://learn.microsoft.com/en-us/entra/agent-id/agent-owners-sponsors-managers),

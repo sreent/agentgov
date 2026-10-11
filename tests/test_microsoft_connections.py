@@ -397,6 +397,13 @@ class TestPurviewAudit:
         monkeypatch.setattr(ids, "utcnow", lambda: later)
         assert sync(ms, "purview-audit").json()["searching"] == 2
         assert graph.queries["q-3"]["filterStartDateTime"] == usage["filterEndDateTime"]
+        # How far back AgentGov knows agents' use: management rules count no further.
+        graph.query_status = "succeeded"
+        sync(ms, "purview-audit")
+        with ms.app.state.rt.db.session() as s:
+            state = s.get(IntegrationState, "purview-audit").data
+        assert state["usage_from"] == usage["filterStartDateTime"]
+        assert state["usage_until"] == graph.queries["q-3"]["filterEndDateTime"]
 
     def test_use_shows_on_the_agent(self, ms, graph) -> None:
         graph.query_status = "succeeded"

@@ -408,6 +408,25 @@ CATALOG: tuple[Feature, ...] = (
         "(AGENTGOV_SMTP_URL) for email",
     ),
     Feature(
+        "management-rules",
+        "Management rules",
+        "lifecycle",
+        "Rules act on the agents that meet their conditions for long enough, such as agents "
+        "nobody used for 90 days or agents without an owner: they raise an issue, give the "
+        "agent an owner, block it, delete it or revoke its access packages, after telling its "
+        "people, and on a few agents at once at most.",
+        CONTROL,
+        MONITOR,
+        {
+            ENFORCE: "Rules in enforce mode tell an agent's people as soon as it matches, and "
+            "act after their days of notice if it still matches.",
+            MONITOR: "Rules tell nobody and change nothing: they record what they would have "
+            "done, for their previews and the ledger.",
+            OFF: "No rule runs, and their issues are resolved. What they did stays done.",
+        },
+        needs="posture checks on: rules run after each posture scan",
+    ),
+    Feature(
         "microsoft-365",
         "Microsoft 365 agent catalog",
         "microsoft",
