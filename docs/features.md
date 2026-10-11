@@ -1,0 +1,129 @@
+# Features
+
+AgentGov is one application, but you don't have to use all of it. Each feature can be
+turned off, and each control the gateway enforces can also run in **monitor** mode. In
+monitor mode AgentGov decides as usual and records what it would have done, but lets the
+call through, like Conditional Access's report-only mode. Use it to try a control on real
+traffic before you enforce it.
+
+## Choosing
+
+| | How |
+|---|---|
+| Admin UI | **Features** page (administrators) |
+| CLI | `agentgov features list`, `agentgov features set least-privilege monitor` |
+| API | `GET /v1/features`, `PUT /v1/features/{feature}` with `{"mode": "monitor"}` |
+| Manifests | `kind: Feature`, `metadata.name: least-privilege`, `spec.mode: monitor` |
+| Deployment | `AGENTGOV_FEATURES="least-privilege=monitor,discovery=off"` |
+
+Every change goes into the ledger as `feature.changed`, with who made it. A change that
+weakens a feature is recorded as a warning: enforce to monitor or off, or on to off.
+The CLI asks before it weakens one (`--yes` skips the question).
+
+A feature set in `AGENTGOV_FEATURES` is **pinned** by the deployment. Administrators see
+it, but can only change it in the deployment: the Compose `.env` file, or the Helm value
+`features`. Pins are applied, and recorded, when the control plane starts. Remove a pin
+and the feature keeps its mode, which administrators may then change. `agentgov export`
+includes the modes administrators chose, not the pins.
+
+## The features
+
+Modes run from the weakest to the strongest. The default is in bold.
+
+### Gateway
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `mcp-gateway` | off, **on** | Publishes approved MCP tool servers on agentgateway at `/mcp/<server>`. Agents call them there with their AgentGov token, and the controls below check every call. Off, no tool server is published, but the registry keeps them |
+| `model-gateway` | off, **on** | Publishes approved [model providers](models.md) on agentgateway at `/llm/<provider>`. Agents call models there with their AgentGov token instead of the provider's API key, and the controls below check every prompt and answer. Off, no provider is published, but the registry keeps them |
+
+### Controls at the gateway
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `least-privilege` | off, monitor, **enforce** | Agents may call only the tools and models their blueprint and their own grants allow, and see only those tools when they list a server's. In monitor mode, agents see and call every tool, and calls they weren't granted are recorded. Telemetry showing a tool used without a grant raises a finding unless this control is off |
+| `approvals` | off, monitor, **enforce** | Calls to tools their servers mark destructive, and calls organisation policies single out (`require_approval`), wait for a person to approve them |
+| `data-protection` | off, monitor, **enforce** | Inspects tool calls and model calls for credentials and personal data. Credentials stop the call (and an answer that contains them is withheld), and personal data is masked unless policy allows it. Off, nothing is inspected and Presidio isn't called. Monitor records what was found. Only an enforced control stops calls when Presidio is down (`AGENTGOV_PRESIDIO_FAILURE_MODE=closed`) |
+| `prompt-injection` | off, monitor, **enforce** | Withholds tool results that carry instructions aimed at the agent (indirect prompt injection) and raises a finding, and refuses model calls whose conversation holds such a result. Monitor lets them through and still raises the finding |
+| `jailbreak-detection` | off, **monitor**, enforce | Looks for jailbreaks, prompts that try to talk a model out of its instructions or its safety rules, in the latest message from a person in each [model call](models.md). Enforced, they are refused; monitored, they go through. Either way they are recorded and raise a finding. It starts in monitor mode because people's own words vary more than tool results do: see what it would refuse before you enforce it |
+| `tool-integrity` | off, monitor, **enforce** | Quarantines tools whose descriptions hide instructions. Tools that changed since approval are held until an administrator reviews them |
+| `risk-based-access` | off, monitor, **enforce** | Refuses agents at critical risk, and blocks agents whose risk score reaches `AGENTGOV_AUTO_BLOCK_RISK_SCORE`. Monitor lets them through, and the automatic block raises an `agent.would_auto_block` finding instead. Risk is always scored and shown |
+| `token-budgets` | off, monitor, **enforce** | Refuses model calls from agents that have used their daily token budget, their own or their blueprint's, until the day ends (UTC). Off, budgets aren't checked; usage is still metered |
+| `unknown-callers` | monitor, **enforce** | Refuses callers without a registered agent's identity. Monitor lets them through and records them; with `discovery` on, they are added to the inventory |
+
+### Detection
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `discovery` | off, **on** | Adds agents seen in telemetry or at the gateway that aren't registered to the inventory, as discovered (shadow AI). Off, registered agents' activity is still recorded. Imports you start yourself are not affected |
+| `posture-checks` | off, **on** | Scans regularly and raises findings: agents without owners or sponsors, attestations that are due, stale agents, broad grants and tool servers awaiting review. Off, nothing is scanned, and findings already raised stay until resolved |
+| `instruction-checks` | off, **on** | Checks agents' instructions (their system prompts) for unsafe content, with AgentGov's rules and with IBM Granite Guardian where it is configured. Off, instructions are kept but not checked; they are checked as soon as checks are on again |
+
+### Developer tools
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `mcp-registry` | **off**, on | Serves the tool servers listed for developers as an MCP registry at `<control plane>/registry`, which GitHub Copilot and VS Code read to offer developers only approved MCP servers ([developer tools](developer-tools.md)). Its readers have no credentials, so the registry is served without them: it is off until you turn it on |
+| `mcp-discovery` | off, **on** | Takes reports of the MCP servers set up on developers' machines (`agentgov mcp scan --report`), compares them with the approved tool servers, and raises findings for those that aren't approved, that skip the gateway or that are blocked. Off, reports are refused; findings already raised stay until resolved |
+
+### Lifecycle
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `registration-approval` | off, **on** | Agents registered by people who aren't administrators start pending, until an administrator approves them. Off, they are active at once |
+
+### Microsoft
+
+Each of these also needs what [microsoft-connections.md](microsoft-connections.md)
+describes. Turning one off stops it even where it is configured.
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `microsoft-365` | off, **on** | Reads the Microsoft 365 agent catalog into the inventory |
+| `entra-agent-id` | off, **on** | Reads agents' Entra identities and links them to their agents |
+| `purview-audit` | off, **on** | Reads agent usage, attacks on agents and makers' changes from the audit log |
+| `defender` | off, **on** | Turns Defender's alerts about agents into findings |
+| `copilot-studio-threat-detection` | **off**, monitor, enforce | Answers Copilot Studio before each tool call its agents make. Monitor tells Copilot Studio to go ahead and records what would have been blocked. Off, AgentGov's endpoint refuses Copilot Studio's calls. Needs `AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS` and the tenant ID, and OPA to enforce |
+
+Some things are never switched off: an agent or tool server that is blocked stays
+blocked, callers must be registered agents unless `unknown-callers` is monitored, and
+organisation policies' denials always apply.
+
+## Rolling out a control
+
+1. Set the control to monitor: `agentgov features set least-privilege monitor`.
+2. Let agents work. Each call a monitored control would have stopped is a ledger
+   warning. Its reason starts with `monitored:` and its details list what each control
+   would have done.
+3. Fix what you find. For example, grant the tools agents legitimately need.
+4. Enforce: `agentgov features set least-privilege enforce`.
+
+## How each part applies the modes
+
+* **OPA.** The bundle carries every mode as `data.registry.features`. The built-in
+  policies apply each control as its mode says. They return what monitored controls
+  would have done as `monitored` in the decision. An organisation policy can read the
+  modes too, with `data.agentgov.context.enforced("approvals")`, `monitored(...)` and
+  `mode(...)`. Its `deny` always applies; its `require_approval` follows `approvals`,
+  and its `redact` follows `data-protection`.
+* **The governance processor** reads the modes from OPA at most five seconds old. It
+  doesn't inspect what an off control would look at, and it records `monitored` with
+  each decision.
+* **The gateway's configuration** follows `mcp-gateway` and `unknown-callers` when the
+  control plane rewrites it.
+* **The control plane** checks the modes when it acts: discovery, posture scans,
+  instruction checks, registration, the automatic block and the Microsoft connections.
+* **The Agent Governance Toolkit** (in-process) applies `least-privilege` and
+  `risk-based-access` only when they are enforced. It can't record what a monitored
+  control would have done.
+
+## Settings that became features
+
+These environment variables are refused now. The message names the feature that replaced
+each one.
+
+| Was | Now |
+|---|---|
+| `AGENTGOV_UNKNOWN_AGENT_MODE=reject\|monitor` | `unknown-callers=enforce\|monitor` |
+| `AGENTGOV_REGISTRATION_REQUIRES_APPROVAL=true\|false` | `registration-approval=on\|off` |
+| `AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION=off\|monitor\|enforce` | `copilot-studio-threat-detection=off\|monitor\|enforce` |

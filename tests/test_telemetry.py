@@ -41,7 +41,7 @@ def payload(service: str, *spans) -> dict:
 
 
 def test_attribute_decoding() -> None:
-    attrs = telemetry._attrs(
+    attrs = telemetry.attrs_of(
         [
             {"key": "s", "value": {"stringValue": "x"}},
             {"key": "i", "value": {"intValue": "42"}},

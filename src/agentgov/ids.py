@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 AGENT = "agt"
 BLUEPRINT = "bp"
 TOOL_SERVER = "ts"
+MODEL_PROVIDER = "mp"
 POLICY = "pol"
 CREDENTIAL = "cred"
 API_KEY = "key"
@@ -17,6 +18,7 @@ FINDING = "fnd"
 EVENT = "evt"
 SESSION = "ses"
 SIGNAL = "sig"
+SIGHTING = "mcs"
 
 
 def new_id(prefix: str) -> str:

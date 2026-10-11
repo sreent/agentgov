@@ -1,7 +1,7 @@
 # Security policy
 
-AgentGov sits on the path between AI agents and the tools they use, so we treat security
-reports as our highest priority.
+AgentGov sits on the path between AI agents and the tools and models they use, so we
+treat security reports as our highest priority.
 
 ## Reporting a vulnerability
 
@@ -30,6 +30,11 @@ Examples of issues we especially want to hear about:
 * A tool call that reaches an MCP server without passing the processor, or that is
   allowed when policy should deny it (including through malformed MCP messages,
   encodings, or batching).
+* A model call that reaches a provider without passing the processor, or with a prompt
+  policy should have refused or masked; or an agent calling a model it wasn't granted,
+  or past its budget while `token-budgets` is enforced.
+* A model provider's API key reaching an agent, the control plane's API, its database
+  or the ledger.
 * An agent obtaining another agent's identity or grants, or acting after being blocked.
 * Redaction that can be bypassed so that detected personal data or secrets reach an agent.
 * Tampering with the evidence ledger that `agentgov ledger verify` does not detect.
@@ -60,11 +65,21 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   `AGENTGOV_PUBLIC_URL` to the control plane's `https://` address so that session
   cookies are marked `Secure`.
 * Keep OPA, the processor, Presidio and the MCP servers on a private network that agents
-  cannot reach, so that the gateway is the only path to tools.
-* Keep `AGENTGOV_UNKNOWN_AGENT_MODE=reject` (the default) and the processor fail-closed.
-  Use `monitor` only for discovery and only where that is acceptable.
-* Back up PostgreSQL, export the ledger regularly (`GET /v1/ledger/export`) and store the
-  exports somewhere the platform cannot modify.
+  cannot reach, so that the gateway is the only path to tools. Give model providers' API
+  keys to the gateway only ([model calls](docs/models.md)), not to agents, so that the
+  gateway is the only path to models too. On Kubernetes, turn on the
+  Helm chart's network policies (`networkPolicy.enabled=true`) and its demo users off
+  (`keycloak.demoUsers=false`), or use your own Keycloak.
+* Keep the controls at the gateway enforced, as they are by default, and the processor
+  fail-closed. Jailbreak detection starts in monitor mode: enforce it once its findings
+  show what it would refuse. Monitor mode and turning a control off are for rollout and evaluation
+  ([features](docs/features.md)). Both are recorded in the ledger as warnings, and only
+  administrators can choose them. To keep the choice with the deployment, pin the
+  features in `AGENTGOV_FEATURES` (the Helm value `features`). Monitor `unknown-callers`
+  only for discovery, and only where that is acceptable.
+* Back up PostgreSQL, before every upgrade too (upgrades migrate its schema), export the
+  ledger regularly (`GET /v1/ledger/export`) and store the exports somewhere the platform
+  cannot modify.
 * If you connect AgentGov's app registration to Microsoft, grant it only the application
   permissions of the [connections](docs/microsoft-connections.md) you use
   (`CopilotPackages.Read.All`, `AgentIdentity.Read.All`, `AuditLogsQuery.Read.All`,
@@ -92,10 +107,22 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   page.
 * If you run the instruction classifier, keep it on the private network: it receives
   agents' instructions (with credentials already redacted).
+* The MCP registry (`mcp-registry`, off by default) is served without credentials, as
+  developers' MCP clients read it: anyone who can reach the control plane can read the
+  names, descriptions and addresses of the servers listed for developers. Serve it where
+  only your developers can reach it, and list there only what they may see.
+* Reports of developers' MCP servers (`agentgov mcp scan --report`) need an API key of
+  the `registrar` role. Give device management its own key, and revoke it if the
+  machines it runs on are lost.
+* Model providers' API keys are files that the gateway and its config sidecar read
+  (`deploy/compose/model-keys`, or the Helm chart's `modelKeys` Secret). Keep them out of
+  version control (the Compose directory ignores everything but the demo's key). To
+  rotate one, replace the file (or the Secret) and restart the gateway. Mark a provider
+  `verified` only if personal data may go to it unmasked.
 
 ## Known limitations
 
-* The prompt-injection and tool-poisoning detectors are heuristics. They raise the cost
+* The prompt-injection, jailbreak and tool-poisoning detectors are heuristics. They raise the cost
   of common attacks; they are not a guarantee.
 * The checks on agents' instructions are rules plus, optionally, a model. Both can miss
   reworded or obfuscated instructions and can flag legitimate ones; treat a finding as a
@@ -117,9 +144,13 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   and it works once, but another program on the same computer could see it in transit.
 * Personal-data detection is as good as Presidio's recognizers for your languages and
   data, and the configured confidence thresholds.
-* AgentGov governs tool traffic that goes through the gateway (and, with the Agent
-  Governance Toolkit, calls inside instrumented agents). It does not sandbox agent
-  processes or see traffic that bypasses the gateway.
+* AgentGov governs tool and model traffic that goes through the gateway (and, with the
+  Agent Governance Toolkit, calls inside instrumented agents). It does not sandbox agent
+  processes or see traffic that bypasses the gateway: an agent that holds a provider's
+  API key of its own can call the provider directly.
+* Token budgets count usage from the gateway's access logs as calls finish. Calls that
+  run at the same time can take an agent past its budget, and the tokens of answers the
+  gateway withholds aren't counted.
 * Connections between components are not mutually authenticated yet (mTLS is on the
   [roadmap](docs/roadmap.md)); rely on network isolation.
 * Administrators' roles are read from the identity provider when they sign in. Removing a

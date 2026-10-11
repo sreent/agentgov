@@ -37,6 +37,8 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "pydantic>=2.7",
   "sqlalchemy>=2.0.30",
+  # The database schema's migrations (agentgov/migrations).
+  "alembic>=1.16",
   "httpx>=0.27",
   # Validates identity-provider tokens for administrator single sign-on.
   "pyjwt[crypto]>=2.10",

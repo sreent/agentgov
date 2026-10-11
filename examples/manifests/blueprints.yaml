@@ -17,6 +17,12 @@ spec:
         - get_customer_notes
         - add_note
         - delete_customer   # destructive: the baseline policy routes it to a human
+  # Models agents of this blueprint may call through the gateway (globs), and the
+  # tokens each may use per UTC day.
+  model_access:
+    - provider: demo
+      models: [mock-small]
+  daily_token_budget: 20000
 ---
 apiVersion: agentgov/v1alpha1
 kind: Blueprint

@@ -104,7 +104,7 @@ class TestRoles:
 
         from agentgov.api.app import create_app
 
-        open_settings = settings.with_overrides(registration_requires_approval=False)
+        open_settings = settings.with_overrides(features="registration-approval=off")
         with TestClient(create_app(open_settings, background=False)) as c:
             registrar = key(c, "registrar")
             resp = c.post("/v1/agents", json={"name": "auto", "sponsors": ["a"]}, headers=registrar)

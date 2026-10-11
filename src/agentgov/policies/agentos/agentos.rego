@@ -44,9 +44,20 @@ granted if {
 	ctx.matches(pattern, tool)
 }
 
+# The least-privilege and risk-based access controls apply here only when they
+# are enforced: the toolkit can't record what a monitored control would do.
 allow if {
 	input.action_type == "tool_call"
 	agent.status == "active"
-	agent.risk_level != "critical"
-	granted
+	not refused_for_risk
+	permitted
 }
+
+refused_for_risk if {
+	ctx.enforced("risk-based-access")
+	agent.risk_level == "critical"
+}
+
+permitted if granted
+
+permitted if not ctx.enforced("least-privilege")

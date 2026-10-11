@@ -78,6 +78,41 @@ def permissions(value: Any) -> list[dict[str, Any]]:
     return grants
 
 
+def model_access(value: Any) -> list[dict[str, Any]]:
+    """Validate model grants: ``[{"provider": "<name>", "models": ["<glob>", ...]}]``."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValidationError("model_access must be a list of {provider, models} grants")
+    grants = []
+    for i, grant in enumerate(value):
+        if not isinstance(grant, dict) or set(grant) - {"provider", "models"}:
+            raise ValidationError(f"model_access[{i}] must have only 'provider' and 'models' keys")
+        provider = slug(grant.get("provider"), f"model_access[{i}].provider")
+        models = string_list(grant.get("models", ["*"]), f"model_access[{i}].models")
+        if not models:
+            raise ValidationError(f"model_access[{i}].models must not be empty")
+        grants.append({"provider": provider, "models": models})
+    return grants
+
+
+def merge_model_access(*grant_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, list[str]] = {}
+    for grants in grant_lists:
+        for grant in grants or []:
+            models = merged.setdefault(grant["provider"], [])
+            models.extend(m for m in grant["models"] if m not in models)
+    return [{"provider": provider, "models": models} for provider, models in merged.items()]
+
+
+def token_budget(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValidationError("daily_token_budget must be a whole number of tokens, or null")
+    return value
+
+
 def merge_grants(*grant_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[str, list[str]] = {}
     for grants in grant_lists:

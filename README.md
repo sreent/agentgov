@@ -3,8 +3,9 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **Open-source governance for AI agents.** AgentGov gives every agent you run an entry in
-a registry, its own identity, access policy on every tool call, data protection, human
-approval for risky actions, a kill switch and an audit trail. It works with any agent
+a registry, its own identity, access policy on every tool call and model call, data
+protection, token budgets, human approval for risky actions, a kill switch and an audit
+trail. It works with any agent
 framework or cloud, and it is built from open-source projects that security teams already
 trust: Keycloak, Open Policy Agent, agentgateway, Presidio and OpenTelemetry.
 
@@ -44,7 +45,7 @@ Whether AgentGov replaces Agent 365 depends on where your agents run:
 
 | Your agents | What AgentGov does |
 |---|---|
-| Built and run by you, with any framework or cloud, calling tools over MCP | The whole job: registry, an identity per agent, policy on every tool call, data protection, approvals, a kill switch and an audit trail. For these agents it is an alternative to Agent 365, and the option for organisations that don't use Microsoft 365 |
+| Built and run by you, with any framework or cloud, calling tools over MCP | The whole job: registry, an identity per agent, policy on every tool call and model call, data protection, approvals, a kill switch and an audit trail. For these agents it is an alternative to Agent 365, and the option for organisations that don't use Microsoft 365 |
 | Built in Microsoft 365 Copilot, Copilot Studio or Agent Builder | Works alongside Microsoft's admin centers. These agents don't pass through AgentGov's gateway, so Microsoft carries out the decisions about them. AgentGov lists them, checks their connectors and instructions, and keeps them in the same registry and audit trail as your other agents. With the Microsoft services you have, it also reads their Entra identities, who uses them and Defender's alerts about them; has Power Platform enforce its connector allowlist; decides Copilot Studio agents' tool calls with its own policies; and quarantines or blocks agents as the admin who signed in ([connections](docs/microsoft-connections.md)) |
 
 Each Microsoft connection is optional: AgentGov uses the ones it can reach and works
@@ -61,28 +62,34 @@ them needs the AI administrator or Power Platform administrator role
 
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
-| **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist | AgentGov control plane |
-| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call using live registry context; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
-| **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
-| **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
-| **Security** | PII redaction, secret blocking, prompt-injection and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger | Presidio, OPA, AgentGov processor, Granite Guardian (optional) |
+| **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
+| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call and model call using live registry context; the models each blueprint allows, with daily token budgets; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
+| **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
+| **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
+| **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger | Presidio, OPA, AgentGov processor, Granite Guardian (optional) |
+
+Use only the parts you need. Each [feature](docs/features.md) can be turned off, and each
+control at the gateway can run in monitor mode first: it records what it would have
+stopped, without stopping anything, until you enforce it.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     agent([AI agent]) -- client credentials --> kc[Keycloak<br/>one client per agent]
-    agent -- MCP + bearer token --> gw[agentgateway]
-    gw -- every call, result and tools/list --> proc[Governance processor]
+    agent -- MCP and model calls + bearer token --> gw[agentgateway]
+    gw -- every call, result, prompt and answer --> proc[Governance processor]
     proc --> opa[OPA<br/>Rego library + registry data]
     proc --> presidio[Presidio]
     gw --> mcp[(MCP servers)]
+    gw -- provider's key --> llm[(Model providers)]
     cp[AgentGov control plane<br/>registry · lifecycle · ledger · UI]
     cp -- provisions clients --> kc
     cp -- policy bundle --> opa
     cp -- gateway config --> gw
     proc -- decisions, approvals --> cp
-    agent -. OTLP .-> otel[OTel Collector] -. discovery, activity .-> cp
+    agent -. OTLP .-> otel[OTel Collector] -. discovery, activity, model usage .-> cp
+    gw -. access logs .-> otel
 ```
 
 1. When an agent is approved, the control plane creates its Keycloak client. The agent
@@ -93,12 +100,15 @@ flowchart LR
    secrets, prompt injection and poisoned tool descriptions) and asks OPA for a
    decision. OPA evaluates the Rego library and your own policies against live registry
    data. The decision is to allow, deny, redact, or hold the call for human approval.
+   Model calls take the same path: the processor checks each prompt and answer, and the
+   gateway calls the provider with the provider's API key, which no agent holds.
 4. The control plane keeps Keycloak, OPA and agentgateway in sync with the registry. A
    change such as blocking an agent reaches OPA through bundle long polling in well
    under a second. Every decision is appended to a hash-chained ledger.
 5. Agents and the gateway send OpenTelemetry traces (GenAI semantic conventions). The
    control plane uses them to record activity and to discover agents that were never
-   registered.
+   registered. The gateway's access logs give each model call's tokens, which the
+   control plane counts against the agent's daily budget.
 6. People sign in to the admin UI with single sign-on through the same Keycloak, and
    their roles decide whether they administer agents, approve requests or only audit.
 
@@ -117,12 +127,12 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[demo]"
 export AGENTGOV_TOKEN=dev-admin-token
-agentgov apply -f examples/manifests      # blueprints, the CRM tool server, an agent, a policy
+agentgov apply -f examples/manifests      # blueprints, the CRM tool server, a model, an agent, a policy
 python examples/agents/demo_agent.py
 ```
 
-The demo registers a new agent and drives a real MCP client through the gateway. It
-shows each control in turn:
+The demo registers a new agent and drives a real MCP client and model calls through
+the gateway. It shows each control in turn:
 
 1. **Registration**: the agent is requested, approved and given its own identity.
 2. **Least privilege**: the agent only sees the tools its blueprint grants.
@@ -130,11 +140,22 @@ shows each control in turn:
 4. **Credentials never leave**: a secret in tool arguments is blocked.
 5. **Indirect prompt injection**: a poisoned tool result is withheld.
 6. **Ungranted tools** are refused even when called directly.
-7. **Human in the loop**: a destructive tool waits for an approver; once approved, the
+7. **Monitor mode**: with least privilege monitored, the same call goes through and the
+   ledger records what would have stopped it; enforced again, it is refused.
+8. **Human in the loop**: a destructive tool waits for an approver; once approved, the
    agent's retry goes through.
-8. **Kill switch**: blocking the agent takes effect everywhere within a second.
-9. **Shadow AI**: telemetry from an unregistered agent is discovered.
-10. **Evidence**: every decision is in a ledger whose hash chain verifies.
+9. **Model calls**: the agent calls a model through the gateway with its own token,
+   never the provider's key. Personal data in the prompt is masked, an ungranted model
+   is refused, credentials are kept out of prompts and answers, and once the agent's
+   metered tokens reach its daily budget, its calls are refused. A jailbreak attempt
+   goes through but is recorded: jailbreak detection starts in monitor mode.
+10. **Kill switch**: blocking the agent takes effect everywhere within a second.
+11. **Shadow AI**: telemetry from an unregistered agent is discovered.
+12. **Developer tools**: the MCP servers approved for developers are served as an MCP
+    registry for GitHub Copilot, and a developer's laptop
+    ([examples/developer-machine](examples/developer-machine)) reports its MCP servers:
+    those that aren't approved, or skip the gateway, raise findings.
+13. **Evidence**: every decision is in a ledger whose hash chain verifies.
 
 Then look around:
 
@@ -149,13 +170,14 @@ Then look around:
 * Keycloak: <http://localhost:8180> (`admin` / `admin`), realm `agentgov`, which has one
   client per agent
 
+On Kubernetes, the [Helm chart](deploy/helm/agentgov/README.md) installs the same stack.
 For trace exploration, add Langfuse with
 `-f deploy/compose/docker-compose.langfuse.yml` (see the
 [deployment guide](deploy/compose/README.md)).
 
 ## Governance as code
 
-Blueprints, tool servers, agents and policies are declarative manifests, applied with
+Blueprints, tool servers, model providers, agents and policies are declarative manifests, applied with
 `agentgov apply -f <dir>`, the UI's **Import manifests** or the API. They can also be
 created and edited one at a time in the admin UI or with the CLI, and **Export manifests**
 (`agentgov export`) writes everything back out as YAML:
@@ -209,6 +231,12 @@ what-if evaluation.
   (`agentgov agents credentials <agent>`), request tokens from Keycloak with the
   client-credentials grant, and connect to `http://<gateway>/mcp/<server>` with
   `Authorization: Bearer <token>`. Any MCP client works.
+* **Models**: point any OpenAI client at `http://<gateway>/llm/<provider>/v1`, with the
+  same token as its API key. The gateway adds the provider's key
+  ([model calls](docs/models.md)).
+* **Developers' coding assistants**: GitHub Copilot reads the approved MCP servers from
+  the MCP registry at `http://<control plane>/registry`, and `agentgov mcp scan --report`
+  reports the ones developers set up ([developer tools](docs/developer-tools.md)).
 * **Telemetry**: point the agent's OpenTelemetry exporter at the collector
   (`:4317` gRPC, `:4318` HTTP). Spans that follow the GenAI semantic conventions
   (`invoke_agent`, `execute_tool`, `chat`) feed activity, discovery and detective
@@ -224,9 +252,9 @@ what-if evaluation.
 |---|---|---|---|
 | [Keycloak](https://www.keycloak.org) | 26.8.0 | Apache-2.0 | Agent identities and tokens |
 | [Open Policy Agent](https://www.openpolicyagent.org) | 1.21.1 | Apache-2.0 | Policy decision point |
-| [agentgateway](https://agentgateway.dev) | 1.6.0 | Apache-2.0 | MCP gateway, policy enforcement point |
+| [agentgateway](https://agentgateway.dev) | 1.6.0 | Apache-2.0 | MCP and model gateway, policy enforcement point |
 | [Presidio](https://github.com/data-privacy-stack/presidio) analyzer | 2.2.364 | MIT | Personal-data detection |
-| [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) (contrib) | 0.162.0 | Apache-2.0 | Trace ingestion and routing |
+| [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) (contrib) | 0.162.0 | Apache-2.0 | Trace and access log ingestion and routing |
 | [PostgreSQL](https://www.postgresql.org) | 17 | PostgreSQL | Registry, Keycloak and Langfuse storage |
 | [Langfuse](https://langfuse.com) (optional) | 4.56.0 | MIT (core) | Trace exploration |
 | [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (optional) | — | MIT | In-process enforcement in agent frameworks |
@@ -243,6 +271,11 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Agent 365 baseline and parity matrix](docs/baseline-agent365.md)
 * [Architecture](docs/architecture.md)
 * [Administration](docs/administration.md): the same tasks in the admin UI, the CLI and the API
+* [Features](docs/features.md): choose which parts of AgentGov you use, and how strictly
+* [Model calls](docs/models.md): model providers, which agents may call which models,
+  usage, cost and token budgets
+* [Developer tools](docs/developer-tools.md): an MCP registry for GitHub Copilot and VS
+  Code, and the MCP servers developers set up on their machines
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin
@@ -255,22 +288,29 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)
 * [Roadmap](docs/roadmap.md)
-* [Reference deployment](deploy/compose/README.md)
+* [Reference deployment](deploy/compose/README.md) (Docker Compose) and the
+  [Helm chart](deploy/helm/agentgov/README.md) for Kubernetes
 
 ## Repository layout
 
 ```text
 src/agentgov/
-  registry/     agents, blueprints, tool servers, approvals, findings, risk, discovery
+  registry/     agents, blueprints, tool servers, model providers and usage, approvals,
+                findings, risk, discovery, features
   policies/     Rego library (agentgov.*, agentos) and its tests
   opa/          bundle server and Rego validation
   identity/     Keycloak reconciler
   gateway.py    agentgateway config generator
-  processor/    ExtMcp governance processor and detectors
+  processor/    governance processor (ExtMcp, and the guardrail webhook for model calls)
+                and detectors
+  migrations/   database schema migrations (Alembic)
   api/  ui/     HTTP API and admin UI
   cli.py        the agentgov command
+  mcp_scan.py   the MCP servers set up on a developer's machine (agentgov mcp scan)
 deploy/compose/ reference deployment
-examples/       manifests, a demo MCP server and the demo agent
+deploy/helm/    Helm chart
+examples/       manifests, a demo MCP server, a demo model, a developer's machine and the
+                demo agent
 docs/           design documents and ADRs
 tests/          unit and integration tests
 ```

@@ -1,0 +1,6 @@
+{
+  // Straight to the CRM server, past the gateway
+  "servers": {
+    "crm-direct": {"type": "http", "url": "http://crm-mcp:9000/mcp"}
+  }
+}

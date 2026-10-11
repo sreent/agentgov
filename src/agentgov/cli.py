@@ -2,8 +2,8 @@
 
 The administration commands are a thin layer over the HTTP API and follow the
 admin UI's pages: agents, blueprints, tool servers, policies, approvals,
-findings, the ledger, access (API keys) and platforms, plus a checker for agent
-instructions. Whatever the UI can change, the CLI can change too, through the
+findings, the ledger, access (API keys), platforms and features, plus a checker
+for agent instructions. Whatever the UI can change, the CLI can change too, through the
 same endpoints and with the same role checks.
 """
 
@@ -73,6 +73,27 @@ instructions_app = typer.Typer(
     help="Check agent instructions (system prompts) for unsafe content.", no_args_is_help=True
 )
 app.add_typer(instructions_app, name="instructions")
+db_app = typer.Typer(
+    help="The control plane's database schema (run where the control plane runs, with "
+    "AGENTGOV_DATABASE_URL).",
+    no_args_is_help=True,
+)
+app.add_typer(db_app, name="db")
+models_app = typer.Typer(
+    help="Model providers agents call through the gateway, and what agents spend.",
+    no_args_is_help=True,
+)
+app.add_typer(models_app, name="models")
+mcp_app = typer.Typer(
+    help="The MCP registry for developers' MCP clients, and the MCP servers developers set up.",
+    no_args_is_help=True,
+)
+app.add_typer(mcp_app, name="mcp")
+features_app = typer.Typer(
+    help="Which features are used, and how strictly (off, monitor or enforce).",
+    no_args_is_help=True,
+)
+app.add_typer(features_app, name="features")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -179,6 +200,29 @@ def _grants(values: list[str] | None) -> list[dict[str, Any]]:
             _fail(f"grants look like server:tool,tool (got {value!r}); use server:* for all tools")
         grants.append({"server": server.strip(), "tools": names})
     return grants
+
+
+def _model_access(values: list[str] | None) -> list[dict[str, Any]]:
+    """Model grants written as ``provider:model,model`` (``provider:*`` for every model)."""
+    grants = []
+    for value in values or []:
+        provider, sep, models = value.partition(":")
+        names = [m.strip() for m in models.split(",") if m.strip()]
+        if not sep or not provider.strip() or not names:
+            _fail(f"model access looks like provider:model,model (got {value!r}); use provider:*")
+        grants.append({"provider": provider.strip(), "models": names})
+    return grants
+
+
+def _model_fields(access: list[str] | None, budget: int | None, no_budget: bool) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if access is not None:
+        body["model_access"] = _model_access(access)
+    if no_budget:
+        body["daily_token_budget"] = None
+    elif budget is not None:
+        body["daily_token_budget"] = budget
+    return body
 
 
 def _given(**fields: Any) -> dict[str, Any]:
@@ -452,6 +496,100 @@ def processor() -> None:
     asyncio.run(serve(Settings.from_env()))
 
 
+def _database() -> Any:
+    from agentgov.config import Settings
+    from agentgov.db import Database
+
+    return Database(Settings.from_env().database_url)
+
+
+@db_app.command("status")
+def db_status() -> None:
+    """The schema's revision, and the migrations this version would apply."""
+    from agentgov import migrations
+
+    db = _database()
+    try:
+        state = migrations.status(db.engine)
+    except migrations.SchemaError as exc:
+        _fail(str(exc))
+    finally:
+        db.dispose()
+    if state.unversioned:
+        current = "none: created before migrations (adopted at the next upgrade)"
+    else:
+        current = state.current or "none: an empty database"
+    typer.echo(f"current: {current}")
+    typer.echo(f"head:    {state.head}")
+    typer.echo("pending: " + (", ".join(state.pending) or "nothing, the schema is up to date"))
+    if not state.up_to_date:
+        raise typer.Exit(1)
+
+
+@db_app.command("upgrade")
+def db_upgrade(
+    sql: bool = typer.Option(
+        False, "--sql", help="Print the SQL instead of running it, for review."
+    ),
+) -> None:
+    """Bring the schema up to date (the control plane also does this when it starts,
+    unless AGENTGOV_DATABASE_AUTO_MIGRATE is false)."""
+    from agentgov import migrations
+
+    db = _database()
+    try:
+        if sql:
+            typer.echo(migrations.upgrade_sql(db.engine), nl=False)
+            return
+        adopted = migrations.status(db.engine).unversioned
+        applied = migrations.upgrade(db.engine)
+    except migrations.SchemaError as exc:
+        _fail(str(exc))
+    finally:
+        db.dispose()
+    if adopted:
+        _done("database", migrations.BASELINE, "adopted (created before migrations)")
+        applied = [revision for revision in applied if revision != migrations.BASELINE]
+    if applied:
+        _done("database", migrations.head(), "migrated (" + ", ".join(applied) + ")")
+    else:
+        _done("database", migrations.head(), "already up to date")
+
+
+@app.command("gateway-config")
+def gateway_config(
+    output: Path = typer.Option(
+        ..., "--output", "-o", help="The file agentgateway reads (-f), on a shared volume."
+    ),
+    once: bool = typer.Option(
+        False, "--once", help="Write it once and stop (as an init container)."
+    ),
+    interval: float = typer.Option(5.0, help="Seconds between checks for changes."),
+) -> None:
+    """Keep agentgateway's configuration current from the control plane, for gateways
+    that don't share a volume with it (a sidecar in Kubernetes). Uses
+    AGENTGOV_CONTROL_PLANE_URL and AGENTGOV_SERVICE_TOKEN."""
+    import httpx
+
+    from agentgov.config import Settings
+    from agentgov.gateway import keep_current
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    # One request every few seconds: log what changes, not each check.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    settings = Settings.from_env()
+    if not settings.service_token:
+        _fail("set AGENTGOV_SERVICE_TOKEN (the control plane's service token)")
+    with httpx.Client(
+        base_url=settings.control_plane_url,
+        headers={"Authorization": f"Bearer {settings.service_token}"},
+        timeout=10,
+    ) as client:
+        keep_current(client, str(output), interval=interval, once=once)
+
+
 @app.command()
 def apply(
     files: list[Path] = typer.Option(..., "--file", "-f", help="Manifest file or directory."),
@@ -572,6 +710,11 @@ ENVIRONMENT = typer.Option(None, help="For example prod, staging or dev.")
 MODEL = typer.Option(None, "--model", help="Model the agent uses (repeatable).")
 GRANT = typer.Option(None, "--grant", help="Extra tool grant server:tool,tool (repeatable).")
 RISK_TIER = typer.Option(None, help="minimal, low, medium, high or critical.")
+MODEL_ACCESS = typer.Option(
+    None, "--model-access", help="Models it may call, provider:model,model (repeatable)."
+)
+TOKEN_BUDGET = typer.Option(None, help="Tokens it may use per day (UTC), in and out.")
+NO_TOKEN_BUDGET = typer.Option(False, "--no-token-budget", help="No daily token budget.")
 
 
 @agents_app.command("create")
@@ -586,12 +729,14 @@ def agents_create(
     platform: str | None = None,
     model: list[str] | None = MODEL,
     grant: list[str] | None = GRANT,
+    model_access: list[str] | None = MODEL_ACCESS,
+    token_budget: int | None = TOKEN_BUDGET,
     label: list[str] | None = LABEL,
     risk_tier: str | None = RISK_TIER,
     approve: bool = typer.Option(False, "--approve", help="Activate it now (admins only)."),
 ) -> None:
     """Register an agent. It waits in pending review unless --approve is given."""
-    body = _agent_fields(
+    body = _model_fields(model_access, token_budget, False) | _agent_fields(
         description=description,
         blueprint=blueprint,
         owner=owner,
@@ -625,11 +770,18 @@ def agents_update(
         None, "--grant", help="Extra grants server:tool,tool (replace the current ones)."
     ),
     clear_grants: bool = typer.Option(False, "--clear-grants", help="Remove the extra grants."),
+    model_access: list[str] | None = typer.Option(
+        None, "--model-access", help="Extra model access provider:model,model (replace it)."
+    ),
+    token_budget: int | None = TOKEN_BUDGET,
+    no_token_budget: bool = typer.Option(
+        False, "--no-token-budget", help="Use its blueprint's budget."
+    ),
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
     risk_tier: str | None = RISK_TIER,
 ) -> None:
     """Change an agent's details. Only the options you pass are changed."""
-    body = _agent_fields(
+    body = _model_fields(model_access, token_budget, no_token_budget) | _agent_fields(
         description=description,
         blueprint=blueprint,
         owner=owner,
@@ -799,9 +951,11 @@ def _classifier_state(classifier: dict[str, Any]) -> str:
         )
     if state == "error":
         return f"classifier failed: {classifier.get('error')}"
-    return {"off": "classifier: not configured", "pending": "classifier: pending"}.get(
-        state, f"classifier: {state}"
-    )
+    return {
+        "off": "classifier: not configured",
+        "pending": "classifier: pending",
+        "unchecked": "not checked: instruction checks were off",
+    }.get(state, f"classifier: {state}")
 
 
 @agents_app.command("instructions")
@@ -817,7 +971,8 @@ def agents_instructions(
             f"{src['source_name']} instructions, from {src['reported_by']}, "
             f"changed {src['updated_at']}"
         )
-        _issues(src["issues"])
+        if src["classifier"].get("state") != "unchecked":
+            _issues(src["issues"])
         typer.echo(f"  {_classifier_state(src['classifier'])}")
         if text:
             typer.echo("")
@@ -911,12 +1066,14 @@ def blueprints_create(
     review_days: int | None = REVIEW_DAYS,
     no_review: bool = NO_REVIEW,
     require_sponsor: bool | None = REQUIRE_SPONSOR,
+    model_access: list[str] | None = MODEL_ACCESS,
+    token_budget: int | None = TOKEN_BUDGET,
     label: list[str] | None = LABEL,
 ) -> None:
     """Create a blueprint."""
     body = _blueprint_fields(
         description, grant, risk_tier, review_days, no_review, require_sponsor, label
-    )
+    ) | _model_fields(model_access, token_budget, False)
     bp = _call("POST", "/v1/blueprints", json={"name": name, **body})
     _done("blueprint", bp["name"], "created")
 
@@ -932,12 +1089,17 @@ def blueprints_update(
     review_days: int | None = REVIEW_DAYS,
     no_review: bool = NO_REVIEW,
     require_sponsor: bool | None = REQUIRE_SPONSOR,
+    model_access: list[str] | None = typer.Option(
+        None, "--model-access", help="Model access provider:model,model (replace it)."
+    ),
+    token_budget: int | None = TOKEN_BUDGET,
+    no_token_budget: bool = NO_TOKEN_BUDGET,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
 ) -> None:
     """Change a blueprint. Every agent on it gets the change."""
     body = _blueprint_fields(
         description, grant, risk_tier, review_days, no_review, require_sponsor, label
-    )
+    ) | _model_fields(model_access, token_budget, no_token_budget)
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
     bp = _call("PATCH", f"/v1/blueprints/{name}", json=body)
@@ -974,6 +1136,27 @@ TRUST = typer.Option(None, "--trust", help="verified or unverified.")
 CLASSIFICATION = typer.Option(None, help="public, internal, confidential or restricted.")
 
 
+def _packages(values: list[str]) -> list[dict[str, Any]]:
+    """Packages written as ``type:identifier[@version]``: npm:@playwright/mcp@0.0.41."""
+    packages = []
+    for value in values:
+        kind, sep, rest = value.partition(":")
+        identifier, at, version = rest.rpartition("@")
+        if not at or not identifier:  # no version, or only a scope's "@"
+            identifier, version = rest, ""
+        if not sep or not identifier:
+            _fail(f"packages look like type:identifier@version, e.g. npm:@playwright/mcp@0.0.41 "
+                  f"(got {value!r})")  # fmt: skip
+        packages.append(
+            {
+                "registry_type": kind,
+                "identifier": identifier,
+                **({"version": version} if version else {}),
+            }
+        )
+    return packages
+
+
 def _toolserver_fields(
     url: str | None,
     description: str | None,
@@ -981,31 +1164,75 @@ def _toolserver_fields(
     trust: str | None,
     classification: str | None,
     label: list[str] | None,
+    *,
+    gateway: bool | None = None,
+    developers: bool | None = None,
+    package: list[str] | None = None,
+    registry_name: str | None = None,
 ) -> dict[str, Any]:
     body = _given(
-        url=url, description=description, trust_level=trust, data_classification=classification
+        url=url,
+        description=description,
+        trust_level=trust,
+        data_classification=classification,
+        gateway=gateway,
+        developers=developers,
     )
     if owner is not None:
         body["owner"] = owner or None
     if label is not None:
         body["labels"] = _labels(label)
+    if package is not None:
+        body["packages"] = _packages(package)
+    if registry_name is not None:
+        body["registry_name"] = registry_name or None
     return body
+
+
+GATEWAY = typer.Option(
+    None, "--gateway/--no-gateway", help="Publish it on the gateway for agents (default)."
+)
+DEVELOPERS = typer.Option(
+    None,
+    "--developers/--no-developers",
+    help="List it for developers, in the MCP registry their MCP clients read.",
+)
+PACKAGE = typer.Option(
+    None,
+    "--package",
+    help="A package developers run, type:identifier@version (repeatable; replaces them).",
+)
+REGISTRY_NAME = typer.Option(
+    None, help="Its name in the MCP registry (default <namespace>/<name>)."
+)
 
 
 @toolservers_app.command("create")
 def toolservers_create(
     name: str,
-    url: str = typer.Option(..., help="The server's streamable HTTP MCP endpoint."),
+    url: str | None = typer.Option(
+        None, help="The server's streamable HTTP MCP endpoint (for the gateway: required)."
+    ),
     description: str | None = DESCRIPTION,
     owner: str | None = OWNER,
     trust: str | None = TRUST,
     classification: str | None = CLASSIFICATION,
     label: list[str] | None = LABEL,
+    gateway: bool | None = GATEWAY,
+    developers: bool | None = DEVELOPERS,
+    package: list[str] | None = PACKAGE,
+    registry_name: str | None = REGISTRY_NAME,
 ) -> None:
     """Register a tool server (admins: approved at once; registrars: pending review)."""
-    body = _toolserver_fields(url, description, owner, trust, classification, label)
+    body = _toolserver_fields(
+        url, description, owner, trust, classification, label,
+        gateway=gateway, developers=developers, package=package, registry_name=registry_name,
+    )  # fmt: skip
     ts = _call("POST", "/v1/toolservers", json={"name": name, **body})
-    _done("toolserver", ts["name"], f"{ts['status']}, published at {ts['gateway_url']}")
+    where = [f"published at {ts['gateway_url']}"] if ts["gateway_url"] else []
+    if ts["developers"]:
+        where.append("listed for developers")
+    _done("toolserver", ts["name"], ", ".join([ts["status"], *where]))
 
 
 @toolservers_app.command("update")
@@ -1017,9 +1244,16 @@ def toolservers_update(
     trust: str | None = TRUST,
     classification: str | None = CLASSIFICATION,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+    gateway: bool | None = GATEWAY,
+    developers: bool | None = DEVELOPERS,
+    package: list[str] | None = PACKAGE,
+    registry_name: str | None = REGISTRY_NAME,
 ) -> None:
     """Change a tool server's details."""
-    body = _toolserver_fields(url, description, owner, trust, classification, label)
+    body = _toolserver_fields(
+        url, description, owner, trust, classification, label,
+        gateway=gateway, developers=developers, package=package, registry_name=registry_name,
+    )  # fmt: skip
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
     ts = _call("PATCH", f"/v1/toolservers/{name}", json=body)
@@ -1145,34 +1379,66 @@ def policies_delete(name: str, yes: bool = YES) -> None:
 
 @policies_app.command("evaluate")
 def policies_evaluate(
-    server: str = typer.Option(..., help="Tool server name."),
-    tool: str = typer.Option(..., help="Tool name."),
+    server: str | None = typer.Option(None, help="Tool server name (with --tool)."),
+    tool: str | None = typer.Option(None, help="Tool name."),
+    provider: str | None = typer.Option(
+        None, help="Model provider name (with --model), for a model call instead."
+    ),
+    model: str | None = typer.Option(None, help="Model the agent asks for."),
     agent: str | None = typer.Option(None, help="Agent (default: an unregistered caller)."),
-    phase: str = typer.Option("request", help="request (the call) or response (the result)."),
+    phase: str = typer.Option(
+        "request", help="request (the call or prompt) or response (the result or answer)."
+    ),
     pii: bool = typer.Option(False, "--pii", help="Personal data was detected."),
     secret: bool = typer.Option(False, "--secret", help="A credential was detected."),
-    injection: bool = typer.Option(False, "--injection", help="Prompt injection in the result."),
+    injection: bool = typer.Option(
+        False,
+        "--injection",
+        help="Prompt injection in the result (in a model call: in a tool result it holds).",
+    ),
+    jailbreak: bool = typer.Option(False, "--jailbreak", help="The prompt is a jailbreak."),
+    tool_calls: bool = typer.Option(
+        False, "--tool-calls", help="The model call's conversation holds tool calls."
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print OPA's full result."),
 ) -> None:
-    """What if: ask the live OPA what it would decide for a tool call. Nothing is recorded."""
+    """What if: ask the live OPA what it would decide for a tool call or a model call.
+    Nothing is recorded."""
+    if bool(server and tool) == bool(provider and model):
+        _fail("give --server and --tool for a tool call, or --provider and --model")
     if agent:
         found = _call("GET", f"/v1/agents/{agent}")
         caller = {"agent_id": found["id"], "client_id": found["identity"]["client_id"]}
     else:
         caller = {"client_id": "agent-not-registered"}
     categories = [c for c, on in (("pii", pii), ("secret", secret)) if on]
-    decision_input = {
-        "phase": phase,
-        "method": "tools/call",
-        "agent": {k: v for k, v in caller.items() if v},
-        "resource": {"server": server, "name": tool},
-        "detections": {
-            "categories": categories,
-            "prompt_injection": injection,
-            "injection_score": 0.95 if injection else 0,
-        },
+    detections: dict[str, Any] = {
+        "categories": categories,
+        "prompt_injection": injection,
+        "injection_score": 0.95 if injection else 0,
     }
-    result = _call("POST", "/v1/policies/evaluate", json={"input": decision_input})["result"]
+    if provider:
+        path = "agentgov/models/decision"
+        decision_input: dict[str, Any] = {
+            "kind": "model",
+            "phase": phase,
+            "agent": {k: v for k, v in caller.items() if v},
+            "provider": provider,
+            "model": model,
+            "detections": {**detections, "jailbreak": jailbreak},
+            "tool_calls": tool_calls,
+        }
+    else:
+        path = "agentgov/mcp/decision"
+        decision_input = {
+            "phase": phase,
+            "method": "tools/call",
+            "agent": {k: v for k, v in caller.items() if v},
+            "resource": {"server": server, "name": tool},
+            "detections": detections,
+        }
+    body = {"path": path, "input": decision_input}
+    result = _call("POST", "/v1/policies/evaluate", json=body)["result"]
     if as_json or not result:
         _print(result)
         return
@@ -1181,6 +1447,8 @@ def policies_evaluate(
         typer.echo(f"  - {reason}")
     if result.get("redact"):
         typer.echo(f"  redact: {', '.join(result['redact'])}")
+    for monitored in result.get("monitored") or []:
+        typer.echo(f"  monitored: {monitored}")
 
 
 # ----------------------------------------------------------------- approvals
@@ -1619,3 +1887,327 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ------------------------------------------------------------------ features
+
+
+@features_app.command("list")
+def features_list() -> None:
+    """Every feature, its mode and what that mode does."""
+    view = _call("GET", "/v1/features")
+    rows = [
+        {
+            "feature": f["key"],
+            "mode": f["mode"],
+            "set_by": f["set_by"],
+            "does": f["effect"],
+        }
+        for f in view["features"]
+    ]
+    _table(rows, ["feature", "mode", "set_by", "does"])
+
+
+@features_app.command("get")
+def features_get(key: str) -> None:
+    """One feature: its modes, what each does, and who chose the current one."""
+    _print(_call("GET", f"/v1/features/{quote(key)}"))
+
+
+@features_app.command("set")
+def features_set(
+    key: str,
+    mode: str = typer.Argument(..., help="off, monitor or enforce (off or on for some)."),
+    yes: bool = YES,
+) -> None:
+    """Choose how strictly a feature applies."""
+    current = _call("GET", f"/v1/features/{quote(key)}")
+    modes = current["modes"]
+    if mode not in modes:
+        _fail(f"{key} takes {', '.join(modes)} (got {mode!r})")
+    if mode != current["mode"] and modes.index(mode) < modes.index(current["mode"]):
+        _confirm(
+            f"{current['title']}: {current['mode']} to {mode}? {current['effects'].get(mode, '')}",
+            yes,
+        )
+    out = _call("PUT", f"/v1/features/{quote(key)}", json={"mode": mode})
+    _done("feature", key, f"{out['mode']}: {out['effect']}")
+
+
+# ----------------------------------------------------------------------- mcp
+
+
+@mcp_app.command("registry")
+def mcp_registry() -> None:
+    """What developers' MCP clients see in the MCP registry, and where they read it."""
+    view = _call("GET", "/v1/mcp/registry")
+    rows = []
+    for entry in view["servers"]:
+        server = entry["server"]
+        where = [r["url"] for r in server.get("remotes") or []]
+        where += [
+            f"{p['registryType']}:{p['identifier']}"
+            + (f"@{p['version']}" if p.get("version") else "")
+            for p in server.get("packages") or []
+        ]
+        rows.append({**server, "where": ", ".join(where)})
+    _table(rows, ["name", "version", "where"])
+    state = "on" if view["enabled"] else "off (agentgov features set mcp-registry on)"
+    typer.echo(f"registry: {view['url']} ({state})")
+
+
+@mcp_app.command("managed-settings")
+def mcp_managed_settings(
+    output: Path | None = typer.Option(None, "--output", "-o", help="Write it to this file."),
+) -> None:
+    """The registry as GitHub Copilot's managed-settings.json allowlist."""
+    text = json.dumps(_call("GET", "/v1/mcp/managed-settings"), indent=2) + "\n"
+    if output is None:
+        typer.echo(text, nl=False)
+    else:
+        output.write_text(text)
+        typer.echo(f"wrote {output}")
+
+
+@mcp_app.command("scan")
+def mcp_scan_command(
+    directory: list[Path] | None = typer.Option(
+        None, "--dir", help="A project to look in too (repeatable; default: this directory)."
+    ),
+    home: Path | None = typer.Option(None, help="Scan this home directory instead of yours."),
+    report: bool = typer.Option(False, "--report", help="Send what was found to AgentGov."),
+    as_json: bool = typer.Option(False, "--json", help="Print what was found as JSON."),
+) -> None:
+    """The MCP servers set up on this machine, in VS Code, Copilot, Claude, Cursor and
+    other clients. Credentials are left out: environment variables and headers by name."""
+    from agentgov import mcp_scan
+
+    found = mcp_scan.scan(directory or [Path.cwd()], home=home)
+    servers = [s.to_dict() for s in found]
+    if as_json:
+        _print(servers)
+    else:
+        rows = [{**s, "where": s["url"] or " ".join(s["command"])} for s in servers]
+        _table(rows, ["name", "client", "scope", "transport", "where"])
+    if report:
+        here = mcp_scan.machine()
+        # Which file a server came from stays here: it names the person's home directory.
+        sent = [{k: v for k, v in s.items() if k != "file"} for s in servers]
+        outcome = _call(
+            "POST",
+            "/v1/mcp/sightings",
+            json={"machine": here["machine"], "user": here["user"], "servers": sent},
+        )
+        typer.echo(
+            f"reported {outcome['servers']} servers: {outcome['approved']} approved, "
+            f"{outcome['unapproved']} not approved, {outcome['bypass']} past the gateway, "
+            f"{outcome['blocked']} blocked"
+        )
+
+
+@mcp_app.command("sightings")
+def mcp_sightings() -> None:
+    """The MCP servers developers reported, and whether each is approved."""
+    rows = [
+        {
+            **g,
+            "names": ", ".join(g["names"]),
+            "clients": ", ".join(g["clients"]),
+            "server": g["server"] or "",
+        }
+        for g in _call("GET", "/v1/mcp/sightings")
+    ]
+    _table(rows, ["status", "server", "identity", "names", "clients", "machines", "users"])
+
+
+# -------------------------------------------------------------------- models
+
+
+def _prices(values: list[str] | None) -> dict[str, dict[str, float]]:
+    """Prices written as ``model-glob=input,output`` in USD per million tokens."""
+    prices = {}
+    for value in values or []:
+        model, sep, amounts = value.partition("=")
+        parts = [p.strip() for p in amounts.split(",")]
+        try:
+            input_usd, output_usd = (float(p) for p in parts)
+        except ValueError:
+            _fail(f"prices look like model=input,output in USD per million tokens (got {value!r})")
+        if not sep or not model.strip():
+            _fail(f"prices look like model=input,output in USD per million tokens (got {value!r})")
+        prices[model.strip()] = {"input": input_usd, "output": output_usd}
+    return prices
+
+
+def _provider_fields(
+    *,
+    kind: str | None,
+    description: str | None,
+    base_url: str | None,
+    key_file: str | None,
+    trust: str | None,
+    price: list[str] | None,
+    label: list[str] | None,
+) -> dict[str, Any]:
+    body = _given(kind=kind, description=description, trust_level=trust)
+    for key, value in (("base_url", base_url), ("key_file", key_file)):
+        if value is not None:
+            body[key] = value or None
+    if price is not None:
+        body["prices"] = _prices(price)
+    if label is not None:
+        body["labels"] = _labels(label)
+    return body
+
+
+PROVIDER_KIND = typer.Option(None, help="openai, anthropic, gemini or openai-compatible.")
+BASE_URL = typer.Option(
+    None, help="An openai-compatible server's OpenAI API base, e.g. http://vllm:8000/v1."
+)
+KEY_FILE = typer.Option(
+    None, help="Where the gateway reads its API key (default /model-keys/<name>)."
+)
+TRUST = typer.Option(None, "--trust", help="verified: personal data may be sent to it.")
+PRICE = typer.Option(
+    None, "--price", help="model=input,output in USD per million tokens (repeatable)."
+)
+
+
+@models_app.command("list")
+def models_list() -> None:
+    """Model providers, and where agents call them."""
+    rows = [
+        {**p, "trust": p["trust_level"], "gateway_path": p["route"]}
+        for p in _call("GET", "/v1/models/providers")
+    ]
+    _table(rows, ["name", "kind", "status", "trust", "gateway_path", "key_file"])
+
+
+@models_app.command("get")
+def models_get(name: str) -> None:
+    """A model provider, as JSON."""
+    _print(_call("GET", f"/v1/models/providers/{quote(name)}"))
+
+
+@models_app.command("create")
+def models_create(
+    name: str,
+    kind: str = typer.Option(..., help="openai, anthropic, gemini or openai-compatible."),
+    description: str | None = DESCRIPTION,
+    base_url: str | None = BASE_URL,
+    key_file: str | None = KEY_FILE,
+    trust: str | None = TRUST,
+    price: list[str] | None = PRICE,
+    label: list[str] | None = LABEL,
+) -> None:
+    """Approve a model provider. Put its API key where the gateway reads it."""
+    body = _provider_fields(
+        kind=kind,
+        description=description,
+        base_url=base_url,
+        key_file=key_file,
+        trust=trust,
+        price=price,
+        label=label,
+    )
+    out = _call("POST", "/v1/models/providers", json={"name": name, **body})
+    _done("model-provider", out["name"], f"approved; agents call it at {out['route']}")
+
+
+@models_app.command("update")
+def models_update(
+    name: str,
+    kind: str | None = PROVIDER_KIND,
+    description: str | None = DESCRIPTION,
+    base_url: str | None = BASE_URL,
+    key_file: str | None = KEY_FILE,
+    trust: str | None = TRUST,
+    price: list[str] | None = typer.Option(
+        None, "--price", help="Prices model=input,output (replace them)."
+    ),
+    label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+) -> None:
+    """Change a model provider."""
+    body = _provider_fields(
+        kind=kind,
+        description=description,
+        base_url=base_url,
+        key_file=key_file,
+        trust=trust,
+        price=price,
+        label=label,
+    )
+    if not body:
+        _fail("nothing to change: pass at least one option (see --help)")
+    out = _call("PATCH", f"/v1/models/providers/{quote(name)}", json=body)
+    _done("model-provider", out["name"], "updated")
+
+
+@models_app.command("block")
+def models_block(name: str) -> None:
+    """Stop every call to a model provider."""
+    out = _call("POST", f"/v1/models/providers/{quote(name)}/block")
+    _done("model-provider", out["name"], out["status"])
+
+
+@models_app.command("unblock")
+def models_unblock(name: str) -> None:
+    """Allow calls to a blocked model provider again."""
+    out = _call("POST", f"/v1/models/providers/{quote(name)}/unblock")
+    _done("model-provider", out["name"], out["status"])
+
+
+@models_app.command("delete")
+def models_delete(name: str, yes: bool = YES) -> None:
+    """Remove a model provider: its route goes from the gateway."""
+    _confirm(f"Delete model provider {name}?", yes)
+    _call("DELETE", f"/v1/models/providers/{quote(name)}")
+    _done("model-provider", name, "deleted")
+
+
+@models_app.command("usage")
+def models_usage(
+    days: int = typer.Option(7, help="How many days back, today included."),
+    agent: str | None = typer.Option(None, help="Only this agent."),
+    provider: str | None = typer.Option(None, help="Only this provider."),
+    by: str | None = typer.Option(
+        None, help="Add it up per owner or sponsor of the agents instead."
+    ),
+) -> None:
+    """Calls, tokens and cost per agent, day, provider and model; and budgets today."""
+    if by not in (None, "owner", "sponsor"):
+        _fail(f"--by takes owner or sponsor (got {by!r})")
+    params = {"days": days, **_given(agent=agent, provider=provider)}
+    view = _call("GET", "/v1/models/usage", params=params)
+    if by:
+        groups = [
+            {
+                **g,
+                by: g[by] or f"(no {by})",
+                "tokens_in": g["input_tokens"],
+                "tokens_out": g["output_tokens"],
+                "cost_usd": f"{g['cost_usd']:.4f}",
+            }
+            for g in view[f"by_{by}"]
+        ]
+        _table(groups, [by, "agents", "calls", "tokens_in", "tokens_out", "cost_usd"])
+        return
+    rows = [
+        {
+            **r,
+            "agent": r["agent_name"] or "(unidentified)",
+            "tokens_in": r["input_tokens"],
+            "tokens_out": r["output_tokens"],
+            "cost_usd": f"{r['cost_usd']:.4f}",
+        }
+        for r in view["rows"]
+    ]
+    _table(rows, ["day", "agent", "provider", "model", "calls", "refused", "tokens_in",
+                  "tokens_out", "cost_usd"])  # fmt: skip
+    for b in view["today"]:
+        if b["daily_token_budget"] is not None:
+            state = "over budget" if b["over_budget"] else "within budget"
+            typer.echo(
+                f"agent/{b['agent_name']}: {b['used_today']} of {b['daily_token_budget']} "
+                f"tokens today ({state})"
+            )

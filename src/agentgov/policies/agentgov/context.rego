@@ -5,6 +5,16 @@ package agentgov.context
 
 registry := data.registry
 
+# How strictly each feature applies (agentgov.registry.features). Controls are
+# "off", "monitor" or "enforce"; a bundle without modes, or a test, enforces them.
+features := object.get(registry, "features", {})
+
+mode(key) := object.get(features, key, "enforce")
+
+enforced(key) if mode(key) == "enforce"
+
+monitored(key) if mode(key) == "monitor"
+
 # The calling agent, resolved from claims the gateway has already validated
 # (the agent_id claim first, then the OAuth client id).
 agent_id := id if {

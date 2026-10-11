@@ -8,8 +8,12 @@ matrix in docs/baseline-agent365.md maps one-to-one:
                    (Entra "agent identity blueprint").
 * ``Agent``      - one agent identity with owner, sponsors and lifecycle state.
                    Its credentials live in Keycloak, not here.
-* ``ToolServer`` - an MCP server published through agentgateway.
+* ``ToolServer`` - an approved MCP server: published through agentgateway for
+                   agents, listed in the MCP registry for developers' tools, or both.
+* ``ModelProvider`` - a model provider agents call through agentgateway.
 * ``Policy``     - an organisation Rego module distributed to OPA.
+* ``FeatureSetting`` - which of AgentGov's features are used, and how strictly.
+* ``McpSighting`` - an MCP server set up on a developer's machine, as reported.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agentgov.db import Base, UTCDateTime
@@ -39,6 +43,9 @@ RISK_LEVELS = ("low", "medium", "high", "critical")
 TRUST_LEVELS = ("verified", "unverified")
 DATA_CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
 SEVERITIES = ("info", "low", "medium", "high", "critical")
+# Model providers agentgateway can call with an API key. "openai-compatible" is any
+# server that speaks OpenAI's API (vLLM, Ollama, LiteLLM, hosted APIs) at base_url.
+MODEL_PROVIDER_KINDS = ("openai", "anthropic", "gemini", "openai-compatible")
 
 
 def _created() -> Mapped[datetime]:
@@ -61,6 +68,10 @@ class Blueprint(Base):
     require_sponsor: Mapped[bool] = mapped_column(Boolean, default=True)
     attestation_days: Mapped[int | None] = mapped_column(Integer, nullable=True, default=90)
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Models its agents may call: [{"provider": "<name>", "models": ["<glob>", ...]}].
+    model_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    # Tokens (input and output) each of its agents may use per UTC day; None: no limit.
+    daily_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -95,6 +106,10 @@ class Agent(Base):
 
     # Agent-specific grants, in addition to the blueprint's.
     permissions: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Models it may call, in addition to the blueprint's (same shape as Blueprint's).
+    model_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    # Its own daily token budget, instead of the blueprint's.
+    daily_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # A2A AgentCard (v1.0) describing the agent's skills and interfaces.
     agent_card: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # Identifiers in other systems (OTel agent id, platform ids, fingerprints).
@@ -128,6 +143,8 @@ class ToolServer(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # The server's own MCP endpoint. A server only for developers may have none ("")
+    # when they run one of its packages on their machines instead.
     url: Mapped[str] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text, default="")
     owner: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -135,6 +152,18 @@ class ToolServer(Base):
     trust_level: Mapped[str] = mapped_column(String(16), default="unverified")
     data_classification: Mapped[str] = mapped_column(String(16), default="internal")
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Published on the gateway, at /mcp/<name>, for agents.
+    gateway: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # Listed for developers, in the MCP registry their MCP clients read
+    # (agentgov.registry.mcp_registry).
+    developers: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # Its name there; by default "<namespace>/<name>".
+    registry_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Packages developers run on their machines: [{registry_type, identifier, version,
+    # command}] ("npm", "@playwright/mcp", "0.0.41").
+    packages: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    # Bumped when what the registry lists changes, so developers' clients see a new version.
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Catalog observed through the gateway: [{name, description, annotations,
     # fingerprint, first_seen, changed_at}]. Fingerprints detect definition drift.
     tools: Mapped[list[Any]] = mapped_column(JSON, default=list)
@@ -142,6 +171,55 @@ class ToolServer(Base):
     created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+
+
+class ModelProvider(Base):
+    """A model provider agents call through the gateway, at ``/llm/<name>``.
+
+    Its API key never enters AgentGov: the gateway reads it from ``key_file``, a
+    file mounted into the gateway (by default ``/model-keys/<name>``).
+    """
+
+    __tablename__ = "model_providers"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # Where an OpenAI-compatible server listens (http(s)://host[:port][/path]).
+    base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_file: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="approved")
+    # "verified": personal data may be sent to it (by agents labelled pii-access).
+    trust_level: Mapped[str] = mapped_column(String(16), default="unverified")
+    # USD per million tokens, by model glob: {"gpt-4o*": {"input": 2.5, "output": 10}}.
+    prices: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class ModelUsage(Base):
+    """Model calls through the gateway, per agent, UTC day, provider and model.
+
+    ``agent_id`` is empty for callers the gateway could not identify (only possible
+    when unknown agents are monitored rather than rejected).
+    """
+
+    __tablename__ = "model_usage"
+
+    agent_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)  # YYYY-MM-DD (UTC)
+    provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model: Mapped[str] = mapped_column(String(128), primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    refused: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+    __table_args__ = (Index("ix_model_usage_day", "day"),)
 
 
 class Policy(Base):
@@ -157,6 +235,22 @@ class Policy(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+
+
+class FeatureSetting(Base):
+    """The mode chosen for one of AgentGov's features (``agentgov.registry.features``).
+
+    Features nobody chose a mode for have no row and run in their default mode.
+    """
+
+    __tablename__ = "feature_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(16))
+    # Chosen by the deployment (AGENTGOV_FEATURES), so not changeable in the app.
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    changed_by: Mapped[str] = mapped_column(String(200))
+    changed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class ApiKey(Base):
@@ -409,3 +503,30 @@ class LedgerHead(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     last_seq: Mapped[int] = mapped_column(Integer, default=0)
     last_hash: Mapped[str] = mapped_column(String(64))
+
+
+class McpSighting(Base):
+    """An MCP server set up in one client on one developer's machine, as last reported
+    by ``agentgov mcp scan --report``. Credentials never arrive here: environment
+    variables and headers are reported by name only."""
+
+    __tablename__ = "mcp_sightings"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    machine: Mapped[str] = mapped_column(String(200))
+    os_user: Mapped[str] = mapped_column(String(200), default="")
+    client: Mapped[str] = mapped_column(String(64))  # "vscode", "claude-desktop", ...
+    scope: Mapped[str] = mapped_column(String(16))  # "user" or "project"
+    name: Mapped[str] = mapped_column(String(200))  # as the client calls it
+    # What identifies the server anywhere: "url:<url>", "npm:<package>", "command:<...>".
+    identity: Mapped[str] = mapped_column(String(400), index=True)
+    transport: Mapped[str] = mapped_column(String(16))  # "stdio", "http" or "sse"
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    command: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    env: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    headers: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    reported_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+    __table_args__ = (Index("ix_mcp_sightings_machine", "machine", "os_user"),)

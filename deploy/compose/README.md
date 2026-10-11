@@ -1,8 +1,8 @@
 # Reference deployment (Docker Compose)
 
 The whole platform on one machine: the AgentGov control plane and governance processor,
-Keycloak, OPA, agentgateway, Presidio, the OpenTelemetry Collector, PostgreSQL and a demo
-MCP server. It is meant for evaluation and development. See [SECURITY.md](../../SECURITY.md)
+Keycloak, OPA, agentgateway, Presidio, the OpenTelemetry Collector, PostgreSQL, a demo
+MCP server and a demo model. It is meant for evaluation and development. See [SECURITY.md](../../SECURITY.md)
 before exposing it to anyone.
 
 ## Start
@@ -26,15 +26,31 @@ python examples/agents/demo_agent.py
 
 | Port | Service | Notes |
 |---|---|---|
-| 8000 | Control plane | API (`/docs`), admin UI (`/ui`), OPA bundles, OTLP ingest |
-| 8080 | agentgateway | MCP routes at `/mcp/<server>`; requires a Keycloak-issued token |
+| 8000 | Control plane | API (`/docs`), admin UI (`/ui`), OPA bundles, OTLP ingest, the MCP registry for developers' tools (`/registry`, once `mcp-registry` is on) |
+| 8080 | agentgateway | MCP routes at `/mcp/<server>` and model routes at `/llm/<provider>`; requires a Keycloak-issued token |
 | 8180 | Keycloak | Admin console user `admin`, password `KEYCLOAK_ADMIN_PASSWORD` (default `admin`); realm `agentgov` |
 | 8181 | OPA | Query API, handy for debugging policies |
 | 4317 / 4318 | OTel Collector | OTLP gRPC / HTTP for agents |
 | 3000 | Langfuse | Only with the Langfuse override (below) |
 
-PostgreSQL, Presidio, the processor and the demo MCP server are only reachable inside
-the Compose network. The MCP server in particular is only reachable through the gateway.
+PostgreSQL, Presidio, the processor, the demo MCP server and the demo model are only
+reachable inside the Compose network. The MCP server and the model in particular are only
+reachable through the gateway.
+
+## Model providers' API keys
+
+The gateway reads each model provider's API key from `model-keys/<provider name>` in this
+directory, which is mounted into it, and into its config sidecar, as `/model-keys`. One
+file per provider, holding only the key:
+
+```bash
+printf '%s' "$OPENAI_API_KEY" > model-keys/openai
+agentgov models create openai --kind openai --trust verified
+```
+
+Git ignores the directory, apart from `demo`, the demo model's made-up key. To keep the
+keys elsewhere, set `AGENTGOV_MODEL_KEYS_DIR` in `.env`. Until a provider's key is there,
+its route answers 503. [Model calls](../../docs/models.md) has the rest.
 
 ## Signing in
 
@@ -125,8 +141,8 @@ sign in through Microsoft Entra ID instead of Keycloak (see `.env.example`), the
 sync the Copilot Studio inventory, quarantine Copilot Studio agents, block Microsoft 365
 agents and push the connector allowlist into Power Platform from AgentGov.
 
-Copilot Studio threat detection (`AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION`) has Copilot
-Studio ask AgentGov's policies before each tool call its agents make. Microsoft calls the
+Copilot Studio threat detection (the feature `copilot-studio-threat-detection`) has
+Copilot Studio ask AgentGov's policies before each tool call its agents make. Microsoft calls the
 control plane, so `AGENTGOV_PUBLIC_URL` must be an HTTPS address it can reach.
 [Agents on Microsoft 365 and Copilot Studio](../../docs/platforms.md) and [Connecting
 AgentGov to Microsoft's services](../../docs/microsoft-connections.md) have the details.
@@ -139,13 +155,37 @@ AgentGov to Microsoft's services](../../docs/microsoft-connections.md) have the 
 | `.env.example` | Every secret the stack uses |
 | `keycloak/agentgov-realm.json` | Realm with the control plane's provisioning client, the `agentgov-admin` sign-in client, the AgentGov roles and the demo users (imported on first start) |
 | `opa/config.yaml` | OPA bundle, decision log and status services (all served by the control plane) |
-| `otel/collector.yaml` | OTLP in; spans to the control plane for discovery and activity |
+| `otel/collector.yaml` | OTLP in; spans to the control plane for discovery and activity, and the gateway's access logs of model calls for usage |
 | `otel/langfuse.yaml` | Merged over the collector config by the Langfuse override |
 | `postgres/init.sql` | Creates the Keycloak database |
+| `model-keys/` | Model providers' API keys, one file per provider |
 
 The agentgateway configuration is not a file in this directory: the control plane
-generates it from the registry into the shared `gateway-config` volume, and agentgateway
-reloads it when it changes.
+generates it from the registry, and the `gateway-config` service (`agentgov
+gateway-config`) fetches it every two seconds into the volume it shares with
+agentgateway, which reloads it when it changes. The control plane never sees the model
+keys: the sidecar is what checks that each provider's key is there.
+
+## Upgrading
+
+The control plane keeps its database schema up to date: when a new version starts, it
+applies the migrations it brings, one control plane at a time. Back up PostgreSQL first,
+then:
+
+```bash
+git pull
+docker compose up -d --build --wait
+docker compose exec control-plane agentgov db status    # the schema's revision
+```
+
+To review the changes before they are made, print them with
+`docker compose run --rm control-plane db upgrade --sql`. To make them yourself, set
+`AGENTGOV_DATABASE_AUTO_MIGRATE=false` on the control plane and run `docker compose run
+--rm control-plane db upgrade` before starting the new version; it then refuses to start
+until the schema is current. A database created before AgentGov had migrations is
+adopted on its first upgrade, with its data. A newer schema than the version knows (after
+going back to an older version) stops the control plane with a message: run the newer
+version, or restore the backup.
 
 ## Reset
 
@@ -160,6 +200,10 @@ docker compose down -v      # removes all data, including Keycloak clients and t
 * **The gateway answers 401**: the bearer token must come from the agent's own Keycloak
   client in the `agentgov` realm (`agentgov agents credentials <agent>`) and tokens expire
   after five minutes. Blocked agents' clients are disabled.
+* **A model route answers 503, "The gateway has no API key for …"**: put the provider's
+  key in `model-keys/<provider>` (see above); the route works within a few seconds.
+* **Model usage stays empty**: the gateway's access logs reach the control plane through
+  the collector. Check `docker compose logs otel-collector`.
 * **A call is denied with "policy engine unavailable"**: OPA has not loaded a bundle yet.
   Check `docker compose logs opa`; bundle activation errors also raise a finding
   (`agentgov findings`).

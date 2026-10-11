@@ -19,6 +19,7 @@ status`) shows each connection and how it is doing:
 | Import only | The Copilot Studio inventory, when admins don't sign in through Entra ID: import an export instead |
 | Out of date | The connector allowlist changed since it was pushed to Power Platform |
 | Monitoring, Enforcing | Copilot Studio threat detection's mode |
+| Turned off in Features | An administrator turned the connection off on the [Features](features.md) page |
 
 AgentGov works out what it has. Its app registration's access token lists the
 application permissions an admin granted it, so AgentGov runs only the connections it
@@ -170,12 +171,12 @@ with its policies and the registry, using the same OPA that decides for the gate
 
 * the agent is blocked in AgentGov, so **Block** in AgentGov now stops a Copilot Studio
   agent's tool calls;
-* the agent's risk is critical;
+* the agent's risk is critical (the `risk-based-access` control);
 * the tool uses a connector that isn't on the allowlist (once the allowlist lists one,
   and when Copilot Studio names the connector in the tool's definition);
-* the inputs contain credentials;
+* the inputs contain credentials (the `data-protection` control);
 * an earlier tool result in the plan tried to give the agent instructions (indirect
-  prompt injection);
+  prompt injection, the `prompt-injection` control);
 * an [organisation policy](policies.md) denies it. Their `deny` rules apply here too, and
   `input.platform` is `copilot-studio`.
 
@@ -185,7 +186,9 @@ agent's activity and risk, and raises findings for credentials and injected inst
 A Copilot Studio agent that AgentGov doesn't know yet is allowed, with a finding asking
 for the inventory to be synced.
 
-There are two modes:
+The controls named above apply as their [features](features.md) say: one in monitor mode
+only records what it would have done (`monitored` in the ledger entry). Threat detection
+itself is the feature `copilot-studio-threat-detection`, off until you choose a mode:
 
 * `monitor` never blocks. AgentGov records what its policies would have decided
   (`would_block` in the ledger, and a count on the Platforms page). Start here.
@@ -213,10 +216,11 @@ not classic ones.
    `Create-CopilotWebhookApp.ps1 -TenantId <tenant ID> -Endpoint
    https://agentgov.contoso.com/integrations/copilot-studio` (see [Microsoft's
    steps][threat-detection]). Note its application (client) ID.
-4. **Configure AgentGov**, then restart it:
+4. **Configure AgentGov**, restart it, then turn the feature
+   `copilot-studio-threat-detection` to monitor on the **Features** page (or with
+   `agentgov features set copilot-studio-threat-detection monitor`):
 
    ```bash
-   AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION=monitor
    AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS=<the app ID from step 3>
    AGENTGOV_OPA_URL=http://opa:8181    # already set in the reference deployment
    ```
@@ -234,7 +238,7 @@ not classic ones.
    offers no way to do every environment at once.
 6. **Watch, then enforce.** Leave it in `monitor` while you look at what AgentGov would
    block (Platforms > Microsoft connections, and the ledger's `decision.copilot_studio`
-   entries). Then set `AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION=enforce`.
+   entries). Then set the feature to enforce.
 
 AgentGov accepts a call only with a token that Microsoft Entra ID signed for this tenant,
 for AgentGov's API, and for one of the apps in `AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS`.

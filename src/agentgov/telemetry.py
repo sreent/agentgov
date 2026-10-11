@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from agentgov import ledger
 from agentgov.models import ACTIVE
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import discovery, findings, instructions
+from agentgov.registry import discovery, features, findings, instructions
 from agentgov.registry.errors import ValidationError
 
 GENAI_OPERATIONS = {
@@ -63,13 +63,13 @@ def _value(v: dict[str, Any]) -> Any:
     return None
 
 
-def _attrs(items: list[dict[str, Any]] | None) -> dict[str, Any]:
+def attrs_of(items: list[dict[str, Any]] | None) -> dict[str, Any]:
     return {a["key"]: _value(a.get("value") or {}) for a in items or [] if "key" in a}
 
 
 def iter_spans(payload: dict[str, Any]) -> Iterator[tuple[dict[str, Any], str, dict[str, Any]]]:
     for rs in payload.get("resourceSpans") or []:
-        resource = _attrs((rs.get("resource") or {}).get("attributes"))
+        resource = attrs_of((rs.get("resource") or {}).get("attributes"))
         for ss in rs.get("scopeSpans") or rs.get("instrumentationLibrarySpans") or []:
             scope = (ss.get("scope") or ss.get("instrumentationLibrary") or {}).get("name", "")
             for span in ss.get("spans") or []:
@@ -128,7 +128,7 @@ def system_instructions(attrs: dict[str, Any], span: dict[str, Any]) -> str | No
     value = attrs.get("gen_ai.system_instructions")
     if value is None:
         for event in span.get("events") or []:
-            value = _attrs(event.get("attributes")).get("gen_ai.system_instructions")
+            value = attrs_of(event.get("attributes")).get("gen_ai.system_instructions")
             if value is not None:
                 break
     return instruction_text(value) if value is not None else None
@@ -153,9 +153,10 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
     }
     seen_agents: set[str] = set()
     reported: dict[str, str] = {}
+    modes = features.modes(session)
     for resource, scope, span in iter_spans(payload):
         stats["spans"] += 1
-        attrs = _attrs(span.get("attributes"))
+        attrs = attrs_of(span.get("attributes"))
         op = attrs.get("gen_ai.operation.name") or (span.get("name") or "").split(" ", 1)[0]
         if op not in GENAI_OPERATIONS:
             continue
@@ -177,6 +178,7 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
             model=model,
             details={"service.name": service} if service else None,
             seen_at=when,
+            discover=modes["discovery"] != features.OFF,
         )
         if agent is None:
             continue
@@ -202,8 +204,10 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
             tool = attrs.get("gen_ai.tool.name") or "unknown"
             server = attrs.get("agentgov.server") or "local"
             discovery.record_activity(session, agent.id, when=when, tool_calls=1)
-            if agent.status == ACTIVE and not granted(
-                agents_svc.effective_grants(agent), server, tool
+            if (
+                modes["least-privilege"] != features.OFF
+                and agent.status == ACTIVE
+                and not granted(agents_svc.effective_grants(agent), server, tool)
             ):
                 stats["ungranted"] += 1
                 ledger.append(
@@ -244,11 +248,17 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
     return stats
 
 
-def decode_protobuf(body: bytes) -> dict[str, Any]:
-    """Decode an OTLP protobuf export (requires the otlp-protobuf extra)."""
+def decode_protobuf(body: bytes, signal: str = "traces") -> dict[str, Any]:
+    """Decode an OTLP protobuf export of traces or logs (requires the otlp-protobuf extra)."""
     from google.protobuf import json_format
-    from opentelemetry.proto.collector.trace.v1 import trace_service_pb2
 
-    request = trace_service_pb2.ExportTraceServiceRequest()
+    if signal == "logs":
+        from opentelemetry.proto.collector.logs.v1 import logs_service_pb2
+
+        request: Any = logs_service_pb2.ExportLogsServiceRequest()
+    else:
+        from opentelemetry.proto.collector.trace.v1 import trace_service_pb2
+
+        request = trace_service_pb2.ExportTraceServiceRequest()
     request.ParseFromString(body)
     return json_format.MessageToDict(request)

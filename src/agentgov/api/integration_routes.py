@@ -1,6 +1,7 @@
 """Endpoints used by the composed components rather than by people.
 
 * OPA        - bundle downloads (with long polling), decision logs, status.
+* Gateway    - agentgateway's configuration, where it can't share a file.
 * Processor  - approvals, decision records, tool catalog, unknown callers.
 * Telemetry  - OTLP/HTTP traces (JSON, or protobuf with the otlp-protobuf extra).
 """
@@ -16,8 +17,18 @@ import anyio.to_thread
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from agentgov.api.auth import Principal, require
+from agentgov.gateway import etag_of
 from agentgov.opa.bundle import BUNDLE_CONTENT_TYPE, parse_prefer_wait
-from agentgov.registry import agents, approvals, decisions, discovery, findings, toolservers
+from agentgov.registry import (
+    agents,
+    approvals,
+    decisions,
+    discovery,
+    features,
+    findings,
+    model_usage,
+    toolservers,
+)
 from agentgov.registry.errors import NotFound, ValidationError
 from agentgov.telemetry import decode_protobuf, ingest
 
@@ -61,6 +72,20 @@ async def opa_bundle(request: Request, _: Principal = Depends(service)) -> Respo
     return Response(
         content=bundle.body, media_type=BUNDLE_CONTENT_TYPE, headers={"ETag": bundle.etag}
     )
+
+
+# ------------------------------------------------------------------------ gateway
+
+
+@router.get("/v1/gateway/config", tags=["gateway"])
+async def gateway_config(request: Request, _: Principal = Depends(service)) -> Response:
+    """agentgateway's configuration, generated from the registry, for gateways that
+    don't share a volume with the control plane (see ``agentgov gateway-config``)."""
+    content = await asyncio.to_thread(_rt(request).gateway.render_current)
+    etag = etag_of(content)
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(content=content, media_type="application/yaml", headers={"ETag": etag})
 
 
 @router.post("/v1/opa/logs", tags=["opa"])
@@ -175,6 +200,7 @@ def internal_observe(
             client_id=body.get("client_id"),
             name=body.get("name"),
             details=body.get("details"),
+            discover=features.is_on(s, "discovery"),
         )
         return {"agent": agent.id if agent else None}
 
@@ -182,7 +208,7 @@ def internal_observe(
 # ---------------------------------------------------------------------- telemetry
 
 
-async def _otlp(request: Request) -> Response:
+async def _otlp(request: Request, signal: str = "traces") -> Response:
     rt = _rt(request)
     content_type = request.headers.get("content-type", "")
     raw = await request.body()
@@ -191,7 +217,7 @@ async def _otlp(request: Request) -> Response:
     protobuf = content_type.startswith("application/x-protobuf")
     if protobuf:
         try:
-            payload = decode_protobuf(raw)
+            payload = decode_protobuf(raw, signal)
         except ImportError as exc:
             raise HTTPException(
                 415, "OTLP protobuf needs the otlp-protobuf extra; use OTLP/HTTP JSON"
@@ -204,6 +230,8 @@ async def _otlp(request: Request) -> Response:
 
     def store() -> dict[str, Any]:
         with rt.db.session() as s:
+            if signal == "logs":
+                return model_usage.ingest_logs(s, payload)
             return ingest(s, payload, classify=rt.guardian is not None)
 
     await anyio.to_thread.run_sync(store)
@@ -215,3 +243,9 @@ async def _otlp(request: Request) -> Response:
 @router.post("/v1/otlp/v1/traces", tags=["telemetry"])
 async def otlp_traces(request: Request, _: Principal = Depends(service)) -> Response:
     return await _otlp(request)
+
+
+@router.post("/v1/otlp/v1/logs", tags=["telemetry"])
+async def otlp_logs(request: Request, _: Principal = Depends(service)) -> Response:
+    """agentgateway's access logs, through the OpenTelemetry Collector: model usage."""
+    return await _otlp(request, "logs")

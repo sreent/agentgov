@@ -2,7 +2,7 @@
 
 ```yaml
 apiVersion: agentgov/v1alpha1
-kind: Agent            # Blueprint | ToolServer | Policy | Agent
+kind: Agent            # Feature | Blueprint | ToolServer | ModelProvider | Policy | Agent
 metadata:
   name: support-bot
 spec:
@@ -14,9 +14,12 @@ spec:
     You help customers with their orders...
 ```
 
+A ``Feature`` sets how strictly one of AgentGov's features applies
+(docs/features.md): ``metadata.name`` is the feature, ``spec.mode`` its mode.
+
 Applying is idempotent: unchanged resources are reported as ``unchanged``.
-Resources are applied in dependency order (blueprints and tool servers
-before the agents and policies that reference them).
+Resources are applied in dependency order (features first, then blueprints and
+tool servers before the agents and policies that reference them).
 """
 
 from __future__ import annotations
@@ -28,11 +31,19 @@ from sqlalchemy.orm import Session
 
 from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
-from agentgov.registry import agents, blueprints, instructions, policies, toolservers
+from agentgov.registry import (
+    agents,
+    blueprints,
+    features,
+    instructions,
+    model_providers,
+    policies,
+    toolservers,
+)
 from agentgov.registry.errors import NotFound, ValidationError
 
 API_VERSION = "agentgov/v1alpha1"
-ORDER = ["Blueprint", "ToolServer", "Policy", "Agent"]
+ORDER = ["Feature", "Blueprint", "ToolServer", "ModelProvider", "Policy", "Agent"]
 
 
 def parse(text: str) -> list[dict[str, Any]]:
@@ -75,13 +86,25 @@ def apply(
         kind, spec = doc["kind"], _spec(doc)
         name = spec["name"]
         action = {
+            "Feature": _feature,
             "Blueprint": _blueprint,
             "ToolServer": _toolserver,
+            "ModelProvider": _model_provider,
             "Policy": _policy,
             "Agent": _agent,
         }[kind](session, settings, spec, actor)
         results.append({"kind": kind, "name": name, "action": action})
     return results
+
+
+def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    if set(spec) - {"name", "mode", "labels"}:
+        raise ValidationError(f"feature {spec['name']}: spec takes only mode")
+    try:
+        changed = features.set_mode(session, settings, spec["name"], spec.get("mode"), actor=actor)
+    except NotFound as exc:
+        raise ValidationError(str(exc)) from None
+    return "configured" if changed else "unchanged"
 
 
 def _blueprint(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
@@ -109,6 +132,24 @@ def _toolserver(session: Session, settings: Settings, spec: dict[str, Any], acto
             session, ts, "approve" if ts.status == PENDING else "unblock", actor=actor
         )
         action = "configured"
+    return action
+
+
+def _model_provider(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    desired = spec.pop("status", model_providers.APPROVED)
+    if desired not in (model_providers.APPROVED, BLOCKED):
+        raise ValidationError(f"model provider {spec['name']}: status must be approved or blocked")
+    try:
+        provider = model_providers.get(session, spec["name"])
+        changed = model_providers.update(session, provider, spec, actor=actor)
+        action = "configured" if changed else "unchanged"
+    except NotFound:
+        provider = model_providers.create(session, spec, actor=actor)
+        action = "created"
+    if provider.status != desired:
+        verb = "block" if desired == BLOCKED else "unblock"
+        model_providers.set_status(session, provider, verb, actor=actor)
+        action = "configured" if action == "unchanged" else action
     return action
 
 
@@ -167,15 +208,30 @@ def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: st
 
 
 def export(session: Session) -> list[dict[str, Any]]:
-    docs: list[dict[str, Any]] = []
+    # Features administrators chose; the deployment's pins belong to the deployment.
+    docs: list[dict[str, Any]] = [
+        _doc("Feature", key, {"mode": mode}) for key, mode in features.chosen(session).items()
+    ]
     for bp in blueprints.list_all(session):
         d = blueprints.to_dict(bp)
         docs.append(_doc("Blueprint", bp.name, {k: d[k] for k in blueprints.FIELDS}))
+    # How a server is used is written out only where it differs from the default: on the
+    # gateway, not listed for developers.
+    unless = {"gateway": True, "developers": False, "registry_name": None, "packages": []}
     for ts in toolservers.list_all(session):
         d = toolservers.to_dict(ts)
-        spec = {k: d[k] for k in toolservers.FIELDS}
+        spec = {k: d[k] for k in toolservers.FIELDS if k not in unless or d[k] != unless[k]}
+        if not d["url"]:
+            spec.pop("url")
         spec["status"] = ts.status
         docs.append(_doc("ToolServer", ts.name, spec))
+    for provider in model_providers.list_all(session):
+        d = model_providers.to_dict(provider)
+        spec = {k: d[k] for k in model_providers.FIELDS if d[k] not in (None, "", {}, [])}
+        if not provider.key_file:
+            spec.pop("key_file", None)  # the default path follows the name
+        spec["status"] = provider.status
+        docs.append(_doc("ModelProvider", provider.name, spec))
     for policy in policies.list_all(session):
         docs.append(
             _doc(

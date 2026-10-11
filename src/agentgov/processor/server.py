@@ -24,6 +24,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Iterable
 from typing import Any
 
 import grpc
@@ -38,6 +39,7 @@ from agentgov.processor.control_plane import (
     ControlPlaneError,
     DecisionRecorder,
 )
+from agentgov.processor.modes import FeatureModes
 from agentgov.processor.presidio import PresidioClient, PresidioError
 from agentgov.processor.proto import ext_mcp_pb2 as pb
 from agentgov.processor.proto import ext_mcp_pb2_grpc as pb_grpc
@@ -46,6 +48,15 @@ log = logging.getLogger(__name__)
 
 DENIED = pb.AuthorizationError.PERMISSION_DENIED
 _TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$")
+
+
+def trace_id_from(traceparents: Iterable[str]) -> str | None:
+    """The W3C trace ID in the first valid ``traceparent`` value."""
+    for value in traceparents:
+        match = _TRACEPARENT.match(value.strip().lower())
+        if match and match.group(1) != "0" * 32:
+            return match.group(1)
+    return None
 
 
 def trace_id_of(context: Any, headers: Any = ()) -> str | None:
@@ -60,11 +71,7 @@ def trace_id_of(context: Any, headers: Any = ()) -> str | None:
     if callable(metadata):
         values += [str(v) for k, v in metadata() or () if k == "traceparent"]
     values += [h.value.decode("latin-1") for h in headers if h.key.lower() == "traceparent"]
-    for value in values:
-        match = _TRACEPARENT.match(value.strip().lower())
-        if match and match.group(1) != "0" * 32:
-            return match.group(1)
-    return None
+    return trace_id_from(values)
 
 
 def _struct(message: Any) -> dict[str, Any]:
@@ -131,6 +138,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         self.cp = control_plane
         self.recorder = recorder
         self.presidio = presidio
+        self.features = FeatureModes(opa)
         self._background: set[asyncio.Task[Any]] = set()
 
     # ------------------------------------------------------------------ helpers
@@ -139,9 +147,13 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    async def _inspect(self, payload: Any, *, check_injection: bool) -> Inspection:
-        scan, strings = detectors.scan_local(payload, check_injection=check_injection)
-        if self.presidio is not None and strings:
+    async def _inspect(self, payload: Any, *, protect: bool, check_injection: bool) -> Inspection:
+        """Look for credentials and personal data (``protect``: data protection is on)
+        and, with ``check_injection``, for instructions aimed at the agent."""
+        scan, strings = detectors.scan_local(
+            payload, check_injection=check_injection, check_secrets=protect
+        )
+        if protect and self.presidio is not None and strings:
             try:
                 pii, skipped = await self.presidio.find_pii(strings)
                 scan.spans.extend(pii)
@@ -153,6 +165,14 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
 
     def _record(self, **fields: Any) -> None:
         self.recorder.record({"ts": ids.isoformat(ids.utcnow()), **fields})
+
+    def _fail_closed(self, modes: dict[str, str]) -> bool:
+        """Whether a call must stop when personal data can't be looked for: only while
+        data protection is enforced, and AGENTGOV_PRESIDIO_FAILURE_MODE says so."""
+        return (
+            modes["data-protection"] == "enforce"
+            and self.settings.presidio_failure_mode == "closed"
+        )
 
     @staticmethod
     def _identity(meta: dict[str, Any]) -> dict[str, Any]:
@@ -197,8 +217,12 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         if target is None:
             return _pass_request()
         identity = self._identity(meta)
-        inspection = await self._inspect(payload, check_injection=False)
+        modes = await self.features.current()
+        inspection = await self._inspect(
+            payload, protect=modes["data-protection"] != "off", check_injection=False
+        )
         resource = f"{server}/{target}"
+        monitored: list[str] = []  # what monitored controls would have done
 
         def finish(
             effect: str,
@@ -222,6 +246,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 redacted=redacted or [],
                 detections=inspection.summary,
                 approval_id=approval_id,
+                monitored=monitored,
                 opa_decision_id=decision_id,
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 trace_id=trace_id,
@@ -238,7 +263,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 )
             )
 
-        if inspection.scan.pii_error and self.settings.presidio_failure_mode == "closed":
+        if inspection.scan.pii_error and self._fail_closed(modes):
             reasons = ["Content inspection is unavailable, so the call was not forwarded"]
             finish("deny", reasons)
             return reject("deny", reasons)
@@ -262,8 +287,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         effect = decision.get("effect", "deny")
         reasons = list(decision.get("reasons") or [])
         agent = decision.get("agent")
+        monitored = list(decision.get("monitored") or [])
 
-        if agent is None and self.settings.unknown_agent_mode == "monitor":
+        if agent is None and modes["unknown-callers"] == "monitor":
             self._spawn(self._observe_unknown(identity, server, method))
             finish(
                 "allow", ["monitor mode: caller is not a registered agent"], decision_id=decision_id
@@ -365,7 +391,13 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
 
         started = time.perf_counter()
         target = (meta.get("request") or {}).get("agentgov_target") or "unknown"
-        inspection = await self._inspect(result, check_injection=True)
+        modes = await self.features.current()
+        inspection = await self._inspect(
+            result,
+            protect=modes["data-protection"] != "off",
+            check_injection=modes["prompt-injection"] != "off",
+        )
+        monitored: list[str] = []
 
         def finish(
             effect: str,
@@ -387,6 +419,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 reasons=reasons,
                 redacted=redacted or [],
                 detections=inspection.summary,
+                monitored=monitored,
                 opa_decision_id=decision_id,
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 trace_id=trace_id,
@@ -401,7 +434,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 )
             )
 
-        if inspection.scan.pii_error and self.settings.presidio_failure_mode == "closed":
+        if inspection.scan.pii_error and self._fail_closed(modes):
             reasons = ["Content inspection is unavailable, so the result was withheld"]
             finish("deny", reasons)
             return withhold(reasons)
@@ -422,7 +455,8 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             return withhold(reasons)
 
         agent = decision.get("agent")
-        if agent is None and self.settings.unknown_agent_mode == "monitor":
+        monitored = list(decision.get("monitored") or [])
+        if agent is None and modes["unknown-callers"] == "monitor":
             finish(
                 "allow", ["monitor mode: caller is not a registered agent"], decision_id=decision_id
             )
@@ -443,7 +477,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         self, server: str, identity: dict[str, Any], result: dict[str, Any]
     ) -> pb.McpResponseResult:
         tools = [t for t in result.get("tools") or [] if isinstance(t, dict)]
-        poisoned = detectors.scan_tool_definitions(tools)
+        modes = await self.features.current()
+        integrity = modes["tool-integrity"]
+        poisoned = detectors.scan_tool_definitions(tools) if integrity != "off" else {}
         self._spawn(self._report_catalog(server, tools, poisoned))
         opa_input = {
             "phase": "response",
@@ -458,9 +494,10 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         except OpaError as exc:
             log.error("policy evaluation failed for tools/list: %s", exc)
             view = {"agent": None, "visible": []}
-        if view.get("agent") is None and self.settings.unknown_agent_mode == "monitor":
+        if view.get("agent") is None and modes["unknown-callers"] == "monitor":
             self._spawn(self._observe_unknown(identity, server, "tools/list"))
-            visible = {t.get("name") for t in tools} - set(poisoned)
+            quarantined = set(poisoned) if integrity == "enforce" else set()
+            visible = {t.get("name") for t in tools} - quarantined
         else:
             visible = set(view.get("visible") or [])
         filtered = [t for t in tools if t.get("name") in visible]
@@ -507,19 +544,30 @@ async def serve(settings: Settings) -> None:
             ("grpc.max_send_message_length", 64 * 1024 * 1024),
         ]
     )
-    pb_grpc.add_ExtMcpServicer_to_server(
-        GovernanceProcessor(
-            settings, opa=opa, control_plane=control_plane, recorder=recorder, presidio=presidio
-        ),
-        server,
+    processor = GovernanceProcessor(
+        settings, opa=opa, control_plane=control_plane, recorder=recorder, presidio=presidio
     )
+    pb_grpc.add_ExtMcpServicer_to_server(processor, server)
     server.add_insecure_port(settings.processor_listen)
+    # Model calls: agentgateway's guardrail webhook, over HTTP.
+    from agentgov.processor import model_guard
+
+    webhook = model_guard.server(
+        model_guard.ModelGuard(processor), settings.processor_webhook_listen
+    )
     recorder.start()
     await server.start()
-    log.info("governance processor listening on %s", settings.processor_listen)
+    webhook_task = asyncio.create_task(webhook.serve())
+    log.info(
+        "governance processor listening on %s (tool calls) and %s (model calls)",
+        settings.processor_listen,
+        settings.processor_webhook_listen,
+    )
     try:
         await server.wait_for_termination()
     finally:
+        webhook.should_exit = True
+        await webhook_task
         await server.stop(grace=5)
         await recorder.stop()
         await http.aclose()

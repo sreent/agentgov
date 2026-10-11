@@ -21,7 +21,15 @@ from agentgov.models import (
     Agent,
     AgentInstructions,
 )
-from agentgov.registry import approvals, blueprints, findings, risk, validation
+from agentgov.registry import (
+    approvals,
+    blueprints,
+    features,
+    findings,
+    model_providers,
+    risk,
+    validation,
+)
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 
 # action -> (allowed source states, target state)
@@ -46,6 +54,8 @@ EDITABLE = (
     "environment",
     "risk_tier",
     "permissions",
+    "model_access",
+    "daily_token_budget",
     "agent_card",
     "external_ids",
     "blueprint",
@@ -118,6 +128,10 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
             value = validation.labels(value)
         elif key == "permissions":
             value = validation.permissions(value)
+        elif key == "model_access":
+            value = validation.model_access(value)
+        elif key == "daily_token_budget":
+            value = validation.token_budget(value)
         elif key == "risk_tier":
             value = validation.risk_tier(value)
         elif key in ("agent_card", "external_ids"):
@@ -158,6 +172,7 @@ def register(
         labels={},
         models=[],
         permissions=[],
+        model_access=[],
         external_ids={},
     )
     _apply(session, agent, data)
@@ -313,24 +328,39 @@ def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.Ris
     # Auto-block is a gateway kill switch: it can't stop an agent on another platform.
     threshold = settings.auto_block_risk_score
     if threshold and result.score >= threshold and agent.status == ACTIVE and not agent.on_platform:
-        transition(
-            session,
-            settings,
-            agent,
-            "block",
-            actor="system:risk",
-            reason=f"auto-blocked: risk score {result.score} >= {threshold}",
-        )
-        findings.raise_finding(
-            session,
-            type="agent.auto_blocked",
-            severity="critical",
-            subject=agent.id,
-            agent_id=agent.id,
-            category=findings.THREAT,
-            title=f"Agent {agent.name} was blocked automatically (risk {result.score})",
-            remediation="Review the agent's activity, then unblock it or delete it.",
-        )
+        mode = features.mode(session, "risk-based-access")
+        if mode == features.ENFORCE:
+            transition(
+                session,
+                settings,
+                agent,
+                "block",
+                actor="system:risk",
+                reason=f"auto-blocked: risk score {result.score} >= {threshold}",
+            )
+            findings.raise_finding(
+                session,
+                type="agent.auto_blocked",
+                severity="critical",
+                subject=agent.id,
+                agent_id=agent.id,
+                category=findings.THREAT,
+                title=f"Agent {agent.name} was blocked automatically (risk {result.score})",
+                remediation="Review the agent's activity, then unblock it or delete it.",
+            )
+        elif mode == features.MONITOR:
+            findings.raise_finding(
+                session,
+                type="agent.would_auto_block",
+                severity="high",
+                subject=agent.id,
+                agent_id=agent.id,
+                category=findings.THREAT,
+                title=f"Agent {agent.name} would have been blocked automatically "
+                f"(risk {result.score})",
+                description="Risk-based access is in monitor mode, so the agent was not blocked.",
+                remediation="Review the agent's activity, and block it if it isn't expected.",
+            )
     return result
 
 
@@ -357,6 +387,10 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         },
         "permissions": agent.permissions or [],
         "effective_permissions": effective_grants(agent),
+        "model_access": agent.model_access or [],
+        "effective_model_access": model_providers.effective_model_access(agent),
+        "daily_token_budget": agent.daily_token_budget,
+        "effective_daily_token_budget": model_providers.effective_budget(agent),
         "agent_card": agent.agent_card,
         "external_ids": agent.external_ids or {},
         "source": agent.source,

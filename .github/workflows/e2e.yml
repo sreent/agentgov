@@ -1,7 +1,9 @@
 # Brings up the full reference stack (Keycloak, OPA, agentgateway, Presidio,
 # OTel Collector, control plane, processor, demo MCP server) and drives every
-# governance control with a real MCP client: scripts/ci.sh --e2e-only. Runs on
-# main, on pull requests that change code or the deployment, and on demand.
+# governance control with a real MCP client: with Docker Compose and from the Helm
+# chart's pods on Docker (scripts/ci.sh --e2e-only, as run locally), and from the
+# chart on a kind cluster (scripts/ci.sh --kind-only). Runs on main, on pull
+# requests that change code or the deployment, and on demand.
 name: e2e
 
 on:
@@ -27,7 +29,7 @@ concurrency:
 
 jobs:
   compose:
-    name: Stack, demo and ledger
+    name: Compose stack and chart pods, demo and ledger
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -38,3 +40,16 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: scripts/ci.sh --e2e-only
+
+  kubernetes:
+    name: Helm chart on kind, demo and ledger
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: scripts/ci.sh --kind-only

@@ -1,0 +1,22 @@
+apiVersion: v2
+name: agentgov
+description: >-
+  Open-source governance for AI agents: a registry, an identity per agent, policy on
+  every tool call, data protection, approvals, a kill switch and an evidence ledger,
+  composed from Keycloak, Open Policy Agent, agentgateway, Presidio and OpenTelemetry.
+type: application
+# The chart's version; appVersion is the AgentGov version (and image tag) it installs.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/sreent/ai-agent-governance-platform
+sources:
+  - https://github.com/sreent/ai-agent-governance-platform
+keywords:
+  - ai-agents
+  - governance
+  - mcp
+  - opa
+  - keycloak
+  - agentgateway
+license: Apache-2.0

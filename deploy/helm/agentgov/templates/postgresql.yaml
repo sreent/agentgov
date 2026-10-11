@@ -1,0 +1,107 @@
+{{- if .Values.postgresql.enabled }}
+{{- $name := include "agentgov.name" (list . "postgresql") }}
+{{- $v := .Values.postgresql }}
+# A single PostgreSQL for evaluation: the registry and ledger, and the bundled
+# Keycloak's data. Use a managed or replicated PostgreSQL in production.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-init
+  labels:
+    {{- include "agentgov.labels" (list . "postgresql") | nindent 4 }}
+data:
+  init.sql: |
+    -- The image creates the "agentgov" database (POSTGRES_USER); Keycloak gets its own.
+    CREATE DATABASE keycloak OWNER agentgov;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agentgov.labels" (list . "postgresql") | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "agentgov.selector" (list . "postgresql") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agentgov.labels" (list . "postgresql") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agentgov.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "agentgov.podSecurity" . | nindent 8 }}
+        # The postgres user of the Alpine image.
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      containers:
+        - name: postgresql
+          image: "{{ $v.image.repository }}:{{ $v.image.tag }}"
+          imagePullPolicy: {{ $v.image.pullPolicy }}
+          env:
+            - {name: POSTGRES_USER, value: agentgov}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ include "agentgov.secretName" . }}, key: postgres-password}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "agentgov", "-d", "agentgov"]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "agentgov", "-d", "agentgov"]
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            {{- include "agentgov.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true}
+            - {name: run, mountPath: /var/run/postgresql}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: init
+          configMap:
+            name: {{ $name }}-init
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- include "agentgov.scheduling" $v | nindent 6 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $v.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $v.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agentgov.labels" (list . "postgresql") | nindent 4 }}
+spec:
+  selector:
+    {{- include "agentgov.selector" (list . "postgresql") | nindent 4 }}
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+{{- end }}

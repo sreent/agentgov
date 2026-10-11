@@ -1,0 +1,226 @@
+# AgentGov on Kubernetes. The defaults install a complete stack, PostgreSQL and
+# Keycloak included, to evaluate it. For production, bring your own PostgreSQL and
+# Keycloak (postgresql.enabled=false, keycloak.enabled=false), put TLS in front
+# (ingress) and turn on the network policies. See README.md.
+
+image:
+  # The AgentGov image: the control plane, the governance processor and the gateway's
+  # configuration sidecar.
+  repository: ghcr.io/sreent/agentgov
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Addresses people, agents and outside services use. They end up in sign-in
+# redirects, token issuers and what the API reports, so set them to what users
+# actually type (https:// with TLS).
+urls:
+  # The control plane: admin UI, API, single sign-on callback (AGENTGOV_PUBLIC_URL).
+  controlPlane: http://localhost:8000
+  # The MCP gateway agents connect to.
+  gateway: http://localhost:8080
+  # The bundled Keycloak, as browsers and agents reach it. Tokens name it as issuer.
+  keycloak: http://localhost:8180
+
+# Features the deployment pins (docs/features.md), for example
+#   features: {least-privilege: monitor, discovery: "off"}
+# Administrators see them in the app but can't change them there; they choose the
+# modes of the other features themselves.
+features: {}
+
+# Model providers' API keys (docs/models.md). The gateway reads each from
+# /model-keys/<provider>, so the keys never enter AgentGov. Name a Secret you manage,
+# whose keys are provider names, or, to evaluate, give the keys here and the chart
+# creates the Secret: keys: {openai: sk-...}.
+modelKeys:
+  existingSecret: ""
+  keys: {}
+
+secrets:
+  # A Secret you manage, with the keys admin-token, service-token,
+  # keycloak-client-secret, oidc-client-secret, demo-password,
+  # keycloak-admin-password and postgres-password (the last two only with the
+  # bundled Keycloak and PostgreSQL). Without one, the chart creates the Secret with
+  # random values and keeps them across upgrades.
+  existingSecret: ""
+
+controlPlane:
+  # Keep one: signed-in admins' Microsoft sign-ins and change notifications live in
+  # its memory (docs/architecture.md, "Scaling notes").
+  replicas: 1
+  # Apply database migrations when it starts. Several replicas starting together
+  # migrate one at a time.
+  autoMigrate: true
+  # More settings, as AGENTGOV_* environment variables (see src/agentgov/config.py),
+  # for example AGENTGOV_AUTO_BLOCK_RISK_SCORE or AGENTGOV_M365_TENANT_ID.
+  env: {}
+  # Secrets or ConfigMaps to read settings from, for example one holding
+  # AGENTGOV_M365_CLIENT_SECRET: [{secretRef: {name: agentgov-microsoft}}].
+  envFrom: []
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  service:
+    type: ClusterIP
+    port: 8000
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    # Defaults to the host of urls.controlPlane.
+    host: ""
+    tls: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+processor:
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+gateway:
+  image:
+    repository: ghcr.io/agentgateway/agentgateway
+    tag: v1.6.0
+    pullPolicy: IfNotPresent
+  replicas: 1
+  # Seconds between checks for configuration changes (new or changed tool servers).
+  configInterval: 5
+  resources:
+    requests: {cpu: 100m, memory: 64Mi}
+    limits: {memory: 512Mi}
+  service:
+    type: ClusterIP
+    port: 8080
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    # Defaults to the host of urls.gateway.
+    host: ""
+    tls: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+opa:
+  image:
+    repository: openpolicyagent/opa
+    tag: 1.21.1-static
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 512Mi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+presidio:
+  # Personal-data detection. Without it, the processor checks for secrets, prompt
+  # injection and poisoned tools, but not personal data.
+  enabled: true
+  image:
+    repository: ghcr.io/data-privacy-stack/presidio-analyzer
+    tag: "2.2.364@sha256:ae8f6f111ac2f04e3fec552f7f80edd0dcbfa2dd69ee1b9e030475be31669885"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 512Mi}
+    limits: {memory: 2Gi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+otelCollector:
+  # Receives agents' and the gateway's traces (OTLP :4317 gRPC, :4318 HTTP) for
+  # discovery and activity.
+  enabled: true
+  image:
+    repository: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib
+    tag: 0.162.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 512Mi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+postgresql:
+  # A single PostgreSQL for AgentGov (and the bundled Keycloak), for evaluation.
+  enabled: true
+  image:
+    repository: postgres
+    tag: 17-alpine
+    pullPolicy: IfNotPresent
+  persistence:
+    size: 8Gi
+    # Empty uses the cluster's default StorageClass.
+    storageClass: ""
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Your own PostgreSQL, with postgresql.enabled=false: a Secret holding the URL,
+# postgresql+psycopg://USER:PASSWORD@HOST:5432/DATABASE.
+externalDatabase:
+  existingSecret: ""
+  key: database-url
+
+keycloak:
+  # Keycloak in development mode, with AgentGov's realm imported on first start,
+  # for evaluation. It stores its data in the bundled PostgreSQL.
+  enabled: true
+  image:
+    repository: quay.io/keycloak/keycloak
+    tag: 26.8.0
+    pullPolicy: IfNotPresent
+  # Import the demo users admin, alice and audrey (password: demo-password in the
+  # Secret). Turn off before anyone else can reach Keycloak.
+  demoUsers: true
+  resources:
+    requests: {cpu: 200m, memory: 512Mi}
+    limits: {memory: 1536Mi}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    # Defaults to the host of urls.keycloak.
+    host: ""
+    tls: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Your own Keycloak, with keycloak.enabled=false. Import files/agentgov-realm.json
+# into it first (or create the agentgov-control-plane and agentgov-admin clients by
+# hand) and put both clients' secrets in the Secret.
+externalKeycloak:
+  # Where the control plane and the gateway reach Keycloak, for example
+  # https://keycloak.example.com.
+  url: ""
+  realm: agentgov
+  # The issuer in its tokens; defaults to url + /realms/ + realm.
+  issuer: ""
+
+networkPolicy:
+  # Allow only the traffic AgentGov needs between its parts (your CNI must enforce
+  # NetworkPolicy). The control plane, gateway and collector stay reachable from
+  # anywhere; OPA, the processor, Presidio and the databases only from AgentGov.
+  enabled: false
+
+serviceAccount:
+  # One service account for AgentGov's pods; none of them calls the Kubernetes API.
+  create: true
+  name: ""
+  annotations: {}

@@ -38,11 +38,11 @@ pipelines, use an API key instead.
 
 | Role | Can |
 |---|---|
-| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, policies, credentials, API keys, platform syncs and the connector allowlist |
+| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, model providers, policies, credentials, API keys, platform syncs, the connector allowlist and which [features](features.md) are used |
 | `approver` | Read everything; decide approval requests; resolve, dismiss and reopen findings; attest the agents it sponsors |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
-| `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers); it cannot read the registry |
-| `service` | The internal endpoints used by OPA, the governance processor and the OpenTelemetry Collector |
+| `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), and report the MCP servers set up on developers' machines; it cannot read the registry |
+| `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector |
 
 People who sign in with single sign-on get their roles from the identity provider (see the
 [deployment guide](../deploy/compose/README.md#signing-in)) each time they sign in. To take
@@ -67,8 +67,17 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Register, edit, delete tool servers | Tool servers → **Register tool server**, **Edit**, **Delete** | `agentgov toolservers create\|update\|delete` | `POST /v1/toolservers`, `PATCH`/`DELETE /v1/toolservers/{name}` |
 | Approve, block, unblock a tool server | Tool servers → **Approve**, **Block server**, **Unblock** | `agentgov toolservers approve\|block\|unblock NAME` | `POST /v1/toolservers/{name}/{action}` |
 | Accept a changed tool definition | Tool catalog → **Approve new definition** | `agentgov toolservers approve-tool NAME TOOL` | `POST /v1/toolservers/{name}/tools/{tool}/approve` |
+| List a tool server for developers, or register one only for developers ([developer tools](developer-tools.md)) | Tool servers → **Edit** / **Register tool server** → *Who uses it* | `agentgov toolservers update crm --developers`, `agentgov toolservers create NAME --no-gateway --developers --package npm:PKG@VERSION` | `developers`, `gateway`, `packages` in `POST`/`PATCH /v1/toolservers` |
+| See the MCP registry and its address for GitHub Copilot | Developer tools | `agentgov mcp registry` | `GET /v1/mcp/registry`; the registry itself at `/registry/v0.1/servers` |
+| Get the managed-settings.json allowlist | Developer tools → **managed-settings.json** | `agentgov mcp managed-settings -o managed-settings.json` | `GET /v1/mcp/managed-settings` |
+| Report the MCP servers on a machine | — | `agentgov mcp scan --report` | `POST /v1/mcp/sightings` |
+| See the MCP servers developers set up | Developer tools → *Set up on developers' machines* | `agentgov mcp sightings` | `GET /v1/mcp/sightings` |
+| Approve, edit, delete model providers ([model calls](models.md)) | Models → **Add provider**, **Edit**, **Delete** | `agentgov models create\|update\|delete` | `POST /v1/models/providers`, `PATCH`/`DELETE /v1/models/providers/{ref}` |
+| Block or unblock a model provider | Models → **Block**, **Unblock** | `agentgov models block\|unblock NAME` | `POST /v1/models/providers/{ref}/block\|unblock` |
+| Give a blueprint or an agent models, and a daily token budget | Blueprint or agent → **Edit** → Models | `agentgov blueprints update B --model-access 'openai:gpt-4.1*' --token-budget N` (agents: the same options) | `model_access`, `daily_token_budget` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |
+| See model usage, cost and budgets, and who is spending | Models; an agent's page → Models | `agentgov models usage [--agent A] [--days N] [--by owner\|sponsor]` | `GET /v1/models/usage` |
 | Add, edit, enable, disable, delete policies | Policies → **Add policy**, **Edit**, **Disable**/**Enable**, **Delete** | `agentgov policies create\|update\|enable\|disable\|delete` | `POST /v1/policies`, `PUT`/`DELETE /v1/policies/{name}` |
-| Ask what policy would decide | Policies → **What if** | `agentgov policies evaluate --server crm --tool delete_customer --agent support-bot` | `POST /v1/policies/evaluate` |
+| Ask what policy would decide, for a tool call or a model call | Policies → **What if** | `agentgov policies evaluate --server crm --tool delete_customer --agent support-bot`, or `--provider openai --model gpt-4.1` | `POST /v1/policies/evaluate` |
 | Apply manifests | Policies → **Import manifests** | `agentgov apply -f DIR` | `POST /v1/apply` |
 | Export manifests | Policies → **Export manifests** | `agentgov export` | `GET /v1/export` |
 | Decide an approval request | Approvals → **Approve** / **Deny** | `agentgov approvals approve\|deny ID` | `POST /v1/approvals/{id}/approve\|deny` |
@@ -91,10 +100,18 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | See an agent's instructions and the problems in them | Agent → Instructions | `agentgov agents instructions REF` | `GET /v1/agents/{ref}/instructions` |
 | Set, forget or rescan an agent's instructions | Agent → Instructions → **Add instructions** / **Edit**, **Forget**, **Rescan** | `agentgov agents set-instructions\|clear-instructions\|rescan-instructions REF` | `PUT`/`DELETE /v1/agents/{ref}/instructions`, `POST …/rescan` |
 | Check instructions before deploying an agent | — | `agentgov instructions check FILE` | `POST /v1/instructions/check` |
+| Choose which features are used, and how strictly ([features](features.md)) | Features | `agentgov features list`, `agentgov features set FEATURE MODE` | `GET /v1/features`, `PUT /v1/features/{feature}` |
+| See what monitored controls would have stopped | Ledger → decision **Monitored** | `agentgov ledger tail` | `GET /v1/ledger?decision=monitored` |
+
+Two commands run where the control plane runs, against its database
+(`AGENTGOV_DATABASE_URL`) rather than its API: `agentgov db status` shows the schema's
+revision and the migrations pending, and `agentgov db upgrade` applies them (`--sql`
+prints them instead). The control plane also applies them when it starts, unless
+`AGENTGOV_DATABASE_AUTO_MIGRATE` is `false` ([upgrading](../deploy/compose/README.md#upgrading)).
 
 Every CLI command has `--help`. Commands that cannot be undone (`purge`, `delete` of
-blueprints, tool servers and policies, `apikeys revoke`) ask for confirmation unless you
-pass `--yes`.
+blueprints, tool servers, model providers and policies, `apikeys revoke`), and `features set` when it
+weakens a feature, ask for confirmation unless you pass `--yes`.
 
 ## Registry as code
 

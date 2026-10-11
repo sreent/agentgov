@@ -11,7 +11,7 @@ from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.identity.delegation import GRAPH, POWER_PLATFORM, DelegationError
 from agentgov.platforms import connections, threat_detection
 from agentgov.platforms.microsoft import PlatformError
-from agentgov.registry import agents, connector_policy, platforms
+from agentgov.registry import agents, connector_policy, features, platforms
 
 router = APIRouter(prefix="/v1/platforms", tags=["platforms"])
 agent_router = APIRouter(prefix="/v1/agents", tags=["platforms"])
@@ -45,7 +45,7 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
     rt = request.app.state.rt
     with rt.db.session() as s:
         view = platforms.overview(s, m365_configured=rt.m365 is not None)
-        detection = threat_detection.summary(s, rt.settings.copilot_studio_threat_detection)
+        detection = threat_detection.summary(s, features.mode(s, threat_detection.FEATURE))
         links = connections.state(s, rt.settings, threat_detection=detection)
     return {
         **view,
@@ -69,6 +69,8 @@ def _app_sync(rt: Any, key: str, actor: str) -> dict[str, Any]:
         outcome = rt.sync_microsoft([key], actor=actor)[key]
     except PlatformError as exc:
         raise HTTPException(502, str(exc)) from exc
+    if outcome.get("off"):
+        raise HTTPException(409, f"{key} is turned off: turn it on in Features first")
     if "lacks_permission" in outcome:
         raise HTTPException(
             409,

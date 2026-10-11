@@ -85,7 +85,7 @@ def opa(tmp_path: Path) -> RealOpa:
 
 def threat_settings(settings: Settings, **overrides: Any) -> Settings:
     values = {
-        "copilot_studio_threat_detection": "enforce",
+        "features": "copilot-studio-threat-detection=enforce",
         "copilot_studio_caller_app_ids": CALLER,
         "copilot_studio_tenant_id": TENANT,
         "opa_url": OPA,
@@ -289,7 +289,7 @@ class TestDecisions:
 
     def test_monitor_mode_never_blocks(self, settings, keys, opa) -> None:
         with make_client(
-            threat_settings(settings, copilot_studio_threat_detection="monitor"), keys, opa
+            threat_settings(settings, features="copilot-studio-threat-detection=monitor"), keys, opa
         ) as client:
             client.post(
                 "/v1/platforms/copilot-studio/import",
@@ -301,6 +301,7 @@ class TestDecisions:
             [entry] = decisions(client)
             assert entry["decision"] == "allow"
             assert entry["details"]["would_block"] is True and entry["details"]["policy"] == "deny"
+            assert entry["reason"] == "monitored: Agent sales-helper is blocked in AgentGov"
             view = client.get("/v1/platforms", headers=ADMIN).json()
             assert view["threat_detection"]["would_block"] == 1
 
@@ -327,7 +328,7 @@ class TestSettings:
             ({"copilot_studio_caller_app_ids": ""}, "CALLER_APP_IDS"),
             ({"copilot_studio_tenant_id": "contoso.onmicrosoft.com"}, "a GUID"),
             ({"opa_url": None}, "AGENTGOV_OPA_URL"),
-            ({"copilot_studio_threat_detection": "maybe"}, "THREAT_DETECTION"),
+            ({"features": "copilot-studio-threat-detection=maybe"}, "takes off, monitor"),
         ],
     )
     def test_misconfiguration_fails_at_start(self, settings, overrides, message) -> None:

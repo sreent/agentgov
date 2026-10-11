@@ -42,13 +42,18 @@ and rebuild the image with `docker compose up -d --build control-plane processor
 request. Run it before you open one:
 
 ```bash
-scripts/ci.sh             # ruff, opa fmt/check/test, pytest, image build and smoke test
-scripts/ci.sh --e2e       # also: the Compose stack, the demo agent and ledger verification
+scripts/ci.sh             # ruff, opa fmt/check/test, pytest, the Helm chart, the image
+scripts/ci.sh --e2e       # also: the demo and ledger verification against the Compose
+                          # stack and against the Helm chart's pods run with Docker
+scripts/ci.sh --kind      # also: the Helm chart on a kind cluster, with the same demo
 scripts/ci.sh --matrix    # also: the tests on each Python 3.11-3.13 installed
 ```
 
-Run `--e2e` when you change the processor, the Rego library, the gateway configuration or
-the identity reconciler. It uses its own Compose project and the stack's usual ports, so
+Run `--e2e` when you change the processor, the Rego library, the gateway configuration,
+the identity reconciler or the Helm chart. Its chart check runs the chart's pods with
+Docker (`scripts/chart-on-docker.py`), so it works wherever Docker does, including Claude
+Code's cloud sessions. `--kind` installs the chart on a real cluster; kind needs a Docker
+host with cgroup v2, and the `e2e` workflow runs it on GitHub. It uses its own Compose project and the stack's usual ports, so
 stop a running local stack first. On GitHub, the `ci` workflow runs the checks on Python
 3.11, 3.12 and 3.13, and the `e2e` workflow runs the end-to-end check for pull requests
 that change code or the deployment.
@@ -58,6 +63,7 @@ that change code or the deployment.
 | Path | What |
 |---|---|
 | `src/agentgov/registry` | Registry and lifecycle: agents, blueprints, tool servers, approvals, findings, risk, discovery |
+| `src/agentgov/models.py`, `src/agentgov/migrations` | The database schema and its migrations (Alembic) |
 | `src/agentgov/policies` | The Rego library and its tests |
 | `src/agentgov/opa` | Bundle building and serving, Rego validation |
 | `src/agentgov/identity` | Keycloak reconciler |
@@ -65,9 +71,36 @@ that change code or the deployment.
 | `src/agentgov/processor` | ExtMcp governance processor and detectors |
 | `src/agentgov/api` | HTTP API |
 | `src/agentgov/ui` | Admin UI (static files, no build step) |
+| `deploy/compose`, `deploy/helm` | The Compose stack and the Helm chart (keep the chart's realm file in step with Compose's: CI compares them) |
 
 If you change the ExtMcp protocol definition, regenerate the stubs with
 `scripts/gen-protos.sh`.
+
+## Adding a feature
+
+Organisations choose which features they use ([features](docs/features.md)), so a new
+capability is a feature they can turn off. Add it to the catalog in
+`src/agentgov/registry/features.py`, with its modes and what each does, and describe it in
+`docs/features.md` (a test checks both). Then check its mode where it acts: in Rego with
+`ctx.enforced(...)`, in the processor with the modes it reads from OPA, and in the control
+plane with `features.mode(session, ...)`. A control that decides about calls should
+support monitor mode: decide, record what it would have done, and let the call through.
+
+## Changing the database schema
+
+Every change to `src/agentgov/models.py` needs a migration in
+`src/agentgov/migrations/versions`, and a test fails until it has one. Write it with:
+
+```bash
+scripts/new-migration.sh "Add model grants to blueprints"
+```
+
+Alembic compares a database built by the existing migrations with the models and writes
+the difference as the next numbered revision. Read it before you commit: Alembic can't
+tell a renamed column from a dropped and an added one, and moving data between columns is
+yours to write. Keep each migration working on both PostgreSQL and SQLite (the helper
+writes SQLite-compatible batch operations), and give new columns on existing tables a
+`server_default` or make them nullable, because tables already have rows.
 
 ## Pull requests
 

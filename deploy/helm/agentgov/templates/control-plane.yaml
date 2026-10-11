@@ -1,0 +1,136 @@
+{{- $name := include "agentgov.name" (list . "control-plane") }}
+{{- $secret := include "agentgov.secretName" . }}
+{{- $keycloak := include "agentgov.keycloakUrl" . }}
+{{- $realm := include "agentgov.realm" . }}
+{{- $v := .Values.controlPlane }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agentgov.labels" (list . "control-plane") | nindent 4 }}
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "agentgov.selector" (list . "control-plane") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agentgov.labels" (list . "control-plane") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agentgov.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "agentgov.podSecurity" . | nindent 8 }}
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: control-plane
+          image: {{ include "agentgov.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["server", "--port", "8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            {{- include "agentgov.commonEnv" . | nindent 12 }}
+            - name: AGENTGOV_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: admin-token}
+            {{- if .Values.postgresql.enabled }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: postgres-password}
+            - name: AGENTGOV_DATABASE_URL
+              value: "postgresql+psycopg://agentgov:$(POSTGRES_PASSWORD)@{{ include "agentgov.name" (list . "postgresql") }}:5432/agentgov"
+            {{- else }}
+            - name: AGENTGOV_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "postgresql.enabled=false needs externalDatabase.existingSecret" .Values.externalDatabase.existingSecret }}
+                  key: {{ .Values.externalDatabase.key }}
+            {{- end }}
+            - name: AGENTGOV_DATABASE_AUTO_MIGRATE
+              value: {{ $v.autoMigrate | quote }}
+            {{- with .Values.features }}
+            - name: AGENTGOV_FEATURES
+              value: {{ include "agentgov.features" $ | quote }}
+            {{- end }}
+            - name: AGENTGOV_PUBLIC_URL
+              value: {{ .Values.urls.controlPlane | trimSuffix "/" | quote }}
+            - name: AGENTGOV_GATEWAY_PUBLIC_URL
+              value: {{ .Values.urls.gateway | trimSuffix "/" | quote }}
+            - name: AGENTGOV_KEYCLOAK_URL
+              value: {{ $keycloak | quote }}
+            - name: AGENTGOV_KEYCLOAK_REALM
+              value: {{ $realm | quote }}
+            - name: AGENTGOV_KEYCLOAK_ISSUER
+              value: {{ include "agentgov.keycloakIssuer" . | quote }}
+            - name: AGENTGOV_KEYCLOAK_JWKS_URL
+              value: "{{ $keycloak }}/realms/{{ $realm }}/protocol/openid-connect/certs"
+            - name: AGENTGOV_KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: keycloak-client-secret}
+            # Administrators sign in through the same Keycloak (agentgov-admin client).
+            - name: AGENTGOV_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: oidc-client-secret}
+            - name: AGENTGOV_PROCESSOR_ADDRESS
+              value: "{{ include "agentgov.name" (list . "processor") }}:50051"
+            - name: AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS
+              value: "{{ include "agentgov.name" (list . "processor") }}:8091"
+            {{- if .Values.otelCollector.enabled }}
+            - name: AGENTGOV_GATEWAY_OTLP_ENDPOINT
+              value: "http://{{ include "agentgov.name" (list . "otel-collector") }}:4317"
+            {{- end }}
+            {{- range $key, $value := $v.env }}
+            - name: {{ $key }}
+              value: {{ $value | toString | quote }}
+            {{- end }}
+          {{- with $v.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          startupProbe:
+            # Migrating the database and waiting for it can take a while on first start.
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            {{- include "agentgov.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- include "agentgov.scheduling" $v | nindent 6 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agentgov.labels" (list . "control-plane") | nindent 4 }}
+spec:
+  type: {{ $v.service.type }}
+  selector:
+    {{- include "agentgov.selector" (list . "control-plane") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $v.service.port }}
+      targetPort: http

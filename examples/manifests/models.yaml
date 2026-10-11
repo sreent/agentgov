@@ -1,0 +1,20 @@
+# Model providers agents call through the gateway, at
+# http://<gateway>/llm/<name>/v1/chat/completions, with their own AgentGov token.
+# The gateway adds the provider's API key, which it reads from /model-keys/<name>
+# (deploy/compose/model-keys, or the chart's modelKeys): no agent holds it.
+apiVersion: agentgov/v1alpha1
+kind: ModelProvider
+metadata:
+  name: demo
+spec:
+  kind: openai-compatible
+  base_url: http://demo-model:9100/v1
+  description: OpenAI-compatible stand-in model (demo server in examples/models/mock).
+  # Not verified: personal data in prompts is masked before it reaches the provider.
+  trust_level: unverified
+  # USD per million tokens, for the cost of each agent's usage.
+  prices:
+    mock-small: {input: 0.15, output: 0.60}
+    mock-large: {input: 2.50, output: 10.00}
+  labels:
+    hosting: self-hosted

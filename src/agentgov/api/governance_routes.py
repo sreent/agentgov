@@ -120,7 +120,10 @@ def finding_action(
 
 @router.post("/posture/scan", tags=["findings"])
 def posture_scan(request: Request, _: Principal = Depends(admin)) -> dict[str, Any]:
-    return _rt(request).run_posture_scan()
+    result = _rt(request).run_posture_scan()
+    if result is None:
+        raise HTTPException(409, "posture checks are off: turn them on in Features first")
+    return result
 
 
 # ----------------------------------------------------------------------- ledger
@@ -142,7 +145,10 @@ def list_ledger(
             stmt = stmt.where(LedgerEntry.type.like(type.replace("*", "%")))
         if agent:
             stmt = stmt.where(LedgerEntry.agent_id == agents.get(s, agent).id)
-        if decision:
+        if decision == "monitored":
+            # Calls that went through because a control was in monitor mode.
+            stmt = stmt.where(LedgerEntry.reason.like("monitored:%"))
+        elif decision:
             stmt = stmt.where(LedgerEntry.decision == decision)
         if before_seq:
             stmt = stmt.where(LedgerEntry.seq < before_seq)
@@ -280,7 +286,7 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
-        servers = s.scalars(select(ToolServer)).all()
+        servers = s.scalars(select(ToolServer).where(ToolServer.gateway.is_(True))).all()
         for ts in servers:
             nodes[f"server:{ts.name}"] = {
                 "id": f"server:{ts.name}",

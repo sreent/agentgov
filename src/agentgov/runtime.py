@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from agentgov import ids, ledger
+from agentgov import ids, ledger, migrations
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.gateway import GatewayConfigWriter
@@ -29,7 +29,14 @@ from agentgov.platforms.microsoft import (
 )
 from agentgov.platforms.threat_detection import ThreatDetection
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import instructions, microsoft_signals, platforms, posture
+from agentgov.registry import (
+    features,
+    instructions,
+    mcp_sightings,
+    microsoft_signals,
+    platforms,
+    posture,
+)
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
 
 log = logging.getLogger(__name__)
@@ -148,9 +155,10 @@ class Runtime:
         # The Microsoft 365 agent catalog, read with Microsoft Graph (app-only).
         self.m365 = MicrosoftApp(settings, http=m365_http) if settings.m365_enabled else None
         self._m365_lock = threading.Lock()
-        # Copilot Studio asks AgentGov about each tool call its agents make.
+        # Copilot Studio asks AgentGov about each tool call its agents make, while the
+        # copilot-studio-threat-detection feature is on.
         self.threat_detection: ThreatDetection | None = None
-        if settings.copilot_studio_threat_detection != "off":
+        if settings.copilot_studio_configured:
             self.threat_detection = ThreatDetection(
                 settings, opa_http=copilot_studio_http, keys_http=copilot_studio_http
             )
@@ -167,6 +175,12 @@ class Runtime:
             if self.guardian is not None
             else None
         )
+        # Checks what arrived while instruction checks were off, once they are on again.
+        self._recheck_worker = _Worker(
+            "instruction-recheck", self.check_unchecked_instructions, 3600
+        )
+        # Developers' MCP servers against the approved ones, again when tool servers change.
+        self._mcp_worker = _Worker("developer-mcp", self.refresh_developer_mcp, 3600)
         self._m365_worker = (
             _Worker(
                 "microsoft-sync",
@@ -180,9 +194,14 @@ class Runtime:
 
     # -- lifecycle -----------------------------------------------------------
     def init_db(self) -> None:
-        self.db.create_all()
+        if self.settings.database_auto_migrate:
+            migrations.upgrade(self.db.engine)
+        else:
+            migrations.check(self.db.engine)
         with self.db.session() as session:
             ledger.ensure_head(session)
+        with self.db.session() as session:
+            features.apply_pins(session, self.settings)
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self.init_db()
@@ -200,6 +219,8 @@ class Runtime:
             with self.db.session() as session:
                 instructions.queue_unclassified(session)
             self._classifier_worker.start()
+        self._recheck_worker.start()
+        self._mcp_worker.start()
         self._started = True
 
     def stop(self) -> None:
@@ -212,6 +233,8 @@ class Runtime:
             self._m365_worker.stop()
         if self._classifier_worker is not None:
             self._classifier_worker.stop()
+        self._recheck_worker.stop()
+        self._mcp_worker.stop()
         self.db.dispose()
 
     # -- reconciliation triggers -----------------------------------------------
@@ -219,14 +242,39 @@ class Runtime:
         self.bundles.notify()
         if self.identity is not None and topics & {"agents", "blueprints"}:
             self.identity.trigger()
-        if "toolservers" in topics and self.settings.gateway_config_path:
+        if topics & {"toolservers", "features"} and self.settings.gateway_config_path:
             self._gateway_worker.trigger()
+        if "feature:instruction-checks" in topics:
+            self._recheck_worker.trigger()
+        if topics & {"toolservers", "feature:mcp-discovery"}:
+            self._mcp_worker.trigger()
         if "instructions" in topics and self._classifier_worker is not None:
             self._classifier_worker.trigger()
 
-    def run_posture_scan(self) -> dict[str, Any]:
+    def run_posture_scan(self) -> dict[str, Any] | None:
+        """Scan, unless posture checks are off (then None)."""
         with self.db.session() as session:
+            if not features.is_on(session, "posture-checks"):
+                return None
             return posture.scan(session, self.settings)
+
+    def refresh_developer_mcp(self) -> int:
+        """Re-check the MCP servers developers reported against the approved tool servers;
+        returns how many findings resolved."""
+        with self.db.session() as session:
+            if not features.is_on(session, "mcp-discovery"):
+                return 0
+            return mcp_sightings.refresh(session, self.settings)
+
+    def check_unchecked_instructions(self) -> int:
+        """Check instructions that arrived while instruction checks were off."""
+        with self.db.session() as session:
+            if not features.is_on(session, "instruction-checks"):
+                return 0
+            checked = instructions.check_unchecked(session, classify=self.guardian is not None)
+            for agent in checked:
+                agents_svc.refresh_risk(session, self.settings, agent)
+            return len(checked)
 
     def sync_microsoft_365(self, *, actor: str | None = None) -> dict[str, int]:
         """Read the Microsoft 365 agent catalog into the registry; returns the counts."""
@@ -285,7 +333,12 @@ class Runtime:
         """
         if self.m365 is None:
             raise PlatformError("AgentGov's Microsoft app registration is not configured")
-        wanted = keys or list(connections.APP_CONNECTIONS)
+        with self.db.session() as session:
+            turned_on = {k for k in connections.APP_CONNECTIONS if features.is_on(session, k)}
+        results: dict[str, Any] = {k: {"off": True} for k in keys or () if k not in turned_on}
+        wanted = [k for k in keys or connections.APP_CONNECTIONS if k in turned_on]
+        if not wanted:
+            return results
 
         def lacking(roles: frozenset[str] | None) -> bool:
             return any(not connections.runnable(connections.BY_KEY[k], roles) for k in wanted)
@@ -310,7 +363,6 @@ class Runtime:
             "purview-audit": self.sync_audit,
             "defender": self.sync_defender,
         }
-        results: dict[str, Any] = {}
         for key in wanted:
             connection = connections.BY_KEY[key]
             if not connections.runnable(connection, roles):
@@ -386,10 +438,11 @@ class Runtime:
                     state[kind], state[f"{kind}_until"] = None, pending["end"]
                     connections.save_state(session, "purview-audit", state)
             elif status in ("failed", "cancelled") or ids.utcnow() - started > AUDIT_GIVE_UP:
-                # Search the same window again.
+                # Search the same window again: from where the failed search started, which
+                # for the first search isn't a day before now any more.
                 with self.db.session() as session:
                     state = connections.load_state(session, "purview-audit")
-                    state[kind] = None
+                    state[kind], state[f"{kind}_until"] = None, pending["start"]
                     connections.save_state(session, "purview-audit", state)
             else:
                 counts["searching"] += 1
@@ -438,6 +491,9 @@ class Runtime:
         """Run the classifier over instructions waiting for it; returns how many."""
         if self.guardian is None:
             return 0
+        with self.db.session() as session:
+            if not features.is_on(session, "instruction-checks"):
+                return 0
         done = 0
         while done < limit:
             with self.db.session() as session:

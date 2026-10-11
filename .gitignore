@@ -27,6 +27,8 @@ htmlcov/
 # Editors / OS
 .idea/
 .vscode/
+# ...except the example developer machine's (examples/developer-machine).
+!examples/developer-machine/project/.vscode/
 .DS_Store
 
 # Local CI (scripts/ci.sh --matrix)

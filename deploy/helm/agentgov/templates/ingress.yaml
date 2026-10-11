@@ -1,0 +1,39 @@
+{{- $root := . }}
+{{- $entries := list
+  (dict "component" "control-plane" "ingress" .Values.controlPlane.ingress "url" .Values.urls.controlPlane "port" .Values.controlPlane.service.port)
+  (dict "component" "gateway" "ingress" .Values.gateway.ingress "url" .Values.urls.gateway "port" .Values.gateway.service.port)
+  (dict "component" "keycloak" "ingress" .Values.keycloak.ingress "url" .Values.urls.keycloak "port" 8080 "enabled" .Values.keycloak.enabled) }}
+{{- range $entries }}
+{{- if and .ingress.enabled (ne (toString .enabled) "false") }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "agentgov.name" (list $root .component) }}
+  labels:
+    {{- include "agentgov.labels" (list $root .component) | nindent 4 }}
+  {{- with .ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .ingress.host | default (include "agentgov.host" .url) | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "agentgov.name" (list $root .component) }}
+                port:
+                  number: {{ .port }}
+{{- end }}
+{{- end }}

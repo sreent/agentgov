@@ -20,6 +20,8 @@
 # they can tell these calls apart by input.platform.
 package agentgov.copilotstudio
 
+import data.agentgov.context as ctx
+
 registry := data.registry
 
 agent := registry.agents[input.agent.id]
@@ -36,12 +38,6 @@ deny contains msg if {
 	msg := sprintf("Agent %s is blocked in AgentGov", [agent.name])
 }
 
-# Risk-based access, as for agents behind the gateway.
-deny contains msg if {
-	agent.risk_level == "critical"
-	msg := sprintf("Agent %s is critical risk (score %d) and is blocked until investigated", [agent.name, agent.risk_score])
-}
-
 # The connector allowlist, enforced at run time once it lists a connector.
 deny contains msg if {
 	allowlist.active == true
@@ -50,18 +46,42 @@ deny contains msg if {
 	msg := sprintf("Connector %s is not on AgentGov's connector allowlist", [connector])
 }
 
-deny contains "Arguments contain credentials; agents must not send secrets to tools" if {
+deny contains msg if {
+	some name
+	some msg in data.agentgov.custom[name].deny
+}
+
+# The controls an organisation can switch apply as their modes say (see agentgov.mcp).
+
+# Risk-based access, as for agents behind the gateway.
+violation contains {"control": "risk-based-access", "message": msg} if {
+	agent.risk_level == "critical"
+	msg := sprintf("Agent %s is critical risk (score %d) and is blocked until investigated", [agent.name, agent.risk_score])
+}
+
+violation contains {
+	"control": "data-protection",
+	"message": "Arguments contain credentials; agents must not send secrets to tools",
+} if {
 	"secret" in categories
 }
 
 # Indirect prompt injection: an earlier tool result tried to give the agent orders.
-deny contains "An earlier tool result contained instructions aimed at the agent (possible prompt injection)" if {
+violation contains {
+	"control": "prompt-injection",
+	"message": "An earlier tool result contained instructions aimed at the agent (possible prompt injection)",
+} if {
 	detections.prompt_injection == true
 }
 
-deny contains msg if {
-	some name
-	some msg in data.agentgov.custom[name].deny
+deny contains v.message if {
+	some v in violation
+	ctx.enforced(v.control)
+}
+
+monitored contains sprintf("%s: %s", [v.control, v.message]) if {
+	some v in violation
+	ctx.monitored(v.control)
 }
 
 effect := "deny" if {
@@ -72,4 +92,5 @@ decision := {
 	"effect": effect,
 	"allow": effect == "allow",
 	"reasons": sort(deny),
+	"monitored": sort(monitored),
 }

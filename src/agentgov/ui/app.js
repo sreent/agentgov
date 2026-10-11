@@ -129,6 +129,9 @@ const ICONS = {
   upload: 'M12 15V4M7 9l5-5 5 5M5 20h14',
   access: 'M5 8a4 4 0 1 0 8 0a4 4 0 1 0-8 0M3 21c0-3.3 2.7-6 6-6 1.2 0 2.3.3 3.2.9M17 14a2 2 0 1 0 0 4a2 2 0 1 0 0-4M18.4 15.6L22 12M20.5 13.5l1.5 1.5',
   platforms: 'M7 19h10.5a4.5 4.5 0 0 0 .5-8.98A6 6 0 0 0 6.34 9.03 5 5 0 0 0 7 19z',
+  features: 'M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4',
+  models: 'M7 7h10v10H7zM10 10h4v4h-4zM10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4',
+  developers: 'M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14',
 };
 
 function icon(name, { label, cls } = {}) {
@@ -405,6 +408,13 @@ const STATUS = {
     out_of_date: ['warning', 'triangle', 'Out of date'],
     monitor: ['neutral', 'eye', 'Monitoring'],
     enforce: ['good', 'shield-check', 'Enforcing'],
+    turned_off: ['neutral', 'power', 'Turned off in Features'],
+  },
+  mode: {
+    enforce: ['good', 'shield-check', 'Enforce'],
+    monitor: ['warning', 'eye', 'Monitor'],
+    on: ['good', 'check-circle', 'On'],
+    off: ['neutral', 'minus', 'Off'],
   },
 };
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
@@ -747,6 +757,29 @@ function formatGrants(grants) {
   return (grants || []).map((g) => `${g.server}: ${g.tools.join(', ')}`).join('\n');
 }
 
+// Model access is typed like tool grants: "provider: model, model", one provider per line.
+function parseModelAccess(text) {
+  return String(text || '').split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const colon = line.indexOf(':');
+    if (colon < 1) throw new Error(`Write each line as "provider: model, model" ("${line}" has no provider).`);
+    const provider = line.slice(0, colon).trim();
+    const models = parseList(line.slice(colon + 1));
+    if (!models.length) throw new Error(`List the models of ${provider} it may call, or * for all of them.`);
+    return { provider, models };
+  });
+}
+
+function formatModelAccess(access) {
+  return (access || []).map((g) => `${g.provider}: ${g.models.join(', ')}`).join('\n');
+}
+
+function parseBudget(text) {
+  if (!text) return null;
+  const n = Number(text);
+  if (!Number.isInteger(n) || n < 0) throw new Error('The daily token budget is a whole number of tokens, or empty.');
+  return n;
+}
+
 const orNull = (text) => text || null;
 
 /* ------------------------------------------------------------ nav badges */
@@ -793,6 +826,9 @@ const PAGES = [
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
   { re: /^\/access$/, nav: 'access', title: 'Access', render: renderAccess },
   { re: /^\/platforms$/, nav: 'platforms', title: 'Platforms', render: renderPlatforms },
+  { re: /^\/features$/, nav: 'features', title: 'Features', render: renderFeatures },
+  { re: /^\/models$/, nav: 'models', title: 'Models', render: renderModels },
+  { re: /^\/developers$/, nav: 'developers', title: 'Developer tools', render: renderDevelopers },
 ];
 
 let renderSeq = 0;
@@ -1079,7 +1115,7 @@ async function start() {
 /* ---------------------------------------------------------------- overview */
 
 async function renderOverview() {
-  const [ov, info] = await Promise.all([api('v1/overview'), getInfo()]);
+  const [ov, info, features] = await Promise.all([api('v1/overview'), getInfo(), api('v1/features').then((v) => v.features).catch(() => null)]);
   updateBadges({ pendingApprovals: ov.approvals?.pending ?? 0, findings: ov.findings });
   return h('div', { class: 'page' },
     pageHead({
@@ -1090,7 +1126,7 @@ async function renderOverview() {
     kpiTiles(ov),
     h('div', { class: 'grid-2 grid-2--even' }, activityCard(ov.activity || []), decisionsCard(ov.decisions_24h || {})),
     h('div', { class: 'grid-2 grid-2--even' }, recentBlocksCard(ov.recent_blocks || []), riskyCard(ov.top_risky || [])),
-    controlPlaneCard(ov, info));
+    controlPlaneCard(ov, info, features));
 }
 
 function ledgerBadge(lg) {
@@ -1410,7 +1446,7 @@ function riskyCard(list) {
   });
 }
 
-function controlPlaneCard(ov, info) {
+function controlPlaneCard(ov, info, features) {
   const ts = ov.toolservers || {};
   const cell = (title, value, note, href) => h('div', {},
     h('span', { class: 'cp-title' }, title),
@@ -1428,7 +1464,10 @@ function controlPlaneCard(ov, info) {
       cell('Evidence ledger', ov.ledger ? plural(ov.ledger.checked, 'entry', 'entries') : 'Not verified',
         ov.ledger?.head ? ['Head ', h('span', { class: 'hash', title: ov.ledger.head }, shortHash(ov.ledger.head))] : null, '#/ledger'),
       cell('Gateway', info?.gateway_url ? copyable(info.gateway_url, 'gateway URL') : 'Not configured',
-        info ? `Unregistered callers: ${info.unknown_agent_mode}` : null)));
+        features ? [
+          features.find((f) => f.key === 'unknown-callers')?.mode === 'monitor' ? 'Unknown callers let through' : 'Unknown callers refused',
+          ' · ', h('a', { href: '#/features' }, featureSummary(features)),
+        ] : null)));
 }
 
 /* ------------------------------------------------------------------ agents */
@@ -1621,18 +1660,20 @@ const ATTESTABLE = new Set(['active', 'blocked', 'pending']);
 async function renderAgent({ match }) {
   const ref = decodeURIComponent(match[1]);
   const agent = await api(`v1/agents/${encodeURIComponent(ref)}`);
-  const [entries, openFindings, instructions] = await Promise.all([
+  const [entries, openFindings, instructions, usage] = await Promise.all([
     api(`v1/ledger?agent=${encodeURIComponent(agent.id)}&limit=12`).catch((e) => e),
     api(`v1/findings?status=open&agent=${encodeURIComponent(agent.id)}`).catch((e) => e),
     api(`v1/agents/${encodeURIComponent(agent.id)}/instructions`).catch((e) => e),
+    api(`v1/models/usage?agent=${encodeURIComponent(agent.id)}&days=7`).catch((e) => e),
   ]);
   // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
   const views = agent.platforms || [];
   const where = views.length && agent.status !== 'deleted' ? await platformActionTarget(agent) : null;
-  const main = views.length ? views.map((v) => platformCard(agent, v, where)) : [permissionsCard(agent)];
+  const main = views.length ? views.map((v) => platformCard(agent, v, where))
+    : [permissionsCard(agent), agentModelsCard(agent, usage)];
   // With threat detection enforcing, AgentGov's policies decide about its tool calls.
-  const enforced = (await getInfo())?.copilot_studio_threat_detection === 'enforce'
-    && views.some((v) => v.source === 'copilot-studio');
+  const enforced = views.some((v) => v.source === 'copilot-studio')
+    && (await featureModes().catch(() => ({})))['copilot-studio-threat-detection'] === 'enforce';
   return h('div', { class: 'page', 'data-title': agent.name },
     agentHeader(agent),
     h('div', { class: 'detail-grid' },
@@ -1851,6 +1892,11 @@ async function agentForm(a) {
       hint: 'Added to the blueprint\'s grants. One server per line; tool names can use * wildcards, and * alone means every tool.',
     },
     {
+      id: 'model_access', label: 'Extra model access', type: 'code', rows: 2, value: formatModelAccess(a?.model_access), placeholder: 'openai: gpt-4o-mini',
+      hint: "Added to the blueprint's model access. One provider per line; model names can use * wildcards.",
+    },
+    { id: 'daily_token_budget', label: 'Daily token budget', type: 'number', min: 0, value: a?.daily_token_budget ?? '', hint: "Input and output tokens per UTC day. Empty: the blueprint's budget." },
+    {
       id: 'risk_tier', label: 'Declared risk tier', type: 'select', value: a?.risk_tier || '',
       options: editing ? tiers : [{ value: '', label: "The blueprint's tier (medium without one)" }, ...tiers],
     },
@@ -1877,6 +1923,8 @@ async function agentForm(a) {
         sponsors: parseList(v.sponsors),
         blueprint: v.blueprint || null,
         permissions: parseGrants(v.permissions),
+        model_access: parseModelAccess(v.model_access),
+        daily_token_budget: parseBudget(v.daily_token_budget),
         framework: orNull(v.framework),
         platform: orNull(v.platform),
         models: parseList(v.models),
@@ -1966,6 +2014,38 @@ function permissionsCard(a) {
       broad ? callout('warning', 'triangle', 'This agent may call every tool on every server (*/*). Replace the wildcard with the tools it needs.') : null,
       list,
       own.size ? h('p', { class: 'hint' }, 'Highlighted patterns are granted to this agent directly; the others come from its blueprint.') : null,
+    ],
+  });
+}
+
+function agentModelsCard(a, usage) {
+  const access = a.effective_model_access || [];
+  const own = new Map((a.model_access || []).map((g) => [g.provider, new Set(g.models)]));
+  const budget = a.effective_daily_token_budget;
+  const today = usage instanceof Error ? null : (usage.today || []).find((b) => b.agent_id === a.id);
+  const used = today?.used_today ?? 0;
+  const totals = usage instanceof Error ? null : usage.totals;
+  const tone = budget != null && used >= budget ? 'critical' : 'accent';
+  return card({
+    title: 'Models',
+    sub: 'Models it may call through the gateway, and what it used in the last 7 days',
+    body: [
+      access.length
+        ? h('ul', { class: 'perm-list', role: 'list' }, access.map((g) => h('li', {},
+          h('span', { class: 'perm-server' }, g.provider),
+          h('div', { class: 'chip-row' }, g.models.map((m) => {
+            const direct = own.get(g.provider)?.has(m);
+            return plainChip(m, { mono: true, tone: direct ? 'accent' : null, title: direct ? 'Granted to this agent directly' : `From blueprint ${a.blueprint || ''}`.trim() });
+          })))))
+        : h('p', { class: 'muted small' }, 'No model access. Policy refuses its model calls through the gateway.'),
+      facts([
+        ['Daily token budget', budget == null ? h('span', { class: 'muted' }, 'None') : `${fmt(budget)} tokens${a.daily_token_budget == null ? ' (from its blueprint)' : ''}`],
+        ['Used today', budget == null ? `${fmt(used)} tokens`
+          : h('div', { class: 'stack', style: 'gap:4px' }, `${fmt(used)} of ${fmt(budget)} tokens`,
+            h('div', { class: 'meter', role: 'img', 'aria-label': `${fmt(used)} of ${fmt(budget)} tokens used today`, style: `background: var(--${tone === 'critical' ? 'critical' : 'neutral'}-tint)` },
+              h('span', { style: `width:${budget ? Math.min(100, (used / budget) * 100) : 100}%; background:${TONE_COLOR[tone]}` })))],
+        totals ? ['Last 7 days', `${plural(totals.calls, 'call')}, ${fmt(totals.input_tokens + totals.output_tokens)} tokens${totals.cost_usd ? `, $${totals.cost_usd.toFixed(2)}` : ''}${totals.refused ? `, ${fmt(totals.refused)} refused` : ''}`] : null,
+      ]),
     ],
   });
 }
@@ -2116,6 +2196,10 @@ const INSTRUCTION_SOURCES = {
 };
 
 function classifierLine(c, settings) {
+  if (c.state === 'unchecked') {
+    return callout('neutral', 'minus', h('span', {}, "Not checked: instruction checks were off when these arrived. They are checked once instruction checks are on (",
+      h('a', { href: '#/features' }, 'Features'), ')).'));
+  }
   if (!settings?.enabled) return h('p', { class: 'hint' }, 'Checked by AgentGov\'s rules. No classifier is configured.');
   const model = c.model || settings.model;
   if (c.state === 'pending') return h('p', { class: 'hint' }, icon('clock'), ` The classifier (${model}) is still checking these instructions.`);
@@ -2153,7 +2237,7 @@ function instructionsCard(a, view) {
       admin ? h('div', { class: 'btn-row' },
         x.source === 'registered' ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'edit-instructions', onclick: guarded(() => editInstructions(a, x)) }, icon('edit'), 'Edit') : null,
         h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `forget-${x.source}`, onclick: guarded(() => forgetInstructions(a, x)) }, icon('trash'), 'Forget')) : null),
-    issueList(x.issues || []),
+    x.classifier?.state === 'unchecked' ? null : issueList(x.issues || []),
     classifierLine(x.classifier || {}, view.classifier),
     h('details', { class: 'disclosure' }, h('summary', {}, icon('chevron'), 'Show the instructions'),
       h('pre', { class: 'kv-pre instructions-text', tabindex: '0' }, x.text),
@@ -2595,6 +2679,7 @@ async function renderApprovals({ match }) {
   const pending = all.filter((r) => r.status === 'pending');
   const history = all.filter((r) => r.status !== 'pending');
   updateBadges({ pendingApprovals: pending.length });
+  const approvalsMode = (await featureModes().catch(() => ({}))).approvals;
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'Approval views' },
     h('a', { class: 'tab', href: '#/approvals', 'aria-current': tab === 'pending' ? 'page' : null },
       'Pending', h('span', { class: 'nav-badge', 'data-tone': pending.length ? 'warning' : '' }, fmt(pending.length))),
@@ -2616,6 +2701,10 @@ async function renderApprovals({ match }) {
       sub: 'Tool calls that policy held for a human decision. An approval is single-use: the agent retries the identical call and it goes through once.',
       actions: [refreshButton()],
     }),
+    approvalsMode && approvalsMode !== 'enforce' ? callout('warning', 'eye', h('span', {},
+      h('strong', {}, `Human approval is ${approvalsMode === 'off' ? 'off' : 'in monitor mode'}: `),
+      approvalsMode === 'off' ? 'no call waits for approval. ' : 'calls that need approval go through, and the ledger records them. ',
+      h('a', { href: '#/features' }, 'Features'), '.')) : null,
     tabs, content);
 }
 
@@ -2716,21 +2805,41 @@ async function renderToolservers() {
 }
 
 const TRUST_LEVELS = [['unverified', 'Unverified'], ['verified', 'Verified']];
+
+// Packages developers run, one per line as type:identifier@version (the CLI's --package).
+function formatPackages(packages) {
+  return (packages || []).map((p) => `${p.registry_type}:${p.identifier}${p.version ? `@${p.version}` : ''}`).join('\n');
+}
+
+function parsePackages(text) {
+  return text.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const colon = line.indexOf(':');
+    if (colon < 1) throw new Error(`"${line}" isn't a package: write type:identifier@version, such as npm:@playwright/mcp@0.0.41.`);
+    const kind = line.slice(0, colon);
+    const rest = line.slice(colon + 1);
+    const at = rest.lastIndexOf('@');
+    return at > 0
+      ? { registry_type: kind, identifier: rest.slice(0, at), version: rest.slice(at + 1) }
+      : { registry_type: kind, identifier: rest };
+  });
+}
 const CLASSIFICATIONS = [['public', 'Public'], ['internal', 'Internal'], ['confidential', 'Confidential'], ['restricted', 'Restricted']];
 
-/** Register a tool server (no `ts`) or edit one. Resolves to the saved server, or null. */
-function toolserverForm(ts) {
+/** Register a tool server (no `ts`, starting from `draft` if given) or edit one. Resolves
+ * to the saved server, or null. */
+function toolserverForm(ts, draft = null) {
   const editing = Boolean(ts);
+  ts = ts || draft;
   const options = (pairs) => pairs.map(([value, label]) => ({ value, label }));
   return ask({
     title: editing ? `Edit ${ts.name}` : 'Register a tool server',
     text: editing
       ? 'Changes are recorded in the evidence ledger. A new upstream URL takes effect when the gateway reloads its generated configuration.'
-      : 'The server is published through the gateway at /mcp/<name>, and agents whose grants cover it can call its tools.',
+      : 'Published on the gateway, the server is at /mcp/<name>, where agents whose grants cover it call its tools. Listed for developers, it is in the MCP registry their MCP clients read.',
     iconName: editing ? 'edit' : 'toolservers', confirm: editing ? 'Save changes' : 'Register server',
     fields: [
-      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'crm', hint: `${NAME_HINT} It becomes the gateway path /mcp/<name>.` },
-      { id: 'url', label: 'Upstream URL', required: true, mono: true, value: ts?.url || '', placeholder: 'http://crm-mcp:8000/mcp', hint: 'The streamable HTTP MCP endpoint. Agents never call it directly, only through the gateway.' },
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, value: ts?.name || '', placeholder: 'crm', hint: `${NAME_HINT} It becomes the gateway path /mcp/<name>.` },
+      { id: 'url', label: 'Upstream URL', mono: true, value: ts?.url || '', placeholder: 'http://crm-mcp:8000/mcp', hint: 'The streamable HTTP MCP endpoint, required on the gateway. Agents never call it directly, only through the gateway.' },
       { id: 'description', label: 'Description', type: 'textarea', value: ts?.description || '' },
       { id: 'owner', label: 'Owner', value: ts?.owner || '', placeholder: 'Team or person' },
       { type: 'row', fields: [
@@ -2738,11 +2847,17 @@ function toolserverForm(ts) {
         { id: 'data_classification', label: 'Data classification', type: 'select', value: ts?.data_classification || 'internal', options: options(CLASSIFICATIONS) },
       ] },
       { id: 'labels', label: 'Labels', value: formatLabels(ts?.labels), placeholder: 'team=cx', mono: true },
+      { type: 'section', label: 'Who uses it' },
+      { id: 'gateway', label: 'Agents, through the gateway', type: 'checkbox', value: ts ? ts.gateway : true, hint: 'Published at /mcp/<name>, with every control.' },
+      { id: 'developers', label: "Developers, in the MCP registry", type: 'checkbox', value: Boolean(ts?.developers), hint: 'Listed in the registry GitHub Copilot and VS Code read (Developer tools).' },
+      { id: 'packages', label: 'Packages developers run', type: 'code', rows: 2, value: formatPackages(ts?.packages), placeholder: 'npm:@playwright/mcp@0.0.41', hint: 'For a server developers run on their machines: one per line, type:identifier@version (npm, pypi, oci, nuget, cargo, mcpb).' },
+      { id: 'registry_name', label: 'Name in the registry', mono: true, value: ts?.registry_name || '', placeholder: 'com.contoso/crm', hint: 'By default <namespace>/<name>.' },
     ].filter(Boolean),
     submit: (v) => {
       const body = {
         url: v.url, description: v.description, owner: orNull(v.owner),
         trust_level: v.trust_level, data_classification: v.data_classification, labels: parseLabels(v.labels),
+        gateway: v.gateway, developers: v.developers, packages: parsePackages(v.packages), registry_name: orNull(v.registry_name),
       };
       if (editing) return api(`v1/toolservers/${encodeURIComponent(ts.name)}`, { method: 'PATCH', body });
       return api('v1/toolservers', { method: 'POST', body: { name: v.name, ...body } });
@@ -2753,7 +2868,9 @@ function toolserverForm(ts) {
 async function registerToolserver() {
   const created = await toolserverForm(null);
   if (!created) return;
-  toast(`Registered ${created.name}. Agents reach it at ${created.gateway_url || `/mcp/${created.name}`}.`);
+  toast(created.gateway
+    ? `Registered ${created.name}. Agents reach it at ${created.gateway_url || `/mcp/${created.name}`}.`
+    : `Registered ${created.name} for developers.`);
   await refresh();
 }
 
@@ -2815,7 +2932,8 @@ function serverCard(ts) {
       h('div', { class: 'server-head' },
         h('div', { class: 'server-title' },
           h('div', { class: 'title-row' }, h('h2', { id: headingId, class: 'tool-name' }, ts.name), chip('server', ts.status), trustChip,
-            plainChip(humanize(ts.data_classification || 'unclassified'), { iconName: 'lock', title: 'Data classification' })),
+            plainChip(humanize(ts.data_classification || 'unclassified'), { iconName: 'lock', title: 'Data classification' }),
+            ts.developers ? plainChip(ts.gateway ? 'Listed for developers' : 'Developers only', { iconName: 'developers', title: 'In the MCP registry developers\' MCP clients read' }) : null),
           ts.description ? h('p', { style: 'color:var(--ink-2)' }, ts.description) : null),
         h('div', { class: 'btn-row' }, actions)),
       poisoned.length ? callout('critical', 'octagon', h('span', {}, h('strong', {}, `${plural(poisoned.length, 'tool')} quarantined. `),
@@ -2823,14 +2941,15 @@ function serverCard(ts) {
       changed.length ? callout('warning', 'triangle', h('span', {}, h('strong', {}, `${plural(changed.length, 'tool')} changed since approval. `),
         'Calls are refused until an administrator approves the new definition.')) : null,
       facts([
-        ['Gateway URL', ts.gateway_url ? copyable(ts.gateway_url, 'gateway URL') : h('span', { class: 'muted' }, 'Gateway public URL not configured')],
-        ['Upstream', h('code', { class: 'break' }, ts.url || '—')],
+        ts.gateway ? ['Gateway URL', ts.gateway_url ? copyable(ts.gateway_url, 'gateway URL') : h('span', { class: 'muted' }, 'Gateway public URL not configured')] : ['Gateway', h('span', { class: 'muted' }, 'Not published: only for developers')],
+        ['Upstream', ts.url ? h('code', { class: 'break' }, ts.url) : null],
+        (ts.packages || []).length ? ['Packages', h('div', { class: 'chip-row' }, ts.packages.map((pk) => plainChip(formatPackages([pk]), { mono: true })))] : null,
         ['Owner', ts.owner],
-        ['Catalog', `${plural(tools.length, 'tool')} · ${fmt(poisoned.length)} poisoned · ${fmt(changed.length)} changed`],
-        ['Catalog synced', timeEl(ts.tools_synced_at, { empty: 'Not yet observed' })],
+        ts.gateway ? ['Catalog', `${plural(tools.length, 'tool')} · ${fmt(poisoned.length)} poisoned · ${fmt(changed.length)} changed`] : null,
+        ts.gateway ? ['Catalog synced', timeEl(ts.tools_synced_at, { empty: 'Not yet observed' })] : null,
       ]),
-      h('div', {}, toggle)),
-    catalog);
+      ts.gateway ? h('div', {}, toggle) : null),
+    ts.gateway ? catalog : null);
 }
 
 function toolTable(ts) {
@@ -3035,8 +3154,8 @@ function findingCard(f, agentsById, act) {
 /* ---------------------------------------------------------------- policies */
 
 async function renderPolicies() {
-  const [blueprints, policies, agents, servers] = await Promise.all([
-    api('v1/blueprints'), api('v1/policies'), api('v1/agents'), api('v1/toolservers'),
+  const [blueprints, policies, agents, servers, providers] = await Promise.all([
+    api('v1/blueprints'), api('v1/policies'), api('v1/agents'), api('v1/toolservers'), api('v1/models/providers'),
   ]);
   const usage = countBy(agents, (a) => a.blueprint || '');
   const exportBtn = h('button', { type: 'button', class: 'btn', 'data-focus-key': 'export-yaml' }, icon('download'), 'Export manifests');
@@ -3044,7 +3163,7 @@ async function renderPolicies() {
     exportBtn.disabled = true;
     try {
       const blob = await saveDownload('v1/export', `agentgov-manifests-${fileStamp()}.yaml`);
-      toast(`Exported blueprints, tool servers, policies and agents as YAML (${fmtBytes(blob.size)}).`);
+      toast(`Exported features, blueprints, tool servers, model providers, policies and agents as YAML (${fmtBytes(blob.size)}).`);
     } catch (err) {
       toast(err.message, { tone: 'critical' });
     } finally {
@@ -3081,7 +3200,7 @@ async function renderPolicies() {
           policies.length
             ? policies.map(policyCard)
             : h('section', { class: 'card' }, emptyState('No organisation policies', 'Only the built-in library (package agentgov.mcp) is enforced.')))),
-      whatIfCard(agents, servers)));
+      whatIfCard(agents, servers, providers)));
 }
 
 /** Create a blueprint (no `b`) or edit one. */
@@ -3105,6 +3224,12 @@ async function blueprintFormFlow(b, servers) {
         { id: 'attestation_days', label: 'Review every (days)', type: 'number', min: 1, value: b ? (b.attestation_days ?? '') : '90', hint: 'Empty: no periodic review.' },
       ] },
       { id: 'require_sponsor', label: 'Require a sponsor before activation', type: 'checkbox', value: b ? b.require_sponsor : true },
+      { type: 'section', label: 'Models' },
+      {
+        id: 'model_access', label: 'Model access', type: 'code', rows: 2, value: formatModelAccess(b?.model_access), placeholder: 'openai: gpt-4o-mini, gpt-4.1*',
+        hint: 'Models its agents may call through the gateway: one provider per line; model names can use * wildcards.',
+      },
+      { id: 'daily_token_budget', label: 'Daily token budget per agent', type: 'number', min: 0, value: b?.daily_token_budget ?? '', hint: 'Input and output tokens per UTC day. Empty: no budget.' },
       { id: 'labels', label: 'Labels', value: formatLabels(b?.labels), placeholder: 'data=customer', mono: true },
     ].filter(Boolean),
     submit: (v) => {
@@ -3113,6 +3238,7 @@ async function blueprintFormFlow(b, servers) {
       const body = {
         description: v.description, permissions: parseGrants(v.permissions), risk_tier: v.risk_tier,
         attestation_days: days, require_sponsor: v.require_sponsor, labels: parseLabels(v.labels),
+        model_access: parseModelAccess(v.model_access), daily_token_budget: parseBudget(v.daily_token_budget),
       };
       if (editing) return api(`v1/blueprints/${encodeURIComponent(b.name)}`, { method: 'PATCH', body });
       return api('v1/blueprints', { method: 'POST', body: { name: v.name, ...body } });
@@ -3279,7 +3405,7 @@ function policyCard(p) {
   });
 }
 
-function whatIfCard(agents, servers) {
+function whatIfCard(agents, servers, providers = []) {
   const registered = agents.filter((a) => a.status !== 'discovered');
   const discovered = agents.filter((a) => a.status === 'discovered');
   const recent = (a) => (a.last_seen_at ? Date.parse(a.last_seen_at) : 0);
@@ -3290,6 +3416,8 @@ function whatIfCard(agents, servers) {
       `${a.name}${a.identity?.client_id ? ` (${a.identity.client_id})` : ''} · ${a.status}`))) : null,
     discovered.length ? h('optgroup', { label: 'Discovered (unmanaged)' }, discovered.map((a) => h('option', { value: a.id, selected: a === preferred }, `${a.name} · no client ID`))) : null,
     h('option', { value: '__unregistered' }, 'An unregistered caller'));
+
+  // A tool call: a tool server and one of its tools.
   const serverInput = h('input', { type: 'text', id: 'wi-server', list: 'wi-server-list', autocomplete: 'off', spellcheck: 'false' });
   const toolInput = h('input', { type: 'text', id: 'wi-tool', list: 'wi-tool-list', autocomplete: 'off', spellcheck: 'false' });
   const serverList = h('datalist', { id: 'wi-server-list' }, servers.map((ts) => h('option', { value: ts.name })));
@@ -3306,39 +3434,97 @@ function whatIfCard(agents, servers) {
   toolInput.value = destructive?.name || ts0?.tools?.[0]?.name || '';
   serverInput.addEventListener('change', fillTools);
 
+  // A model call: a model provider and a model.
+  const providerInput = h('input', { type: 'text', id: 'wi-provider', list: 'wi-provider-list', autocomplete: 'off', spellcheck: 'false' });
+  const modelInput = h('input', { type: 'text', id: 'wi-model', list: 'wi-model-list', autocomplete: 'off', spellcheck: 'false' });
+  const providerList = h('datalist', { id: 'wi-provider-list' }, providers.map((p) => h('option', { value: p.name })));
+  const modelList = h('datalist', { id: 'wi-model-list' });
+  providerInput.value = (providers.find((p) => p.status === 'approved') || providers[0])?.name || '';
+  // The models the chosen agent may call there, where they are names rather than globs.
+  const grantedModels = () => {
+    const agent = agents.find((a) => a.id === agentSel.value);
+    return (agent?.effective_model_access || [])
+      .filter((g) => g.provider === providerInput.value.trim())
+      .flatMap((g) => g.models).filter((m) => !/[*?[]/.test(m));
+  };
+  const fillModels = () => modelList.replaceChildren(...grantedModels().map((m) => h('option', { value: m })));
+  fillModels();
+  modelInput.value = grantedModels()[0] || '';
+  providerInput.addEventListener('change', fillModels);
+  agentSel.addEventListener('change', fillModels);
+
+  const kindTool = h('input', { type: 'radio', name: 'wi-kind', id: 'wi-kind-tool', value: 'tool', checked: true });
+  const kindModel = h('input', { type: 'radio', name: 'wi-kind', id: 'wi-kind-model', value: 'model' });
   const phaseRequest = h('input', { type: 'radio', name: 'wi-phase', id: 'wi-phase-request', value: 'request', checked: true });
   const phaseResponse = h('input', { type: 'radio', name: 'wi-phase', id: 'wi-phase-response', value: 'response' });
   const pii = h('input', { type: 'checkbox', id: 'wi-pii', value: 'pii' });
   const secret = h('input', { type: 'checkbox', id: 'wi-secret', value: 'secret' });
   const injection = h('input', { type: 'checkbox', id: 'wi-injection' });
+  const jailbreak = h('input', { type: 'checkbox', id: 'wi-jailbreak' });
+  const toolCalls = h('input', { type: 'checkbox', id: 'wi-tool-calls' });
   const result = h('div', { class: 'stack', style: 'gap:12px', 'aria-live': 'polite' });
   const submit = h('button', { type: 'submit', class: 'btn btn--primary' }, icon('play'), 'Evaluate');
+
+  const requestLabel = h('span', {});
+  const responseLabel = h('span', {});
+  const injectionLabel = h('span', {});
+  const toolFields = h('div', { class: 'form-row' },
+    h('div', { class: 'field' }, h('label', { for: 'wi-server' }, 'Tool server'), serverInput, serverList),
+    h('div', { class: 'field' }, h('label', { for: 'wi-tool' }, 'Tool'), toolInput, toolList));
+  const modelFields = h('div', { class: 'form-row' },
+    h('div', { class: 'field' }, h('label', { for: 'wi-provider' }, 'Model provider'), providerInput, providerList),
+    h('div', { class: 'field' }, h('label', { for: 'wi-model' }, 'Model'), modelInput, modelList));
+  const modelOnly = [
+    h('label', { class: 'check', for: 'wi-jailbreak' }, jailbreak, 'A jailbreak in the prompt'),
+    h('label', { class: 'check', for: 'wi-tool-calls' }, toolCalls, 'The conversation holds tool calls'),
+  ];
+  const isModel = () => kindModel.checked;
+  const showKind = () => {
+    const model = isModel();
+    toolFields.hidden = model;
+    modelFields.hidden = !model;
+    modelOnly.forEach((el) => { el.hidden = !model; });
+    requestLabel.textContent = model ? 'Request (the prompt)' : 'Request (the tool call)';
+    responseLabel.textContent = model ? 'Response (the answer)' : 'Response (the tool result)';
+    injectionLabel.textContent = model ? 'Prompt injection in a tool result in the conversation' : 'Prompt injection in the result';
+  };
+  showKind();
+  [kindTool, kindModel].forEach((r) => r.addEventListener('change', showKind));
 
   function buildInput() {
     const agentId = agentSel.value;
     const agent = agents.find((a) => a.id === agentId);
     const categories = [pii, secret].filter((c) => c.checked).map((c) => c.value);
     const phase = phaseResponse.checked ? 'response' : 'request';
+    const caller = agentId === '__unregistered'
+      ? { client_id: 'agent-not-registered' }
+      : { agent_id: agent?.id, client_id: agent?.identity?.client_id || undefined };
+    const detections = { categories, prompt_injection: injection.checked, injection_score: injection.checked ? 0.95 : 0 };
+    if (isModel()) {
+      return {
+        path: 'agentgov/models/decision',
+        input: {
+          kind: 'model', phase, agent: caller, provider: providerInput.value.trim(), model: modelInput.value.trim(),
+          detections: { ...detections, jailbreak: jailbreak.checked }, tool_calls: toolCalls.checked,
+        },
+      };
+    }
     return {
-      phase,
-      method: 'tools/call',
-      agent: agentId === '__unregistered'
-        ? { client_id: 'agent-not-registered' }
-        : { agent_id: agent?.id, client_id: agent?.identity?.client_id || undefined },
-      resource: { server: serverInput.value.trim(), name: toolInput.value.trim() },
-      detections: { categories, prompt_injection: injection.checked, injection_score: injection.checked ? 0.95 : 0 },
+      path: 'agentgov/mcp/decision',
+      input: { phase, method: 'tools/call', agent: caller, resource: { server: serverInput.value.trim(), name: toolInput.value.trim() }, detections },
     };
   }
 
   async function evaluate(example) {
-    const input = buildInput();
-    if (!input.resource.server || !input.resource.name) {
-      result.replaceChildren(callout('warning', 'alert-circle', 'Choose a tool server and a tool to evaluate.'));
+    const { path, input } = buildInput();
+    const missing = isModel() ? !input.provider || !input.model : !input.resource.server || !input.resource.name;
+    if (missing) {
+      result.replaceChildren(callout('warning', 'alert-circle', isModel() ? 'Choose a model provider and a model to evaluate.' : 'Choose a tool server and a tool to evaluate.'));
       return;
     }
     submit.disabled = true;
     try {
-      const res = await api('v1/policies/evaluate', { method: 'POST', body: { input } });
+      const res = await api('v1/policies/evaluate', { method: 'POST', body: { path, input } });
       fill(result, whatIfResult(res, input, example));
     } catch (err) {
       result.replaceChildren(callout('critical', 'alert-circle', h('span', {}, h('strong', {}, "Couldn't evaluate. "), err.message)));
@@ -3348,18 +3534,21 @@ function whatIfCard(agents, servers) {
   }
 
   const form = h('form', { class: 'whatif-form', novalidate: true },
+    h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Call'),
+      h('div', { class: 'radio-row' },
+        h('label', { class: 'check', for: 'wi-kind-tool' }, kindTool, 'A tool call'),
+        h('label', { class: 'check', for: 'wi-kind-model' }, kindModel, 'A model call'))),
     h('div', { class: 'field' }, h('label', { for: 'wi-agent' }, 'Agent'), agentSel),
-    h('div', { class: 'form-row' },
-      h('div', { class: 'field' }, h('label', { for: 'wi-server' }, 'Tool server'), serverInput, serverList),
-      h('div', { class: 'field' }, h('label', { for: 'wi-tool' }, 'Tool'), toolInput, toolList)),
+    toolFields, modelFields,
     h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Phase'),
       h('div', { class: 'radio-row' },
-        h('label', { class: 'check', for: 'wi-phase-request' }, phaseRequest, 'Request (the tool call)'),
-        h('label', { class: 'check', for: 'wi-phase-response' }, phaseResponse, 'Response (the tool result)'))),
+        h('label', { class: 'check', for: 'wi-phase-request' }, phaseRequest, requestLabel),
+        h('label', { class: 'check', for: 'wi-phase-response' }, phaseResponse, responseLabel))),
     h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Detections ', h('span', { class: 'muted' }, '(what Presidio and the detectors found)')),
       h('label', { class: 'check', for: 'wi-pii' }, pii, 'Personal data (pii)'),
       h('label', { class: 'check', for: 'wi-secret' }, secret, 'Credentials (secret)'),
-      h('label', { class: 'check', for: 'wi-injection' }, injection, 'Prompt injection in the result')),
+      h('label', { class: 'check', for: 'wi-injection' }, injection, injectionLabel),
+      ...modelOnly),
     h('div', { class: 'btn-row' }, submit));
   form.addEventListener('submit', (e) => { e.preventDefault(); evaluate(false); });
   if (agents.length || servers.length) evaluate(true);
@@ -3368,7 +3557,7 @@ function whatIfCard(agents, servers) {
   return h('section', { class: 'card whatif', 'aria-labelledby': 'whatif-title' },
     h('div', { class: 'card-head' }, h('div', { class: 'card-head-text' },
       h('h2', { id: 'whatif-title' }, 'What if'),
-      h('p', { class: 'card-sub' }, 'Ask the live OPA what it would decide for a tool call. Nothing is recorded.'))),
+      h('p', { class: 'card-sub' }, 'Ask the live OPA what it would decide for a tool call or a model call. Nothing is recorded.'))),
     h('div', { class: 'card-body' }, form, h('hr', { style: 'border:0; border-top:1px solid var(--line); margin:4px 0; width:100%' }), result));
 }
 
@@ -3391,6 +3580,10 @@ function whatIfResult(res, input, example) {
       ? h('div', { class: 'stack', style: 'gap:6px' }, h('span', { class: 'field-label' }, 'Reasons'),
         h('ul', { class: 'reasons', role: 'list' }, r.reasons.map((reason) => h('li', {}, icon(r.effect === 'deny' ? 'ban' : 'user-check'), h('span', {}, reason)))))
       : null,
+    (r.monitored || []).length
+      ? h('div', { class: 'stack', style: 'gap:6px' }, h('span', { class: 'field-label' }, 'Monitored: would have been stopped'),
+        h('ul', { class: 'reasons', role: 'list' }, r.monitored.map((m) => h('li', {}, icon('eye'), h('span', {}, m)))))
+      : null,
     facts([
       ['Redact', (r.redact || []).length ? h('div', { class: 'chip-row' }, r.redact.map((c) => plainChip(c, { mono: true }))) : 'Nothing'],
       ['Agent seen as', r.agent ? [r.agent.name, ` · ${r.agent.status} · ${r.agent.risk_level} risk`] : h('span', { class: 'muted' }, 'Not a registered agent')],
@@ -3407,8 +3600,13 @@ const LEDGER_TYPES = [
   ['', 'All events'], ['decision.*', 'Policy decisions'], ['approval.*', 'Approvals'], ['agent.*', 'Agent lifecycle'],
   ['toolserver.*', 'Tool servers'], ['policy.*', 'Organisation policies'], ['blueprint.*', 'Blueprints'], ['apikey.*', 'API keys'],
   ['admin.*', 'Sign-ins and sessions'], ['platform.*', 'Platform syncs and imports'], ['connector.*', 'Connector allowlist'],
+  ['feature.*', 'Features'], ['model_provider.*', 'Model providers'], ['model.*', 'Model budgets'],
+  ['mcp.*', "Developers' MCP servers"],
 ];
-const LEDGER_DECISIONS = [['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval']];
+const LEDGER_DECISIONS = [
+  ['', 'Any decision'], ['allow', 'Allowed'], ['deny', 'Denied'], ['require_approval', 'Needs approval'],
+  ['monitored', 'Monitored: would have been stopped'],
+];
 const PAGE_SIZE = 100;
 
 // The trace viewer (Langfuse, Jaeger, ...) is another app: open it in a new tab.
@@ -3827,10 +4025,11 @@ const CONNECTION_COUNTS = {
 function connectionHelp(c, view) {
   if (c.status === 'missing_permission') return `Grant AgentGov's app registration the application permission ${c.permission}, with admin consent, then sync.`;
   if (c.status === 'out_of_date') return 'The allowlist changed since it was pushed: push it again.';
+  if (c.status === 'turned_off') return 'Turn it on again on the Features page.';
   if (c.key === 'threat-detection') {
     const origin = new URL(API_ROOT).origin;
     return c.status === 'off'
-      ? `Needs ${c.needs.join(', ')}. Connect ${origin}/integrations/copilot-studio in the Power Platform admin center, then set AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION.`
+      ? `Needs ${c.needs.join(', ')}. Connect ${origin}/integrations/copilot-studio in the Power Platform admin center, then turn on Copilot Studio threat detection on the Features page.`
       : `Endpoint: ${origin}/integrations/copilot-studio`;
   }
   if (c.status === 'off' || c.status === 'import') return `Needs ${c.needs.join(', and ')}.`;
@@ -3853,7 +4052,7 @@ function connectionLastRun(c, view) {
 
 function connectionsCard(view) {
   const rows = view.connections || [];
-  const appReady = rows.some((c) => c.via === 'app' && c.status !== 'off');
+  const appReady = rows.some((c) => c.via === 'app' && !['off', 'turned_off'].includes(c.status));
   const actions = can('admin') && appReady
     ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'sync-all', onclick: (e) => syncConnections(e.currentTarget) }, icon('refresh'), 'Sync all')]
     : null;
@@ -3867,7 +4066,7 @@ function connectionsCard(view) {
       h('thead', {}, h('tr', {}, ['Connection', 'Status', 'Last run', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
       h('tbody', {}, rows.map((c) => {
         const help = connectionHelp(c, view);
-        const syncable = can('admin') && c.via === 'app' && c.status !== 'off';
+        const syncable = can('admin') && c.via === 'app' && !['off', 'turned_off'].includes(c.status);
         return h('tr', { 'data-connection': c.key },
           h('td', { 'data-label': 'Connection' }, h('span', { class: 'cell-title' }, c.name), h('div', { class: 'cell-sub' }, c.gives)),
           h('td', { 'data-label': 'Status' }, chip('connection', c.status), help ? h('div', { class: 'cell-sub break' }, help) : null),
@@ -4230,6 +4429,404 @@ function connectorList(v) {
     v.allowlist_active ? null : h('p', { class: 'hint' }, h('a', { href: '#/platforms' }, 'The connector allowlist'), ' is empty, so connectors are not checked yet.'));
 }
 
+/* ---------------------------------------------------------------- features */
+
+const MODE_WORDS = { off: 'Off', on: 'On', monitor: 'Monitor', enforce: 'Enforce' };
+
+async function featureModes() {
+  const view = await api('v1/features');
+  return Object.fromEntries(view.features.map((f) => [f.key, f.mode]));
+}
+
+// What differs from the defaults: features monitored, and features turned off.
+function featureSummary(list) {
+  const monitored = list.filter((f) => f.mode === 'monitor' && f.default !== 'monitor').length;
+  const off = list.filter((f) => f.mode === 'off' && f.default !== 'off').length;
+  const parts = [monitored ? `${fmt(monitored)} monitored` : null, off ? `${fmt(off)} turned off` : null].filter(Boolean);
+  return parts.length ? `Features: ${parts.join(', ')}` : 'Features: the defaults';
+}
+
+async function renderFeatures() {
+  const view = await api('v1/features');
+  const monitored = view.features.filter((f) => f.mode === 'monitor' && f.group === 'controls');
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Features',
+      sub: 'Choose which parts of AgentGov you use, and how strictly. In monitor mode a control decides and records what it would have done, but lets the call through: try it on real traffic before you enforce it.',
+      actions: [refreshButton()],
+    }),
+    monitored.length ? callout('warning', 'eye', h('span', {},
+      h('strong', {}, `${plural(monitored.length, 'control')} in monitor mode. `),
+      'Calls they would have stopped go through, and the ledger records them as warnings. ',
+      h('a', { href: '#/ledger?decision=monitored' }, 'See what they would have stopped'), '.')) : null,
+    Object.entries(view.groups).map(([group, title]) => {
+      const list = view.features.filter((f) => f.group === group);
+      return list.length ? featuresCard(title, list) : null;
+    }));
+}
+
+function featuresCard(title, list) {
+  return card({
+    title,
+    flush: true,
+    body: h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable features-table' },
+      h('caption', { class: 'sr-only' }, title),
+      h('thead', {}, h('tr', {}, ['Feature', 'Mode', 'Now'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, list.map((f) => h('tr', { 'data-feature': f.key },
+        h('td', { 'data-label': 'Feature' },
+          h('span', { class: 'cell-title' }, f.title), h('div', { class: 'cell-sub' }, f.description),
+          f.needs ? h('div', { class: 'cell-sub' }, `Needs ${f.needs}.`) : null),
+        h('td', { 'data-label': 'Mode' }, modeControl(f)),
+        h('td', { 'data-label': 'Now' }, h('div', {}, f.effect), featureProvenance(f))))))),
+  });
+}
+
+function featureProvenance(f) {
+  if (f.set_by === 'deployment') {
+    return h('div', { class: 'cell-sub' }, icon('lock'), ' Set by the deployment (AGENTGOV_FEATURES)');
+  }
+  if (f.set_by === 'admin') return h('div', { class: 'cell-sub' }, `Set by ${f.changed_by} `, timeEl(f.changed_at));
+  return h('div', { class: 'cell-sub' }, 'The default');
+}
+
+function modeControl(f) {
+  if (!can('admin') || f.set_by === 'deployment') return chip('mode', f.mode);
+  const name = `mode-${f.key}`;
+  return h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': `${f.title}: mode` },
+    f.modes.map((m) => {
+      const id = `${name}-${m}`;
+      const unavailable = f.unavailable?.[m];
+      const input = h('input', {
+        type: 'radio', id, name, value: m, checked: m === f.mode,
+        disabled: Boolean(unavailable) && m !== f.mode, 'data-focus-key': id,
+      });
+      input.addEventListener('change', guarded(() => chooseMode(f, m)));
+      return h('label', { for: id, title: unavailable || f.effects[m] || null }, input, h('span', {}, MODE_WORDS[m] || humanize(m)));
+    }));
+}
+
+async function chooseMode(f, mode) {
+  if (f.modes.indexOf(mode) < f.modes.indexOf(f.mode)) {
+    const ok = await ask({
+      title: `${f.title}: ${(MODE_WORDS[mode] || mode).toLowerCase()}?`,
+      text: f.effects[mode],
+      tone: 'danger', iconName: 'triangle', confirm: `Set to ${(MODE_WORDS[mode] || mode).toLowerCase()}`,
+    });
+    if (!ok) { await refresh(); return; }
+  }
+  try {
+    const out = await api(`v1/features/${encodeURIComponent(f.key)}`, { method: 'PUT', body: { mode } });
+    toast(`${f.title}: ${(MODE_WORDS[out.mode] || out.mode).toLowerCase()}. ${out.effect}`);
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+  }
+  await refresh();
+}
+
+/* ------------------------------------------------------------------ models */
+
+const PROVIDER_KINDS = [
+  ['openai', 'OpenAI'], ['anthropic', 'Anthropic'], ['gemini', 'Google Gemini'],
+  ['openai-compatible', 'OpenAI-compatible server (vLLM, Ollama, LiteLLM, hosted APIs)'],
+];
+
+async function renderModels() {
+  const [providers, usage, info, features] = await Promise.all([
+    api('v1/models/providers'), api('v1/models/usage?days=7'), getInfo(), featureModes().catch(() => ({})),
+  ]);
+  const gateway = (info?.gateway_url || '').replace(/\/$/, '');
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Models',
+      sub: "Model providers agents call through the gateway, at /llm/<provider>, with their AgentGov token instead of the provider's API key. Every prompt and answer is checked, and every call is metered.",
+      actions: [
+        can('admin') ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'add-provider', onclick: guarded(() => providerForm(null)) }, icon('plus'), 'Add provider') : null,
+        refreshButton(),
+      ],
+    }),
+    features['model-gateway'] === 'off' ? callout('warning', 'power', h('span', {},
+      h('strong', {}, 'The model gateway is off: '), 'no provider is published on the gateway. ', h('a', { href: '#/features' }, 'Features'), '.')) : null,
+    providersCard(providers, gateway),
+    budgetsCard(usage),
+    spendCard(usage),
+    usageCard(usage));
+}
+
+function providersCard(providers, gateway) {
+  const body = providers.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('caption', { class: 'sr-only' }, 'Model providers'),
+    h('thead', {}, h('tr', {}, ['Provider', 'Status', 'Agents call', 'Prices (USD per 1M tokens)', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+    h('tbody', {}, providers.map((p) => h('tr', { 'data-provider': p.name },
+      h('td', { 'data-label': 'Provider' }, h('span', { class: 'cell-title' }, p.name),
+        h('div', { class: 'cell-sub' }, (PROVIDER_KINDS.find(([k]) => k === p.kind) || [p.kind, p.kind])[1], p.base_url ? ` at ${p.base_url}` : ''),
+        h('div', { class: 'cell-sub' }, `Key file: ${p.key_file}`)),
+      h('td', { 'data-label': 'Status' }, chip('server', p.status),
+        h('div', { class: 'cell-sub' }, p.trust_level === 'verified' ? 'Verified: may receive personal data' : 'Unverified: personal data is masked')),
+      h('td', { 'data-label': 'Agents call' }, copyable(`${gateway}${p.route}/v1/chat/completions`, `${p.name} endpoint`)),
+      h('td', { 'data-label': 'Prices' }, Object.keys(p.prices || {}).length
+        ? h('div', { class: 'chip-row' }, Object.entries(p.prices).map(([m, price]) => plainChip(`${m}: ${price.input} in, ${price.output} out`, { mono: true })))
+        : h('span', { class: 'muted' }, 'None: cost is not counted')),
+      h('td', { 'data-label': '' }, can('admin') ? h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `edit-${p.name}`, onclick: guarded(() => providerForm(p)) }, icon('edit'), 'Edit'),
+        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `block-${p.name}`, onclick: guarded(() => blockProvider(p)) },
+          icon(p.status === 'blocked' ? 'undo' : 'ban'), p.status === 'blocked' ? 'Unblock' : 'Block'),
+        h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `delete-${p.name}`, onclick: guarded(() => deleteProvider(p)) }, icon('trash'), 'Delete')) : null))))))
+    : emptyState('No model providers', "Add one, then put its API key where the gateway reads it. Agents call it with their own token and never see the key.");
+  return card({ title: 'Providers', flush: Boolean(providers.length), body });
+}
+
+function budgetsCard(usage) {
+  const rows = (usage.today || []).filter((b) => b.daily_token_budget != null);
+  if (!rows.length) return null;
+  return card({
+    title: 'Budgets today',
+    sub: `Tokens each agent used on ${usage.day} (UTC), against its daily budget`,
+    body: h('ul', { class: 'risk-list', role: 'list' }, rows.map((b) => {
+      const tone = b.over_budget ? 'critical' : 'accent';
+      return h('li', {},
+        h('a', { href: agentHref(b.agent_id), class: 'cell-title break' }, b.agent_name),
+        h('span', { class: 'small' }, `${fmt(b.used_today)} of ${fmt(b.daily_token_budget)} tokens`,
+          b.over_budget ? [' ', plainChip('Over budget', { tone: 'critical', iconName: 'ban', title: 'Its model calls are refused until the day ends (UTC)' })] : null),
+        h('div', { class: 'meter', role: 'img', 'aria-label': `${fmt(b.used_today)} of ${fmt(b.daily_token_budget)} tokens`, style: `background: var(--neutral-tint)` },
+          h('span', { style: `width:${b.daily_token_budget ? Math.min(100, (b.used_today / b.daily_token_budget) * 100) : 100}%; background:${TONE_COLOR[tone]}` })));
+    })),
+  });
+}
+
+// Usage added up per owner or per sponsor of the agents behind it.
+function spendCard(usage) {
+  const groups = { owner: usage.by_owner || [], sponsor: usage.by_sponsor || [] };
+  if (!groups.owner.length) return null;
+  const words = { owner: ['Owner', 'No owner'], sponsor: ['Sponsor', 'No sponsor'] };
+  const table = (by) => h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('caption', { class: 'sr-only' }, `Model usage per ${by}`),
+    h('thead', {}, h('tr', {}, [words[by][0], 'Agents', 'Calls', 'Tokens', 'Cost'].map((c, i) => h('th', { scope: 'col', class: i ? 'num' : null }, c)))),
+    h('tbody', {}, groups[by].map((g) => h('tr', {},
+      h('td', { 'data-label': words[by][0] }, g[by] ? h('span', { class: 'break' }, g[by]) : h('span', { class: 'muted' }, words[by][1])),
+      h('td', { 'data-label': 'Agents', class: 'num' }, fmt(g.agents)),
+      h('td', { 'data-label': 'Calls', class: 'num' }, fmt(g.calls)),
+      h('td', { 'data-label': 'Tokens', class: 'num' }, fmt(g.input_tokens + g.output_tokens)),
+      h('td', { 'data-label': 'Cost', class: 'num' }, g.cost_usd ? `$${g.cost_usd.toFixed(4)}` : h('span', { class: 'muted' }, '—')))))));
+  const body = h('div', {}, table('owner'));
+  const choose = h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'Add up per' },
+    ['owner', 'sponsor'].map((by) => {
+      const input = h('input', { type: 'radio', id: `spend-${by}`, name: 'spend-by', value: by, checked: by === 'owner', 'data-focus-key': `spend-${by}` });
+      input.addEventListener('change', () => fill(body, table(by)));
+      return h('label', { for: `spend-${by}` }, input, h('span', {}, words[by][0]));
+    }));
+  return card({
+    title: 'Who is spending',
+    sub: 'The last 7 days, per owner and per sponsor of the agents. An agent with several sponsors counts in full for each.',
+    actions: [choose],
+    flush: true,
+    body,
+  });
+}
+
+function usageCard(usage) {
+  const t = usage.totals || {};
+  const rows = usage.rows || [];
+  return card({
+    title: 'Usage, last 7 days',
+    sub: rows.length ? `${plural(t.calls, 'call')}, ${fmt(t.refused)} refused · ${fmt(t.input_tokens)} tokens in, ${fmt(t.output_tokens)} out${t.cost_usd ? ` · $${t.cost_usd.toFixed(2)}` : ''}` : null,
+    flush: Boolean(rows.length),
+    body: rows.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, 'Model usage'),
+      h('thead', {}, h('tr', {}, ['Day', 'Agent', 'Model', 'Calls', 'Tokens in', 'Tokens out', 'Cost'].map((c) => h('th', { scope: 'col', class: ['Calls', 'Tokens in', 'Tokens out', 'Cost'].includes(c) ? 'num' : null }, c)))),
+      h('tbody', {}, rows.map((r) => h('tr', {},
+        h('td', { 'data-label': 'Day' }, r.day),
+        h('td', { 'data-label': 'Agent' }, r.agent_id ? agentLink(r.agent_id, r.agent_name) : h('span', { class: 'muted', title: 'Calls without an agent token (unknown callers in monitor mode)' }, 'Unidentified')),
+        h('td', { 'data-label': 'Model' }, h('code', {}, `${r.provider}/${r.model || '?'}`)),
+        h('td', { 'data-label': 'Calls', class: 'num' }, fmt(r.calls), r.refused ? h('div', { class: 'cell-sub' }, `${fmt(r.refused)} refused`) : null),
+        h('td', { 'data-label': 'Tokens in', class: 'num' }, fmt(r.input_tokens)),
+        h('td', { 'data-label': 'Tokens out', class: 'num' }, fmt(r.output_tokens)),
+        h('td', { 'data-label': 'Cost', class: 'num' }, r.cost_usd ? `$${r.cost_usd.toFixed(4)}` : h('span', { class: 'muted' }, '—')))))))
+      : emptyState('No model calls yet', 'Calls through the gateway show up here once the OpenTelemetry Collector forwards the gateway\'s access logs.'),
+  });
+}
+
+function parsePrices(text) {
+  const out = {};
+  for (const line of String(text || '').split('\n').map((l) => l.trim()).filter(Boolean)) {
+    const m = line.match(/^(.+?)\s*[:=]\s*([\d.]+)\s*,\s*([\d.]+)$/);
+    if (!m) throw new Error(`Write each price as "model: input, output" in USD per million tokens ("${line}").`);
+    out[m[1].trim()] = { input: Number(m[2]), output: Number(m[3]) };
+  }
+  return out;
+}
+
+function formatPrices(prices) {
+  return Object.entries(prices || {}).map(([m, p]) => `${m}: ${p.input}, ${p.output}`).join('\n');
+}
+
+async function providerForm(p) {
+  const editing = Boolean(p);
+  const saved = await ask({
+    title: editing ? `Edit ${p.name}` : 'Add a model provider',
+    text: "The gateway reads the provider's API key from a file mounted into it; the key never enters AgentGov. Changes are recorded in the evidence ledger.",
+    iconName: editing ? 'edit' : 'models', confirm: editing ? 'Save changes' : 'Add provider', wide: true,
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'openai', hint: `${NAME_HINT} Agents call it at /llm/<name>.` },
+      { id: 'kind', label: 'Kind', type: 'select', value: p?.kind || 'openai', options: PROVIDER_KINDS.map(([value, label]) => ({ value, label })) },
+      { id: 'base_url', label: 'Base URL', mono: true, value: p?.base_url || '', placeholder: 'http://vllm:8000/v1', hint: 'Only for an OpenAI-compatible server: its OpenAI API base, as an OpenAI SDK takes it.' },
+      { id: 'key_file', label: 'Key file', mono: true, value: p && p.key_file !== `/model-keys/${p.name}` ? p.key_file : '', placeholder: '/model-keys/<name>', hint: 'Where the gateway reads the API key. Empty: /model-keys/<name>.' },
+      { id: 'trust_level', label: 'Trust', type: 'select', value: p?.trust_level || 'unverified', options: [
+        { value: 'unverified', label: 'Unverified: personal data in prompts is masked' },
+        { value: 'verified', label: 'Verified (a data processing agreement covers it): personal data may be sent' },
+      ] },
+      { id: 'prices', label: 'Prices', type: 'code', rows: 2, value: formatPrices(p?.prices), placeholder: 'gpt-4o*: 2.5, 10', hint: 'One model pattern per line: USD per million input tokens, then output tokens.' },
+      { id: 'description', label: 'Description', type: 'textarea', value: p?.description || '' },
+    ].filter(Boolean),
+    submit: (v) => {
+      const body = {
+        kind: v.kind, base_url: v.kind === 'openai-compatible' ? orNull(v.base_url) : null, key_file: orNull(v.key_file),
+        trust_level: v.trust_level, prices: parsePrices(v.prices), description: v.description,
+      };
+      if (editing) return api(`v1/models/providers/${encodeURIComponent(p.name)}`, { method: 'PATCH', body });
+      return api('v1/models/providers', { method: 'POST', body: { name: v.name, ...body } });
+    },
+  });
+  if (!saved) return;
+  toast(editing ? `Saved ${saved.name}.` : `Added ${saved.name}. Agents call it at ${saved.route} once the gateway has its key.`);
+  await refresh();
+}
+
+async function blockProvider(p) {
+  const block = p.status !== 'blocked';
+  const done = await ask({
+    title: block ? `Block ${p.name}?` : `Unblock ${p.name}?`,
+    text: block ? 'Every model call to it is refused within a second, for every agent.' : 'Agents with access may call it again.',
+    tone: block ? 'danger' : 'primary', iconName: block ? 'ban' : 'undo', confirm: block ? 'Block' : 'Unblock',
+    submit: () => api(`v1/models/providers/${encodeURIComponent(p.name)}/${block ? 'block' : 'unblock'}`, { method: 'POST' }),
+  });
+  if (!done) return;
+  toast(block ? `Blocked ${p.name}.` : `Unblocked ${p.name}.`);
+  await refresh();
+}
+
+async function deleteProvider(p) {
+  const done = await ask({
+    title: `Delete ${p.name}?`,
+    text: 'Its route goes from the gateway. Its usage history stays.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete provider', busy: 'Deleting…',
+    submit: () => api(`v1/models/providers/${encodeURIComponent(p.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted ${p.name}.`);
+  await refresh();
+}
+
 /* -------------------------------------------------------------------- go */
 
 boot();
+
+/* ---------------------------------------------------------- developer tools */
+
+const SIGHTING_STATUS = {
+  approved: ['Approved', 'good', 'check-circle', 'An approved tool server'],
+  bypass: ['Past the gateway', 'critical', 'triangle', "A gateway server's own address: calls skip the gateway's controls"],
+  blocked: ['Blocked', 'critical', 'ban', 'A blocked tool server'],
+  unapproved: ['Not approved', 'warning', 'triangle', 'Not an approved tool server'],
+};
+
+async function renderDevelopers() {
+  const [registry, sightings, features] = await Promise.all([
+    api('v1/mcp/registry'), api('v1/mcp/sightings'), featureModes().catch(() => ({})),
+  ]);
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Developer tools',
+      sub: "Which MCP servers developers' MCP clients may use, served as an MCP registry for GitHub Copilot and VS Code, and which ones developers have set up on their machines.",
+      actions: [refreshButton()],
+    }),
+    registryCard(registry),
+    sightingsCard(sightings, features));
+}
+
+function registryCard(registry) {
+  const servers = registry.servers || [];
+  const where = (server) => [
+    ...(server.remotes || []).map((r) => h('code', { class: 'break' }, r.url)),
+    ...(server.packages || []).map((pk) => plainChip(`${pk.registryType}:${pk.identifier}${pk.version ? `@${pk.version}` : ''}`, { mono: true })),
+  ];
+  const download = h('button', { type: 'button', class: 'btn', 'data-focus-key': 'managed-settings' }, icon('download'), 'managed-settings.json');
+  download.addEventListener('click', guarded(async () => {
+    await saveDownload('v1/mcp/managed-settings', 'managed-settings.json');
+    toast('Saved managed-settings.json: the same servers as an allowlist, by URL and command.');
+  }));
+  return card({
+    title: 'MCP registry',
+    sub: "Tool servers listed for developers. In GitHub's AI controls (MCP), set this as the MCP registry URL and choose Registry only: Copilot then runs only these servers.",
+    actions: [download],
+    body: [
+      registry.enabled ? null : callout('warning', 'power', h('span', {}, h('strong', {}, 'The registry is off: '),
+        "developers' clients can't read it. It is served without credentials, as they read it; turn on ", h('code', {}, 'mcp-registry'), ' on the ', h('a', { href: '#/features' }, 'Features'), ' page.')),
+      facts([
+        ['Registry URL', copyable(registry.url, 'registry URL')],
+        ['Names', h('span', {}, h('code', {}, `${registry.namespace}/<server>`))],
+      ]),
+      servers.length
+        ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+          h('caption', { class: 'sr-only' }, 'Servers in the MCP registry'),
+          h('thead', {}, h('tr', {}, ['Name', 'Version', 'Developers connect to', 'Status'].map((c) => h('th', { scope: 'col' }, c)))),
+          h('tbody', {}, servers.map((entry) => h('tr', {},
+            h('td', { 'data-label': 'Name' }, h('code', { class: 'break' }, entry.server.name)),
+            h('td', { 'data-label': 'Version' }, entry.server.version),
+            h('td', { 'data-label': 'Developers connect to' }, h('div', { class: 'stack', style: 'gap:4px' }, where(entry.server))),
+            h('td', { 'data-label': 'Status' }, entry.server._meta?.['dev.agentgov/server']?.throughGateway
+              ? plainChip('Through the gateway', { tone: 'good', iconName: 'shield' })
+              : plainChip('Developers only', { iconName: 'developers' })))))))
+        : emptyState('No tool servers are listed for developers', 'Edit a tool server and tick Developers, or register one only for developers, with its address or its packages.'),
+    ],
+  });
+}
+
+function sightingsCard(groups, features) {
+  const command = 'agentgov mcp scan --report';
+  const body = groups.length
+    ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, "MCP servers on developers' machines"),
+      h('thead', {}, h('tr', {}, ['Status', 'Server', 'Set up as', 'Machines', 'Last reported', ''].map((c) => h('th', { scope: 'col', class: c === 'Machines' ? 'num' : null }, c || h('span', { class: 'sr-only' }, 'Actions'))))),
+      h('tbody', {}, groups.map((g) => {
+        const [label, tone, ic, title] = SIGHTING_STATUS[g.status] || [humanize(g.status), 'neutral', 'info', ''];
+        const what = g.url || (g.command || []).join(' ') || g.identity;
+        return h('tr', {},
+          h('td', { 'data-label': 'Status' }, plainChip(label, { tone, iconName: ic, title }), g.server ? h('div', { class: 'cell-sub' }, g.server) : null),
+          h('td', { 'data-label': 'Server' }, h('code', { class: 'break' }, what)),
+          h('td', { 'data-label': 'Set up as' }, h('span', { class: 'break' }, g.names.join(', ')), h('div', { class: 'cell-sub' }, g.clients.join(', '))),
+          h('td', { 'data-label': 'Machines', class: 'num' }, fmt(g.machines), h('div', { class: 'cell-sub' }, plural(g.users, 'person', 'people'))),
+          h('td', { 'data-label': 'Last reported' }, timeEl(g.last_seen_at)),
+          h('td', { 'data-label': '' }, g.status === 'unapproved' && can('admin') && registerDraft(g)
+            ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `register-${g.identity}`, onclick: guarded(() => registerSighting(g)) }, icon('plus'), 'Register')
+            : null));
+      }))))
+    : emptyState('No reports yet', h('span', {}, 'Developers, or your device management, run ', h('code', {}, command), ' with an API key of the registrar role.'));
+  return card({
+    title: "Set up on developers' machines",
+    sub: 'The MCP servers in VS Code, Copilot, Claude, Cursor and other clients, as developers report them, against the approved tool servers. Credentials never leave their machines.',
+    actions: [copyable(command, 'scan command')],
+    flush: Boolean(groups.length),
+    body: [
+      features['mcp-discovery'] === 'off' ? callout('warning', 'power', h('span', {}, h('strong', {}, 'Reports are off. '), 'Turn on ', h('code', {}, 'mcp-discovery'), ' on the ', h('a', { href: '#/features' }, 'Features'), ' page.')) : null,
+      body,
+    ],
+  });
+}
+
+// A tool server registration started from what developers set up: their address, or
+// the package they run.
+function registerDraft(g) {
+  const [kind, ...rest] = g.identity.split(':');
+  const value = rest.join(':');
+  const name = (g.names[0] || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
+  if (kind === 'url') return { name, url: g.url || value, gateway: false, developers: true };
+  if (['npm', 'pypi', 'oci'].includes(kind)) return { name, gateway: false, developers: true, packages: [{ registry_type: kind, identifier: value }] };
+  return null;
+}
+
+async function registerSighting(g) {
+  const created = await toolserverForm(null, registerDraft(g));
+  if (!created) return;
+  toast(`Registered ${created.name}. Its finding resolves once AgentGov compares the reports again.`);
+  await refresh();
+}

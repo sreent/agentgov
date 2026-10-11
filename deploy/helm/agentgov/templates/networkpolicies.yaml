@@ -1,0 +1,68 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $root := . }}
+{{- /*
+  Who may reach what. The control plane, the gateway, the collector and Keycloak
+  serve people, agents and outside services, so they accept connections from
+  anywhere; OPA, the processor, Presidio and PostgreSQL only from AgentGov's own
+  parts. Egress is left open: MCP servers, Microsoft's APIs and model providers
+  can be anywhere.
+*/}}
+{{- $internal := list
+  (dict "component" "opa" "ports" (list 8181) "from" (list "control-plane" "processor") "enabled" true)
+  (dict "component" "processor" "ports" (list 50051 8091) "from" (list "gateway") "enabled" true)
+  (dict "component" "presidio" "ports" (list 3000) "from" (list "processor") "enabled" .Values.presidio.enabled)
+  (dict "component" "postgresql" "ports" (list 5432) "from" (list "control-plane" "keycloak") "enabled" .Values.postgresql.enabled) }}
+{{- range $internal }}
+{{- if .enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "agentgov.name" (list $root .component) }}
+  labels:
+    {{- include "agentgov.labels" (list $root .component) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "agentgov.selector" (list $root .component) | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- range .from }}
+        - podSelector:
+            matchLabels:
+              {{- include "agentgov.selector" (list $root .) | nindent 14 }}
+        {{- end }}
+      ports:
+        {{- range .ports }}
+        - port: {{ . }}
+        {{- end }}
+{{- end }}
+{{- end }}
+{{- $public := list
+  (dict "component" "control-plane" "ports" (list 8000) "enabled" true)
+  (dict "component" "gateway" "ports" (list 8080) "enabled" true)
+  (dict "component" "otel-collector" "ports" (list 4317 4318 13133) "enabled" .Values.otelCollector.enabled)
+  (dict "component" "keycloak" "ports" (list 8080 9000) "enabled" .Values.keycloak.enabled) }}
+{{- range $public }}
+{{- if .enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "agentgov.name" (list $root .component) }}
+  labels:
+    {{- include "agentgov.labels" (list $root .component) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "agentgov.selector" (list $root .component) | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        {{- range .ports }}
+        - port: {{ . }}
+        {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
