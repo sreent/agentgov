@@ -251,10 +251,22 @@ function can(kind) {
   return roles.includes('secops') && (me?.handoff?.reached || []).includes(kind);
 }
 
-// Someone without an AgentGov role, signed in to decide the approval requests that agents
-// acting for them sent them (the approvals-by-person feature). They see only those.
+// Someone without an AgentGov role, signed in to see the issues sent to them (the issues
+// feature) and decide the approval requests that agents acting for them sent them (the
+// approvals-by-person feature). They see only those.
 function isPerson() {
   return Boolean(me) && !me.roles.some((r) => READ_ROLES.includes(r)) && me.roles.includes('person');
+}
+
+// Their pages: issues (on the findings page) and approvals, as the features allow.
+function personPages() {
+  const inbox = me?.inbox || {};
+  const pages = [inbox.issues ? 'findings' : null, inbox.approvals ? 'approvals' : null].filter(Boolean);
+  return pages.length ? pages : ['approvals'];
+}
+
+function personHome() {
+  return `#/${personPages()[0]}`;
 }
 
 // Reasons /auth/callback sends back (?sso_error=...). Only these fixed texts are shown.
@@ -387,6 +399,26 @@ const STATUS = {
     open: ['warning', 'alert-circle', 'Open'],
     resolved: ['good', 'check-circle', 'Resolved'],
     dismissed: ['neutral', 'minus', 'Dismissed'],
+    accepted: ['neutral', 'shield-check', 'Risk accepted'],
+  },
+  access: {
+    requested: ['warning', 'clock', 'Requested'],
+    active: ['good', 'check-circle', 'Active'],
+    expired: ['serious', 'triangle', 'Expired'],
+    denied: ['neutral', 'ban', 'Denied'],
+    revoked: ['neutral', 'minus', 'Revoked'],
+    renewed: ['neutral', 'check-double', 'Renewed'],
+  },
+  entra_access: {
+    delivered: ['good', 'check-circle', 'Delivered'],
+    delivering: ['warning', 'clock', 'Delivering'],
+    partiallyDelivered: ['warning', 'triangle', 'Partly delivered'],
+    deliveryFailed: ['critical', 'octagon', 'Delivery failed'],
+  },
+  notification: {
+    pending: ['neutral', 'clock', 'Sending'],
+    sent: ['good', 'check-circle', 'Sent'],
+    failed: ['critical', 'octagon', 'Not sent'],
   },
   apikey: {
     active: ['good', 'check-circle', 'Active'],
@@ -825,7 +857,12 @@ function updateBadges({ pendingApprovals, findings }) {
 async function refreshBadges() {
   try {
     if (isPerson()) {
-      updateBadges({ pendingApprovals: (await api('v1/me/approvals?status=pending')).length });
+      const pages = personPages();
+      const [pending, issues] = await Promise.all([
+        pages.includes('approvals') ? api('v1/me/approvals?status=pending') : [],
+        pages.includes('findings') ? api('v1/me/issues?status=open') : [],
+      ]);
+      updateBadges({ pendingApprovals: pending.length, findings: summarizeFindings(issues) });
       return;
     }
     const [pending, open] = await Promise.all([api('v1/approvals?status=pending'), api('v1/findings?status=open')]);
@@ -843,6 +880,8 @@ const PAGES = [
   { re: /^\/approvals(?:\/(history))?$/, nav: 'approvals', title: 'Approvals', render: renderApprovals },
   { re: /^\/toolservers$/, nav: 'toolservers', title: 'Tool servers', render: renderToolservers },
   { re: /^\/findings$/, nav: 'findings', title: 'Findings', render: renderFindings },
+  { re: /^\/findings\/teams$/, nav: 'findings', title: 'Teams', render: renderTeams },
+  { re: /^\/findings\/([^/]+)$/, nav: 'findings', title: 'Finding', render: renderFinding },
   { re: /^\/policies$/, nav: 'policies', title: 'Policies', render: renderPolicies },
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
   { re: /^\/access$/, nav: 'access', title: 'Access', render: renderAccess },
@@ -887,8 +926,8 @@ async function route({ soft = false } = {}) {
     match = path.match(p.re);
     if (match) { page = p; break; }
   }
-  if (!page) { location.replace(isPerson() ? '#/approvals' : '#/overview'); return; }
-  if (isPerson() && page.nav !== 'approvals') { location.replace('#/approvals'); return; }
+  if (!page) { location.replace(isPerson() ? personHome() : '#/overview'); return; }
+  if (isPerson() && !personPages().includes(page.nav)) { location.replace(personHome()); return; }
   const seq = ++renderSeq;
   setActiveNav(page.nav);
   closeNav(false);
@@ -1001,11 +1040,12 @@ function enterApp() {
   $('.skip-link').hidden = false;
   $('#shell').hidden = false;
   firstRender = true;
-  // People without an AgentGov role have only their approvals.
+  // People without an AgentGov role have only their issues and approvals.
   for (const link of document.querySelectorAll('#nav [data-nav]')) {
-    link.closest('li').hidden = isPerson() && link.dataset.nav !== 'approvals';
+    link.closest('li').hidden = isPerson() && !personPages().includes(link.dataset.nav);
   }
-  if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', isPerson() ? '#/approvals' : '#/overview');
+  $('#nav-findings-label').textContent = isPerson() ? 'Your issues' : 'Findings';
+  if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', isPerson() ? personHome() : '#/overview');
   route();
   refreshBadges();
   getInfo().then((info) => {
@@ -1071,7 +1111,7 @@ async function onSignin(event) {
   } catch (ex) {
     token = null;
     if (ex.status === 401) err.textContent = 'That token was not accepted. Check it for missing or extra characters, or ask an administrator for a new API key.';
-    else if (ex.status === 403) err.textContent = `This token can't open the admin center (${ex.detail || 'its role is not allowed'}). Use an admin, approver or auditor key.`;
+    else if (ex.status === 403) err.textContent = `This token can't open the admin center (${ex.detail || 'its role is not allowed'}). Use an admin, approver, secops or auditor key.`;
     else err.textContent = ex.message;
     err.hidden = false;
     input.focus();
@@ -1124,7 +1164,7 @@ async function start() {
     }
     if (!who.roles.some((r) => READ_ROLES.includes(r) || r === 'person')) {
       if (!token) await api('auth/logout', { method: 'POST', signingIn: true }).catch(() => null);
-      resetToSignin(`Your role (${who.role}) can't open the admin center. Use an admin, approver or auditor account.`);
+      resetToSignin(`Your role (${who.role}) can't open the admin center. Use an admin, approver, secops or auditor account.`);
       return;
     }
     me = who;
@@ -1687,27 +1727,34 @@ const ATTESTABLE = new Set(['active', 'blocked', 'pending']);
 async function renderAgent({ match }) {
   const ref = decodeURIComponent(match[1]);
   const agent = await api(`v1/agents/${encodeURIComponent(ref)}`);
-  const [entries, openFindings, instructions, usage, a2a] = await Promise.all([
+  const [entries, openFindings, instructions, usage, a2a, held, packages, modes] = await Promise.all([
     api(`v1/ledger?agent=${encodeURIComponent(agent.id)}&limit=12`).catch((e) => e),
     api(`v1/findings?status=open&agent=${encodeURIComponent(agent.id)}`).catch((e) => e),
     api(`v1/agents/${encodeURIComponent(agent.id)}/instructions`).catch((e) => e),
     api(`v1/models/usage?agent=${encodeURIComponent(agent.id)}&days=7`).catch((e) => e),
     api(`v1/agents/${encodeURIComponent(agent.id)}/a2a`).catch((e) => e),
+    api(`v1/agents/${encodeURIComponent(agent.id)}/access-packages`).catch((e) => e),
+    api('v1/access-packages').catch(() => []),
+    featureModes().catch(() => ({})),
   ]);
+  // What Microsoft Entra ID Governance assigns its Entra identity, when it has one.
+  const entra = agent.external_ids?.entra_agent_id
+    ? await api(`v1/agents/${encodeURIComponent(agent.id)}/entra-access-packages`).catch((e) => e)
+    : null;
   // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
   const views = agent.platforms || [];
   const where = views.length && agent.status !== 'deleted' ? await platformActionTarget(agent) : null;
   const main = views.length ? views.map((v) => platformCard(agent, v, where))
-    : [permissionsCard(agent), agentModelsCard(agent, usage), agentA2ACard(agent, a2a)];
+    : [permissionsCard(agent), agentAccessCard(agent, held, packages, modes['access-packages']), agentModelsCard(agent, usage), agentA2ACard(agent, a2a)];
   // With threat detection enforcing, AgentGov's policies decide about its tool calls.
-  const enforced = views.some((v) => v.source === 'copilot-studio')
-    && (await featureModes().catch(() => ({})))['copilot-studio-threat-detection'] === 'enforce';
+  const enforced = views.some((v) => v.source === 'copilot-studio') && modes['copilot-studio-threat-detection'] === 'enforce';
   return h('div', { class: 'page', 'data-title': agent.name },
     agentHeader(agent),
     h('div', { class: 'detail-grid' },
       h('div', { class: 'stack' }, main, instructionsCard(agent, instructions), agentLedgerCard(agent, entries),
         views.length ? null : agentCardCard(agent)),
       h('div', { class: 'stack' }, riskCard(agent, enforced), peopleCard(agent), attestationCard(agent), identityCard(agent),
+        entra instanceof Error || !entra ? null : entraAccessCard(agent, entra),
         agentFindingsCard(openFindings))));
 }
 
@@ -1893,7 +1940,9 @@ const NAME_HINT = 'Lowercase letters, digits and hyphens, starting and ending wi
 
 /** Register an agent (no `a`) or edit one. Resolves to the saved agent, or null. */
 async function agentForm(a) {
-  const [blueprints, issuers] = await Promise.all([api('v1/blueprints'), api('v1/identity-issuers').catch(() => [])]);
+  const [blueprints, issuers, teams] = await Promise.all([
+    api('v1/blueprints'), api('v1/identity-issuers').catch(() => []), api('v1/teams').catch(() => []),
+  ]);
   const editing = Boolean(a);
   const identity = a?.workload_identity;
   // How it authenticates: offered once there's an issuer to choose.
@@ -1918,12 +1967,17 @@ async function agentForm(a) {
     { id: 'description', label: 'Description', type: 'textarea', value: a?.description || '' },
     { type: 'section', label: 'Accountability' },
     { type: 'row', fields: [
-      { id: 'owner', label: 'Owner', value: a?.owner || '', placeholder: 'Team or person' },
+      { id: 'owner', label: 'Owner', value: a?.owner || '', placeholder: 'Team or person', datalist: teams.map((t) => t.name) },
       { id: 'environment', label: 'Environment', value: a?.environment || '', placeholder: 'prod', datalist: ['prod', 'staging', 'dev'] },
     ] },
     {
       id: 'sponsors', label: 'Sponsors', value: (a?.sponsors || []).join(', '), placeholder: 'alice@example.com',
       hint: 'People who vouch for the agent, separated by commas. Approval needs at least one unless the blueprint waives it.',
+    },
+    {
+      id: 'team', label: 'Team', type: 'select', value: a?.team || '',
+      options: [{ value: '', label: "Its blueprint's team (or the default team)" }, ...teams.map((t) => ({ value: t.name, label: t.name }))],
+      hint: 'Issues about the agent go to its owner, then its sponsors, then this team.',
     },
     ...authentication,
     { type: 'section', label: 'Access' },
@@ -1992,6 +2046,7 @@ async function agentForm(a) {
         owner: orNull(v.owner),
         environment: orNull(v.environment),
         sponsors: parseList(v.sponsors),
+        team: v.team || null,
         blueprint: v.blueprint || null,
         permissions: parseGrants(v.permissions),
         model_access: parseModelAccess(v.model_access),
@@ -2203,6 +2258,7 @@ function peopleCard(a) {
       sponsors.length ? h('ul', { class: 'people', role: 'list' }, sponsors.map((p) => personRow(p, 'Sponsor')))
         : callout(managed ? 'warning' : 'neutral', managed ? 'alert-circle' : 'info',
           'No sponsor. An agent needs at least one sponsor before it can be activated.'),
+      a.team ? h('ul', { class: 'people', role: 'list' }, personRow(a.team, 'Team: issues escalate to it')) : null,
     ],
   });
 }
@@ -2873,10 +2929,12 @@ async function renderApprovals({ match }) {
   const tab = match[1] === 'history' ? 'history' : 'pending';
   const person = isPerson();
   // Requests sent to the person signed in: agents acted for them.
-  const [all, agents, mine] = await Promise.all([
+  const [all, agents, mine, asked, packages] = await Promise.all([
     person ? api('v1/me/approvals') : api('v1/approvals'),
     person ? [] : api('v1/agents?include_deleted=true').catch(() => []),
     api('v1/me/approvals?status=pending').catch(() => []),
+    person ? [] : api('v1/access-assignments?status=requested').catch(() => []),
+    person ? [] : api('v1/access-packages').catch(() => []),
   ]);
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const mineIds = new Set(mine.map((r) => r.id));
@@ -2884,7 +2942,7 @@ async function renderApprovals({ match }) {
   const history = all.filter((r) => r.status !== 'pending');
   updateBadges({ pendingApprovals: pending.length });
   const approvalsMode = person ? 'enforce' : (await featureModes().catch(() => ({}))).approvals;
-  const card = (r) => approvalCard(r, agentsById.get(r.agent_id), mineIds.has(r.id));
+  const approval = (r) => approvalCard(r, agentsById.get(r.agent_id), mineIds.has(r.id));
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'Approval views' },
     h('a', { class: 'tab', href: '#/approvals', 'aria-current': tab === 'pending' ? 'page' : null },
       'Pending', h('span', { class: 'nav-badge', 'data-tone': pending.length ? 'warning' : '' }, fmt(pending.length))),
@@ -2898,13 +2956,24 @@ async function renderApprovals({ match }) {
     content = pending.length
       ? h('div', { class: 'stack' },
         yours.length && !person ? h('div', { class: 'section-title' }, h('h2', {}, 'Waiting for you')) : null,
-        yours.length ? h('div', { class: 'approval-list' }, yours.map(card)) : null,
+        yours.length ? h('div', { class: 'approval-list' }, yours.map(approval)) : null,
         yours.length && others.length ? h('div', { class: 'section-title' }, h('h2', {}, "Everyone else's")) : null,
-        others.length ? h('div', { class: 'approval-list' }, others.map(card)) : null)
+        others.length ? h('div', { class: 'approval-list' }, others.map(approval)) : null)
       : h('section', { class: 'card' }, person
         ? emptyState('Nothing is waiting for you', 'When an agent acting for you needs your approval to do something, it appears here.')
         : emptyState('Nothing is waiting for approval',
           'When policy holds a tool call for a human (for example a tool its server marks destructive), it appears here.'));
+    if (asked.length) {
+      content = h('div', { class: 'stack' }, content, card({
+        title: 'Access requests',
+        sub: 'Access packages asked for agents. Someone other than who asked decides.',
+        body: h('ul', { class: 'access-list', role: 'list' }, asked.map((r) => h('li', { class: 'access-row' },
+          h('div', { class: 'access-main' },
+            h('div', { class: 'cell-title' }, r.package, ' for ', agentLink(r.agent_id, r.agent_name)),
+            h('div', { class: 'cell-sub break' }, `${r.requested_by}, for ${plural(r.days, 'day')}: ${r.reason} · `, timeEl(r.requested_at))),
+          h('div', { class: 'btn-row' }, assignmentButtons(r, packages, { id: r.agent_id, name: r.agent_name }))))),
+      }));
+    }
   } else {
     content = h('section', { class: 'card', 'aria-label': 'Approval history' },
       history.length ? approvalHistoryTable(history) : emptyState('No decided approvals yet'));
@@ -3262,21 +3331,44 @@ async function approveTool(ts, t) {
 
 /* ---------------------------------------------------------------- findings */
 
-const FINDING_STATUS = [['open', 'Open'], ['resolved', 'Resolved'], ['dismissed', 'Dismissed'], ['all', 'All']];
+const FINDING_STATUS = [
+  ['open', 'Open'], ['mine', 'Yours'], ['accepted', 'Risk accepted'], ['resolved', 'Resolved'], ['dismissed', 'Dismissed'], ['all', 'All'],
+];
+const LEVEL_WORDS = { owner: 'its owner', sponsors: 'its sponsors', team: 'its team' };
+const FINDING_DONE = { resolve: 'Resolved', dismiss: 'Dismissed', reopen: 'Reopened', acknowledge: 'Acknowledged' };
+
+// What the signed-in person may do to findings: approvers, administrators and (from triage)
+// the secops role act on all of them; the people an issue reached acknowledge it.
+function mayTriage() {
+  return can('approve') || can('triage');
+}
+
+function findingTabs(current) {
+  if (isPerson()) return null;
+  return h('nav', { class: 'tabs', 'aria-label': 'Finding views' },
+    h('a', { class: 'tab', href: '#/findings', 'aria-current': current === 'findings' ? 'page' : null }, 'Findings'),
+    h('a', { class: 'tab', href: '#/findings/teams', 'aria-current': current === 'teams' ? 'page' : null }, 'Teams'));
+}
 
 async function renderFindings({ params }) {
+  const person = isPerson();
+  const statuses = person ? FINDING_STATUS.filter(([k]) => !['mine', 'dismissed'].includes(k)) : FINDING_STATUS;
   const state = {
-    status: FINDING_STATUS.some(([k]) => k === params.get('status')) ? params.get('status') : 'open',
+    status: statuses.some(([k]) => k === params.get('status')) ? params.get('status') : 'open',
     severity: params.get('severity') || '',
     category: params.get('category') || '',
   };
+  // People without a role see the issues sent to them; everyone else, every finding, or theirs.
+  const source = (status) => (person ? `v1/me/issues?status=${encodeURIComponent(status)}`
+    : status === 'mine' ? 'v1/me/issues?status=open' : `v1/findings?status=${encodeURIComponent(status)}`);
   const [initial, agents] = await Promise.all([
-    api(`v1/findings?status=${encodeURIComponent(state.status)}`),
-    api('v1/agents?include_deleted=true').catch(() => []),
+    api(source(state.status)),
+    person ? [] : api('v1/agents?include_deleted=true').catch(() => []),
   ]);
   let list = initial;
   const agentsById = new Map(agents.map((a) => [a.id, a]));
-  if (state.status === 'open') updateBadges({ findings: summarizeFindings(list) });
+  const badge = () => { if (state.status === 'open') updateBadges({ findings: summarizeFindings(list) }); };
+  badge();
 
   const statusHost = h('div', { class: 'seg', role: 'group', 'aria-label': 'Finding status' });
   const sevHost = h('div', { class: 'seg', role: 'group', 'aria-label': 'Severity' });
@@ -3289,12 +3381,33 @@ async function renderFindings({ params }) {
   const sync = () => setHashQuiet('/findings', { status: state.status === 'open' ? '' : state.status, severity: state.severity, category: state.category });
 
   async function reload() {
-    list = await api(`v1/findings?status=${encodeURIComponent(state.status)}`);
-    if (state.status === 'open') updateBadges({ findings: summarizeFindings(list) });
+    list = await api(source(state.status));
+    badge();
+  }
+
+  async function act(f, action, rows) {
+    try {
+      if (action === 'accept') {
+        if (!await acceptRisk(f)) return;
+      } else {
+        await api(`v1/findings/${encodeURIComponent(f.id)}/${action}`, { method: 'POST' });
+        toast(`${FINDING_DONE[action]}: ${f.title}`);
+      }
+      const index = rows.indexOf(f);
+      await reload();
+      apply();
+      const target = listHost.querySelector(`[data-focus-key="finding-${CSS.escape(f.id)}"]`)
+        || listHost.querySelectorAll('.finding')[Math.min(index, listHost.querySelectorAll('.finding').length - 1)]
+        || listTitle;
+      target.focus();
+      refreshBadges();
+    } catch (err) {
+      toast(err.message, { tone: 'critical' });
+    }
   }
 
   function apply() {
-    statusHost.replaceChildren(...FINDING_STATUS.map(([key, label]) => h('button', {
+    statusHost.replaceChildren(...statuses.map(([key, label]) => h('button', {
       type: 'button', class: 'seg-btn', 'aria-pressed': String(state.status === key), 'data-focus-key': `fstatus-${key}`,
       onclick: async () => {
         state.status = key;
@@ -3318,36 +3431,26 @@ async function renderFindings({ params }) {
     const rows = scoped
       .filter((f) => !state.severity || f.severity === state.severity)
       .sort((x, y) => SEVERITY_ORDER.indexOf(x.severity) - SEVERITY_ORDER.indexOf(y.severity) || String(y.last_seen).localeCompare(String(x.last_seen)));
-    countEl.textContent = plural(rows.length, `${state.status === 'all' ? '' : `${state.status} `}finding`.trim());
+    const word = person || state.status === 'mine' ? 'issue' : 'finding';
+    const which = ['all', 'mine'].includes(state.status) ? '' : `${statusMeta('finding', state.status)[2].toLowerCase()} `;
+    countEl.textContent = plural(rows.length, `${which}${word}`);
+    const yours = person || state.status === 'mine';
     listHost.replaceChildren(...(rows.length
-      ? rows.map((f) => findingCard(f, agentsById, async (action) => {
-        try {
-          await api(`v1/findings/${encodeURIComponent(f.id)}/${action}`, { method: 'POST' });
-          toast(`${{ resolve: 'Resolved', dismiss: 'Dismissed', reopen: 'Reopened' }[action]}: ${f.title}`);
-          const index = rows.indexOf(f);
-          await reload();
-          apply();
-          const target = listHost.querySelector(`[data-focus-key="finding-${CSS.escape(f.id)}"]`)
-            || listHost.querySelectorAll('.finding')[Math.min(index, listHost.querySelectorAll('.finding').length - 1)]
-            || listTitle;
-          target.focus();
-          refreshBadges();
-        } catch (err) {
-          toast(err.message, { tone: 'critical' });
-        }
-      }))
-      : [h('section', { class: 'card' }, emptyState(state.status === 'open' ? 'No open findings' : 'No findings match these filters',
-        state.status === 'open' ? 'Posture scans and runtime detections raise findings here.' : null))]));
+      ? rows.map((f) => findingCard(f, agentsById, (action) => act(f, action, rows), { yours }))
+      : [h('section', { class: 'card' }, emptyFindings(state.status, person))]));
   }
 
   category.addEventListener('change', () => { state.category = category.value; apply(); sync(); });
   apply();
-  return h('div', { class: 'page' },
+  return h('div', { class: 'page', 'data-title': person ? 'Your issues' : 'Findings' },
     pageHead({
-      title: 'Findings',
-      sub: 'Posture gaps from scheduled scans and threats detected at runtime, most severe first.',
+      title: person ? 'Your issues' : 'Findings',
+      sub: person
+        ? 'Issues about agents you own or sponsor, and those sent to your teams. Acknowledge one to take it on: it then goes no further. Fix what it says and it closes by itself.'
+        : 'Posture gaps from scheduled scans and threats detected at runtime, most severe first. Each goes to the people responsible: the agent\'s owner, then its sponsors, then its team.',
       actions: [refreshButton()],
     }),
+    findingTabs('findings'),
     h('div', { class: 'filters' }, statusHost,
       h('div', { class: 'field', style: 'flex:0 1 180px' }, h('label', { for: 'finding-category', class: 'sr-only' }, 'Category'), category)),
     h('div', { class: 'filters' }, sevHost, countEl),
@@ -3355,37 +3458,316 @@ async function renderFindings({ params }) {
     listHost);
 }
 
-function findingCard(f, agentsById, act) {
+function emptyFindings(status, person) {
+  if (status === 'mine' || (person && status === 'open')) {
+    return emptyState('Nothing is waiting for you', 'Issues about agents you own or sponsor, and those sent to your teams, appear here.');
+  }
+  if (status === 'open') return emptyState('No open findings', 'Posture scans and runtime detections raise findings here.');
+  return emptyState('No findings match these filters');
+}
+
+// Who an issue is with, and what they did about it.
+function issueLine(f) {
+  if (f.status === 'accepted') {
+    return h('p', { class: 'finding-issue' }, icon('shield-check'), h('span', {},
+      h('strong', {}, 'Risk accepted '), 'until ', timeEl(f.accepted_until, { absolute: true }), f.accepted_reason ? `: ${f.accepted_reason}` : ''));
+  }
+  if (f.status !== 'open') return null;
+  if (!f.level) return null;
+  const who = (f.assignees || []).join(', ');
+  if (f.acknowledged_at) {
+    return h('p', { class: 'finding-issue' }, icon('user-check'), h('span', {},
+      h('strong', {}, `${f.acknowledged_by?.replace(/^[a-z]+:/, '') || 'Someone'} took it on `), timeEl(f.acknowledged_at)));
+  }
+  return h('p', { class: 'finding-issue' }, icon('user'), h('span', {},
+    'With ', h('strong', {}, LEVEL_WORDS[f.level] || f.level), who ? ` (${who})` : '',
+    f.escalate_at ? [', goes further ', timeEl(f.escalate_at), ' unless someone acknowledges it'] : ''));
+}
+
+function findingActions(f, act, { yours = false, detail = false } = {}) {
+  const triage = mayTriage();
+  const buttons = [];
+  if (!detail) {
+    buttons.push(h('a', { class: 'btn btn--sm btn--ghost', href: `#/findings/${encodeURIComponent(f.id)}` }, 'Details', icon('arrow')));
+  }
+  if (f.status === 'open') {
+    if (f.level && !f.acknowledged_at && (triage || yours)) {
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('acknowledge') }, icon('user-check'), 'Acknowledge'));
+    }
+    if (triage) {
+      buttons.push(
+        h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('accept') }, icon('shield-check'), 'Accept risk'),
+        h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('dismiss') }, icon('minus'), 'Dismiss'),
+        h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => act('resolve') }, icon('check'), 'Resolve'));
+    }
+  } else if (triage) {
+    buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('reopen') }, icon('undo'), 'Reopen'));
+  }
+  return buttons;
+}
+
+async function acceptRisk(f) {
+  const later = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
+  const done = await ask({
+    title: 'Accept the risk?',
+    text: `${f.title}. It goes to nobody until the date you choose, then opens again if it still holds. A year at most: then someone decides again.`,
+    iconName: 'shield-check', confirm: 'Accept risk',
+    fields: [
+      { id: 'reason', label: 'Why it is acceptable', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with the finding.' },
+      { id: 'until', label: 'Until', required: true, value: later, mono: true, hint: 'A date (YYYY-MM-DD), or a number of days.' },
+    ],
+    submit: (v) => api(`v1/findings/${encodeURIComponent(f.id)}/accept`, {
+      method: 'POST', body: { reason: v.reason, until: /^\d+$/.test(v.until) ? Number(v.until) : v.until },
+    }),
+  });
+  if (done) toast(`Risk accepted until ${done.accepted_until.slice(0, 10)}: ${f.title}`);
+  return done;
+}
+
+function findingCard(f, agentsById, act, { yours = false } = {}) {
   const tone = toneOf('severity', f.severity);
   const agent = f.agent_id ? agentsById.get(f.agent_id) : null;
   const headingId = `finding-title-${f.id}`;
-  const actions = !(can('approve') || can('triage')) ? [] : f.status === 'open'
-    ? [h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('dismiss') }, icon('minus'), 'Dismiss'),
-      h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => act('resolve') }, icon('check'), 'Resolve')]
-    : [h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('reopen') }, icon('undo'), 'Reopen')];
+  const subject = f.agent_id && !isPerson() ? agentLink(f.agent_id, agent?.name || f.subject) : h('code', {}, agent?.name || f.subject);
   return h('article', { class: 'card finding', 'data-tone': tone, 'aria-labelledby': headingId, tabindex: '-1', 'data-focus-key': `finding-${f.id}` },
     h('div', { class: 'finding-stripe', 'aria-hidden': 'true' }),
     h('div', { class: 'finding-main' },
       h('div', { class: 'finding-top' }, chip('severity', f.severity), plainChip(humanize(f.category)),
-        f.status !== 'open' ? chip('finding', f.status) : null, h('span', { class: 'ledger-type muted' }, f.type)),
+        f.status !== 'open' ? chip('finding', f.status) : null,
+        f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle', title: 'The sync that checks it failed: it may no longer hold.' }) : null,
+        h('span', { class: 'ledger-type muted' }, f.type)),
       h('h3', { id: headingId, class: 'break' }, f.title),
       f.description ? h('p', { class: 'finding-desc small' }, f.description) : null,
       f.remediation ? h('p', { class: 'finding-fix' }, h('strong', {}, 'How to fix: '), f.remediation) : null,
+      issueLine(f),
       h('div', { class: 'finding-actions' },
         h('div', { class: 'finding-meta' },
-          h('span', {}, 'Subject: ', f.agent_id ? agentLink(f.agent_id, agent?.name || f.subject) : h('code', {}, f.subject)),
+          h('span', {}, 'Subject: ', subject),
           h('span', {}, `Seen ${f.occurrences === 1 ? 'once' : `${fmt(f.occurrences)} times`}`),
           h('span', {}, 'First ', timeEl(f.first_seen)),
           h('span', {}, 'Last ', timeEl(f.last_seen)),
-          f.resolved_at ? h('span', {}, `${f.status === 'dismissed' ? 'Dismissed' : 'Resolved'} by ${f.resolved_by || 'unknown'} `, timeEl(f.resolved_at)) : null),
-        h('div', { class: 'btn-row' }, actions))));
+          f.resolved_at ? h('span', {}, `${f.status === 'dismissed' ? 'Dismissed' : f.status === 'accepted' ? 'Accepted' : 'Resolved'} by ${f.resolved_by || 'unknown'} `, timeEl(f.resolved_at)) : null),
+        h('div', { class: 'btn-row' }, findingActions(f, act, { yours })))));
+}
+
+/* ------------------------------------------------------------ one finding */
+
+async function renderFinding({ match }) {
+  const id = decodeURIComponent(match[1]);
+  const f = await api(`v1/findings/${encodeURIComponent(id)}`);
+  const person = isPerson();
+  const act = guarded(async (action) => {
+    if (action === 'accept') {
+      if (!await acceptRisk(f)) return;
+    } else {
+      await api(`v1/findings/${encodeURIComponent(f.id)}/${action}`, { method: 'POST' });
+      toast(`${FINDING_DONE[action]}: ${f.title}`);
+    }
+    refreshBadges();
+    await refresh();
+  });
+  const subject = f.agent_id && !person ? agentLink(f.agent_id, f.agent_name || f.subject) : h('code', {}, f.agent_name || f.subject);
+  const crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Breadcrumb' },
+    h('a', { href: '#/findings' }, person ? 'Your issues' : 'Findings'), icon('chevron'), h('span', { 'aria-current': 'page' }, f.type));
+  return h('div', { class: 'page', 'data-title': f.title },
+    pageHead({ title: f.title, crumbs, actions: [refreshButton()] }),
+    h('div', { class: 'chip-row' }, chip('severity', f.severity), chip('finding', f.status), plainChip(humanize(f.category)),
+      f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle' }) : null),
+    f.verified === false ? callout('warning', 'triangle', h('span', {}, h('strong', {}, 'Unverified: '),
+      'the latest sync that checks it failed, so it may no longer hold. It stays open until a sync succeeds.')) : null,
+    card({
+      title: 'What it is',
+      body: h('div', { class: 'stack' },
+        f.description ? h('p', {}, f.description) : null,
+        f.remediation ? h('p', { class: 'finding-fix' }, h('strong', {}, 'How to fix: '), f.remediation) : null,
+        facts([
+          ['Subject', subject],
+          ['Seen', `${f.occurrences === 1 ? 'once' : `${fmt(f.occurrences)} times`}, first `, timeEl(f.first_seen), ', last ', timeEl(f.last_seen)],
+          f.status === 'accepted' ? ['Risk accepted until', [timeEl(f.accepted_until, { absolute: true }), f.accepted_reason ? `: ${f.accepted_reason}` : '']] : null,
+          f.acknowledged_at ? ['Acknowledged', [`by ${f.acknowledged_by} `, timeEl(f.acknowledged_at)]] : null,
+          f.resolved_at && f.status !== 'open' ? [humanize(f.status), [`by ${f.resolved_by || 'unknown'} `, timeEl(f.resolved_at)]] : null,
+        ].map((row) => row && [row[0], Array.isArray(row[1]) ? h('span', {}, row[1]) : h('span', {}, ...row.slice(1))])),
+        h('div', { class: 'btn-row' }, findingActions(f, act, { yours: f.yours, detail: true }))),
+    }),
+    f.type.startsWith('access.') ? await findingAccessCard(f) : null,
+    chainCard(f),
+    notificationsCard(f),
+    historyCard(f));
+}
+
+// An issue about an access package: what it is, and renewing, keeping or removing it.
+async function findingAccessCard(f) {
+  const row = await api(`v1/access-assignments/${encodeURIComponent(f.subject)}`).catch(() => null);
+  if (!row) return null;
+  const packages = await api('v1/access-packages').catch(() => []);
+  const pk = packages.find((x) => x.name === row.package);
+  const agent = { id: row.agent_id, name: row.agent_name };
+  const held = ['active', 'expired'].includes(row.status);
+  const after = guarded(async (done) => { if (done) { refreshBadges(); await refresh(); } });
+  const buttons = held ? [
+    pk && f.type !== 'access.review_due' ? h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: async () => after(await requestPackage(agent, packages, pk)) }, icon('refresh'), 'Renew') : null,
+    f.type === 'access.review_due' ? h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: async () => after(await reviewAssignment(row, true)) }, icon('check'), 'Keep it') : null,
+    f.type === 'access.review_due' ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: async () => after(await reviewAssignment(row, false)) }, icon('ban'), 'Remove it') : null,
+    can('approve') || can('contain') ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: async () => after(await assignmentAction(row, 'revoke')) }, icon('ban'), 'Revoke') : null,
+  ].filter(Boolean) : [];
+  return card({
+    title: 'Access package',
+    body: h('div', { class: 'stack' },
+      facts([
+        ['Package', h('span', {}, row.package, ' ', chip('access', row.status))],
+        ['Agent', isPerson() ? row.agent_name : agentLink(row.agent_id, row.agent_name)],
+        row.expires_at ? ['Expires', timeEl(row.expires_at, { absolute: true })] : null,
+        ['Asked for by', `${row.requested_by}: ${row.reason}`],
+        pk ? ['Grants', [...pk.permissions.map((g) => `${g.server}: ${g.tools.join(', ')}`), ...pk.model_access.map((m) => `${m.provider}: ${m.models.join(', ')}`), ...pk.agent_access.map((x) => `agent ${x}`)].join('; ')] : null,
+      ]),
+      buttons.length ? h('div', { class: 'btn-row' }, buttons) : null),
+  });
+}
+
+function chainCard(f) {
+  const steps = f.chain || [];
+  const body = steps.length
+    ? h('ol', { class: 'levels' }, steps.map((step) => h('li', { 'data-reached': step.reached ? 'true' : 'false', 'aria-current': step.current ? 'step' : null },
+      icon(step.current ? 'user' : step.reached ? 'check-circle' : 'minus'),
+      h('div', {}, h('strong', {}, humanize(step.level)), h('div', { class: 'cell-sub break' }, step.who.join(', ')),
+        step.current && f.status === 'open' && f.escalate_at && !f.acknowledged_at
+          ? h('div', { class: 'cell-sub' }, 'Goes to the next step ', timeEl(f.escalate_at), ' unless someone acknowledges it') : null))))
+    : emptyState('Nobody to send it to', 'Give the agent an owner or sponsors, or mark a team as the default team: issues with nobody else go to it.');
+  return card({
+    title: 'Who it goes to',
+    sub: 'Step by step, until someone acknowledges it: an agent\'s owner, then its sponsors, then its team. Each step is told by email and in its team\'s chat.',
+    body,
+  });
+}
+
+function notificationsCard(f) {
+  const rows = f.notifications || [];
+  if (!rows.length) return null;
+  return card({
+    title: 'Messages',
+    sub: 'Emails and chat messages about it, retried until they go.',
+    flush: true,
+    body: h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, 'Messages'),
+      h('thead', {}, h('tr', {}, ['To', 'Step', 'Status'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, rows.map((n) => h('tr', {},
+        h('td', { 'data-label': 'To', class: 'break' }, h('span', { class: 'cell-title' }, n.recipient), h('div', { class: 'cell-sub' }, n.channel === 'email' ? 'Email' : humanize(n.channel))),
+        h('td', { 'data-label': 'Step' }, humanize(n.level)),
+        h('td', { 'data-label': 'Status' }, chip('notification', n.status),
+          n.sent_at ? h('div', { class: 'cell-sub' }, timeEl(n.sent_at)) : null,
+          n.last_error ? h('div', { class: 'cell-sub break' }, n.last_error) : null,
+          n.next_attempt_at && n.attempts ? h('div', { class: 'cell-sub' }, 'Tries again ', timeEl(n.next_attempt_at)) : null)))))),
+  });
+}
+
+function historyCard(f) {
+  const rows = f.history || [];
+  if (!rows.length) return null;
+  return card({
+    title: 'History',
+    sub: 'From the evidence ledger, newest first.',
+    body: h('ul', { class: 'timeline', role: 'list' }, rows.map((e) => h('li', {},
+      h('div', { class: 'cell-title' }, humanize(e.type.replace(/^finding\./, ''))),
+      h('div', { class: 'cell-sub break' }, e.actor, ' · ', timeEl(e.ts),
+        e.details?.to ? ` · to ${e.details.to}` : '',
+        e.details?.why ? ` · ${e.details.why}` : '',
+        e.details?.assignees ? ` · ${e.details.assignees.join(', ')}` : '')))),
+  });
+}
+
+/* ------------------------------------------------------------------- teams */
+
+async function renderTeams() {
+  if (isPerson()) { location.replace('#/findings'); return h('div'); }
+  const [teams, destinations] = await Promise.all([api('v1/teams'), api('v1/destinations').catch(() => [])]);
+  const chats = destinations.filter((d) => ['teams', 'slack'].includes(d.kind));
+  const admin = can('admin');
+  const hasDefault = teams.some((t) => t.default);
+  const body = teams.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('caption', { class: 'sr-only' }, 'Teams'),
+    h('thead', {}, h('tr', {}, ['Team', 'Members', 'Reached at', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+    h('tbody', {}, teams.map((t) => h('tr', { 'data-team': t.name },
+      h('td', { 'data-label': 'Team', class: 'break' }, h('span', { class: 'cell-title' }, t.name),
+        t.default ? h('div', {}, plainChip('Default team', { tone: 'good', iconName: 'check-circle' })) : null,
+        t.description ? h('div', { class: 'cell-sub' }, t.description) : null),
+      h('td', { 'data-label': 'Members', class: 'break' }, t.members.length ? t.members.join(', ') : h('span', { class: 'muted' }, 'None')),
+      h('td', { 'data-label': 'Reached at', class: 'break' },
+        t.emails.length ? h('div', {}, t.emails.join(', ')) : t.members.some((m) => m.includes('@')) ? h('div', { class: 'cell-sub' }, "Its members' email addresses") : null,
+        t.destinations.length ? h('div', { class: 'chip-row' }, t.destinations.map((d) => plainChip(d, { iconName: 'secops' }))) : null,
+        !t.emails.length && !t.destinations.length && !t.members.some((m) => m.includes('@')) ? h('span', { class: 'muted' }, 'In AgentGov only') : null),
+      h('td', { 'data-label': '' }, admin ? h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `team-edit-${t.name}`, onclick: guarded(() => teamForm(t, chats)) }, icon('edit'), 'Edit'),
+        h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `team-delete-${t.name}`, onclick: guarded(() => deleteTeam(t)) }, icon('trash'), 'Delete')) : null))))))
+    : emptyState('No teams', 'Add the teams that own agents, and the one that takes the issues nobody else does.');
+  return h('div', { class: 'page', 'data-title': 'Teams' },
+    pageHead({
+      title: 'Findings',
+      sub: "Teams own agents (as an agent's owner or sponsor), and take the issues about them that their owners and sponsors didn't acknowledge in time.",
+      actions: [
+        admin ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'add-team', onclick: guarded(() => teamForm(null, chats)) }, icon('plus'), 'Add team') : null,
+        refreshButton(),
+      ],
+    }),
+    findingTabs('teams'),
+    teams.length && !hasDefault ? callout('warning', 'alert-circle', h('span', {}, h('strong', {}, 'No default team: '),
+      'issues about agents without a team of their own, and those that are about nothing else, go to nobody. Mark one team as the default.')) : null,
+    card({ title: 'Teams', flush: Boolean(teams.length), body }));
+}
+
+async function teamForm(t, chats) {
+  const editing = Boolean(t);
+  const saved = await ask({
+    title: editing ? `Edit team ${t.name}` : 'Add a team',
+    text: 'Agents name it as their owner, a sponsor or their team, and blueprints as their agents\' team. Changes are recorded in the evidence ledger.',
+    iconName: editing ? 'edit' : 'user', confirm: editing ? 'Save changes' : 'Add team', wide: true,
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'cx-platform', hint: NAME_HINT },
+      { id: 'description', label: 'Description', type: 'textarea', value: t?.description || '' },
+      {
+        id: 'members', label: 'Members', type: 'textarea', value: (t?.members || []).join(', '), placeholder: 'alice@example.com, bob@example.com',
+        hint: 'Email addresses or user names, separated by commas: they see the team\'s issues in AgentGov and acknowledge them.',
+      },
+      {
+        id: 'emails', label: 'Email its issues to', value: (t?.emails || []).join(', '), placeholder: 'cx-platform@example.com',
+        hint: "A list's or a shared mailbox's address, or people's own. Empty: its members' addresses. Needs a mail server (AGENTGOV_SMTP_URL).",
+      },
+      chats.length ? { type: 'section', label: 'Post its issues to' } : null,
+      ...chats.map((d) => ({ id: `chat-${d.name}`, label: `${d.name} (${humanize(d.kind)})`, type: 'checkbox', value: (t?.destinations || []).includes(d.name) })),
+      { id: 'default', label: 'The default team: it takes the issues that have no team of their own', type: 'checkbox', value: Boolean(t?.default) },
+    ].filter(Boolean),
+    extra: chats.length ? null : h('p', { class: 'hint' }, 'To post its issues in a Teams or Slack channel, add the channel as a destination on the Security operations page first.'),
+    submit: (v) => {
+      const body = {
+        description: v.description, members: parseList(v.members), emails: parseList(v.emails),
+        destinations: chats.filter((d) => v[`chat-${d.name}`]).map((d) => d.name), default: v.default,
+      };
+      if (editing) return api(`v1/teams/${encodeURIComponent(t.name)}`, { method: 'PATCH', body });
+      return api('v1/teams', { method: 'POST', body: { name: v.name, ...body } });
+    },
+  });
+  if (!saved) return;
+  toast(editing ? `Saved team ${saved.name}.` : `Added team ${saved.name}.`);
+  await refresh();
+}
+
+async function deleteTeam(t) {
+  const done = await ask({
+    title: `Delete team ${t.name}?`,
+    text: 'Teams that blueprints or agents name cannot be deleted: name another team or person there first.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete team', busy: 'Deleting…',
+    submit: () => api(`v1/teams/${encodeURIComponent(t.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted team ${t.name}.`);
+  await refresh();
 }
 
 /* ---------------------------------------------------------------- policies */
 
 async function renderPolicies() {
-  const [blueprints, policies, agents, servers, providers] = await Promise.all([
+  const [blueprints, policies, agents, servers, providers, packages] = await Promise.all([
     api('v1/blueprints'), api('v1/policies'), api('v1/agents'), api('v1/toolservers'), api('v1/models/providers'),
+    api('v1/access-packages').catch(() => []),
   ]);
   const usage = countBy(agents, (a) => a.blueprint || '');
   const exportBtn = h('button', { type: 'button', class: 'btn', 'data-focus-key': 'export-yaml' }, icon('download'), 'Export manifests');
@@ -3422,6 +3804,16 @@ async function renderPolicies() {
           blueprints.length
             ? h('div', { class: 'bp-grid' }, blueprints.map((b) => blueprintCard(b, usage[b.name] || 0, servers)))
             : h('section', { class: 'card' }, emptyState('No blueprints yet', admin ? 'Create one to give a class of agents its tools.' : 'An admin creates blueprints here, with the CLI or with a Blueprint manifest.'))),
+        h('section', { class: 'stack', 'aria-labelledby': 'pkg-title' },
+          h('div', { class: 'section-title' },
+            h('div', {}, h('h2', { id: 'pkg-title' }, 'Access packages'),
+              h('p', {}, 'Grants agents hold for a while once approved: asked for, reminded before they expire, renewed or reviewed')),
+            sectionAction('New package', 'new-package', () => packageForm(null, servers, blueprints))),
+          packages.length
+            ? h('div', { class: 'bp-grid' }, packages.map((pk) => packageCard(pk, servers, blueprints)))
+            : h('section', { class: 'card' }, emptyState('No access packages', admin
+              ? 'Create one for access agents need for a while: a project, an incident, a pilot.'
+              : 'An admin creates access packages here, with the CLI or with an AccessPackage manifest.'))),
         h('section', { class: 'stack', 'aria-labelledby': 'rego-title' },
           h('div', { class: 'section-title' },
             h('div', {}, h('h2', { id: 'rego-title' }, 'Organisation policies'),
@@ -3436,6 +3828,7 @@ async function renderPolicies() {
 /** Create a blueprint (no `b`) or edit one. */
 async function blueprintFormFlow(b, servers) {
   const editing = Boolean(b);
+  const teams = await api('v1/teams').catch(() => []);
   const saved = await ask({
     title: editing ? `Edit blueprint ${b.name}` : 'New blueprint',
     text: editing
@@ -3479,6 +3872,11 @@ async function blueprintFormFlow(b, servers) {
         id: 'approvals_by', label: 'Approval requests made for a person go to', type: 'select', value: b?.approvals_by || 'approvers', options: Object.entries(APPROVALS_BY).map(([value, label]) => ({ value, label })),
         hint: 'To the person while the approvals-by-person feature is on; administrators can always decide.',
       },
+      {
+        id: 'team', label: 'Team', type: 'select', value: b?.team || '',
+        options: [{ value: '', label: 'The default team' }, ...teams.map((t) => ({ value: t.name, label: t.name }))],
+        hint: 'Issues about its agents go to their owners, then their sponsors, then this team.',
+      },
       { id: 'labels', label: 'Labels', value: formatLabels(b?.labels), placeholder: 'data=customer', mono: true },
     ].filter(Boolean),
     submit: (v) => {
@@ -3491,6 +3889,7 @@ async function blueprintFormFlow(b, servers) {
         model_access: parseModelAccess(v.model_access), daily_token_budget: parseBudget(v.daily_token_budget),
         agent_access: parseList(v.agent_access),
         acts_for: v.acts_for, people_groups: parseList(v.people_groups), approvals_by: v.approvals_by,
+        team: v.team || null,
       };
       if (editing) return api(`v1/blueprints/${encodeURIComponent(b.name)}`, { method: 'PATCH', body });
       return api('v1/blueprints', { method: 'POST', body: { name: v.name, ...body } });
@@ -3656,6 +4055,240 @@ function blueprintCard(b, used, servers) {
       ]),
       h('div', { class: 'field-label' }, 'Permissions'),
       permissionList(b.permissions),
+    ],
+  });
+}
+
+function packageCard(pk, servers, blueprints) {
+  const held = pk.assignments.active + pk.assignments.expired;
+  return card({
+    title: pk.name, level: 'h3', id: `pkg-${pk.id}`,
+    sub: pk.description,
+    actions: [plainChip(`Up to ${plural(pk.duration_days, 'day')}`, { iconName: 'clock' })],
+    foot: can('admin') ? h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `pkg-edit-${pk.name}`, onclick: guarded(() => packageForm(pk, servers, blueprints)) }, icon('edit'), 'Edit'),
+      h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `pkg-delete-${pk.name}`, onclick: guarded(() => deletePackage(pk)) }, icon('trash'), 'Delete')) : null,
+    body: [
+      facts([
+        ['Held by', held ? plural(held, 'agent') : h('span', { class: 'muted' }, 'No agents'), pk.assignments.requested ? ` · ${fmt(pk.assignments.requested)} waiting` : ''],
+        ['Requests', pk.approval ? 'An approver decides' : 'Granted at once'],
+        ['Reviews', pk.review_days ? `Every ${plural(pk.review_days, 'day')}` : 'None'],
+        ['For agents on', pk.blueprints.length ? pk.blueprints.join(', ') : 'Any blueprint'],
+        pk.model_access.length ? ['Models', h('div', { class: 'chip-row' }, pk.model_access.map((m) => plainChip(`${m.provider}: ${m.models.join(', ')}`, { mono: true })))] : null,
+        pk.agent_access.length ? ['May call agents', h('div', { class: 'chip-row' }, pk.agent_access.map((x) => plainChip(x, { mono: true })))] : null,
+      ].map((row) => row && [row[0], h('span', {}, ...row.slice(1))])),
+      pk.permissions.length ? [h('div', { class: 'field-label' }, 'Tools'), permissionList(pk.permissions)] : null,
+    ],
+  });
+}
+
+async function packageForm(pk, servers, blueprints) {
+  const editing = Boolean(pk);
+  const saved = await ask({
+    title: editing ? `Edit access package ${pk.name}` : 'New access package',
+    text: editing
+      ? 'Every agent that holds it gets the change as soon as OPA loads the updated policy bundle.'
+      : 'Agents hold what it grants for a while once a request is approved. Before it expires, the people responsible for the agent are told, so they can renew it.',
+    iconName: editing ? 'edit' : 'policies', confirm: editing ? 'Save changes' : 'Create package', wide: true,
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'crm-write', hint: NAME_HINT },
+      { id: 'description', label: 'Description', type: 'textarea', value: pk?.description || '' },
+      {
+        id: 'permissions', label: 'Tool grants', type: 'code', rows: 3, value: formatGrants(pk?.permissions), placeholder: 'crm: update_customer',
+        hint: `One server per line; tool names can use * wildcards.${servers.length ? ` Registered servers: ${servers.map((ts) => ts.name).join(', ')}.` : ''}`,
+      },
+      { id: 'model_access', label: 'Model access', type: 'code', rows: 2, value: formatModelAccess(pk?.model_access), placeholder: 'openai: gpt-4.1', hint: 'One provider per line.' },
+      { id: 'agent_access', label: 'Agents it lets call', value: (pk?.agent_access || []).join(', '), placeholder: 'billing-agent', mono: true, hint: 'Over A2A, separated by commas; names can use * wildcards.' },
+      { type: 'row', fields: [
+        { id: 'duration_days', label: 'Lasts at most (days)', type: 'number', min: 1, value: pk?.duration_days ?? 90, required: true },
+        { id: 'review_days', label: 'Review every (days)', type: 'number', min: 1, value: pk?.review_days ?? '', hint: 'Empty: no reviews.' },
+      ] },
+      { id: 'approval', label: 'An approver decides each request', type: 'checkbox', value: pk ? pk.approval : true, hint: 'Otherwise it is granted as soon as someone allowed asks for it.' },
+      {
+        id: 'blueprints', label: 'For agents on these blueprints', value: (pk?.blueprints || []).join(', '), mono: true,
+        hint: `Separated by commas. Empty: any agent.${blueprints.length ? ` Blueprints: ${blueprints.map((b) => b.name).join(', ')}.` : ''}`,
+      },
+    ].filter(Boolean),
+    submit: (v) => {
+      const whole = (text, label) => {
+        if (!text) return null;
+        const n = Number(text);
+        if (!(Number.isInteger(n) && n > 0 && n <= 365)) throw new Error(`${label} is a whole number of days from 1 to 365.`);
+        return n;
+      };
+      const body = {
+        description: v.description, permissions: parseGrants(v.permissions), model_access: parseModelAccess(v.model_access),
+        agent_access: parseList(v.agent_access), blueprints: parseList(v.blueprints), approval: v.approval,
+        duration_days: whole(v.duration_days, 'How long it lasts'), review_days: whole(v.review_days, 'The review period'),
+      };
+      if (editing) return api(`v1/access-packages/${encodeURIComponent(pk.name)}`, { method: 'PATCH', body });
+      return api('v1/access-packages', { method: 'POST', body: { name: v.name, ...body } });
+    },
+  });
+  if (!saved) return;
+  toast(editing ? `Saved access package ${saved.name}.` : `Created access package ${saved.name}.`);
+  await refresh();
+}
+
+async function deletePackage(pk) {
+  const done = await ask({
+    title: `Delete access package ${pk.name}?`,
+    text: 'Packages that agents hold or ask for cannot be deleted: revoke or deny those first.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete package', busy: 'Deleting…',
+    submit: () => api(`v1/access-packages/${encodeURIComponent(pk.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted access package ${pk.name}.`);
+  await refresh();
+}
+
+/* -------------------------------------------- access packages on agents */
+
+// Ask for a package for an agent; asked again while it holds one, it is a renewal.
+async function requestPackage(agent, packages, current) {
+  const choices = current ? [current] : packages;
+  if (!choices.length) { toast('There are no access packages yet: an admin creates them on the Policies page.', { tone: 'warning' }); return null; }
+  const first = choices[0];
+  const done = await ask({
+    title: current ? `Renew ${current.name} for ${agent.name}?` : `Request access for ${agent.name}`,
+    text: current
+      ? 'It carries on from now for the days you ask, and never ends sooner than it would have. An approver decides, unless the package needs no approval.'
+      : 'An approver decides, unless the package needs no approval. The agent holds what it grants until it expires.',
+    iconName: 'key', confirm: current ? 'Ask to renew' : 'Request access',
+    fields: [
+      current ? null : { id: 'package', label: 'Access package', type: 'select', value: first.name, options: choices.map((pk) => ({ value: pk.name, label: `${pk.name} (up to ${plural(pk.duration_days, 'day')})` })) },
+      { id: 'days', label: 'For how many days', type: 'number', min: 1, value: first.duration_days, required: true },
+      { id: 'reason', label: 'Why the agent needs it', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown to the approver.' },
+    ].filter(Boolean),
+    submit: (v) => api('v1/access-assignments', {
+      method: 'POST', body: { agent: agent.id || agent.agent_id, package: current ? current.name : v.package, days: Number(v.days), reason: v.reason },
+    }),
+  });
+  if (!done) return null;
+  toast(done.status === 'active' ? `${done.package} is granted to ${done.agent_name} until ${done.expires_at.slice(0, 10)}.` : `Asked for ${done.package} for ${done.agent_name}: an approver decides.`);
+  return done;
+}
+
+async function assignmentAction(row, action) {
+  const words = { approve: ['Approve', 'primary', 'check'], deny: ['Deny', 'danger', 'ban'], revoke: ['Revoke', 'danger', 'ban'] }[action];
+  const done = await ask({
+    title: `${words[0]} ${row.package} for ${row.agent_name}?`,
+    text: action === 'revoke'
+      ? 'The agent loses what it grants as soon as OPA loads the updated policy bundle.'
+      : `Asked by ${row.requested_by} for ${plural(row.days, 'day')}: ${row.reason}`,
+    tone: words[1], iconName: words[2], confirm: words[0],
+    fields: [{ id: 'note', label: action === 'revoke' ? 'Reason' : 'Note', type: 'textarea', hint: 'Recorded in the evidence ledger.' }],
+    submit: (v) => api(`v1/access-assignments/${encodeURIComponent(row.id)}/${action}`, {
+      method: 'POST', body: action === 'revoke' ? { reason: v.note || null } : { note: v.note || null },
+    }),
+  });
+  if (!done) return null;
+  toast(`${{ approve: 'Approved', deny: 'Denied', revoke: 'Revoked' }[action]}: ${row.package} for ${row.agent_name}.`);
+  return done;
+}
+
+async function reviewAssignment(row, keep) {
+  const done = await ask({
+    title: keep ? `Keep ${row.package} for ${row.agent_name}?` : `Remove ${row.package} from ${row.agent_name}?`,
+    text: keep ? 'The agent still needs it: it holds it until it expires, and is asked again at its next review.' : 'The agent loses what it grants as soon as OPA loads the updated policy bundle.',
+    tone: keep ? 'primary' : 'danger', iconName: keep ? 'check' : 'ban', confirm: keep ? 'Keep it' : 'Remove it',
+    fields: [{ id: 'note', label: 'Note', type: 'textarea', hint: 'Recorded in the evidence ledger.' }],
+    submit: (v) => api(`v1/access-assignments/${encodeURIComponent(row.id)}/review`, { method: 'POST', body: { keep, note: v.note || null } }),
+  });
+  if (done) toast(keep ? `Kept ${row.package} for ${row.agent_name}.` : `Removed ${row.package} from ${row.agent_name}.`);
+  return done;
+}
+
+function assignmentButtons(row, packages, agent) {
+  const buttons = [];
+  const decider = can('approve');
+  if (row.status === 'requested' && decider && row.requested_by === me?.actor) {
+    buttons.push(h('span', { class: 'muted small' }, 'You asked for it: another approver decides.'));
+  }
+  if (row.status === 'requested' && decider && row.requested_by !== me?.actor) {
+    buttons.push(
+      h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: guarded(async () => { if (await assignmentAction(row, 'approve')) await refresh(); }) }, icon('check'), 'Approve'),
+      h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: guarded(async () => { if (await assignmentAction(row, 'deny')) await refresh(); }) }, icon('ban'), 'Deny'));
+  }
+  if (['active', 'expired'].includes(row.status)) {
+    const pk = packages.find((x) => x.name === row.package);
+    if (pk && decider) {
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: guarded(async () => { if (await requestPackage(agent, packages, pk)) await refresh(); }) }, icon('refresh'), 'Renew'));
+    }
+    if (decider || can('contain')) {
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: guarded(async () => { if (await assignmentAction(row, 'revoke')) await refresh(); }) }, icon('ban'), 'Revoke'));
+    }
+  }
+  return buttons;
+}
+
+function entraAccessCard(agent, view) {
+  const manage = view.mode === 'manage' && can('admin');
+  const rows = view.held || [];
+  const remove = (row) => guarded(async () => {
+    const done = await ask({
+      title: `Remove ${row.package} from ${agent.name} in Entra?`,
+      text: "AgentGov asks Microsoft Entra to remove the assignment, as its app. Entra removes what it grants the agent's identity, or refuses; the next sync shows which.",
+      tone: 'danger', iconName: 'ban', confirm: 'Ask Entra to remove it',
+      submit: () => api(`v1/agents/${encodeURIComponent(agent.id)}/entra-access-packages/${encodeURIComponent(row.id)}`, { method: 'DELETE' }),
+    });
+    if (done) { toast(`Asked Entra to remove ${row.package} from ${agent.name}.`); await refresh(); }
+  });
+  const assign = guarded(async () => {
+    const done = await ask({
+      title: `Assign an Entra access package to ${agent.name}`,
+      text: "AgentGov asks Microsoft Entra to assign it to the agent's Entra identity, as its app, through the package's policy for agents. The next sync shows it delivered.",
+      iconName: 'key', confirm: 'Ask Entra to assign it',
+      fields: [{ id: 'package', label: 'Access package', type: 'select', value: view.packages[0]?.id, options: view.packages.map((p) => ({ value: p.id, label: p.name })) }],
+      submit: (v) => api(`v1/agents/${encodeURIComponent(agent.id)}/entra-access-packages/assign`, { method: 'POST', body: { package: v.package } }),
+    });
+    if (done) { toast(`Asked Entra to assign it to ${agent.name}.`); await refresh(); }
+  });
+  let body;
+  if (view.mode === 'off') body = emptyState('Turned off', h('span', {}, 'Turn on Microsoft Entra access packages on the ', h('a', { href: '#/features' }, 'Features'), ' page.'));
+  else if (!view.synced_at) body = emptyState('Not read yet', h('span', {}, 'The connection runs on a schedule, once AgentGov\'s app can read them (', h('a', { href: '#/platforms' }, 'Platforms'), ').'));
+  else if (!rows.length) body = emptyState('None', 'Its Entra identity holds no access package.');
+  else {
+    body = h('ul', { class: 'access-list', role: 'list' }, rows.map((row) => h('li', { class: 'access-row' },
+      h('div', { class: 'access-main' },
+        h('div', { class: 'cell-title' }, row.package, ' ', chip('entra_access', row.state)),
+        h('div', { class: 'cell-sub' }, row.expires_at ? ['Expires ', timeEl(row.expires_at)] : 'No end date')),
+      manage ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: remove(row) }, icon('ban'), 'Remove in Entra')) : null)));
+  }
+  return card({
+    title: 'Entra access packages',
+    sub: view.mode === 'manage' ? 'What Microsoft Entra ID Governance assigns its Entra identity. Administrators assign and remove them here.' : 'What Microsoft Entra ID Governance assigns its Entra identity, read by AgentGov.',
+    actions: manage && view.packages.length ? [h('button', { type: 'button', class: 'btn btn--sm', onclick: assign }, icon('plus'), 'Assign')] : null,
+    body,
+  });
+}
+
+function agentAccessCard(agent, rows, packages, mode) {
+  if (rows instanceof Error) return null;
+  const current = rows.filter((r) => ['requested', 'active', 'expired'].includes(r.status));
+  const earlier = rows.filter((r) => !current.includes(r));
+  const line = (r) => h('li', { class: 'access-row' },
+    h('div', { class: 'access-main' },
+      h('div', { class: 'cell-title' }, r.package, ' ', chip('access', r.status)),
+      h('div', { class: 'cell-sub break' },
+        r.status === 'requested' ? [`Asked by ${r.requested_by} for ${plural(r.days, 'day')}: ${r.reason}`]
+          : r.expires_at ? [r.status === 'expired' ? 'Expired ' : ['active'].includes(r.status) ? 'Expires ' : 'Ended ', timeEl(r.status === 'active' || r.status === 'expired' ? r.expires_at : r.ended_at || r.decided_at)]
+            : [`${humanize(r.status)} by ${r.decided_by || 'unknown'}`])),
+    h('div', { class: 'btn-row' }, assignmentButtons(r, packages, agent)));
+  const expiredNote = current.some((r) => r.status === 'expired') && mode !== 'enforce'
+    ? callout('warning', 'triangle', h('span', {}, h('strong', {}, 'Expired, still used: '),
+      mode === 'off' ? 'access packages are off, so they grant nothing.' : 'expired packages are monitored, so the agent keeps the access. Renew or revoke them.'))
+    : null;
+  return card({
+    title: 'Access packages',
+    sub: 'Extra tools, models and agents it holds for a while once approved.',
+    actions: can('approve') && packages.length ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'request-access', onclick: guarded(async () => { if (await requestPackage(agent, packages, null)) await refresh(); }) }, icon('plus'), 'Request access')] : null,
+    body: [
+      expiredNote,
+      current.length ? h('ul', { class: 'access-list', role: 'list' }, current.map(line))
+        : emptyState('No access packages', packages.length ? 'Request one when the agent needs more for a while.' : null),
+      earlier.length ? h('details', { class: 'disclosure' }, h('summary', {}, icon('chevron'), `Earlier (${fmt(earlier.length)})`),
+        h('ul', { class: 'access-list', role: 'list' }, earlier.map(line))) : null,
     ],
   });
 }
@@ -4507,6 +5140,7 @@ const CONNECTION_COUNTS = {
   'purview-audit': (c) => [`${plural(c.interactions, 'interaction')}`, `${plural(c.maker_events, 'maker change')}`,
     c.searching ? `${plural(c.searching, 'search', 'searches')} running` : null].filter(Boolean).join(', '),
   defender: (c) => `${plural(c.alerts, 'alert')} about agents, ${fmt(c.matched)} matched, ${fmt(c.resolved)} resolved`,
+  'entra-access-packages': (c) => `${plural(c.packages, 'package')} agents can hold, ${plural(c.assignments, 'assignment')} to agents, ${fmt(c.expiring)} expiring`,
   'connector-policies': (c) => `${plural(c.connectors, 'connector')} applied to ${plural(c.targets, 'group or environment', 'groups or environments')}`,
 };
 
@@ -4521,6 +5155,9 @@ function connectionHelp(c, view) {
       : `Endpoint: ${origin}/integrations/copilot-studio`;
   }
   if (c.status === 'off' || c.status === 'import') return `Needs ${c.needs.join(', and ')}.`;
+  if (c.manage === 'unknown') {
+    return "Managing: the app's token holds no EntitlementManagement.ReadWrite.All, so Entra takes AgentGov's requests only for catalogs where its app is an Access package assignment manager.";
+  }
   return null;
 }
 
@@ -5205,7 +5842,8 @@ async function destinationForm(d) {
       const kind = editing ? d.kind : v.kind;
       const family = destFamily(kind);
       const events = DEST_EVENTS[family].map(([key]) => key).filter((key) => v[`ev-${family}-${key}`]);
-      if (!events.length) throw new Error('Choose at least one kind of event to send it.');
+      // A chat may take no alerts: a team's channel, for the issues its team posts there.
+      if (!events.length && family !== 'chat') throw new Error('Choose at least one kind of event to send it.');
       const body = {
         events, min_severity: v.min_severity, description: v.description, labels: parseLabels(v.labels),
         ...(family === 'siem' ? { url: orNull(v.url) } : {}),

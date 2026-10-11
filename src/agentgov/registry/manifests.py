@@ -2,8 +2,8 @@
 
 ```yaml
 apiVersion: agentgov/v1alpha1
-kind: Agent            # Feature | Destination | IdentityIssuer | Blueprint | ToolServer |
-                       # ModelProvider | Policy | Agent
+kind: Agent            # Feature | Destination | Team | IdentityIssuer | Blueprint |
+                       # ToolServer | ModelProvider | AccessPackage | Policy | Agent
 metadata:
   name: support-bot
 spec:
@@ -19,8 +19,9 @@ A ``Feature`` sets how strictly one of AgentGov's features applies
 (docs/features.md): ``metadata.name`` is the feature, ``spec.mode`` its mode.
 
 Applying is idempotent: unchanged resources are reported as ``unchanged``.
-Resources are applied in dependency order (features first, then identity issuers,
-blueprints and tool servers before the agents and policies that reference them).
+Resources are applied in dependency order (features first, then destinations, the teams
+that post to them, identity issuers, blueprints, tool servers, model providers and the access
+packages that name blueprints, before the agents and policies that reference them).
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from sqlalchemy.orm import Session
 from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
 from agentgov.registry import (
+    access_packages,
     agents,
     blueprints,
     destinations,
@@ -41,6 +43,7 @@ from agentgov.registry import (
     instructions,
     model_providers,
     policies,
+    teams,
     toolservers,
 )
 from agentgov.registry.errors import NotFound, ValidationError
@@ -49,10 +52,12 @@ API_VERSION = "agentgov/v1alpha1"
 ORDER = [
     "Feature",
     "Destination",
+    "Team",
     "IdentityIssuer",
     "Blueprint",
     "ToolServer",
     "ModelProvider",
+    "AccessPackage",
     "Policy",
     "Agent",
 ]
@@ -100,10 +105,12 @@ def apply(
         action = {
             "Feature": _feature,
             "Destination": _destination,
+            "Team": _team,
             "IdentityIssuer": _identity_issuer,
             "Blueprint": _blueprint,
             "ToolServer": _toolserver,
             "ModelProvider": _model_provider,
+            "AccessPackage": _access_package,
             "Policy": _policy,
             "Agent": _agent,
         }[kind](session, settings, spec, actor)
@@ -138,6 +145,15 @@ def _destination(session: Session, settings: Settings, spec: dict[str, Any], act
         destinations.set_status(session, destination, verb, actor=actor)
         action = "configured"
     return action
+
+
+def _team(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    spec.pop("labels", None)
+    team = teams.find(session, spec["name"])
+    if team is None:
+        teams.create(session, spec, actor=actor)
+        return "created"
+    return "configured" if teams.update_team(session, team, spec, actor=actor) else "unchanged"
 
 
 def _identity_issuer(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
@@ -202,6 +218,16 @@ def _model_provider(session: Session, settings: Settings, spec: dict[str, Any], 
         model_providers.set_status(session, provider, verb, actor=actor)
         action = "configured" if action == "unchanged" else action
     return action
+
+
+def _access_package(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    try:
+        package = access_packages.get(session, spec["name"])
+    except NotFound:
+        access_packages.create(session, spec, actor=actor)
+        return "created"
+    changed = access_packages.update(session, package, spec, actor=actor)
+    return "configured" if changed else "unchanged"
 
 
 def _policy(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
@@ -280,6 +306,10 @@ def export(session: Session) -> list[dict[str, Any]]:
                 spec[key] = value
         spec["status"] = destination.status
         docs.append(_doc("Destination", destination.name, spec))
+    for team in teams.list_all(session):
+        d = teams.to_dict(team)
+        spec = {k: d[k] for k in teams.FIELDS if d[k] not in ("", [], False)}
+        docs.append(_doc("Team", team.name, spec))
     for issuer in identity_issuers.list_all(session):
         d = identity_issuers.to_dict(issuer)
         spec = {k: d[k] for k in identity_issuers.FIELDS if d[k] not in (None, "", {}, False)}
@@ -305,6 +335,11 @@ def export(session: Session) -> list[dict[str, Any]]:
             spec.pop("key_file", None)  # the default path follows the name
         spec["status"] = provider.status
         docs.append(_doc("ModelProvider", provider.name, spec))
+    for package in access_packages.list_all(session):
+        d = access_packages.to_dict(session, package)
+        spec = {k: d[k] for k in access_packages.FIELDS if d[k] not in ("", [], {}, None)}
+        spec["approval"] = d["approval"]
+        docs.append(_doc("AccessPackage", package.name, spec))
     for policy in policies.list_all(session):
         docs.append(
             _doc(

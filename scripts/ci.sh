@@ -27,6 +27,9 @@ OPA_VERSION=1.21.1
 HELM_VERSION=3.19.0
 KUBECONFORM_VERSION=0.7.0
 KIND_VERSION=0.30.0
+# Schemas of custom resources (External Secrets, the clouds' load balancer settings), for
+# kubeconform: https://github.com/datreeio/CRDs-catalog
+CRDS_CATALOG='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 KUBECTL_VERSION=1.34.1
 CHART=deploy/helm/agentgov
 AGENTGATEWAY_IMAGE=ghcr.io/agentgateway/agentgateway:v1.6.0
@@ -243,6 +246,11 @@ lint_python() {
   ruff check src tests examples scripts && ruff format --check src tests examples scripts
 }
 
+# The docs: links between pages, and the settings reference generated from config.py.
+lint_docs() {
+  python scripts/check-docs.py && python scripts/settings-doc.py --check
+}
+
 lint_rego() {
   local unformatted
   unformatted=$(opa fmt --list src/agentgov/policies examples/manifests/policies) || return 1
@@ -288,8 +296,31 @@ lint_chart() {
       --set controlPlane.ingress.enabled=true --set gateway.ingress.enabled=true \
       --set urls.controlPlane=https://agentgov.example.com \
       --set urls.gateway=https://mcp.example.com >"$out/production.yaml" &&
+    helm template agentgov "$CHART" --set postgresql.enabled=false \
+      --set externalDatabase.existingSecret=agentgov-db \
+      --set keycloak.externalDatabase.url=jdbc:postgresql://db.example.com:5432/keycloak \
+      --set keycloak.externalDatabase.existingSecret=agentgov-db --set keycloak.mode=production \
+      --set keycloak.replicas=2 --set keycloak.ingress.enabled=true \
+      --set networkPolicy.enabled=true --set urls.keycloak=https://auth.example.com \
+      >"$out/production-keycloak.yaml" &&
     kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
-      "$out/default.yaml" "$out/production.yaml" || rc=1
+      "$out/default.yaml" "$out/production.yaml" "$out/production-keycloak.yaml" || rc=1
+  # The cloud guides' values (docs/deploy), and the manifests they apply beside the chart,
+  # against the Kubernetes schemas and, for their custom resources, the CRDs catalog.
+  local cloud
+  for cloud in deploy/kubernetes/*/; do
+    [ -f "$cloud/values.yaml" ] || continue
+    helm template agentgov "$CHART" -f "$cloud/values.yaml" >"$out/cloud.yaml" &&
+      kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
+        -schema-location default -schema-location "$CRDS_CATALOG" "$out/cloud.yaml" || rc=1
+    # The catalog's schemas of the External Secrets Operator's stores don't compile as
+    # JSON Schema draft 4, which kubeconform uses (a boolean where a schema should be).
+    if compgen -G "$cloud/manifests/*.yaml" >/dev/null; then
+      kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
+        -schema-location default -schema-location "$CRDS_CATALOG" \
+        -skip SecretStore,ClusterSecretStore "$cloud"manifests/*.yaml || rc=1
+    fi
+  done
   rm -rf "$out"
   return "$rc"
 }
@@ -323,6 +354,8 @@ DEMO_DESTINATION_SECRETS=(
   --set destinationSecrets.values.soc-slack=http://demo-sink:9300/slack/T0000/B0000/demo-only
   --set destinationSecrets.values.soc-teams=http://demo-sink:9300/teams/workflows/demo-only
   --set destinationSecrets.values.soc-splunk=demo-hec-token
+  --set destinationSecrets.values.cx-slack=http://demo-sink:9300/slack/T0000/B0001/cx-platform
+  --set destinationSecrets.values.governance-teams=http://demo-sink:9300/teams/workflows/governance
 )
 
 end_to_end() {
@@ -370,8 +403,9 @@ chart_on_docker() {
   fi
   build_demo_images || return 1
   rendered=$(mktemp)
+  # Keycloak in production mode here (Compose runs it in development mode).
   helm template agentgov "$CHART" --set image.repository=agentgov --set image.tag=local \
-    --set image.pullPolicy=Never --set presidio.image.tag=2.2.364 \
+    --set image.pullPolicy=Never --set presidio.image.tag=2.2.364 --set keycloak.mode=production \
     --set modelKeys.keys.demo=demo-model-key "${DEMO_DESTINATION_SECRETS[@]}" >"$rendered" || return 1
   python scripts/chart-on-docker.py down
   if python scripts/chart-on-docker.py up "$rendered" --demo; then
@@ -607,6 +641,7 @@ if [ "$image" = 1 ] || [ "$e2e" = 1 ] || [ "$kind" = 1 ]; then ensure_docker || 
 
 if [ "$lint" = 1 ]; then
   run "Lint (ruff)" lint_python
+  run "Docs (links, settings reference)" lint_docs
   run "Rego (opa fmt, check --strict, test)" lint_rego
 fi
 if [ "$tests" = 1 ]; then

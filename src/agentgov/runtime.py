@@ -17,6 +17,7 @@ from agentgov.gateway import GatewayConfigWriter
 from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
+from agentgov.notify import Notifier
 from agentgov.opa.bundle import BundleServer
 from agentgov.platforms import connections
 from agentgov.platforms.microsoft import (
@@ -27,15 +28,18 @@ from agentgov.platforms.microsoft import (
     is_declarative,
 )
 from agentgov.platforms.threat_detection import ThreatDetection
-from agentgov.registry import agents as agents_svc
 from agentgov.registry import (
+    access_packages,
+    entra_access,
     features,
     instructions,
+    issues,
     mcp_sightings,
     microsoft_signals,
     platforms,
     posture,
 )
+from agentgov.registry import agents as agents_svc
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
 from agentgov.secops.delivery import Delivery
 
@@ -110,6 +114,8 @@ class Runtime:
         self.gateway = GatewayConfigWriter(self.db, settings)
         # The security team's SIEMs and chats (the security-operations feature).
         self.delivery = Delivery(self.db, settings, http=destinations_http)
+        # Issues to the people responsible for them, by email and in their teams' chats.
+        self.notifier = Notifier(self.db, settings, self.delivery)
         self.ledger_integrity = ledger.IntegrityMonitor()
         # Administrator single sign-on (OIDC), when a client secret is configured.
         self.sso = OIDCClient(settings, http=oidc_http) if settings.sso_enabled else None
@@ -158,6 +164,8 @@ class Runtime:
         )
         # Developers' MCP servers against the approved ones, again when tool servers change.
         self._mcp_worker = _Worker("developer-mcp", self.refresh_developer_mcp, 3600)
+        # Deleted agents are purged once they can no longer be restored.
+        self._retention_worker = _Worker("agent-retention", self.purge_deleted_agents, 3600)
         self._m365_worker = (
             _Worker(
                 "microsoft-sync",
@@ -170,6 +178,11 @@ class Runtime:
         self._delivery_worker = (
             _Worker("secops-delivery", self.delivery.run, settings.delivery_interval_seconds)
             if settings.delivery_interval_seconds > 0
+            else None
+        )
+        self._issues_worker = (
+            _Worker("issues", self.run_issues, settings.issues_interval_seconds)
+            if settings.issues_interval_seconds > 0
             else None
         )
         self._started = False
@@ -203,8 +216,12 @@ class Runtime:
             self._classifier_worker.start()
         self._recheck_worker.start()
         self._mcp_worker.start()
+        if self.settings.soft_delete_retention_days > 0:
+            self._retention_worker.start()
         if self._delivery_worker is not None:
             self._delivery_worker.start()
+        if self._issues_worker is not None:
+            self._issues_worker.start()
         self._started = True
 
     def stop(self) -> None:
@@ -219,8 +236,11 @@ class Runtime:
             self._classifier_worker.stop()
         self._recheck_worker.stop()
         self._mcp_worker.stop()
+        self._retention_worker.stop()
         if self._delivery_worker is not None:
             self._delivery_worker.stop()
+        if self._issues_worker is not None:
+            self._issues_worker.stop()
         self.db.dispose()
 
     # -- reconciliation triggers -----------------------------------------------
@@ -249,6 +269,27 @@ class Runtime:
             if not features.is_on(session, "posture-checks"):
                 return None
             return posture.scan(session, self.settings)
+
+    def purge_deleted_agents(self) -> list[str]:
+        """Purge the agents deleted longer ago than AGENTGOV_SOFT_DELETE_RETENTION_DAYS."""
+        with self.db.session() as session:
+            purged = agents_svc.purge_expired(session, self.settings)
+        if purged:
+            log.info("purged %d agent(s) deleted over the retention period", len(purged))
+        return purged
+
+    def run_issues(self) -> dict[str, Any]:
+        """Expire access packages and raise their reminders and reviews; route findings to
+        the people responsible, escalate those nobody acknowledged, open accepted risks
+        whose time ran out, and send what is due."""
+        with self.db.session() as session:
+            access = access_packages.check(session, self.settings)
+        with self.db.session() as session:
+            reopened = issues.reopen_accepted(session)
+            if not features.is_on(session, "issues"):
+                return {"reopened": reopened, **access}
+            routed = issues.route(session, self.settings)
+        return {"reopened": reopened, **access, **routed, **self.notifier.run()}
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;
@@ -354,6 +395,7 @@ class Runtime:
             "entra-agent-id": self.sync_agent_identities,
             "purview-audit": self.sync_audit,
             "defender": self.sync_defender,
+            "entra-access-packages": self.sync_entra_access_packages,
         }
         for key in wanted:
             connection = connections.BY_KEY[key]
@@ -477,6 +519,26 @@ class Runtime:
             counts = microsoft_signals.record_alerts(session, self.settings, alerts)
             connections.save_state(session, "defender", {"since": latest})
             platforms.set_sync(session, "defender", ok=True, counts=counts, actor=actor)
+            return counts
+
+    def sync_entra_access_packages(self, *, actor: str | None = None) -> dict[str, int]:
+        """Read the access packages agents can hold in Microsoft Entra, and what their
+        identities hold, raising issues for those about to expire."""
+        assert self.m365 is not None
+        try:
+            # Network calls before the transaction: a package's assignments page by page.
+            packages = [p for p in self.m365.access_packages() if entra_access.agent_policies(p)][
+                : entra_access.MAX_PACKAGES
+            ]
+            assignments = {p["id"]: self.m365.package_assignments(p["id"]) for p in packages}
+        except PlatformError as exc:
+            self._failed("entra-access-packages", exc, actor)
+            raise
+        with self.db.session() as session:
+            counts = entra_access.record(session, packages, assignments)
+            platforms.set_sync(
+                session, "entra-access-packages", ok=True, counts=counts, actor=actor
+            )
             return counts
 
     def classify_pending_instructions(self, limit: int = 100) -> int:

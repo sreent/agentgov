@@ -69,9 +69,11 @@ ownership and a UI but no enforcement. This gap is the reason AgentGov exists.
   ASI01 Goal Hijack (indirect injection withheld), ASI02 Tool Misuse (grants, approvals),
   ASI03 Identity & Privilege Abuse (per-agent identity, least privilege, risk-based access),
   ASI04 Supply Chain (tool server review, definition pinning, poisoning detection),
-  ASI10 Rogue Agents (kill switch, discovery, auto-block). ASI05–ASI09 need controls
-  outside the tool path (sandboxing, memory integrity, multi-agent protocols) and are on
-  the roadmap or out of scope.
+  ASI07 Insecure Inter-Agent Communication (calls between agents only through the gateway,
+  who may call whom, signed delegations), ASI08 Cascading Failures in part (loops refused,
+  at most five agents in a chain), ASI10 Rogue Agents (kill switch, discovery, auto-block).
+  ASI05, ASI06 and ASI09 need controls outside the call path (sandboxing, memory integrity,
+  human-agent trust) and are on the roadmap or out of scope.
 * **Regulation.** The EU AI Act as amended by the Digital Omnibus (Regulation (EU)
   2026/1744) postpones Annex III high-risk obligations to 2 December 2027; Article 12
   logging and Articles 19 / 26(6) retention (at least six months) are what the evidence

@@ -2,6 +2,13 @@
 {{- $name := include "agentgov.name" (list . "keycloak") }}
 {{- $secret := include "agentgov.secretName" . }}
 {{- $v := .Values.keycloak }}
+{{- $production := eq $v.mode "production" }}
+{{- if not (has $v.mode (list "dev" "production")) }}
+{{- fail "keycloak.mode is dev or production" }}
+{{- end }}
+{{- if and (not .Values.postgresql.enabled) (not (and $v.externalDatabase.url $v.externalDatabase.existingSecret)) }}
+{{- fail "keycloak.enabled with postgresql.enabled=false needs keycloak.externalDatabase.url and existingSecret: without a database, Keycloak keeps agents' clients in a file it loses when it restarts" }}
+{{- end }}
 {{- /* AgentGov's realm, with the sign-in redirects at the control plane's address. */}}
 {{- $realm := .Files.Get "files/agentgov-realm.json" | replace "http://localhost:8000" (trimSuffix "/" .Values.urls.controlPlane) | fromJson }}
 {{- if not $v.demoUsers }}
@@ -38,9 +45,14 @@ metadata:
   labels:
     {{- include "agentgov.labels" (list . "keycloak") | nindent 4 }}
 spec:
+  {{- if $production }}
+  # Replicas find each other through the database (Keycloak's jdbc-ping).
+  replicas: {{ $v.replicas }}
+  {{- else }}
   replicas: 1
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "agentgov.selector" (list . "keycloak") | nindent 6 }}
@@ -64,20 +76,33 @@ spec:
         - name: keycloak
           image: "{{ $v.image.repository }}:{{ $v.image.tag }}"
           imagePullPolicy: {{ $v.image.pullPolicy }}
-          args: ["start-dev", "--import-realm"]
+          args: [{{ if $production }}"start"{{ else }}"start-dev"{{ end }}, "--import-realm"]
           env:
             - {name: KC_BOOTSTRAP_ADMIN_USERNAME, value: admin}
             - name: KC_BOOTSTRAP_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: keycloak-admin-password}
-            {{- if .Values.postgresql.enabled }}
             - {name: KC_DB, value: postgres}
+            {{- if .Values.postgresql.enabled }}
             - name: KC_DB_URL
               value: "jdbc:postgresql://{{ include "agentgov.name" (list . "postgresql") }}:5432/keycloak"
             - {name: KC_DB_USERNAME, value: agentgov}
             - name: KC_DB_PASSWORD
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: postgres-password}
+            {{- else }}
+            {{- with $v.externalDatabase }}
+            - {name: KC_DB_URL, value: {{ .url | quote }}}
+            - {name: KC_DB_USERNAME, value: {{ .username | quote }}}
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .existingSecret }}, key: {{ .passwordKey }}}
+            {{- end }}
+            {{- end }}
+            {{- if $production }}
+            # Behind a load balancer that terminates TLS and sets X-Forwarded-* headers.
+            - {name: KC_HTTP_ENABLED, value: "true"}
+            - {name: KC_PROXY_HEADERS, value: xforwarded}
             {{- end }}
             # Tokens name this issuer; AgentGov's parts reach Keycloak at the Service.
             - name: KC_HOSTNAME
@@ -94,12 +119,17 @@ spec:
             - name: AGENTGOV_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: oidc-client-secret}
+            {{- if $v.demoUsers }}
             - name: AGENTGOV_DEMO_PASSWORD
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: demo-password}
+            {{- end }}
           ports:
             - {name: http, containerPort: 8080}
             - {name: management, containerPort: 9000}
+            {{- if $production }}
+            - {name: jgroups, containerPort: 7800}
+            {{- end }}
           startupProbe:
             httpGet: {path: /health/started, port: management}
             periodSeconds: 5
@@ -119,10 +149,16 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - {name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}
+            {{- with $v.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: realm
           configMap:
             name: {{ $name }}-realm
+        {{- with $v.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- include "agentgov.scheduling" $v | nindent 6 }}
 ---
 apiVersion: v1

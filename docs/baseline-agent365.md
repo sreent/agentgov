@@ -32,7 +32,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Inventory of all agents with owner, publisher, platform, status | ✅ | Registry API, UI and manifests (`Agent` with owner, sponsors, framework, platform, models, environment, labels, A2A agent card) |
 | Status: Available / Blocked / Draft / Not activated | ✅ | `active` / `blocked` / `pending` / `discovered`, plus soft-`deleted` |
 | Requests: pending review, approve, reject | ✅ | Registrar-role API keys create `pending` agents; admins approve |
-| Block / unblock, delete with 30-day restore | ✅ | Lifecycle actions; soft delete with `restore`, then `purge` |
+| Block / unblock, delete with 30-day restore | ✅ | Lifecycle actions; soft delete, restorable for 30 days, then purged automatically (or with `purge` sooner) |
 | Agents without owners, agents at risk (registry tiles) | ✅ | Overview tiles and posture findings |
 | Unmanaged / shadow agents | ✅ | Discovery from OpenTelemetry spans, gateway callers (monitor mode) and scanner imports (`/v1/discovery/import`, e.g. the Agent Governance Toolkit's `agent-discovery`) |
 | IT-approved agent blueprints | ✅ | `Blueprint`: permissions, risk tier, sponsor requirement, attestation period, labels |
@@ -55,20 +55,21 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Secretless credentials (federated identity credentials) | ✅ | Agents authenticate with their workload's own token instead of a client secret: Kubernetes service account tokens, SPIFFE JWT-SVIDs, or tokens from Entra Agent ID and other OpenID Connect issuers, through Keycloak's federated client authentication; blueprints can require it, and blocking an issuer stops its agents ([agents' own identities](agent-identity.md)) |
 | Credential rotation | ✅ | `POST /v1/agents/{id}/credentials {"rotate": true}` |
 | Entra Agent ID identities of agents built on Microsoft's platforms | ✅ | Read from Microsoft Graph and linked to their registry agents; an identity Microsoft disabled raises a finding ([connections](microsoft-connections.md#microsoft-entra-agent-id)) |
-| Conditional Access for agents | ✅ | **OPA** policies evaluated on every tool call, with registry context |
+| Conditional Access for agents | ✅ | **OPA** policies evaluated on every tool call, model call and call between agents, with registry context |
 | Report-only mode for access policies | ✅ | Each control at the gateway can run in monitor mode: it decides and records, but doesn't stop the call ([features](features.md)) |
 | Risk-based access (ID Protection "risky agents") | ✅ | Risk score from posture and runtime signals; critical risk is blocked by the baseline policy; optional auto-block |
 | Access reviews / sponsor attestation | ✅ | Periodic attestation by sponsors; expiry raises findings |
-| Access packages for agents | ⏳ | — |
+| Access packages for agents | ✅ | AgentGov's own [access packages](access-packages.md): tools, models and agents to call, held for a while once someone other than the requester approves, with reminders, renewals, reviews and expiry at the gateway (monitored by default, enforced when you choose); and Microsoft Entra's access packages for agents' Entra identities, read with issues before they expire, and assigned or removed from AgentGov in manage mode ([connections](microsoft-connections.md#microsoft-entra-access-packages)) |
+| Sponsors and owners told about their agents' problems | ✅ | Findings go to an agent's owner, then its sponsors, then its team, by email and in their Teams or Slack channels, and escalate when nobody acknowledges them; people without an AgentGov role sign in to see and acknowledge their own ([issues](issues.md)) |
 | Kill switch | ✅ | `block` disables the Keycloak client and denies at the gateway within a second (OPA long polling) |
-| Administrators sign in with their organisation account; delegated admin roles | ✅ | Single sign-on to the admin UI and API through **Keycloak** (which can federate an existing directory); provider roles map to `admin`, `approver`, `auditor`, `registrar` |
+| Administrators sign in with their organisation account; delegated admin roles | ✅ | Single sign-on to the admin UI and API through **Keycloak** (which can federate an existing directory); provider roles map to `admin`, `approver`, `secops`, `auditor`, `registrar` |
 
 ### Visualization and observability
 
 | Agent 365 capability | AgentGov | How |
 |---|---|---|
 | Overview dashboard | ✅ | Admin UI overview: inventory, risk, approvals, findings, 14-day activity |
-| Agent map (agents, users, tools) | ✅ | `/v1/graph` and the UI map: people → agents → tool servers, with call volumes |
+| Agent map (agents, users, tools) | ✅ | `/v1/graph` and the UI map: people → agents → tool servers and other agents, with call volumes |
 | Telemetry via OpenTelemetry (invoke_agent / execute_tool / chat spans) | ✅ | **OTel Collector** → control plane; the same GenAI semantic conventions, so Agent 365-instrumented agents can report here |
 | Trace exploration | ✅ | Optional **Langfuse** (`deploy/compose/docker-compose.langfuse.yml`): the collector sends it every agent and gateway trace, and each gateway decision in the ledger links to its trace |
 | Usage and cost of agents' model calls | ✅ | Tokens and cost per agent, day, provider and model, metered from the gateway's access logs ([model calls](models.md)) |

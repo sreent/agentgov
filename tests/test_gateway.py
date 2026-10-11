@@ -321,8 +321,14 @@ class TestServedConfig:
                 raise httpx.ConnectError("control plane starting")
             return httpx.Response(200, text="binds: []\n", headers={"ETag": '"x"'})
 
-        monkeypatch.setattr(gateway.time, "sleep", lambda _: None)
+        heartbeat = tmp_path / "alive"
+        beats: list[float] = []
+        # Every round touches the heartbeat, also while the control plane doesn't answer.
+        monkeypatch.setattr(
+            gateway.time, "sleep", lambda _: beats.append(heartbeat.stat().st_mtime)
+        )
         client = httpx.Client(base_url="http://cp", transport=httpx.MockTransport(handler))
         path = tmp_path / "config.yaml"
-        gateway.keep_current(client, str(path), interval=1, once=True)
+        gateway.keep_current(client, str(path), interval=1, once=True, heartbeat=str(heartbeat))
         assert calls["n"] == 3 and yaml.safe_load(path.read_text()) == {"binds": []}
+        assert len(beats) == 2 and heartbeat.exists()

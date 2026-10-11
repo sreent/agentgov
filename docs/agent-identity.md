@@ -36,14 +36,15 @@ sequenceDiagram
 
 | Kind | Its tokens | `issuer` | `keys_url` | An agent's subject |
 |---|---|---|---|---|
-| `kubernetes` | Service account tokens | The cluster's service account issuer: `https://kubernetes.default.svc.cluster.local` inside a cluster, or a managed cluster's own, such as `https://oidc.eks.<region>.amazonaws.com/id/<ID>` | Its OpenID Connect discovery URL, when Keycloak can't read it at the issuer | `system:serviceaccount:<namespace>:<name>` |
+| `kubernetes` | Service account tokens | The `iss` of the cluster's tokens: the cloud's OpenID Connect issuer on GKE, AKS and EKS, such as `https://oidc.eks.<region>.amazonaws.com/id/<ID>`; `https://kubernetes.default.svc.cluster.local` on a cluster that keeps the default, such as kind or kubeadm ([below](#kubernetes)) | Its OpenID Connect discovery URL, when Keycloak can't read it at the issuer | `system:serviceaccount:<namespace>:<name>` |
 | `spiffe` | JWT-SVIDs, from SPIRE or another SPIFFE implementation | The trust domain, `spiffe://example.org` | Its SPIFFE bundle endpoint (required) | A SPIFFE ID in the trust domain, `spiffe://example.org/ns/agents/sa/support-bot` |
 | `oidc` | Any OpenID Connect issuer's JWTs: Microsoft Entra ID, Okta, AWS, Google Cloud, GitHub Actions | The issuer as its tokens name it | Its JWKS URL; found from its discovery document otherwise | The tokens' `sub` |
 
 An `oidc` issuer also takes:
 
-* `audience`: what its tokens carry when it can't be Keycloak's realm URL, such as
-  `api://agentgov` for Microsoft Entra ID. Keycloak then takes that audience instead.
+* `audience`: what its tokens carry when it can't be Keycloak's realm URL, such as the
+  application ID of AgentGov's API registration in Microsoft Entra ID
+  ([below](#microsoft-entra-agent-id)). Keycloak then takes that audience instead.
 * `allow_reuse`: Keycloak takes each token once unless this is on, so a stolen token is
   worth less. Tokens without a `jti` claim, such as Entra ID's, need it on.
 
@@ -53,7 +54,7 @@ check agents' tokens: no one signs in with it. Two issuers can't have the same `
 | | How |
 |---|---|
 | Admin UI | **Access** → *Agent identity issuers*: **Add issuer**, **Edit**, **Block**, **Delete**; the card shows each issuer's agents and whether Keycloak has it |
-| CLI | `agentgov issuers create prod-cluster --kind kubernetes --issuer https://kubernetes.default.svc.cluster.local`; `list`, `get`, `update`, `block`, `unblock`, `delete` |
+| CLI | `agentgov issuers create prod-cluster --kind kubernetes --issuer https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE`; `list`, `get`, `update`, `block`, `unblock`, `delete` |
 | API | `GET` and `POST /v1/identity-issuers`; `GET`, `PATCH` and `DELETE /v1/identity-issuers/{name}`; `POST /v1/identity-issuers/{name}/block` and `/unblock` |
 | Manifests | `kind: IdentityIssuer` ([example](../examples/manifests/identity.yaml)) |
 
@@ -133,13 +134,22 @@ spec:
               expirationSeconds: 3600  # Keycloak takes tokens valid for an hour at most
 ```
 
-For agents in **the cluster AgentGov's Keycloak runs in**, the issuer is
-`https://kubernetes.default.svc.cluster.local`. Keycloak reads that cluster's keys from
-the API server with its own service account token, so the Helm chart has to mount it:
-`keycloak.mountServiceAccountToken=true`. For **another cluster**, use its service
-account issuer. Managed clusters (Amazon EKS, Azure AKS, Google GKE) publish theirs on the
-internet; for a cluster whose API server Keycloak can reach instead, give that as
-`keys_url`.
+The issuer is the `iss` in the cluster's service account tokens
+(`kubectl get --raw /.well-known/openid-configuration | jq -r .issuer`, or decode a pod's
+token):
+
+* On **GKE, AKS and EKS**, it is the cluster's OpenID Connect issuer, also for agents in the
+  cluster Keycloak runs in: `https://container.googleapis.com/v1/projects/<project>/locations/<location>/clusters/<cluster>`,
+  `https://<region>.oic.prod-aks.azure.com/<tenant ID>/<GUID>/` or
+  `https://oidc.eks.<region>.amazonaws.com/id/<ID>`. The cloud publishes the keys on the
+  internet, so Keycloak reads them there, wherever it runs, without a service account token.
+  The [cloud guides](deploy/README.md) show it for each cluster.
+* On a cluster that keeps the default issuer, `https://kubernetes.default.svc.cluster.local`
+  (kind, kubeadm), Keycloak reads the keys from that cluster's API server with its own
+  service account token: it must run in that cluster, with
+  `keycloak.mountServiceAccountToken=true` in the Helm chart, and only one such cluster can
+  be an issuer, because two issuers can't share an `issuer`
+  ([Kubernetes](deploy/kubernetes.md#agents-in-the-cluster)).
 
 ## SPIFFE
 
@@ -163,9 +173,10 @@ Agent ID, and get app-only tokens from Entra ID for the APIs they call:
    URI, such as `api://agentgov`. Let it accept v2 tokens (`"requestedAccessTokenVersion":
    2` in its manifest).
 2. Add an `oidc` issuer: `issuer` `https://login.microsoftonline.com/<tenant ID>/v2.0`,
-   `audience` `api://agentgov`, `allow_reuse` on (Entra ID's tokens carry no `jti`, and
-   its libraries reuse a token until it expires). With v1 tokens, the issuer is
-   `https://sts.windows.net/<tenant ID>/` and `keys_url`
+   `audience` the API registration's application (client) ID, which v2 tokens carry in
+   `aud`, and `allow_reuse` on (Entra ID's tokens carry no `jti`, and its libraries reuse a
+   token until it expires). With v1 tokens, the issuer is
+   `https://sts.windows.net/<tenant ID>/`, the `audience` `api://agentgov` and `keys_url`
    `https://login.microsoftonline.com/<tenant ID>/discovery/keys`.
 3. Give the agent its identity: the subject is its agent identity in Entra ID, which app-only
    tokens name in `sub`. For an agent linked to its Entra Agent ID
@@ -184,7 +195,7 @@ Agent ID, and get app-only tokens from Entra ID for the APIs they call:
 | AWS, elsewhere | `sts:GetWebIdentityToken` ([outbound identity federation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_outbound.html)), audience the realm URL | `oidc`, the account's issuer URL |
 | Okta | A token from an authorization server for the agent's service app | `oidc`, the authorization server's issuer; `audience` the server's audience |
 
-Most of these issuers' tokens can be reused for their lifetime and carry a `jti`, so
+Most of these tokens carry a `jti`, and agents can fetch a fresh one for each sign-in, so
 `allow_reuse` can stay off; turn it on when an agent presents the same token more than
 once, or its tokens lack a `jti`.
 
@@ -221,8 +232,8 @@ until it is on again; agents with a client secret aren't affected.
 * Keycloak 26.6 or later. The control plane's service account needs `realm-management`'s
   `manage-identity-providers` and `view-identity-providers`: AgentGov's realm file gives
   them, and an issuer says so when Keycloak refuses it. A realm imported before this
-  version needs them added by hand ([Compose](../deploy/compose/README.md#upgrading),
-  [Helm](../deploy/helm/agentgov/README.md#upgrading)).
+  version needs them added by hand ([Compose](deploy/local.md#upgrading),
+  [Kubernetes](deploy/kubernetes.md#upgrading)).
 * SPIFFE issuers need Keycloak's `spiffe` preview feature.
 * An issuer that can't be put in Keycloak shows why on the Access page, and as a finding.
   A blocked issuer that Keycloak hasn't been told about is a high-severity finding: until
@@ -230,12 +241,13 @@ until it is on again; agents with a client secret aren't affected.
 
 ## Trying it
 
-The Compose stack, and the chart's demo runs, include a stand-in Kubernetes cluster
+The Compose stack, and CI's runs of the Helm chart (`scripts/ci.sh --e2e` and `--kind`),
+include a stand-in Kubernetes cluster
 ([`examples/identity/workload-issuer`](../examples/identity/workload-issuer/server.py))
 whose service account tokens agents authenticate with, and its issuer, `demo-cluster`, in
-the example manifests. `python examples/agents/demo_agent.py` registers an agent with no
-secret, gets its access token with a service account token, calls a tool, and blocks and
-unblocks the issuer.
+the example manifests. In step 14 of the demo, `python examples/agents/demo_agent.py`
+registers an agent with no secret, gets its access token with a service account token, calls
+a tool, and blocks and unblocks the issuer.
 
 ## Limits
 

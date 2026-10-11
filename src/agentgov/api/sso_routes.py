@@ -18,9 +18,14 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from agentgov import ids
-from agentgov.api.auth import CSRF_HEADER, SESSION_COOKIE, bearer_token, session_principal
+from agentgov.api.auth import (
+    CSRF_HEADER,
+    SESSION_COOKIE,
+    bearer_token,
+    describe,
+    session_principal,
+)
 from agentgov.identity import sso
-from agentgov.registry import features
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["sign-in"])
@@ -125,10 +130,10 @@ def callback(
     refresh_token = tokens.get("refresh_token") if rt.delegations is not None else None
     with rt.db.session() as s:
         if not who.roles:
-            if not features.is_on(s, "approvals-by-person"):
+            if not sso.people_may_sign_in(s):
                 sso.record_denied(s, who)
                 return failed("no_role")
-            # They may decide the approval requests sent to them, and nothing else.
+            # They see the approval requests and the issues sent to them, and nothing else.
             who = dataclasses.replace(who, roles=[sso.PERSON])
         if port:
             try:
@@ -169,7 +174,7 @@ def current_session(request: Request) -> dict[str, Any]:
     principal = session_principal(request)
     if principal is None:
         return {"signed_in": False}
-    return {"signed_in": True, **principal.describe()}
+    return {"signed_in": True, **describe(request.app.state.rt, principal)}
 
 
 class CliCode(BaseModel):

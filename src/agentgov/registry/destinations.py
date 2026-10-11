@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import mark_changed
-from agentgov.models import DESTINATION_KINDS, Destination, LedgerHead
+from agentgov.models import DESTINATION_KINDS, Destination, LedgerHead, Team
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 
@@ -190,7 +190,8 @@ def _url(value: Any) -> str:
 def _events(value: Any, kind: str) -> list[str]:
     allowed = CHAT_EVENTS if kind in CHAT else SIEM_EVENTS
     events = validation.string_list(value, "events")
-    if not events:
+    # A chat may take no alerts at all: a team's channel, for the issues its team posts.
+    if not events and kind not in CHAT:
         raise ValidationError(f"events takes one or more of {', '.join(allowed)}")
     unknown = [e for e in events if e not in allowed]
     if unknown:
@@ -379,6 +380,14 @@ def replay(session: Session, destination: Destination, after: Any, *, actor: str
 
 
 def delete(session: Session, destination: Destination, *, actor: str) -> None:
+    posting = sorted(
+        t.name for t in session.scalars(select(Team)) if destination.name in (t.destinations or [])
+    )
+    if posting:
+        raise Conflict(
+            f"team(s) {', '.join(posting)} post issues to {destination.name!r}: take it out of "
+            "them first"
+        )
     ledger.append(
         session,
         type="destination.deleted",

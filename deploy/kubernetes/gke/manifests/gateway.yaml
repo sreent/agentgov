@@ -1,0 +1,88 @@
+# HTTPS for AgentGov's three addresses: a global external Application Load Balancer from
+# GKE's Gateway controller, at the reserved address agentgov, with the certificates of the
+# Certificate Manager map agentgov (docs/deploy/gcp.md). The chart's HTTPRoutes attach to
+# the https listener.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgov
+  namespace: agentgov
+  annotations:
+    networking.gke.io/certmap: agentgov
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    - {type: NamedAddress, value: agentgov}
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces: {from: Same}
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces: {from: Same}
+---
+# Plain HTTP only redirects to HTTPS.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agentgov-redirect
+  namespace: agentgov
+spec:
+  parentRefs: [{name: agentgov, sectionName: http}]
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect: {scheme: https, statusCode: 301}
+---
+# The load balancer's timeout counts from the request to the end of the response, 30
+# seconds by default: agents' streams through the gateway may last an hour.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: agentgov-gateway
+  namespace: agentgov
+spec:
+  default:
+    timeoutSec: 3600
+  targetRef: {group: "", kind: Service, name: agentgov-gateway}
+---
+# The load balancer checks each part at its own health endpoint (by default it asks for /).
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: agentgov-control-plane
+  namespace: agentgov
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck: {requestPath: /readyz}
+  targetRef: {group: "", kind: Service, name: agentgov-control-plane}
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: agentgov-gateway
+  namespace: agentgov
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck: {requestPath: /healthz}
+  targetRef: {group: "", kind: Service, name: agentgov-gateway}
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: agentgov-keycloak
+  namespace: agentgov
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck: {portSpecification: USE_FIXED_PORT, port: 9000, requestPath: /health/ready}
+  targetRef: {group: "", kind: Service, name: agentgov-keycloak}

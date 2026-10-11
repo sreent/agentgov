@@ -17,6 +17,7 @@ from fastapi import HTTPException, Request
 
 from agentgov.identity import sso
 from agentgov.registry import apikeys, features
+from agentgov.secops import handoff
 
 READ_ROLES = ("admin", "approver", "secops", "auditor")
 SESSION_COOKIE = "agentgov_session"
@@ -66,6 +67,20 @@ class Principal:
         }
 
 
+def describe(rt: Any, principal: Principal) -> dict[str, Any]:
+    """Who is signed in and with which roles; what is sent to people themselves (issues,
+    and approval requests); and, for the secops role, what the hand-off lets it do."""
+    out = principal.describe()
+    with rt.db.session() as s:
+        out["inbox"] = {
+            "issues": features.is_on(s, "issues"),
+            "approvals": features.is_on(s, "approvals-by-person"),
+        }
+        if "secops" in principal.roles:
+            out["handoff"] = {"level": handoff.level(s), "reached": handoff.reached(s)}
+    return out
+
+
 def bearer_token(request: Request) -> str | None:
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
@@ -111,10 +126,10 @@ def _signed_in(rt: Any, token: str | None) -> Principal | None:
             return None
         roles = [r for r in sso.SSO_ROLES if r in (record.roles or [])]
         if not roles:
-            # Someone without an AgentGov role, there to decide the requests sent to them.
+            # Someone without an AgentGov role, there for the requests and issues sent to them.
             if sso.PERSON not in (record.roles or []):
                 return None
-            if not features.is_on(session, "approvals-by-person"):
+            if not sso.people_may_sign_in(session):
                 return None
             roles = [sso.PERSON]
         delegations = getattr(rt, "delegations", None)

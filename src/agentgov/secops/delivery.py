@@ -163,7 +163,9 @@ class Delivery:
                 cursor=row.cursor,
                 last=entries[-1].seq if entries else row.cursor,
             )
-            chosen = list(row.events or destinations.default_events(row.kind))
+            chosen = list(
+                row.events if row.events is not None else destinations.default_events(row.kind)
+            )
             least = row.min_severity or destinations.default_severity(row.kind)
             if row.kind in CHAT:
                 for entry in entries:

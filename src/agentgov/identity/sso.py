@@ -34,8 +34,10 @@ from agentgov.models import AdminSession, CliLogin, LoginState
 # AgentGov roles a person can hold through single sign-on, most privileged first.
 SSO_ROLES = ("admin", "approver", "secops", "auditor", "registrar")
 # Someone without an AgentGov role, signed in to decide the approval requests sent to
-# them (the approvals-by-person feature).
+# them (the approvals-by-person feature) or to see the issues sent to them (issues).
 PERSON = "person"
+# The features that let them sign in: while one is on.
+PERSON_FEATURES = ("approvals-by-person", "issues")
 LOGIN_TTL = timedelta(minutes=10)
 # How long the CLI has to collect its session once the person has signed in.
 CLI_CODE_TTL = timedelta(minutes=2)
@@ -242,6 +244,13 @@ class OIDCClient:
 
 
 # --------------------------------------------------------------------- sessions
+
+
+def people_may_sign_in(session: Session) -> bool:
+    """Whether people without an AgentGov role may sign in, to see what was sent to them."""
+    from agentgov.registry import features
+
+    return any(features.is_on(session, name) for name in PERSON_FEATURES)
 
 
 def purge_expired(session: Session) -> None:

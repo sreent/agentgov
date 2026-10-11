@@ -6,7 +6,7 @@ MCP gateway:       {{ .Values.urls.gateway }}/mcp/<server>
 Keycloak:          {{ .Values.urls.keycloak }}  (realm agentgov)
 {{- end }}
 
-{{- if not (or .Values.controlPlane.ingress.enabled (ne .Values.controlPlane.service.type "ClusterIP")) }}
+{{- if not (or .Values.controlPlane.ingress.enabled .Values.controlPlane.httpRoute.enabled (ne .Values.controlPlane.service.type "ClusterIP")) }}
 
 Nothing is exposed outside the cluster yet. To try it from this machine:
 
@@ -22,14 +22,15 @@ The bootstrap admin token (keep it for break-glass access; create API keys inste
   kubectl -n {{ .Release.Namespace }} get secret {{ include "agentgov.secretName" . }} -o jsonpath='{.data.admin-token}' | base64 -d
 {{- if and .Values.keycloak.enabled .Values.keycloak.demoUsers }}
 
-Demo users admin, alice and audrey sign in with the password:
+Demo users admin, alice, sofia, audrey and sam sign in with the password:
 
   kubectl -n {{ .Release.Namespace }} get secret {{ include "agentgov.secretName" . }} -o jsonpath='{.data.demo-password}' | base64 -d
 
 Turn them off (keycloak.demoUsers=false) before anyone else can reach Keycloak.
 {{- end }}
-{{- if or .Values.postgresql.enabled .Values.keycloak.enabled }}
+{{- $devKeycloak := and .Values.keycloak.enabled (ne .Values.keycloak.mode "production") }}
+{{- if or .Values.postgresql.enabled $devKeycloak }}
 
-This release runs its own {{ if .Values.postgresql.enabled }}PostgreSQL{{ end }}{{ if and .Values.postgresql.enabled .Values.keycloak.enabled }} and {{ end }}{{ if .Values.keycloak.enabled }}Keycloak (in development mode){{ end }}, for evaluation.
-For production, use your own (see the chart's README).
+This release runs {{ if .Values.postgresql.enabled }}its own PostgreSQL{{ end }}{{ if and .Values.postgresql.enabled $devKeycloak }} and {{ end }}{{ if $devKeycloak }}Keycloak in development mode{{ end }}, for evaluation.
+Before others rely on it, see docs/deploy/kubernetes.md#before-others-rely-on-it.
 {{- end }}

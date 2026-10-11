@@ -53,3 +53,24 @@ test_blocked_agents_stay_denied_whatever_the_modes if {
 	reg := object.union(registry, {"features": {"least-privilege": "off", "risk-based-access": "off"}})
 	not agentos.allow with input as req("old-bot", "anything") with data.registry as reg
 }
+
+held := {"agents": {"agt_c": {
+	"id": "agt_c",
+	"name": "kb-bot",
+	"status": "active",
+	"risk_level": "low",
+	"grants": [],
+	"packages": [
+		{"name": "now", "grants": [{"server": "crm", "tools": ["update_*"]}], "expires_at": "2099-01-01T00:00:00Z"},
+		{"name": "gone", "grants": [{"server": "crm", "tools": ["export_*"]}], "expires_at": "2000-01-01T00:00:00Z"},
+	],
+}}}
+
+with_mode(mode) := object.union(held, {"features": {"access-packages": mode}})
+
+test_access_packages_grant_in_process if {
+	agentos.allow with input as req("kb-bot", "crm/update_customer") with data.registry as held
+	not agentos.allow with input as req("kb-bot", "crm/export_all") with data.registry as with_mode("enforce")
+	agentos.allow with input as req("kb-bot", "crm/export_all") with data.registry as with_mode("monitor")
+	not agentos.allow with input as req("kb-bot", "crm/update_customer") with data.registry as with_mode("off")
+}

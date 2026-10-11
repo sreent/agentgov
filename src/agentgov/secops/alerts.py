@@ -63,8 +63,11 @@ def alert(
                 ("Subject", subject),
                 ("What to do", details.get("remediation")),
             ),
-            link=f"{ui}/findings",
-            link_label="Open the findings",
+            # The finding's own page: who it went to, and what happened to it.
+            link=f"{ui}/findings/{details['finding_id']}"
+            if details.get("finding_id")
+            else f"{ui}/findings",
+            link_label="Open the finding",
         )
     if entry.type == "approval.requested" and "approvals" in events:
         person = entry.on_behalf_of

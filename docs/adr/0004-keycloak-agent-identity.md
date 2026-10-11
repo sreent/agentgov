@@ -24,3 +24,9 @@ can be rotated. The reconciler is level-triggered and tolerant of concurrent cre
   evaluates the live agent status on every call.
 * Secretless authentication (Keycloak federated client authentication with Kubernetes or
   SPIFFE tokens) and on-behalf-of flows (RFC 8693) are the next steps.
+
+## Update
+
+Both next steps have shipped: agents authenticate without secrets through Keycloak's
+federated client authentication ([agents' own identities](../agent-identity.md)), and act for
+people through token exchange ([acting for people](../acting-for-people.md)).

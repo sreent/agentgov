@@ -30,3 +30,10 @@ done in the processor, so the gateway configuration only changes when servers ch
 * The response message carries no request parameters; the processor returns the call
   context as metadata on the request side and agentgateway hands it back on the
   response side (`mcpGuardrails` CEL variable).
+
+## Update
+
+The gateway's configuration now also changes with model providers, with agents that serve
+A2A, and with the features that publish routes (`mcp-gateway`, `model-gateway`,
+`a2a-gateway`, `unknown-callers`). It is still regenerated only when one of these changes;
+per-agent decisions stay in the processor and OPA.

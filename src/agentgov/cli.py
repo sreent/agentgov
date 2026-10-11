@@ -44,7 +44,8 @@ policies_app = typer.Typer(
 )
 approvals_app = typer.Typer(help="Human-in-the-loop approvals.", no_args_is_help=True)
 findings_app = typer.Typer(
-    help="Posture and threat findings (lists open findings by default).",
+    help="Posture and threat findings, and the issues they are for the people responsible "
+    "(lists open findings by default).",
     invoke_without_command=True,
 )
 ledger_app = typer.Typer(help="The tamper-evident evidence ledger.", no_args_is_help=True)
@@ -109,6 +110,16 @@ destinations_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(destinations_app, name="destinations")
+teams_app = typer.Typer(
+    help="Teams: people and chat channels that own agents, and that issues escalate to.",
+    no_args_is_help=True,
+)
+app.add_typer(teams_app, name="teams")
+packages_app = typer.Typer(
+    help="Access packages: grants agents hold for a while once approved.",
+    no_args_is_help=True,
+)
+app.add_typer(packages_app, name="access-packages")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -269,7 +280,7 @@ LOGIN_WAIT_SECONDS = 600
 # Reasons /auth/callback sends back (?error=...), as the admin UI words them.
 LOGIN_ERRORS = {
     "no_role": "you signed in, but your account has no AgentGov role. Ask an administrator "
-    "for agentgov-admin, agentgov-approver or agentgov-auditor.",
+    "for agentgov-admin, agentgov-approver, agentgov-secops or agentgov-auditor.",
     "state": "that sign-in could not be completed in this browser. Start again.",
     "expired": "that sign-in expired or was already used. Start again.",
     "provider": "the identity provider could not complete the sign-in. Try again.",
@@ -493,12 +504,20 @@ def server(
     """Run the control plane (API, admin UI, OPA bundle server)."""
     import uvicorn
 
+    from agentgov.config import Settings
+
     if dev:
         os.environ.setdefault("AGENTGOV_DEV_MODE", "true")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
-    uvicorn.run("agentgov.api.app:create_app", factory=True, host=host, port=port)
+    uvicorn.run(
+        "agentgov.api.app:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        timeout_keep_alive=Settings.from_env().http_keepalive_seconds,
+    )
 
 
 @app.command()
@@ -582,6 +601,9 @@ def gateway_config(
         False, "--once", help="Write it once and stop (as an init container)."
     ),
     interval: float = typer.Option(5.0, help="Seconds between checks for changes."),
+    heartbeat: Path | None = typer.Option(
+        None, help="A file to touch every round, for a liveness probe."
+    ),
 ) -> None:
     """Keep agentgateway's configuration current from the control plane, for gateways
     that don't share a volume with it (a sidecar in Kubernetes). Uses
@@ -604,14 +626,21 @@ def gateway_config(
         headers={"Authorization": f"Bearer {settings.service_token}"},
         timeout=10,
     ) as client:
-        keep_current(client, str(output), interval=interval, once=once)
+        keep_current(
+            client,
+            str(output),
+            interval=interval,
+            once=once,
+            heartbeat=str(heartbeat) if heartbeat else None,
+        )
 
 
 @app.command()
 def apply(
     files: list[Path] = typer.Option(..., "--file", "-f", help="Manifest file or directory."),
 ) -> None:
-    """Apply declarative manifests (Blueprint, ToolServer, Policy, Agent)."""
+    """Apply declarative manifests (Feature, Destination, Team, IdentityIssuer, Blueprint,
+    ToolServer, ModelProvider, AccessPackage, Policy, Agent)."""
     docs: list[str] = []
     for path in files:
         targets = (
@@ -732,6 +761,23 @@ MODEL_ACCESS = typer.Option(
 )
 TOKEN_BUDGET = typer.Option(None, help="Tokens it may use per day (UTC), in and out.")
 NO_TOKEN_BUDGET = typer.Option(False, "--no-token-budget", help="No daily token budget.")
+TEAM = typer.Option(
+    None,
+    help="The team issues about it escalate to after its owner and sponsors, instead of its "
+    "blueprint's ('' for its blueprint's).",
+)
+BP_TEAM = typer.Option(
+    None,
+    help="The team issues about its agents escalate to after their owners and sponsors ('' "
+    "for the default team).",
+)
+
+
+def _team_field(team: str | None) -> dict[str, Any]:
+    # An empty string clears it.
+    return {} if team is None else {"team": team or None}
+
+
 WORKLOAD_IDENTITY = typer.Option(
     None,
     "--workload-identity",
@@ -794,6 +840,7 @@ def agents_create(
     blueprint: str | None = AGENT_BLUEPRINT,
     owner: str | None = OWNER,
     sponsor: list[str] | None = SPONSOR,
+    team: str | None = TEAM,
     environment: str | None = ENVIRONMENT,
     framework: str | None = None,
     platform: str | None = None,
@@ -811,6 +858,7 @@ def agents_create(
     """Register an agent. It waits in pending review unless --approve is given."""
     body = (
         _model_fields(model_access, token_budget, False)
+        | _team_field(team)
         | _workload_identity(workload_identity)
         | _a2a_fields(a2a_url, agent_access)
         | _agent_fields(
@@ -840,6 +888,7 @@ def agents_update(
     sponsor: list[str] | None = typer.Option(
         None, "--sponsor", help="Sponsors (replace the current ones; repeatable)."
     ),
+    team: str | None = TEAM,
     environment: str | None = ENVIRONMENT,
     framework: str | None = None,
     platform: str | None = None,
@@ -873,6 +922,7 @@ def agents_update(
     """Change an agent's details. Only the options you pass are changed."""
     body = (
         _model_fields(model_access, token_budget, no_token_budget)
+        | _team_field(team)
         | _workload_identity(workload_identity, clear=no_workload_identity)
         | _a2a_fields(a2a_url, agent_access, no_a2a=no_a2a, no_agent_access=no_agent_access)
         | _agent_fields(
@@ -1223,6 +1273,7 @@ def blueprints_create(
     approvals_by: str | None = APPROVALS_BY,
     require_workload_identity: bool | None = REQUIRE_WORKLOAD_IDENTITY,
     agent_access: list[str] | None = AGENT_ACCESS,
+    team: str | None = BP_TEAM,
     label: list[str] | None = LABEL,
 ) -> None:
     """Create a blueprint."""
@@ -1230,6 +1281,7 @@ def blueprints_create(
         _blueprint_fields(
             description, grant, risk_tier, review_days, no_review, require_sponsor, label
         )
+        | _team_field(team)
         | _model_fields(model_access, token_budget, False)
         | _a2a_fields(None, agent_access)
         | _people_fields(acts_for, people_groups, False, approvals_by)
@@ -1268,6 +1320,7 @@ def blueprints_update(
     no_agent_access: bool = typer.Option(
         False, "--no-agent-access", help="Its agents may call no other agent."
     ),
+    team: str | None = BP_TEAM,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
 ) -> None:
     """Change a blueprint. Every agent on it gets the change."""
@@ -1275,6 +1328,7 @@ def blueprints_update(
         _blueprint_fields(
             description, grant, risk_tier, review_days, no_review, require_sponsor, label
         )
+        | _team_field(team)
         | _model_fields(model_access, token_budget, no_token_budget)
         | _people_fields(acts_for, people_groups, all_people, approvals_by)
         | _given(require_workload_identity=require_workload_identity)
@@ -1701,24 +1755,98 @@ def approvals_deny(approval_id: str, note: str | None = None) -> None:
 
 # ------------------------------------------------------------------ findings
 
-FINDING_STATUS = typer.Option("open", help="open, resolved, dismissed or all.")
+FINDING_STATUS = typer.Option("open", help="open, resolved, dismissed, accepted or all.")
+MINE = typer.Option(
+    False,
+    "--mine",
+    help="Only the issues sent to you: about agents you own or sponsor, or to your teams.",
+)
 
 
-def _list_findings(status: str) -> None:
-    rows = _call("GET", "/v1/findings", params={"status": status})
-    _table(rows, ["id", "severity", "status", "type", "title"])
+def _with(f: dict[str, Any]) -> str:
+    """Who an issue is with, and whether they took it on."""
+    if f.get("status") == "accepted":
+        return f"risk accepted until {f['accepted_until'][:10]}"
+    if not f.get("level"):
+        return ""
+    who = ", ".join(f.get("assignees") or [])
+    if f["level"] != "team":
+        who += f" ({f['level']})"
+    return f"{who}, acknowledged" if f.get("acknowledged_at") else who
+
+
+def _list_findings(status: str, mine: bool = False) -> None:
+    path = "/v1/me/issues" if mine else "/v1/findings"
+    rows = _call("GET", path, params={"status": status})
+    for row in rows:
+        row["with"] = _with(row)
+        if row.get("verified") is False:
+            row["status"] = f"{row['status']} (unverified)"
+    _table(rows, ["id", "severity", "status", "type", "with", "title"])
 
 
 @findings_app.callback()
-def findings_main(ctx: typer.Context, status: str = FINDING_STATUS) -> None:
+def findings_main(ctx: typer.Context, status: str = FINDING_STATUS, mine: bool = MINE) -> None:
     if ctx.invoked_subcommand is None:
-        _list_findings(status)
+        _list_findings(status, mine)
 
 
 @findings_app.command("list")
-def findings_list(status: str = FINDING_STATUS) -> None:
+def findings_list(status: str = FINDING_STATUS, mine: bool = MINE) -> None:
     """List findings."""
-    _list_findings(status)
+    _list_findings(status, mine)
+
+
+@findings_app.command("get")
+def findings_get(finding_id: str) -> None:
+    """Show a finding: who it goes to, the messages sent about it, and what happened to it."""
+    f = _call("GET", f"/v1/findings/{quote(finding_id)}")
+    typer.echo(f"{f['id']}  {f['severity']}  {f['status']}  {f['type']}")
+    typer.echo(f["title"])
+    if f.get("description"):
+        typer.echo(f"\n{f['description']}")
+    if f.get("remediation"):
+        typer.echo(f"\nWhat to do: {f['remediation']}")
+    if f.get("verified") is False:
+        typer.echo("\nUnverified: the sync that checks it failed; it may no longer hold.")
+    if f.get("status") == "accepted":
+        typer.echo(f"\nRisk accepted until {f['accepted_until']}: {f['accepted_reason']}")
+    if f.get("acknowledged_at"):
+        typer.echo(f"\nAcknowledged by {f['acknowledged_by']} at {f['acknowledged_at']}")
+    if f.get("chain"):
+        typer.echo("\nWho it goes to:")
+        for step in f["chain"]:
+            mark = "->" if step["current"] else ("  " if not step["reached"] else " +")
+            typer.echo(f" {mark} {step['level']}: {', '.join(step['who'])}")
+        if f.get("escalate_at"):
+            typer.echo(f"    goes further at {f['escalate_at']} unless someone acknowledges it")
+    if f.get("notifications"):
+        typer.echo("\nMessages:")
+        _table(f["notifications"], ["level", "channel", "recipient", "status", "attempts"])
+
+
+@findings_app.command("acknowledge")
+def findings_acknowledge(finding_id: str) -> None:
+    """Take an issue on: it goes no further up its chain."""
+    f = _call("POST", f"/v1/findings/{quote(finding_id)}/acknowledge")
+    _done("finding", f["id"], f"acknowledged by {f['acknowledged_by']}")
+
+
+@findings_app.command("accept")
+def findings_accept(
+    finding_id: str,
+    reason: str = typer.Option(..., help="Why the risk is acceptable."),
+    until: str = typer.Option(
+        ...,
+        help="Until when: a date (2026-12-31), a time, or a number of days (90). A year at most.",
+    ),
+) -> None:
+    """Accept a finding's risk until a date: it opens again then if it still holds."""
+    when: str | int = int(until) if until.isdigit() else until
+    f = _call(
+        "POST", f"/v1/findings/{quote(finding_id)}/accept", json={"reason": reason, "until": when}
+    )
+    _done("finding", f["id"], f"risk accepted until {f['accepted_until']}")
 
 
 def _finding_action(finding_id: str, action: str) -> None:
@@ -1734,13 +1862,13 @@ def findings_resolve(finding_id: str) -> None:
 
 @findings_app.command("dismiss")
 def findings_dismiss(finding_id: str) -> None:
-    """Dismiss a finding (accepted risk or false positive)."""
+    """Dismiss a finding that is wrong (to accept a risk, use accept)."""
     _finding_action(finding_id, "dismiss")
 
 
 @findings_app.command("reopen")
 def findings_reopen(finding_id: str) -> None:
-    """Reopen a resolved or dismissed finding."""
+    """Reopen a resolved, dismissed or accepted finding."""
     _finding_action(finding_id, "reopen")
 
 
@@ -1762,7 +1890,9 @@ def ledger_tail(
     type: str | None = typer.Option(None, help="Event type; * is a wildcard (decision.*)."),
     agent: str | None = typer.Option(None, help="Only this agent's entries."),
     user: str | None = typer.Option(None, help="Only what agents did for this person."),
-    decision: str | None = typer.Option(None, help="allow, deny or require_approval."),
+    decision: str | None = typer.Option(
+        None, help="allow, deny, require_approval, or monitored (let through in monitor mode)."
+    ),
     traces: bool = typer.Option(False, "--traces", help="Add links to the trace viewer."),
 ) -> None:
     """Show the latest ledger entries, oldest first."""
@@ -1802,7 +1932,7 @@ def apikeys_list() -> None:
 @apikeys_app.command("create")
 def apikeys_create(
     name: str,
-    role: str = typer.Option(..., help="admin, approver, auditor, registrar or service."),
+    role: str = typer.Option(..., help="admin, approver, secops, auditor, registrar or service."),
 ) -> None:
     """Create a key. It is printed once, on standard output, and only its hash is kept."""
     key = _call("POST", "/v1/apikeys", json={"name": name, "role": role})
@@ -2075,6 +2205,45 @@ def platforms_unapprove_connector(connector_id: str) -> None:
     """Take a connector off the allowlist."""
     out = _call("DELETE", f"/v1/platforms/connectors/{_connector(connector_id)}/approval")
     _done("connector", out["connector_id"], "no longer approved")
+
+
+@platforms_app.command("entra-access")
+def platforms_entra_access(
+    agent: str | None = typer.Option(None, help="Only this agent's (with what it could hold)."),
+) -> None:
+    """The Microsoft Entra access packages agents' Entra identities hold, and until when."""
+    if agent:
+        view = _call("GET", f"/v1/agents/{quote(agent)}/entra-access-packages")
+        rows = view["held"]
+        for row in rows:
+            row["agent"] = agent
+        typer.echo(f"mode: {view['mode']}; Entra identity: {view['entra_agent_id'] or 'none'}")
+    else:
+        view = _call("GET", "/v1/platforms/entra-access-packages")
+        names = view["agents"]
+        rows = [{**row, "agent": names.get(agent_id, agent_id)}
+                for agent_id, held in view["held"].items() for row in held]  # fmt: skip
+        typer.echo(f"mode: {view['mode']}; {len(view['packages'])} packages agents can hold")
+    _table(rows, ["agent", "package", "state", "expires_at", "id"])
+
+
+@platforms_app.command("entra-assign")
+def platforms_entra_assign(
+    agent: str, package: str = typer.Argument(..., help="The package's ID or name.")
+) -> None:
+    """Ask Entra to assign an access package to the agent's Entra identity (manage mode)."""
+    out = _call(
+        "POST", f"/v1/agents/{quote(agent)}/entra-access-packages/assign", json={"package": package}
+    )
+    _done("entra-request", out["request_id"] or "?", out["state"] or "submitted")
+
+
+@platforms_app.command("entra-remove")
+def platforms_entra_remove(agent: str, assignment_id: str, yes: bool = YES) -> None:
+    """Ask Entra to remove one of the agent identity's assignments (manage mode)."""
+    _confirm(f"Ask Entra to remove {assignment_id} from {agent}?", yes)
+    out = _call("DELETE", f"/v1/agents/{quote(agent)}/entra-access-packages/{quote(assignment_id)}")
+    _done("entra-request", out["request_id"] or "?", out["state"] or "submitted")
 
 
 # -------------------------------------------------------------- instructions
@@ -2731,6 +2900,320 @@ def destinations_delete(name: str, yes: bool = YES) -> None:
     _confirm(f"Delete destination {name}?", yes)
     _call("DELETE", f"/v1/destinations/{quote(name)}")
     _done("destination", name, "deleted")
+
+
+# ------------------------------------------------------------- access packages
+
+PKG_GRANT = typer.Option(None, "--grant", help="Tool grant server:tool,tool (repeatable).")
+PKG_MODEL = typer.Option(
+    None, "--model-access", help="Models it grants, provider:model,model (repeatable)."
+)
+PKG_AGENTS = typer.Option(
+    None, "--agent-access", help="Agents it lets call, by name or pattern (repeatable)."
+)
+PKG_BLUEPRINTS = typer.Option(
+    None, "--blueprint", help="Only agents on these blueprints may hold it (repeatable)."
+)
+PKG_DAYS = typer.Option(None, "--days", help="How many days it lasts at most (1 to 365).")
+PKG_REVIEW = typer.Option(None, "--review-days", help="Review who holds it every N days.")
+PKG_APPROVAL = typer.Option(
+    None, "--approval/--no-approval", help="Whether an approver decides requests."
+)
+
+
+def _package_fields(
+    description: str | None,
+    grant: list[str] | None,
+    model_access: list[str] | None,
+    agent_access: list[str] | None,
+    blueprint: list[str] | None,
+    days: int | None,
+    review_days: int | None,
+    no_review: bool,
+    approval: bool | None,
+) -> dict[str, Any]:
+    body = _given(description=description, duration_days=days, approval=approval)
+    if grant is not None:
+        body["permissions"] = _grants(grant)
+    if model_access is not None:
+        body["model_access"] = _model_access(model_access)
+    if agent_access is not None:
+        body["agent_access"] = _split(agent_access)
+    if blueprint is not None:
+        body["blueprints"] = _split(blueprint)
+    if no_review:
+        body["review_days"] = None
+    elif review_days is not None:
+        body["review_days"] = review_days
+    return body
+
+
+def _grant_summary(p: dict[str, Any]) -> str:
+    parts = [f"{g['server']}:{','.join(g['tools'])}" for g in p["permissions"]]
+    parts += [f"{m['provider']}:{','.join(m['models'])}" for m in p["model_access"]]
+    if p["agent_access"]:
+        parts.append(f"agents:{','.join(p['agent_access'])}")
+    return "; ".join(parts)
+
+
+@packages_app.command("list")
+def packages_list() -> None:
+    """List access packages, and how many agents hold each."""
+    rows = _call("GET", "/v1/access-packages")
+    for row in rows:
+        row["grants"] = _grant_summary(row)
+        row["days"] = row["duration_days"]
+        row["held"] = row["assignments"]["active"] + row["assignments"]["expired"]
+        row["waiting"] = row["assignments"]["requested"]
+    _table(rows, ["name", "days", "grants", "held", "waiting"])
+
+
+@packages_app.command("get")
+def packages_get(name: str) -> None:
+    """Show an access package."""
+    _print(_call("GET", f"/v1/access-packages/{quote(name)}"))
+
+
+@packages_app.command("create")
+def packages_create(
+    name: str,
+    description: str | None = DESCRIPTION,
+    grant: list[str] | None = PKG_GRANT,
+    model_access: list[str] | None = PKG_MODEL,
+    agent_access: list[str] | None = PKG_AGENTS,
+    blueprint: list[str] | None = PKG_BLUEPRINTS,
+    days: int | None = PKG_DAYS,
+    review_days: int | None = PKG_REVIEW,
+    approval: bool | None = PKG_APPROVAL,
+) -> None:
+    """Add an access package: what it grants, to which agents, for how long."""
+    body = _package_fields(
+        description,
+        grant,
+        model_access,
+        agent_access,
+        blueprint,
+        days,
+        review_days,
+        False,
+        approval,
+    )
+    out = _call("POST", "/v1/access-packages", json={"name": name, **body})
+    _done("access-package", out["name"], "created")
+
+
+@packages_app.command("update")
+def packages_update(
+    name: str,
+    description: str | None = DESCRIPTION,
+    grant: list[str] | None = typer.Option(
+        None, "--grant", help="Tool grants server:tool,tool (replace them; repeatable)."
+    ),
+    model_access: list[str] | None = typer.Option(
+        None, "--model-access", help="Models it grants (replace them; repeatable)."
+    ),
+    agent_access: list[str] | None = typer.Option(
+        None, "--agent-access", help="Agents it lets call (replace them; repeatable)."
+    ),
+    blueprint: list[str] | None = typer.Option(
+        None, "--blueprint", help="The blueprints whose agents may hold it (replace them)."
+    ),
+    days: int | None = PKG_DAYS,
+    review_days: int | None = PKG_REVIEW,
+    no_review: bool = typer.Option(False, "--no-review", help="No periodic reviews."),
+    approval: bool | None = PKG_APPROVAL,
+) -> None:
+    """Change an access package: every agent that holds it gets the change."""
+    body = _package_fields(
+        description, grant, model_access, agent_access, blueprint, days, review_days, no_review,
+        approval,
+    )  # fmt: skip
+    if not body:
+        _fail("nothing to change: pass at least one option (see --help)")
+    out = _call("PATCH", f"/v1/access-packages/{quote(name)}", json=body)
+    _done("access-package", out["name"], "updated")
+
+
+@packages_app.command("delete")
+def packages_delete(name: str, yes: bool = YES) -> None:
+    """Delete an access package no agent holds or asks for."""
+    _confirm(f"Delete access package {name}?", yes)
+    _call("DELETE", f"/v1/access-packages/{quote(name)}")
+    _done("access-package", name, "deleted")
+
+
+@packages_app.command("request")
+def packages_request(
+    agent: str,
+    package: str,
+    reason: str = typer.Option(..., help="Why the agent needs it."),
+    days: int | None = typer.Option(None, help="For how many days (the package's most)."),
+    approve: bool = typer.Option(
+        False, "--approve", help="Assign it at once (administrators only)."
+    ),
+) -> None:
+    """Ask for an access package for an agent; asked again while it holds one, it renews."""
+    body: dict[str, Any] = {"agent": agent, "package": package, "reason": reason}
+    if days is not None:
+        body["days"] = days
+    if approve:
+        body["approve"] = True
+    out = _call("POST", "/v1/access-assignments", json=body)
+    until = f" until {out['expires_at']}" if out["expires_at"] else ""
+    _done("access", out["id"], f"{out['status']}{until}")
+
+
+@packages_app.command("assignments")
+def packages_assignments(
+    status: str | None = typer.Option(
+        None, help="requested, active, expired, denied, revoked, renewed or all."
+    ),
+    agent: str | None = typer.Option(None, help="Only this agent's."),
+    package: str | None = typer.Option(None, help="Only this package's."),
+) -> None:
+    """List who holds and asks for access packages."""
+    params = _given(status=status, agent=agent, package=package)
+    rows = _call("GET", "/v1/access-assignments", params=params)
+    _table(rows, ["id", "agent_name", "package", "status", "expires_at", "requested_by", "reason"])
+
+
+def _assignment_action(assignment_id: str, action: str, body: dict[str, Any]) -> None:
+    out = _call("POST", f"/v1/access-assignments/{quote(assignment_id)}/{action}", json=body)
+    _done("access", out["id"], out["status"])
+
+
+@packages_app.command("approve")
+def packages_approve(assignment_id: str, note: str | None = None) -> None:
+    """Approve a request (someone other than who asked)."""
+    _assignment_action(assignment_id, "approve", _given(note=note))
+
+
+@packages_app.command("deny")
+def packages_deny(assignment_id: str, note: str | None = None) -> None:
+    """Deny a request."""
+    _assignment_action(assignment_id, "deny", _given(note=note))
+
+
+@packages_app.command("revoke")
+def packages_revoke(assignment_id: str, reason: str | None = None, yes: bool = YES) -> None:
+    """Take an access package away from an agent, now."""
+    _confirm(f"Revoke {assignment_id}?", yes)
+    _assignment_action(assignment_id, "revoke", _given(reason=reason))
+
+
+@packages_app.command("review")
+def packages_review(
+    assignment_id: str,
+    keep: bool = typer.Option(
+        ..., "--keep/--remove", help="Whether the agent still needs it (remove revokes it)."
+    ),
+    note: str | None = None,
+) -> None:
+    """Review an agent's access package: keep it, or remove it."""
+    _assignment_action(assignment_id, "review", {"keep": keep, **_given(note=note)})
+
+
+# ---------------------------------------------------------------------- teams
+
+MEMBER = typer.Option(
+    None,
+    "--member",
+    help="Someone in it, by email address or user name: they see its issues in AgentGov "
+    "(repeatable or comma-separated).",
+)
+EMAIL = typer.Option(
+    None,
+    "--email",
+    help="Where its issues are emailed, such as a list's address (repeatable or "
+    "comma-separated); without any, its members' addresses.",
+)
+CHANNEL = typer.Option(
+    None,
+    "--channel",
+    help="A Teams or Slack destination its issues are posted to (repeatable or comma-separated).",
+)
+
+
+def _team_fields(
+    description: str | None,
+    member: list[str] | None,
+    email: list[str] | None,
+    channel: list[str] | None,
+    default: bool | None,
+) -> dict[str, Any]:
+    body = _given(description=description, default=default)
+    for key, values in (("members", member), ("emails", email), ("destinations", channel)):
+        if values is not None:
+            body[key] = _split(values)
+    return body
+
+
+@teams_app.command("list")
+def teams_list() -> None:
+    """List teams."""
+    rows = _call("GET", "/v1/teams")
+    for row in rows:
+        row["members"] = len(row["members"])
+        row["emails"] = ", ".join(row["emails"])
+        row["channels"] = ", ".join(row["destinations"])
+        row["default"] = "yes" if row["default"] else ""
+    _table(rows, ["name", "default", "members", "emails", "channels"])
+
+
+@teams_app.command("get")
+def teams_get(name: str) -> None:
+    """Show a team, and the blueprints and agents that name it."""
+    _print(_call("GET", f"/v1/teams/{quote(name)}"))
+
+
+@teams_app.command("create")
+def teams_create(
+    name: str,
+    description: str | None = DESCRIPTION,
+    member: list[str] | None = MEMBER,
+    email: list[str] | None = EMAIL,
+    channel: list[str] | None = CHANNEL,
+    default: bool = typer.Option(
+        False, "--default", help="Issues without a team of their own go to it."
+    ),
+) -> None:
+    """Add a team that agents' owners, sponsors and blueprints can name."""
+    body = _team_fields(description, member, email, channel, default or None)
+    out = _call("POST", "/v1/teams", json={"name": name, **body})
+    _done("team", out["name"], "created (the default team)" if out["default"] else "created")
+
+
+@teams_app.command("update")
+def teams_update(
+    name: str,
+    description: str | None = DESCRIPTION,
+    member: list[str] | None = typer.Option(
+        None, "--member", help="Its members (replace them; repeatable)."
+    ),
+    email: list[str] | None = typer.Option(
+        None, "--email", help="Where its issues are emailed (replace them; repeatable)."
+    ),
+    channel: list[str] | None = typer.Option(
+        None, "--channel", help="Its Teams and Slack destinations (replace them; repeatable)."
+    ),
+    default: bool | None = typer.Option(
+        None, "--default/--not-default", help="Whether issues without a team go to it."
+    ),
+) -> None:
+    """Change a team. Only the options you pass are changed."""
+    body = _team_fields(description, member, email, channel, default)
+    if not body:
+        _fail("nothing to change: pass at least one option (see --help)")
+    out = _call("PATCH", f"/v1/teams/{quote(name)}", json=body)
+    _done("team", out["name"], "updated")
+
+
+@teams_app.command("delete")
+def teams_delete(name: str, yes: bool = YES) -> None:
+    """Delete a team that no blueprint or agent names."""
+    _confirm(f"Delete team {name}?", yes)
+    _call("DELETE", f"/v1/teams/{quote(name)}")
+    _done("team", name, "deleted")
 
 
 @models_app.command("usage")

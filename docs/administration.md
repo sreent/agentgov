@@ -25,7 +25,8 @@ one sign-in. The CLI proves with PKCE that it started the sign-in and gets an Ag
 session of its own, which lasts as long as one in the UI (`AGENTGOV_SESSION_HOURS`). The
 session is saved for `AGENTGOV_URL` in `sessions.json` in the agentgov config directory
 (`~/.config/agentgov` on Linux; set `AGENTGOV_CONFIG_DIR` to move it), readable only by
-you. `agentgov logout` ends it. `AGENTGOV_TOKEN` takes precedence over a saved session.
+you. `agentgov logout` ends it. `AGENTGOV_TOKEN` (or `AGENTGOV_ADMIN_TOKEN`) takes
+precedence over a saved session.
 The session appears on the **Access** page like any other, and the ledger's
 `admin.login` entry says it came from the CLI.
 
@@ -38,16 +39,17 @@ pipelines, use an API key instead.
 
 | Role | Can |
 |---|---|
-| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations and which [features](features.md) are used |
-| `approver` | Read everything; decide approval requests; resolve, dismiss and reopen findings; attest the agents it sponsors |
-| `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
+| `admin` | Everything below, plus agent lifecycle, blueprints, access packages, tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations, teams and which [features](features.md) are used |
+| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks; attest the agents it sponsors |
+| `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings, acknowledge issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
-| `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), and report the MCP servers set up on developers' machines; it cannot read the registry |
-| `person` | Someone without an AgentGov role, signed in to decide the approval requests that agents acting for them sent them, while the `approvals-by-person` feature is on; sees nothing else ([acting for people](acting-for-people.md)) |
+| `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
+| `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)); sees nothing else |
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector |
 
-People who sign in with single sign-on get their roles from the identity provider (see the
-[deployment guide](../deploy/compose/README.md#signing-in)) each time they sign in. To take
+People who sign in with single sign-on get their roles from the identity provider each time
+they sign in (see [single sign-on](configuration.md#administrator-single-sign-on-oidc), and the
+demo realm's users in [signing in](deploy/local.md#signing-in)). To take
 someone's access away, remove their role there, then sign them out on the **Access**
 page so that their open sessions end too. The same page lists everyone who has signed
 in (or been refused) and every API key, for access reviews. API keys have one role each.
@@ -61,7 +63,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Edit an agent | Agent → **Edit** | `agentgov agents update REF --owner …` | `PATCH /v1/agents/{ref}` |
 | Approve, block, unblock, delete, restore | Agent toolbar | `agentgov agents approve\|block\|unblock\|delete\|restore REF` | `POST /v1/agents/{ref}/{action}` |
 | Adopt a discovered agent | Agent → **Adopt** | `agentgov agents lifecycle REF adopt` | `POST /v1/agents/{ref}/adopt` |
-| Delete a deleted agent permanently | Agent → **Delete permanently** | `agentgov agents purge REF` | `DELETE /v1/agents/{ref}` |
+| Delete a deleted agent permanently (otherwise it is purged after `AGENTGOV_SOFT_DELETE_RETENTION_DAYS`, 30 by default) | Agent → **Delete permanently** | `agentgov agents purge REF` | `DELETE /v1/agents/{ref}` |
 | Attest an agent | Agent → **Attest** | `agentgov agents attest REF` | `POST /v1/agents/{ref}/attest` |
 | Show or rotate an agent's client secret | Agent → Identity → **Show secret** / **Rotate** | `agentgov agents credentials REF [--rotate]` | `POST /v1/agents/{ref}/credentials` |
 | Approve, edit, block, delete identity issuers ([agents' own identities](agent-identity.md)) | Access → *Agent identity issuers* → **Add issuer**, **Edit**, **Block**/**Unblock**, **Delete** | `agentgov issuers create\|update\|block\|unblock\|delete` | `POST /v1/identity-issuers`, `PATCH`/`DELETE /v1/identity-issuers/{name}`, `POST /v1/identity-issuers/{name}/block\|unblock` |
@@ -93,6 +95,14 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Decide an approval request | Approvals → **Approve** / **Deny** | `agentgov approvals approve\|deny ID` | `POST /v1/approvals/{id}/approve\|deny` |
 | See the approval requests sent to you, as the person an agent acted for | Approvals → *Waiting for you* | `agentgov approvals list --mine` | `GET /v1/me/approvals` |
 | Resolve, dismiss, reopen findings | Findings | `agentgov findings resolve\|dismiss\|reopen ID` | `POST /v1/findings/{id}/{action}` |
+| See who an issue is with, its messages and its history ([issues](issues.md)) | Findings → **Details** | `agentgov findings get ID` | `GET /v1/findings/{id}` |
+| See the issues sent to you, as an owner, a sponsor or a team member | Findings → *Yours* (people without a role: *Your issues*) | `agentgov findings list --mine` | `GET /v1/me/issues` |
+| Acknowledge an issue, or accept its risk until a date | Findings → **Acknowledge**, **Accept risk** | `agentgov findings acknowledge ID`, `agentgov findings accept ID --reason R --until DATE` | `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` |
+| Add, edit and delete teams, and choose the default team | Findings → Teams | `agentgov teams create\|update\|delete`, `agentgov teams list` | `POST /v1/teams`, `PATCH`/`DELETE /v1/teams/{name}` |
+| Add, edit and delete access packages ([access packages](access-packages.md)) | Policies → *Access packages* | `agentgov access-packages create\|update\|delete`, `agentgov access-packages list` | `POST /v1/access-packages`, `PATCH`/`DELETE /v1/access-packages/{name}` |
+| Ask for an access package for an agent, or renew one | Agent → *Access packages* → **Request access**, **Renew** | `agentgov access-packages request AGENT PACKAGE --reason R` | `POST /v1/access-assignments` |
+| Decide, revoke or review an agent's access package | Approvals → *Access requests*; agent → *Access packages* | `agentgov access-packages approve\|deny\|revoke ID`, `agentgov access-packages review ID --keep\|--remove` | `POST /v1/access-assignments/{id}/approve\|deny\|revoke\|review` |
+| Name the team issues about an agent escalate to | Blueprint or agent → **Edit** → *Team* | `agentgov blueprints update B --team T` (agents: the same option) | `team` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |
 | Browse, verify and export the ledger | Ledger → filters, **Verify chain**, **Export JSONL** | `agentgov ledger tail --agent A`, `ledger verify`, `ledger export` | `GET /v1/ledger`, `/v1/ledger/verify`, `/v1/ledger/export` |
 | See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |
 | See the calls between agents, and the chain of agents behind any call | Ledger, type `decision.a2a.*`; an entry's *Chain* | `agentgov ledger tail --type 'decision.a2a.*'` | `GET /v1/ledger?type=decision.a2a.*` (`details.chain`) |
@@ -117,18 +127,19 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Choose how much is handed to the security team ([security operations](secops.md)) | Security operations → *Hand-off* | `agentgov secops level LEVEL`, `agentgov secops status` | `PUT /v1/features/security-operations`, `GET /v1/secops` |
 | Add, edit, test, pause, resume, replay and delete destinations (SIEMs, Teams, Slack) | Security operations → **Add destination**, **Test**, **Edit**, **Pause**/**Resume**, **Replay**, **Delete** | `agentgov destinations create\|update\|test\|pause\|resume\|replay\|delete` | `POST /v1/destinations`, `PATCH`/`DELETE /v1/destinations/{name}`, `POST /v1/destinations/{name}/{action}` |
 | Read the ledger as OCSF events | Security operations → *Events API* | `agentgov secops events [--after N] [--follow]` | `GET /v1/secops/events?after=N` |
-| See what monitored controls would have stopped | Ledger → decision **Monitored** | `agentgov ledger tail` | `GET /v1/ledger?decision=monitored` |
+| See what monitored controls would have stopped | Ledger → decision **Monitored** | `agentgov ledger tail --decision monitored` | `GET /v1/ledger?decision=monitored` |
 
 Two commands run where the control plane runs, against its database
 (`AGENTGOV_DATABASE_URL`) rather than its API: `agentgov db status` shows the schema's
 revision and the migrations pending, and `agentgov db upgrade` applies them (`--sql`
 prints them instead). The control plane also applies them when it starts, unless
-`AGENTGOV_DATABASE_AUTO_MIGRATE` is `false` ([upgrading](../deploy/compose/README.md#upgrading)).
+`AGENTGOV_DATABASE_AUTO_MIGRATE` is `false` (upgrading with [Compose](deploy/local.md#upgrading) or [Kubernetes](deploy/kubernetes.md#upgrading)).
 
 Every CLI command has `--help`. Commands that cannot be undone (`purge`, `delete` of
 blueprints, tool servers, model providers, identity issuers, destinations and policies,
-`apikeys revoke`), `destinations replay`, and `features set` (or `secops level`) when it
-lowers a feature, ask for confirmation unless you pass `--yes`.
+`apikeys revoke`, `agents clear-instructions`), `destinations replay`,
+`platforms push-connector-policy`, and `features set` (or `secops level`) when it lowers a
+feature, ask for confirmation unless you pass `--yes`.
 
 ## Registry as code
 

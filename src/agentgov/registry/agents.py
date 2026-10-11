@@ -19,6 +19,7 @@ from agentgov.models import (
     DELETED,
     DISCOVERED,
     PENDING,
+    AccessAssignment,
     Agent,
     AgentInstructions,
 )
@@ -30,6 +31,7 @@ from agentgov.registry import (
     identity_issuers,
     model_providers,
     risk,
+    teams,
     validation,
 )
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
@@ -49,6 +51,7 @@ EDITABLE = (
     "description",
     "owner",
     "sponsors",
+    "team",
     "labels",
     "framework",
     "platform",
@@ -191,6 +194,8 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
             continue
         if key in ("sponsors", "models"):
             value = validation.string_list(value, key)
+        elif key == "team":
+            value = teams.reference(session, value)
         elif key == "labels":
             value = validation.labels(value)
         elif key == "permissions":
@@ -398,10 +403,29 @@ def purge(session: Session, agent: Agent, *, actor: str) -> None:
     if agent.status != DELETED:
         raise InvalidTransition("only deleted agents can be purged")
     ledger.append(session, type="agent.purged", actor=actor, agent=agent, severity="warning")
-    # Its instructions go too: the ledger keeps their hashes, not their text.
+    # Its instructions and access packages go too: the ledger keeps their history (and the
+    # instructions' hashes, not their text).
     session.execute(delete(AgentInstructions).where(AgentInstructions.agent_id == agent.id))
+    session.execute(delete(AccessAssignment).where(AccessAssignment.agent_id == agent.id))
     session.delete(agent)
     mark_changed(session, "agents")
+
+
+def purge_expired(session: Session, settings: Settings) -> list[str]:
+    """Purge the agents deleted longer ago than the retention period (0 keeps them):
+    until then they can be restored."""
+    days = settings.soft_delete_retention_days
+    if days <= 0:
+        return []
+    cutoff = ids.utcnow() - timedelta(days=days)
+    expired = session.scalars(
+        select(Agent).where(Agent.status == DELETED, Agent.deleted_at < cutoff)
+    ).unique()
+    names = []
+    for agent in list(expired):
+        names.append(agent.name)
+        purge(session, agent, actor="system:retention")
+    return names
 
 
 def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.RiskResult:
@@ -478,6 +502,7 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         "blueprint": agent.blueprint.name if agent.blueprint else None,
         "owner": agent.owner,
         "sponsors": agent.sponsors or [],
+        "team": agent.team,
         "labels": agent.labels or {},
         "framework": agent.framework,
         "platform": agent.platform,

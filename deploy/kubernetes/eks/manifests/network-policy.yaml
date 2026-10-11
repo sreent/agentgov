@@ -1,0 +1,9 @@
+# EKS Auto Mode enforces network policies once its controller is on
+# (docs/deploy/aws.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: amazon-vpc-cni
+  namespace: kube-system
+data:
+  enable-network-policy-controller: "true"

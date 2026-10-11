@@ -707,6 +707,14 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .finding-desc { color: var(--ink-2); overflow-wrap: anywhere; }
 .finding-fix { font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .finding-fix strong { font-weight: 600; }
+.finding-issue { display: flex; gap: 6px; align-items: flex-start; font-size: var(--fs-sm); color: var(--ink-2); overflow-wrap: anywhere; }
+.finding-issue .ico { width: 16px; height: 16px; margin-top: 2px; flex: none; color: var(--accent); }
+.access-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.access-row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.access-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.access-main { flex: 1 1 260px; min-width: 0; }
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.timeline li { padding-left: 12px; border-left: 2px solid var(--line); }
 .finding-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: var(--fs-xs); color: var(--ink-3); }
 .finding-actions { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; }
 .finding-actions .finding-meta { flex: 1 1 320px; }

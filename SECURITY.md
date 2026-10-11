@@ -56,15 +56,18 @@ AgentGov is pre-1.0. Security fixes are made on `main` and included in the next 
 
 ## Deploying safely
 
-The reference stack in `deploy/compose` is for evaluation. For anything else:
+The defaults of the Compose stack and of the Helm chart are for evaluation
+([checklist](docs/deploy/README.md#before-others-rely-on-it)). For anything else:
 
 * Replace every default secret (`deploy/compose/.env.example` lists them), in particular
   `AGENTGOV_ADMIN_TOKEN`, `AGENTGOV_SERVICE_TOKEN`, the Keycloak client secrets and
   database passwords. Use long random values.
-* Delete the realm's demo users (`admin`, `alice`, `sofia`, `audrey`, `sam`) and sign people in through
-  your own directory, federated into Keycloak, with the `agentgov-*` roles assigned to
-  groups. Use role-scoped API keys for automation, and keep the bootstrap admin token for
-  break-glass access only.
+* Delete the realm's demo users (`admin`, `alice`, `sofia`, `audrey`, `sam`) and the demo
+  app `agentgov-demo-chat`, which accepts people's passwords directly, and name your own apps
+  in `AGENTGOV_PEOPLE_APP_CLIENTS` (the Helm value `peopleApps`). Sign people in through your
+  own directory, federated into Keycloak, with the `agentgov-*` roles assigned to groups. Use
+  role-scoped API keys for automation, and keep the bootstrap admin token for break-glass
+  access only.
 * Terminate TLS in front of the control plane, Keycloak and agentgateway, and set
   `AGENTGOV_PUBLIC_URL` to the control plane's `https://` address so that session
   cookies are marked `Secure`.
@@ -76,8 +79,10 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   gateway is the only path to models too. Keep destinations' credentials (SIEM tokens,
   Teams and Slack webhook URLs) in your secret store, mounted into the control plane only
   ([security operations](docs/secops.md)). On Kubernetes, turn on the
-  Helm chart's network policies (`networkPolicy.enabled=true`) and its demo users off
-  (`keycloak.demoUsers=false`), or use your own Keycloak.
+  Helm chart's network policies (`networkPolicy.enabled=true`), run its Keycloak in
+  production mode without the demo users (`keycloak.mode=production`,
+  `keycloak.demoUsers=false`, both before the first install) or use your own, and keep
+  Keycloak's admin console (`/admin`) off the internet if your load balancer can.
 * Keep the controls at the gateway enforced, as they are by default, and the processor
   fail-closed. Jailbreak detection starts in monitor mode: enforce it once its findings
   show what it would refuse. Monitor mode and turning a control off are for rollout and evaluation

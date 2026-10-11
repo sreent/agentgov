@@ -1,0 +1,389 @@
+"""Issues: findings routed to the people responsible for them (docs/issues.md).
+
+A finding about an agent goes to its owner first, then its sponsors, then its team (its
+own, its blueprint's, or the default team); one about a tool server to its owner, then the
+default team; any other to the default team. An owner or a sponsor is a person (an email
+address or a user name) or a team, by name. At each step, AgentGov tells the people and
+teams there, by email and in their teams' chats, and lists the issue for them in AgentGov.
+If none of them acknowledges it in time (AGENTGOV_ISSUE_ESCALATION_HOURS), it goes to the
+next step. Acknowledging stops it there; resolving it, or accepting the risk until a date,
+ends it. Raised again later, it starts over.
+
+Nothing is routed or sent while the issues feature is off; findings stay in AgentGov's
+list as before.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from agentgov import ids
+from agentgov.config import Settings
+from agentgov.models import Agent, Destination, Finding, LedgerEntry, Notification, ToolServer
+from agentgov.registry import findings, teams
+from agentgov.registry.errors import InvalidTransition, ValidationError
+
+OWNER, SPONSORS, TEAM = "owner", "sponsors", "team"
+LEVELS = (OWNER, SPONSORS, TEAM)
+SYSTEM = "system:issues"
+# The longest a risk can be accepted for: then someone decides again.
+MAX_ACCEPT = timedelta(days=365)
+EMAIL = "email"
+
+
+@dataclass(frozen=True)
+class Recipient:
+    """A person or a team at a step of an issue's chain, and how they are reached."""
+
+    kind: str  # "person" or "team"
+    name: str  # an email address or a user name; or the team's name
+    emails: tuple[str, ...] = ()
+    channels: tuple[str, ...] = ()  # Teams and Slack destinations, by name
+    members: tuple[str, ...] = ()  # a team's people, by email address or user name
+
+    def describe(self) -> str:
+        return f"team {self.name}" if self.kind == "team" else self.name
+
+
+class Directory:
+    """The teams, read once for a round of routing or a list of issues."""
+
+    def __init__(self, session: Session) -> None:
+        self.teams = {t.name: t for t in teams.list_all(session)}
+        self.default = next((t for t in self.teams.values() if t.is_default), None)
+
+    def recipient(self, name: str | None) -> Recipient | None:
+        """Who a name stands for: a team of that name, or else a person."""
+        name = (name or "").strip()
+        if not name:
+            return None
+        team = self.teams.get(name)
+        if team is not None:
+            members = tuple(team.members or [])
+            # Its own addresses, or else its members'.
+            emails = tuple(team.emails or []) or tuple(m for m in members if teams.is_email(m))
+            return Recipient("team", team.name, emails, tuple(team.destinations or []), members)
+        if teams.is_email(name):
+            return Recipient("person", name.lower(), (name.lower(),))
+        # Reached in AgentGov only, when they sign in.
+        return Recipient("person", name)
+
+    def team(self, *names: str | None) -> Recipient | None:
+        """The first of these that is a team, or else the default team."""
+        for name in names:
+            if name and name in self.teams:
+                return self.recipient(name)
+        return self.recipient(self.default.name) if self.default else None
+
+
+def chain(
+    session: Session, finding: Finding, directory: Directory | None = None
+) -> list[tuple[str, list[Recipient]]]:
+    """The steps of a finding's chain, each with the people and teams at it that no earlier
+    step reached. Steps with nobody new at them are left out."""
+    d = directory or Directory(session)
+    raw: list[tuple[str, list[Recipient | None]]] = []
+    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
+    if agent is not None:
+        blueprint = agent.blueprint
+        raw = [
+            (OWNER, [d.recipient(agent.owner)]),
+            (SPONSORS, [d.recipient(str(s)) for s in agent.sponsors or []]),
+            (TEAM, [d.team(agent.team, blueprint.team if blueprint else None)]),
+        ]
+    elif finding.type.startswith("toolserver."):
+        server = session.get(ToolServer, finding.subject)
+        raw = [(OWNER, [d.recipient(server.owner) if server else None]), (TEAM, [d.team()])]
+    else:
+        raw = [(TEAM, [d.team()])]
+    steps: list[tuple[str, list[Recipient]]] = []
+    reached: set[str] = set()
+    for level, people in raw:
+        new = [
+            p for p in dict.fromkeys(p for p in people if p is not None) if p.name not in reached
+        ]
+        if new:
+            steps.append((level, new))
+            reached.update(p.name for p in new)
+    return steps
+
+
+def involved(session: Session, finding: Finding, directory: Directory | None = None) -> set[str]:
+    """Everyone the issue has reached so far, by email address and user name (lower case),
+    team members included: they may see it and acknowledge it."""
+    names: set[str] = set()
+    if finding.level is None:
+        return names
+    for level, people in chain(session, finding, directory):
+        for person in people:
+            if person.kind == "person":
+                names.add(person.name.lower())
+            # A team by its members and addresses, never its name: a person could have it.
+            names.update(e.lower() for e in (*person.emails, *person.members))
+        if level == finding.level:
+            break
+    return names
+
+
+def _next(
+    steps: list[tuple[str, list[Recipient]]], level: str | None
+) -> tuple[str, list[Recipient]] | None:
+    """The step after ``level`` (the first, without one)."""
+    if level is None:
+        return steps[0] if steps else None
+    later = [s for s in steps if LEVELS.index(s[0]) > LEVELS.index(level)]
+    return later[0] if later else None
+
+
+def _give(
+    session: Session,
+    settings: Settings,
+    finding: Finding,
+    step: tuple[str, list[Recipient]],
+    steps: list[tuple[str, list[Recipient]]],
+    now: datetime,
+    *,
+    escalated: bool,
+) -> None:
+    level, people = step
+    finding.level = level
+    finding.assignees = [p.describe() for p in people]
+    hours = settings.escalation_delays()[finding.severity]
+    finding.escalate_at = now + timedelta(hours=hours) if _next(steps, level) else None
+    queued = _queue(session, settings, finding, level, people)
+    findings.record(
+        session,
+        finding,
+        "escalated" if escalated else "assigned",
+        SYSTEM,
+        severity="warning" if escalated else "info",
+        level=level,
+        assignees=finding.assignees,
+        notifications=queued,
+    )
+
+
+def _queue(
+    session: Session, settings: Settings, finding: Finding, level: str, people: list[Recipient]
+) -> int:
+    """Queue the messages for the people at this step: email to their addresses (with a
+    mail server), and their teams' chats."""
+    wanted: list[tuple[str, str]] = []
+    for person in people:
+        if settings.smtp_url:
+            wanted += [(EMAIL, address) for address in person.emails]
+        for name in person.channels:
+            destination = session.scalar(select(Destination).where(Destination.name == name))
+            if destination is not None:
+                wanted.append((destination.kind, name))
+    count = 0
+    for channel, to in dict.fromkeys(wanted):
+        exists = session.scalar(
+            select(Notification.id).where(
+                Notification.finding_id == finding.id,
+                Notification.round == finding.round,
+                Notification.level == level,
+                Notification.channel == channel,
+                Notification.recipient == to,
+            )
+        )
+        if exists:
+            continue
+        session.add(
+            Notification(
+                id=ids.new_id(ids.NOTIFICATION),
+                finding_id=finding.id,
+                round=finding.round or 0,
+                level=level,
+                channel=channel,
+                recipient=to,
+                status="pending",
+                attempts=0,
+                next_attempt_at=ids.utcnow(),
+            )
+        )
+        count += 1
+    return count
+
+
+# ------------------------------------------------------------------------ rounds
+
+
+def route(session: Session, settings: Settings, now: datetime | None = None) -> dict[str, int]:
+    """Give open findings that aren't with anyone to the first step of their chain, and
+    escalate those nobody acknowledged in time."""
+    now = now or ids.utcnow()
+    assigned = escalated = 0
+    directory = Directory(session)
+    open_findings = session.scalars(select(Finding).where(Finding.status == "open")).all()
+    for finding in open_findings:
+        steps = chain(session, finding, directory)
+        if finding.level is None:
+            first = _next(steps, None)
+            if first is not None:
+                _give(session, settings, finding, first, steps, now, escalated=False)
+                assigned += 1
+        elif (
+            finding.acknowledged_at is None
+            and finding.escalate_at is not None
+            and finding.escalate_at <= now
+        ):
+            step = _next(steps, finding.level)
+            if step is None:
+                finding.escalate_at = None
+            else:
+                _give(session, settings, finding, step, steps, now, escalated=True)
+                escalated += 1
+    return {"assigned": assigned, "escalated": escalated}
+
+
+def reopen_accepted(session: Session, now: datetime | None = None) -> int:
+    """Accepted risks whose date has come open again, for someone to decide anew. If the
+    condition is gone, the next check resolves them."""
+    now = now or ids.utcnow()
+    count = 0
+    for finding in session.scalars(
+        select(Finding).where(Finding.status == "accepted", Finding.accepted_until <= now)
+    ):
+        finding.status = "open"
+        finding.accepted_until = None
+        findings.restart_chain(finding)
+        findings.record(
+            session, finding, "reopened", SYSTEM, why="the time its risk was accepted for ran out"
+        )
+        count += 1
+    return count
+
+
+# ---------------------------------------------------------------------- actions
+
+
+def acknowledge(session: Session, finding: Finding, *, actor: str) -> Finding:
+    """Someone it reached takes it on: it stops going further up its chain."""
+    if finding.status != "open":
+        raise InvalidTransition(f"finding is {finding.status}: only open findings are acknowledged")
+    if finding.acknowledged_at is None:
+        finding.acknowledged_at = ids.utcnow()
+        finding.acknowledged_by = actor
+        finding.escalate_at = None
+        findings.record(session, finding, "acknowledged", actor, severity="info")
+    return finding
+
+
+def parse_until(value: Any, now: datetime | None = None) -> datetime:
+    """An accepted risk's end: an ISO 8601 date or time, or a number of days from now."""
+    now = now or ids.utcnow()
+    if isinstance(value, int) and not isinstance(value, bool):
+        until = now + timedelta(days=value)
+    else:
+        try:
+            until = datetime.fromisoformat(str(value))
+        except ValueError:
+            raise ValidationError(
+                "until is a date (2026-12-31), a time (2026-12-31T17:00:00Z) or days from now"
+            ) from None
+        # Times without a zone, and plain dates, are UTC.
+        until = until.replace(tzinfo=UTC) if until.tzinfo is None else until.astimezone(UTC)
+    if until <= now:
+        raise ValidationError("until must be in the future")
+    if until > now + MAX_ACCEPT:
+        raise ValidationError("a risk is accepted for a year at most: then someone decides again")
+    return until
+
+
+def accept(session: Session, finding: Finding, *, reason: Any, until: Any, actor: str) -> Finding:
+    """Accept the risk until a date, for a reason: the finding stops going to anyone until
+    then, and opens again at that date if it still holds."""
+    if finding.status not in ("open", "accepted"):
+        raise InvalidTransition(f"finding is {finding.status}: only open findings are accepted")
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValidationError("say why the risk is acceptable (reason)")
+    if len(reason) > 2000:
+        raise ValidationError("reason is 2000 characters at most")
+    finding.accepted_until = parse_until(until)
+    finding.accepted_reason = reason
+    finding.status = "accepted"
+    finding.escalate_at = None
+    findings.record(
+        session,
+        finding,
+        "accepted",
+        actor,
+        severity="warning",
+        until=ids.isoformat(finding.accepted_until),
+        why=reason,
+    )
+    return finding
+
+
+# ---------------------------------------------------------------- what people see
+
+
+def for_person(session: Session, name: str, *, status: str | None = None) -> list[Finding]:
+    """The issues that reached this person (by their email address or user name), or one
+    of the teams they are in."""
+    key = (name or "").lower()
+    if not key:
+        return []
+    stmt = select(Finding).where(Finding.level.is_not(None)).order_by(Finding.last_seen.desc())
+    if status and status != "all":
+        stmt = stmt.where(Finding.status == status)
+    directory = Directory(session)
+    return [f for f in session.scalars(stmt) if key in involved(session, f, directory)]
+
+
+def may_act(session: Session, finding: Finding, name: str) -> bool:
+    return (name or "").lower() in involved(session, finding)
+
+
+def describe(session: Session, finding: Finding) -> list[dict[str, Any]]:
+    """Its chain, step by step: who is at each step, and how far the issue has gone."""
+    reached = LEVELS.index(finding.level) if finding.level else -1
+    return [
+        {
+            "level": level,
+            "who": [p.describe() for p in people],
+            "reached": LEVELS.index(level) <= reached,
+            "current": level == finding.level,
+        }
+        for level, people in chain(session, finding)
+    ]
+
+
+def history(session: Session, finding: Finding, limit: int = 200) -> list[LedgerEntry]:
+    """What happened to it, newest first, from the ledger."""
+    rows = session.scalars(
+        select(LedgerEntry)
+        .where(LedgerEntry.type.like("finding.%"), LedgerEntry.resource == finding.subject)
+        .order_by(LedgerEntry.seq.desc())
+        .limit(limit * 5)
+    )
+    return [e for e in rows if (e.details or {}).get("finding_id") == finding.id][:limit]
+
+
+def notifications(session: Session, finding: Finding) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(Notification)
+        .where(Notification.finding_id == finding.id)
+        .order_by(Notification.created_at)
+    )
+    return [
+        {
+            "round": n.round,
+            "level": n.level,
+            "channel": n.channel,
+            "recipient": n.recipient,
+            "status": n.status,
+            "attempts": n.attempts,
+            "last_error": n.last_error,
+            "sent_at": ids.isoformat(n.sent_at),
+            "next_attempt_at": ids.isoformat(n.next_attempt_at) if n.status == "pending" else None,
+        }
+        for n in rows
+    ]

@@ -1,0 +1,37 @@
+{{- $root := . }}
+{{- /* Gateway API routes, instead of ingresses, to a Gateway you manage. */}}
+{{- $entries := list
+  (dict "values" "controlPlane" "component" "control-plane" "route" .Values.controlPlane.httpRoute "url" .Values.urls.controlPlane "port" .Values.controlPlane.service.port)
+  (dict "values" "gateway" "component" "gateway" "route" .Values.gateway.httpRoute "url" .Values.urls.gateway "port" .Values.gateway.service.port)
+  (dict "values" "keycloak" "component" "keycloak" "route" .Values.keycloak.httpRoute "url" .Values.urls.keycloak "port" 8080 "enabled" .Values.keycloak.enabled) }}
+{{- range $entries }}
+{{- if and .route.enabled (ne (toString .enabled) "false") }}
+{{- if not .route.parentRefs }}
+{{- fail (printf "%s.httpRoute needs parentRefs: the Gateway to attach to" .values) }}
+{{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "agentgov.name" (list $root .component) }}
+  labels:
+    {{- include "agentgov.labels" (list $root .component) | nindent 4 }}
+  {{- with .route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml .route.parentRefs | nindent 4 }}
+  hostnames:
+    - {{ .route.host | default (include "agentgov.host" .url) | quote }}
+  rules:
+    - backendRefs:
+        - name: {{ include "agentgov.name" (list $root .component) }}
+          port: {{ .port }}
+      {{- with .route.timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

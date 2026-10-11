@@ -62,15 +62,16 @@ them needs the AI administrator or Power Platform administrator role
 
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
-| **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
-| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
-| **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
+| **Registry** | Inventory with owners, sponsors and teams; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings, sent as issues to each agent's owner, sponsors and team until someone takes them on; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
+| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
+| **Visualization** | Overview dashboard, agent map (people → agents → tool servers and other agents), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; calls between agents (A2A 1.0) through the gateway, with who may call whom, and the chain of agents that handed work down, from the person at its head, in policy and the ledger; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
 | **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), OCSF, OpenTelemetry |
 
-Use only the parts you need. Each [feature](docs/features.md) can be turned off, and each
-control at the gateway can run in monitor mode first: it records what it would have
-stopped, without stopping anything, until you enforce it.
+Use only the parts you need. Every [feature](docs/features.md) but the gateway's handling of
+unknown callers can be turned off, and most controls at the gateway can run in monitor mode
+first: they record what they would have stopped, without stopping anything, until you enforce
+them.
 
 ## How it works
 
@@ -113,14 +114,16 @@ flowchart LR
    registered. The gateway's access logs give each model call's tokens, which the
    control plane counts against the agent's daily budget.
 6. People sign in to the admin UI with single sign-on through the same Keycloak, and
-   their roles decide whether they administer agents, approve requests or only audit.
+   their roles decide whether they administer agents, approve requests, work in security
+   operations or only audit.
 
 [Architecture](docs/architecture.md) covers the design in detail: sequence diagrams,
 trust boundaries, failure modes and scaling.
 
 ## Quickstart
 
-You need Docker with Compose v2, Python 3.11 or later, and about 4 GB of free memory.
+You need Docker with Compose v2, Python 3.11 or later, and about 4 GB of free memory
+([requirements](docs/requirements.md)).
 
 ```bash
 git clone https://github.com/sreent/ai-agent-governance-platform.git
@@ -130,7 +133,7 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[demo]"
 export AGENTGOV_TOKEN=dev-admin-token
-agentgov apply -f examples/manifests      # blueprints, the CRM tool server, a model, agents, a policy, an identity issuer, the SOC's destinations
+agentgov apply -f examples/manifests      # blueprints, the CRM tool server, a model, agents, a policy, an identity issuer, the SOC's destinations and its hand-off level, teams and an access package
 python examples/agents/demo_agent.py
 ```
 
@@ -147,34 +150,40 @@ the gateway. It shows each control in turn:
    ledger records what would have stopped it; enforced again, it is refused.
 8. **Human in the loop**: a destructive tool waits for an approver; once approved, the
    agent's retry goes through.
-9. **Model calls**: the agent calls a model through the gateway with its own token,
-   never the provider's key. Personal data in the prompt is masked, an ungranted model
-   is refused, credentials are kept out of prompts and answers, and once the agent's
-   metered tokens reach its daily budget, its calls are refused. A jailbreak attempt
-   goes through but is recorded: jailbreak detection starts in monitor mode.
-10. **Acting for people**: sam signs in to the demo chat app, and the agent exchanges
+9. **Access packages**: alice, the agent's sponsor, asks for the crm-export package for it;
+   she can't approve her own request, an administrator does, and the agent can export
+   customers until the package is revoked (or would expire, a week later).
+10. **Model calls**: the agent calls a model through the gateway with its own token,
+    never the provider's key. Personal data in the prompt is masked, an ungranted model
+    is refused, credentials are kept out of prompts and answers, and once the agent's
+    metered tokens reach its daily budget, its calls are refused. A jailbreak attempt
+    goes through but is recorded: jailbreak detection starts in monitor mode.
+11. **Acting for people**: sam signs in to the demo chat app, and the agent exchanges
     sam's token for one of its own: it acts for sam as its blueprint allows, only for
     people in the groups the blueprint names, and sam approves what it wants to do for
     them.
-11. **Agent to agent**: the agent hands sam's question to a billing agent over A2A,
+12. **Agent to agent**: the agent hands sam's question to a billing agent over A2A,
     through the gateway. The billing agent learns who asked and for whom, whatever the
     caller claims, and its own call to the CRM carries the chain `sam > agent >
     billing-agent` into policy and the ledger. A made-up delegation is refused, and so
     is the call once the blueprint no longer grants it.
-12. **Kill switch**: blocking the agent takes effect everywhere within a second.
-13. **Own identities**: an agent with no client secret at all authenticates with its
+13. **Kill switch**: blocking the agent takes effect everywhere within a second.
+14. **Own identities**: an agent with no client secret at all authenticates with its
     service account token from a stand-in Kubernetes cluster, and calls a tool; blocking
     the cluster's issuer stops Keycloak taking its tokens.
-14. **Shadow AI**: telemetry from an unregistered agent is discovered.
-15. **Developer tools**: the MCP servers approved for developers are served as an MCP
+15. **Shadow AI**: telemetry from an unregistered agent is discovered.
+16. **Developer tools**: the MCP servers approved for developers are served as an MCP
     registry for GitHub Copilot, and a developer's laptop
     ([examples/developer-machine](examples/developer-machine)) reports its MCP servers:
     those that aren't approved, or skip the gateway, raise findings.
-16. **Security operations**: the SOC's stand-in SIEM has the ledger as OCSF events, its
+17. **Security operations**: the SOC's stand-in SIEM has the ledger as OCSF events, its
     Splunk the decisions and findings that matter, and its Slack and Teams the alerts;
     its SOAR's `secops` key is refused a block at the `inform` level, and blocks the
     shadow agent once the level is `contain`.
-17. **Evidence**: every decision is in a ledger whose hash chain verifies.
+18. **Issues**: the agent's findings went to its owner, the cx-platform team, in its own
+    Slack channel, and the issues no team owns to the AI governance team's Teams channel;
+    alice, in cx-platform, sees them in AgentGov and acknowledges one.
+19. **Evidence**: every decision is in a ledger whose hash chain verifies.
 
 Then look around:
 
@@ -190,14 +199,16 @@ Then look around:
 * Keycloak: <http://localhost:8180> (`admin` / `admin`), realm `agentgov`, which has one
   client per agent
 
-On Kubernetes, the [Helm chart](deploy/helm/agentgov/README.md) installs the same stack.
-For trace exploration, add Langfuse with
-`-f deploy/compose/docker-compose.langfuse.yml` (see the
-[deployment guide](deploy/compose/README.md)).
+[Running it locally](docs/deploy/local.md) has every endpoint and demo user, and the optional
+Langfuse for exploring traces. On Kubernetes, the Helm chart installs the same stack
+([Kubernetes](docs/deploy/kubernetes.md)), and guides for [Google Cloud](docs/deploy/gcp.md),
+[Azure](docs/deploy/azure.md) and [AWS](docs/deploy/aws.md) add each cloud's database, secrets
+and load balancer.
 
 ## Governance as code
 
-Blueprints, tool servers, model providers, agents and policies are declarative manifests, applied with
+Blueprints, tool servers, model providers, identity issuers, access packages, teams, agents,
+policies, destinations and feature modes are declarative manifests, applied with
 `agentgov apply -f <dir>`, the UI's **Import manifests** or the API. They can also be
 created and edited one at a time in the admin UI or with the CLI, and **Export manifests**
 (`agentgov export`) writes everything back out as YAML:
@@ -298,6 +309,13 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 
 ## Documentation
 
+[The documentation's index](docs/README.md) lists every page. Among them:
+
+* [Deploying AgentGov](docs/deploy/README.md): [on your machine](docs/deploy/local.md),
+  [on Kubernetes](docs/deploy/kubernetes.md), and on [Google Cloud](docs/deploy/gcp.md),
+  [Azure](docs/deploy/azure.md) and [AWS](docs/deploy/aws.md)
+* [Configuration](docs/configuration.md): every setting, and
+  [requirements](docs/requirements.md): versions, resources and network
 * [Agent 365 baseline and parity matrix](docs/baseline-agent365.md)
 * [Architecture](docs/architecture.md)
 * [Administration](docs/administration.md): the same tasks in the admin UI, the CLI and the API
@@ -313,12 +331,16 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   client secret
 * [Agent to agent](docs/agent-to-agent.md): calls between agents over A2A through the
   gateway, who may call whom, and the chain of delegation in policy and the ledger
+* [Access packages](docs/access-packages.md): tools, models and agents an agent holds for a
+  while once approved, with reminders, renewals and reviews
+* [Issues](docs/issues.md): findings sent to each agent's owner, sponsors and team, by email
+  and in their chats, until someone takes them on
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin
 * [Connecting AgentGov to Microsoft's services](docs/microsoft-connections.md): Entra
-  Agent ID, the Purview audit log, Defender alerts, Power Platform connector policies and
-  Copilot Studio threat detection, each optional
+  Agent ID, the Purview audit log, Defender alerts, Entra access packages, Power Platform
+  connector policies and Copilot Studio threat detection, each optional
 * [Agent instructions](docs/instructions.md): checking agents' system prompts for harmful
   or malicious content
 * [Security operations](docs/secops.md): the ledger to SIEMs as OCSF events,
@@ -327,45 +349,18 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)
 * [Roadmap](docs/roadmap.md)
-* [Reference deployment](deploy/compose/README.md) (Docker Compose) and the
-  [Helm chart](deploy/helm/agentgov/README.md) for Kubernetes
-
-## Repository layout
-
-```text
-src/agentgov/
-  registry/     agents, blueprints, tool servers, model providers and usage, identity
-                issuers, approvals, findings, risk, discovery, features, destinations
-  secops/       the ledger as OCSF events, delivery to SIEMs and chats, hand-off levels
-  policies/     Rego library (agentgov.*, agentos) and its tests
-  opa/          bundle server and Rego validation
-  identity/     Keycloak reconciler (agents' clients and identity issuers), and the
-                delegations agents pass on when they hand work to each other
-  gateway.py    agentgateway config generator
-  processor/    governance processor (ExtMcp, the guardrail webhook for model calls, and
-                external authorization for calls between agents) and detectors
-  migrations/   database schema migrations (Alembic)
-  api/  ui/     HTTP API and admin UI
-  cli.py        the agentgov command
-  mcp_scan.py   the MCP servers set up on a developer's machine (agentgov mcp scan)
-deploy/compose/ reference deployment
-deploy/helm/    Helm chart
-examples/       manifests, a demo MCP server, a demo model, a demo workload identity
-                issuer, a stand-in for the security team's tools, a developer's machine,
-                an agent other agents call (A2A) and the demo agent
-docs/           design documents and ADRs
-tests/          unit and integration tests
-```
 
 ## Development
+
+[CONTRIBUTING](CONTRIBUTING.md) has the development setup, the checks and
+[where things live](CONTRIBUTING.md#where-things-live) in the repository.
 
 ```bash
 scripts/ci.sh          # lint, Rego checks, tests, image build; sets up .venv and opa
 scripts/ci.sh --e2e    # plus the full stack and the demo walkthrough
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist, and
-[SECURITY.md](SECURITY.md) to report a vulnerability.
+[SECURITY.md](SECURITY.md) explains how to report a vulnerability.
 
 ## License
 

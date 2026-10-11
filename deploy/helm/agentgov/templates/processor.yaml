@@ -48,6 +48,14 @@ spec:
             - name: AGENTGOV_PRESIDIO_URL
               value: "http://{{ include "agentgov.name" (list . "presidio") }}:3000"
             {{- end }}
+            {{- range $key, $value := $v.env }}
+            - name: {{ $key }}
+              value: {{ $value | toString | quote }}
+            {{- end }}
+          {{- with $v.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           readinessProbe:
             tcpSocket: {port: grpc}
             periodSeconds: 10

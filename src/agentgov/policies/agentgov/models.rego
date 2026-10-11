@@ -67,18 +67,23 @@ deny contains msg if {
 # Controls.
 # ---------------------------------------------------------------------------
 
-model_granted if {
-	some grant in object.get(ctx.agent, "model_access", [])
-	grant.provider == input.provider
-	some pattern in grant.models
-	ctx.matches(pattern, object.get(input, "model", ""))
-}
+# Granted by the agent's blueprint, its own model access, or an access package it holds.
+model_granted if ctx.model_granted(input.provider, object.get(input, "model", ""))
 
 violation contains {"control": "least-privilege", "message": msg} if {
 	phase == "request"
 	ctx.agent.status == "active"
 	not model_granted
 	msg := sprintf("Model %s is not granted to agent %s", [model_id, ctx.agent.name])
+}
+
+# Access packages: a model only an expired package grants.
+violation contains {"control": "access-packages", "message": msg} if {
+	phase == "request"
+	ctx.agent.status == "active"
+	names := ctx.expired_model_grants(input.provider, object.get(input, "model", ""))
+	count(names) > 0
+	msg := sprintf("Model %s was granted to agent %s by access package %s, which has expired", [model_id, ctx.agent.name, concat(", ", sort(names))])
 }
 
 violation contains {

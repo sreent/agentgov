@@ -15,11 +15,13 @@ person in the demo realm: sam signs in to the demo chat app, the agent exchanges
 sam's token for a token of its own, and sam signs in to AgentGov to approve what
 it wants to do for them (AGENTGOV_DEMO_PASSWORD is the demo users' password). It
 hands sam's question to another agent over A2A (examples/agents/billing), through
-the gateway, which tells that agent who handed it the work, up to sam.
+the gateway, which tells that agent who handed it the work, up to sam. Its sponsor alice
+asks for an access package for it, which an administrator approves and later revokes.
 Then an agent with no secret at all authenticates with its service account token
 from a stand-in Kubernetes cluster (examples/identity/workload-issuer). Last, the
 security team's tools get what happened: their SIEM the ledger as OCSF events, their
-chats alerts, and their SOAR blocks a shadow agent once the hand-off lets it
+chats alerts, and their SOAR blocks a shadow agent once the hand-off lets it; and the
+teams responsible for agents get their issues in their own channels
 (examples/secops/sink stands in for all of them).
 """
 
@@ -63,6 +65,12 @@ DEVELOPER_MACHINE = Path(__file__).resolve().parent.parent / "developer-machine"
 # The stand-in for the security team's SIEM, Splunk, Slack and Teams (examples/secops/sink),
 # and the hand-off feature (secops.yaml).
 SINK = os.environ.get("AGENTGOV_DEMO_SINK", "http://localhost:9300")
+# The chats' webhooks at the sink, each a channel (deploy/compose/destination-secrets): the
+# SOC's, and the teams' own (examples/manifests/teams.yaml).
+SOC_SLACK = "/slack/T0000/B0000/demo-only"
+SOC_TEAMS = "/teams/workflows/demo-only"
+CX_SLACK = "/slack/T0000/B0001/cx-platform"
+GOVERNANCE_TEAMS = "/teams/workflows/governance"
 HANDOFF = "/v1/features/security-operations"
 # The agent other agents call (agents.yaml, examples/agents/billing), on the gateway.
 BILLING = "billing-agent"
@@ -287,8 +295,36 @@ def agentgov_session(person: str) -> httpx.Client:
     return browser
 
 
+async def access_packages(client: Client, name: str) -> None:
+    step("9. Access packages: the agent holds more for a while, once someone else approves")
+    alice = agentgov_session("alice")
+    asked = alice.post(
+        f"{CONTROL_PLANE}/v1/access-assignments",
+        json={"agent": name, "package": "crm-export", "days": 7, "reason": "Audit AUD-7"},
+    )
+    row = asked.json()
+    show(
+        "alice, its sponsor, asked:",
+        asked.status_code == 201 and row.get("status") == "requested",
+        f"crm-export (export_customers) for {row.get('days')} days: {row.get('reason')}",
+    )
+    if asked.status_code != 201:
+        return
+    url = f"/v1/access-assignments/{row['id']}"
+    refused = alice.post(f"{CONTROL_PLANE}{url}/approve", json={})
+    show("not by alice herself:", refused.status_code == 403, refused.json().get("detail", ""))
+    decided = admin("POST", f"{url}/approve", json={"note": "audit ticket checked"})
+    print(f"  {YELLOW}administrator{RESET} approved it, until {decided['expires_at'][:10]}")
+    allowed, payload = await once_mode_applies(client, "export_customers", {}, allowed=True)
+    report(allowed, payload, expect_allowed=True)
+    admin("POST", f"{url}/revoke", json={"reason": "the audit is done"})
+    print("  revoked once the audit was done (left alone, it would have expired)")
+    allowed, payload = await once_mode_applies(client, "export_customers", {}, allowed=False)
+    report(allowed, payload, expect_allowed=False)
+
+
 async def model_calls(http: httpx2.AsyncClient, name: str) -> None:
-    step("9. Model calls: agents reach approved models through the gateway, never their keys")
+    step("10. Model calls: agents reach approved models through the gateway, never their keys")
     email = "jane.doe@example.com"
     answered, text = await chat(http, "mock-small", f"Draft a reply to {email} about her refund")
     report_answer(answered, text, expect_answered=True, ok=email not in text)
@@ -345,7 +381,7 @@ async def model_calls(http: httpx2.AsyncClient, name: str) -> None:
 
 
 async def acting_for_people(name: str, creds: dict[str, str]) -> None:
-    step("10. Acting for people: the agent acts for sam, as its blueprint allows, and sam approves")
+    step("11. Acting for people: the agent acts for sam, as its blueprint allows, and sam approves")
     token = token_for("sam", creds)
     print(f"  sam signed in to {DEMO_APP}; the agent exchanged sam's token for a token of its own")
     blueprint = "/v1/blueprints/customer-support"
@@ -443,7 +479,7 @@ def answer_of(reply: dict[str, Any]) -> tuple[str, str]:
 
 
 async def agent_to_agent(name: str, creds: dict[str, str]) -> None:
-    step("11. Agent to agent: the agent hands sam's question to another agent, as allowed")
+    step("12. Agent to agent: the agent hands sam's question to another agent, as allowed")
     ready, _ = until(lambda: admin("GET", f"/v1/identity-issuers/{CLUSTER}")["sync"]["synced_at"])
     if not ready:
         show("not ready:", False, f"{BILLING} authenticates through {CLUSTER}, not in Keycloak")
@@ -601,11 +637,12 @@ async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
                 allowed, payload = await call(client, "delete_customer", {"customer_id": "c-003"})
                 report(allowed, payload, expect_allowed=True)
 
+            await access_packages(client, name)
             await model_calls(http, name)
             await acting_for_people(name, creds)
             await agent_to_agent(name, creds)
 
-            step("12. Kill switch: blocking the agent takes effect everywhere within a second")
+            step("13. Kill switch: blocking the agent takes effect everywhere within a second")
             started = time.monotonic()
             admin("POST", f"/v1/agents/{name}/block", json={"reason": "demo kill switch"})
             allowed = True
@@ -652,7 +689,7 @@ def sign_in(creds: dict[str, str], assertion: str) -> httpx.Response:
 
 
 async def own_identity() -> None:
-    step("13. Own identities: an agent with no secret at all authenticates as its workload")
+    step("14. Own identities: an agent with no secret at all authenticates as its workload")
     ready, _ = until(lambda: admin("GET", f"/v1/identity-issuers/{CLUSTER}")["sync"]["synced_at"])
     sync = admin("GET", f"/v1/identity-issuers/{CLUSTER}")["sync"]
     if not ready or sync["error"]:
@@ -719,7 +756,7 @@ async def own_identity() -> None:
 
 
 def shadow_agent() -> str | None:
-    step("14. Shadow AI: telemetry from an unregistered agent is discovered")
+    step("15. Shadow AI: telemetry from an unregistered agent is discovered")
     service = f"notebook-agent-{secrets.token_hex(2)}"
     span = {
         "traceId": secrets.token_hex(16),
@@ -765,7 +802,7 @@ def shadow_agent() -> str | None:
 def developer_tools() -> None:
     from agentgov import mcp_scan
 
-    step("15. Developer tools: approved MCP servers as a registry, and what developers set up")
+    step("16. Developer tools: approved MCP servers as a registry, and what developers set up")
     admin("PUT", "/v1/features/mcp-registry", json={"mode": "on"})
     print("  mcp-registry set to on: GitHub Copilot and VS Code can read it")
     page = httpx.get(f"{CONTROL_PLANE}/registry/v0.1/servers", timeout=10).json()
@@ -813,12 +850,19 @@ def received(kind: str) -> list[dict[str, Any]]:
     return resp.json()  # type: ignore[no-any-return]
 
 
+def received_at(path: str) -> list[dict[str, Any]]:
+    """What one chat channel got: the messages sent to its webhook."""
+    resp = httpx.get(f"{SINK}/received", params={"path": path}, timeout=10)
+    resp.raise_for_status()
+    return resp.json()  # type: ignore[no-any-return]
+
+
 def teams_text(message: dict[str, Any]) -> str:
     return str(message["attachments"][0]["content"]["body"][0]["text"]).replace("\u200b", "")
 
 
 def security_operations(name: str, shadow: str | None) -> None:
-    step("16. Security operations: the SOC's SIEM and chats get it all, and its SOAR acts")
+    step("17. Security operations: the SOC's SIEM and chats get it all, and its SOAR acts")
     head = admin("GET", "/v1/ledger", params={"limit": 1})[0]["seq"]
 
     def siem_events() -> list[dict[str, Any]]:
@@ -854,13 +898,13 @@ def security_operations(name: str, shadow: str | None) -> None:
         bool(hec) and all(h["event"]["severity_id"] >= 3 for h in hec),
         f"{len(hec)} events: decisions and findings, medium severity and up",
     )
-    slack = [m["blocks"][0]["text"]["text"] for m in received("slack")]
+    slack = [m["blocks"][0]["text"]["text"] for m in received_at(SOC_SLACK)]
     show(
         "Slack:",
         any(f"Agent {name} blocked" == t for t in slack),
         f"{len(slack)} alerts, such as: " + "; ".join(slack[-3:]),
     )
-    teams = [teams_text(m) for m in received("teams")]
+    teams = [teams_text(m) for m in received_at(SOC_TEAMS)]
     show("Teams:", any(name in t for t in teams), f"{len(teams)} kill switches: {teams[-1:]}")
 
     # The SOC's SOAR acts with its own API key (the secops role), as far as the hand-off
@@ -891,7 +935,7 @@ def security_operations(name: str, shadow: str | None) -> None:
             f"{shadow}, as secops:soc-soar in the ledger",
         )
         alerted, waited = until(
-            lambda: any(shadow in m["blocks"][0]["text"]["text"] for m in received("slack")),
+            lambda: any(shadow in m["blocks"][0]["text"]["text"] for m in received_at(SOC_SLACK)),
             timeout=60,
         )
         show("alerted:", alerted, f"Slack heard of it {waited:.1f}s later")
@@ -904,8 +948,48 @@ def security_operations(name: str, shadow: str | None) -> None:
         )
 
 
+def issues(name: str) -> None:
+    step("18. Issues: findings go to the people responsible for them, in their own channels")
+    agent_id = admin("GET", f"/v1/agents/{name}")["id"]
+
+    def about_agent() -> list[str]:
+        return [
+            m["blocks"][0]["text"]["text"] for m in received_at(CX_SLACK) if name in json.dumps(m)
+        ]
+
+    def governance() -> list[str]:
+        return [teams_text(m) for m in received_at(GOVERNANCE_TEAMS)]
+
+    # Issues are routed, and sent, every AGENTGOV_ISSUES_INTERVAL_SECONDS (60).
+    got, _ = until(lambda: bool(about_agent()), timeout=120)
+    sent = about_agent()
+    show(
+        "cx-platform's Slack:",
+        got,
+        f"{len(sent)} issues about {name}, as its owner, such as: {sent[-1] if sent else ''}",
+    )
+    got, _ = until(lambda: bool(governance()), timeout=120)
+    others = governance()
+    show(
+        "ai-governance's Teams:",
+        got,
+        f"{len(others)} issues no other team owns, such as: {others[-1] if others else ''}",
+    )
+    alice = agentgov_session("alice")
+    mine = alice.get(f"{CONTROL_PLANE}/v1/me/issues").json()
+    theirs = [f for f in mine if f.get("agent_id") == agent_id]
+    show("alice's issues:", bool(theirs), f"{len(mine)} open, as a member of cx-platform")
+    if theirs:
+        acked = alice.post(f"{CONTROL_PLANE}/v1/findings/{theirs[0]['id']}/acknowledge")
+        show(
+            "acknowledged:",
+            acked.status_code == 200,
+            f"{theirs[0]['title']}, by {acked.json().get('acknowledged_by')}: it goes no further",
+        )
+
+
 def evidence(name: str) -> None:
-    step("17. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("19. Evidence: every decision is in a hash-chained, verifiable ledger")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -932,6 +1016,7 @@ def main() -> None:
         shadow = shadow_agent()
         developer_tools()
         security_operations(name, shadow)
+        issues(name)
         evidence(name)
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")

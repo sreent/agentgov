@@ -1,0 +1,32 @@
+# One internet-facing Application Load Balancer, from EKS Auto Mode, for the chart's three
+# Ingresses, with the ACM certificate for their names (docs/deploy/aws.md). The guide
+# replaces <certificate-arn> with your certificate's ARN.
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: agentgov
+spec:
+  scheme: internet-facing
+  # In the public subnets, which eksctl tags for internet-facing load balancers.
+  subnets:
+    matchTags:
+      - {key: kubernetes.io/role/elb, values: ["1"]}
+  group:
+    name: agentgov
+  certificateARNs: [<certificate-arn>]
+  sslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+  loadBalancerAttributes:
+    # Seconds a connection may carry nothing before the load balancer closes it: agents'
+    # streams through the gateway can be quiet for a while.
+    - {key: idle_timeout.timeout_seconds, value: "600"}
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: agentgov
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: agentgov

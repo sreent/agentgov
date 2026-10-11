@@ -28,6 +28,7 @@ from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.identity.sso import display_name, roles_from_claims
 from agentgov.models import AdminSession, CliLogin
+from agentgov.registry import findings
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN, SERVICE, seed
 from tests.test_cli import _Shared, runner
@@ -320,6 +321,8 @@ class TestRefusals:
         assert error_code(resp) == "provider"
 
     def test_people_without_an_agentgov_role_are_refused(self, sso, provider) -> None:
+        # Unless issues or approvals sent to people let them in, to see theirs.
+        _feature(sso, "issues", "off")
         assert error_code(sign_in(sso, provider, roles=["offline_access"])) == "no_role"
         assert sso.get("/v1/me").status_code == 401
         denied = sso.get("/v1/ledger", params={"type": "admin.login_denied"}, headers=ADMIN)
@@ -388,6 +391,7 @@ def auditor_key(client: TestClient) -> dict[str, str]:
 
 class TestAccess:
     def test_people_come_from_sign_ins_and_refusals(self, sso, provider) -> None:
+        _feature(sso, "issues", "off")  # so that people without a role are refused
         sign_in(sso, provider, roles=["agentgov-approver"])
         sso.cookies.clear()
         sign_in(sso, provider, sub="user-2", email="bob@example.com", roles=["offline"])
@@ -480,10 +484,12 @@ def _held_for(client: TestClient, sub: str, username: str) -> dict[str, Any]:
     return _check(client, sub, username)
 
 
+def _feature(client: TestClient, name: str, mode: str) -> None:
+    client.put(f"/v1/features/{name}", json={"mode": mode}, headers=ADMIN).raise_for_status()
+
+
 def _approvals_by_person(client: TestClient, mode: str = "on") -> None:
-    client.put(
-        "/v1/features/approvals-by-person", json={"mode": mode}, headers=ADMIN
-    ).raise_for_status()
+    _feature(client, "approvals-by-person", mode)
 
 
 class TestApprovalsByThePerson:
@@ -532,6 +538,7 @@ class TestApprovalsByThePerson:
         assert decided.json()["status"] == "denied"
 
     def test_without_the_feature_approvers_decide(self, sso, provider) -> None:
+        _feature(sso, "issues", "off")
         held = _held_for(sso, "user-1", "alice")
         assert held["approval"]["deciders"] == "approvers"
         assert error_code(sign_in(sso, provider, sub="user-1", roles=[])) == "no_role"
@@ -541,11 +548,87 @@ class TestApprovalsByThePerson:
         assert decided.status_code == 200
 
     def test_turning_the_feature_off_ends_their_sessions(self, sso, provider) -> None:
+        _feature(sso, "issues", "off")
         _approvals_by_person(sso)
         sign_in(sso, provider, sub="user-1", roles=[])
         assert sso.get("/v1/me").status_code == 200
         _approvals_by_person(sso, "off")
         assert sso.get("/v1/me").status_code == 401
+
+
+class TestIssuesForPeople:
+    def test_people_without_a_role_see_and_acknowledge_their_own(self, sso, provider) -> None:
+        agent = seed(sso)
+        sso.patch(
+            "/v1/agents/support-bot", json={"owner": "alice@example.com"}, headers=ADMIN
+        ).raise_for_status()
+        rt = sso.app.state.rt
+        with rt.db.session() as s:
+            mine, _ = findings.raise_finding(
+                s,
+                type="agent.attestation_due",
+                severity="medium",
+                subject=agent["id"],
+                agent_id=agent["id"],
+                title="support-bot is due for review",
+            )
+            other, _ = findings.raise_finding(
+                s, type="destination.failing", severity="high", subject="dst_1", title="Failing"
+            )
+            mine_id, other_id = mine.id, other.id
+        rt.run_issues()
+        # The issues feature is on: alice signs in without an AgentGov role.
+        assert sign_in(sso, provider, sub="user-1", roles=[]).headers["location"] == "/ui/"
+        me = sso.get("/v1/me").json()
+        assert (me["roles"], me["inbox"]) == (["person"], {"issues": True, "approvals": False})
+        assert [f["id"] for f in sso.get("/v1/me/issues").json()] == [mine_id]
+        assert sso.get(f"/v1/findings/{mine_id}").json()["yours"] is True
+        # Their issues, and nothing else.
+        assert sso.get("/v1/findings").status_code == 403
+        assert sso.get(f"/v1/findings/{other_id}").status_code == 403
+        assert sso.post(f"/v1/findings/{other_id}/acknowledge", headers=CSRF).status_code == 403
+        acked = sso.post(f"/v1/findings/{mine_id}/acknowledge", headers=CSRF)
+        assert acked.json()["acknowledged_by"] == "person:alice@example.com"
+        # Risks are accepted by approvers, not by the people responsible.
+        body = {"reason": "fine", "until": 30}
+        assert (
+            sso.post(f"/v1/findings/{mine_id}/accept", json=body, headers=CSRF).status_code == 403
+        )
+
+
+class TestAccessPackagesForPeople:
+    def test_owners_ask_for_and_review_their_agents_packages(self, sso, provider) -> None:
+        seed(sso)
+        sso.patch(
+            "/v1/agents/support-bot", json={"owner": "alice@example.com"}, headers=ADMIN
+        ).raise_for_status()
+        sso.post(
+            "/v1/access-packages",
+            json={"name": "crm-write", "permissions": [{"server": "crm", "tools": ["update_*"]}]},
+            headers=ADMIN,
+        ).raise_for_status()
+        sign_in(sso, provider, sub="user-1", roles=[])
+        body = {"agent": "support-bot", "package": "crm-write", "reason": "Incident INC-1"}
+        asked = sso.post("/v1/access-assignments", json=body, headers=CSRF)
+        assert asked.status_code == 201, asked.text
+        assert asked.json()["requested_by"] == "person:alice@example.com"
+        assert sso.get("/v1/agents/support-bot/access-packages").status_code == 200
+        # They ask; approvers decide.
+        approve = f"/v1/access-assignments/{asked.json()['id']}/approve"
+        assert sso.post(approve, headers=CSRF).status_code == 403
+        assert sso.post(approve, headers=ADMIN).status_code == 200
+        review = f"/v1/access-assignments/{asked.json()['id']}/review"
+        kept = sso.post(review, json={"keep": True}, headers=CSRF)
+        assert kept.status_code == 200 and kept.json()["reviewed_at"]
+        # Nobody else's agents.
+        sso.post(
+            "/v1/agents",
+            json={"name": "other-bot", "owner": "bob@example.com", "sponsors": ["bob@example.com"]},
+            headers=ADMIN,
+        ).raise_for_status()
+        other = {**body, "agent": "other-bot"}
+        assert sso.post("/v1/access-assignments", json=other, headers=CSRF).status_code == 403
+        assert sso.get("/v1/agents/other-bot/access-packages").status_code == 403
 
 
 class TestCliSignIn:
@@ -592,6 +675,7 @@ class TestCliSignIn:
         assert resp.status_code == 400 and "expired" in resp.json()["detail"]
 
     def test_failures_go_back_to_the_cli(self, sso, provider) -> None:
+        _feature(sso, "issues", "off")
         _, back = cli_sign_in(sso, provider, roles=["offline"])
         assert at_the_cli(back) == {"error": "no_role"}
 
@@ -686,6 +770,7 @@ class TestCliLogin:
         assert again.output.strip() == "Not signed in to http://testserver."
 
     def test_a_refused_sign_in_is_reported(self, sso, provider, sessions_file, monkeypatch):
+        _feature(sso, "issues", "off")
         pages: list[str] = []
         monkeypatch.setattr(cli.webbrowser, "open", a_browser(sso, provider, pages, roles=[]))
         result = runner.invoke(cli.app, ["login"])

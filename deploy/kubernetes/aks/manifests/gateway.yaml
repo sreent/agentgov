@@ -1,0 +1,46 @@
+# HTTPS for AgentGov's three addresses: a Gateway of the application routing add-on's
+# Gateway API implementation, with the certificate kept in Key Vault
+# (docs/deploy/azure.md). The chart's HTTPRoutes attach to its listeners. The guide
+# replaces <keyvault> and agentgov.example.com with your names.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgov
+  namespace: agentgov
+spec:
+  gatewayClassName: approuting-istio
+  listeners:
+    - name: control-plane
+      hostname: agentgov.example.com
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        options:
+          # Unversioned, so that a renewed certificate is picked up.
+          kubernetes.azure.com/tls-cert-keyvault-uri: https://<keyvault>.vault.azure.net/certificates/agentgov
+          kubernetes.azure.com/tls-cert-service-account: agentgov-azure
+      allowedRoutes:
+        namespaces: {from: Same}
+    - name: gateway
+      hostname: gateway.agentgov.example.com
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        options:
+          kubernetes.azure.com/tls-cert-keyvault-uri: https://<keyvault>.vault.azure.net/certificates/agentgov
+          kubernetes.azure.com/tls-cert-service-account: agentgov-azure
+      allowedRoutes:
+        namespaces: {from: Same}
+    - name: keycloak
+      hostname: auth.agentgov.example.com
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        options:
+          kubernetes.azure.com/tls-cert-keyvault-uri: https://<keyvault>.vault.azure.net/certificates/agentgov
+          kubernetes.azure.com/tls-cert-service-account: agentgov-azure
+      allowedRoutes:
+        namespaces: {from: Same}

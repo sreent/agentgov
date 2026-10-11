@@ -28,8 +28,8 @@ from sqlalchemy.orm import Session
 
 from agentgov import ledger
 from agentgov.models import ACTIVE
+from agentgov.registry import access_packages, discovery, features, findings, instructions
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import discovery, features, findings, instructions
 from agentgov.registry.errors import ValidationError
 
 GENAI_OPERATIONS = {
@@ -208,6 +208,9 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
                 modes["least-privilege"] != features.OFF
                 and agent.status == ACTIVE
                 and not granted(agents_svc.effective_grants(agent), server, tool)
+                and not granted(
+                    access_packages.current(session, agent.id)["permissions"], server, tool
+                )
             ):
                 stats["ungranted"] += 1
                 ledger.append(

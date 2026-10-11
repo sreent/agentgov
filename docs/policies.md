@@ -3,7 +3,8 @@
 Authorization is decided by [Open Policy Agent](https://www.openpolicyagent.org) using
 the Rego library in `src/agentgov/policies/`. The control plane ships the library and
 the live registry to OPA as a bundle; the governance processor asks OPA for a decision on
-every governed MCP operation, and on every prompt and answer of a [model call](models.md).
+every governed MCP operation, on every prompt and answer of a [model call](models.md), and on
+every [call between agents](agent-to-agent.md).
 
 ## How a decision is made
 
@@ -13,8 +14,9 @@ Every rule contributes to one of three sets, and the outcome follows a fixed pre
 2. otherwise any entry in **`require_approval`** → the call waits for a human;
 3. otherwise **allow**, after masking whatever is in **`redact`** (`"secret"`, `"pii"`).
 
-Grants are the ceiling: an agent can only call tools that its blueprint (or its own
-`permissions`) grants. Policies can only take permissions away or add conditions.
+Grants are the ceiling: an agent can only call tools that its blueprint, its own
+`permissions` or an [access package](access-packages.md) it holds grants. Policies can only
+take permissions away or add conditions.
 
 Most rules belong to a control that an administrator can switch
 ([features](features.md)): enforced, the rule applies; monitored, it only adds what it
@@ -29,6 +31,7 @@ The decision carries `monitored`, and the ledger records it.
 | Agent is not `active` (pending, blocked, deleted) | deny | always |
 | Tool server unknown, pending review or blocked | deny | always |
 | Tool not granted to the agent (least privilege) | deny, and hidden from `tools/list` | `least-privilege` |
+| Tool granted only by an access package that has expired | deny, and hidden from `tools/list` | `access-packages` |
 | Tool definition changed since it was approved (MCP rug pull) | deny until an admin approves the new definition | `tool-integrity` |
 | Tool description contains hidden instructions (tool poisoning) | deny, and hidden from `tools/list` | `tool-integrity` |
 | The agent acts for someone its blueprint doesn't allow (`acts_for`, `people_groups`), or for no one when it must act for a person | deny, and nothing in `tools/list` | `acting-for-people` |
@@ -51,6 +54,7 @@ The decision carries `monitored`, and the ledger records it.
   "agent": {"client_id": "agent-support-bot", "agent_id": "agt_…", "subject": "…"},
   "user": {"id": "…", "username": "sam", "email": "sam@example.com",   // the person the agent
            "groups": ["/support"], "roles": [], "via": "exchange"},      // acts for, if any
+  "chain": [{"type": "person", "id": "5c0b…", "name": "sam"}],          // who handed the work down
   "resource": {"server": "crm", "name": "delete_customer"},
   "arguments": {"customer_id": "c-003"},    // request phase only
   "detections": {
@@ -74,6 +78,7 @@ The decision carries `monitored`, and the ledger records it.
                         "risk_tier": "medium", "risk_level": "low", "risk_score": 10,
                         "grants": [{"server": "crm", "tools": ["get_*"]}],
                         "acts_for": "either", "people_groups": [],
+                        "a2a": false, "agent_access": ["billing-*"],
                         "workload_identity": {"issuer": "prod-cluster",
                                               "subject": "system:serviceaccount:agents:support-bot"}}},
   "clients": {"agent-support-bot": "agt_…"},
@@ -154,7 +159,8 @@ that holds something to decide on (`phase: "response"`). Its built-in rules:
 | Caller is not a registered agent | deny | `unknown-callers` |
 | Agent is not `active` | deny | always |
 | Model provider unknown or blocked | deny | always |
-| Model not granted to the agent (`model_access`) | deny | `least-privilege` |
+| Model not granted to the agent (`model_access`, or an access package it holds) | deny | `least-privilege` |
+| Model granted only by an access package that has expired | deny | `access-packages` |
 | The agent acts for someone its blueprint doesn't allow, or for no one when it must act for a person | deny | `acting-for-people` |
 | Credentials in the prompt | deny | `data-protection` |
 | Credentials in the answer | answer withheld | `data-protection` |
@@ -186,7 +192,8 @@ as `data-protection` does. A model call can't wait for an approver, so
 
 `data.registry.model_providers` holds each provider's `kind`, `status`, `trust_level`
 and `labels`, and each agent in `data.registry.agents` its `model_access`,
-`daily_token_budget` and whether it is `over_budget` today. For example:
+`daily_token_budget`, whether it is `over_budget` today, and the access `packages` it
+holds (each with its `grants`, `model_access`, `agent_access` and `expires_at`). For example:
 
 ```rego
 package agentgov.custom.prod_models
@@ -204,6 +211,18 @@ Rules written for tool calls look at `input.resource`, which model calls don't h
 they don't apply to them. To ask the live OPA about a model call, use **What if** on the
 Policies page, `agentgov policies evaluate --provider … --model …`, or send
 `"path": "agentgov/models/decision"` with the input to `POST /v1/policies/evaluate`.
+
+## Calls between agents
+
+Calls between agents ask `data.agentgov.a2a.decision`, with `input.kind == "a2a"` and the
+agent called in `input.target`. Its built-in rules refuse calls to agents that aren't
+registered, active or serving A2A, an agent calling itself, a loop back to an agent already
+in the chain, and chains of more than five agents; under `least-privilege`, a caller may call
+only the agents its `agent_access`, or an [access package](access-packages.md) it holds,
+names. [Agent to agent](agent-to-agent.md#in-policy) shows
+the input and an organisation policy for these calls. To ask the live OPA, use **What if**,
+`agentgov policies evaluate --agent … --call-agent …`, or send
+`"path": "agentgov/a2a/decision"` to `POST /v1/policies/evaluate`.
 
 ## Copilot Studio's tool calls
 

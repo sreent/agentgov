@@ -69,12 +69,22 @@ deny contains msg if {
 # Controls: what each one would do. They are applied below, as their modes say.
 # ---------------------------------------------------------------------------
 
-# Least privilege: only tools granted by the agent's blueprint or its own grants.
+# Least privilege: only tools granted by the agent's blueprint, its own grants or an
+# access package it holds.
 violation contains {"control": "least-privilege", "effect": "deny", "message": msg} if {
 	phase == "request"
 	ctx.agent.status == "active"
 	not ctx.granted(input.resource.server, input.resource.name)
 	msg := sprintf("%s is not granted to agent %s", [resource_id, ctx.agent.name])
+}
+
+# Access packages: a tool only an expired package grants.
+violation contains {"control": "access-packages", "effect": "deny", "message": msg} if {
+	phase == "request"
+	ctx.agent.status == "active"
+	names := ctx.expired_tool_grants(input.resource.server, input.resource.name)
+	count(names) > 0
+	msg := sprintf("%s was granted to agent %s by access package %s, which has expired", [resource_id, ctx.agent.name, concat(", ", sort(names))])
 }
 
 # MCP "rug pull": the server changed the tool after it was approved.
@@ -252,8 +262,14 @@ refused_for_person if {
 	count(ctx.person_refusals) > 0
 }
 
-# Monitored or off, least privilege hides nothing: agents may call every tool.
-may_see(name) if ctx.granted(input.resource.server, name)
+# Monitored or off, least privilege hides nothing: agents may call every tool. Nor do
+# expired access packages, unless they are enforced.
+may_see(name) if ctx.granted_in_force(input.resource.server, name)
+
+may_see(name) if {
+	ctx.granted(input.resource.server, name)
+	not ctx.enforced("access-packages")
+}
 
 may_see(_) if not ctx.enforced("least-privilege")
 

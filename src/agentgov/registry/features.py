@@ -38,6 +38,9 @@ SWITCH = (OFF, ON)
 CONTROL = (OFF, MONITOR, ENFORCE)
 # How much is handed to the security team's tools (agentgov.secops.handoff).
 HANDOFF = (OFF, "inform", "triage", "contain", "decide")
+# Microsoft Entra's access packages for agents' identities: read, or also changed.
+INFORM, MANAGE = "inform", "manage"
+READ_OR_MANAGE = (OFF, INFORM, MANAGE)
 DEPLOYMENT = "deployment"  # the actor of pinned modes
 
 GROUPS = {
@@ -372,6 +375,39 @@ CATALOG: tuple[Feature, ...] = (
         },
     ),
     Feature(
+        "access-packages",
+        "Access packages",
+        "lifecycle",
+        "Agents hold extra tools, models and agents to call for a while: an access package, "
+        "requested by their owners, sponsors or approvers, approved, reminded before it "
+        "expires, renewed or reviewed.",
+        CONTROL,
+        MONITOR,
+        {
+            ENFORCE: "Expired access packages grant nothing: calls that need them are denied.",
+            MONITOR: "Agents keep the access of expired packages: each call that needs it is "
+            "recorded, and an issue asks for it to be renewed or revoked.",
+            OFF: "Access packages grant nothing and can't be requested. Assignments are kept.",
+        },
+        needs="least-privilege enforced, for packages to be what grants the access",
+    ),
+    Feature(
+        "issues",
+        "Issues to the people responsible",
+        "lifecycle",
+        "Findings go to the people responsible for them: an agent's owner, then its sponsors, "
+        "then its team, each told by email and in their team's chat, and the issue goes up "
+        "the chain when nobody acknowledges it in time.",
+        SWITCH,
+        ON,
+        {
+            ON: "Findings are routed, escalated and sent to the people responsible.",
+            OFF: "Findings stay in AgentGov's list only, as for administrators.",
+        },
+        needs="teams with email addresses or chat channels; a mail server "
+        "(AGENTGOV_SMTP_URL) for email",
+    ),
+    Feature(
         "microsoft-365",
         "Microsoft 365 agent catalog",
         "microsoft",
@@ -424,6 +460,27 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "Not read, even where it could be.",
         },
         needs="AgentGov's Microsoft app registration, with SecurityAlert.Read.All",
+    ),
+    Feature(
+        "entra-access-packages",
+        "Microsoft Entra access packages",
+        "microsoft",
+        "The access packages Microsoft Entra ID Governance assigns agents' Entra identities "
+        "(groups, API permissions, Entra roles), and when each expires: an issue reminds the "
+        "agent's people before one does. Managed, administrators also assign and remove them "
+        "from AgentGov.",
+        READ_OR_MANAGE,
+        INFORM,
+        {
+            MANAGE: "Read, and administrators assign and remove them from AgentGov, as Entra "
+            "requests made by AgentGov's app.",
+            INFORM: "Read where AgentGov's app registration has the permission. Nothing is "
+            "written into Entra.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AgentGov's Microsoft app registration, with EntitlementManagement.Read.All "
+        "(EntitlementManagement.ReadWrite.All, or the Access package assignment manager role "
+        "in the packages' catalogs, to manage), and a Microsoft Agent 365 licence",
     ),
     Feature(
         "copilot-studio-threat-detection",

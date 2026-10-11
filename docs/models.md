@@ -57,17 +57,16 @@ its route from the gateway.
 
 ### The provider's API key
 
-The key never enters AgentGov's database, API or ledger: the gateway reads it from a file.
-
-| Deployment | Where the key goes |
-|---|---|
-| Compose | `deploy/compose/model-keys/<name>` (one file per provider; `AGENTGOV_MODEL_KEYS_DIR` moves the directory) |
-| Helm | `modelKeys.keys.<name>` in your values, or your own Secret with one key per provider in `modelKeys.existingSecret` |
-| Elsewhere | Any file the gateway can read; set the provider's `key_file` |
+The key never enters AgentGov's database, API or ledger: the gateway reads it from a file,
+named after the provider, which the deployment puts there ([files, not
+settings](configuration.md#files-not-settings)): `deploy/compose/model-keys/<name>` with
+Compose, a Secret with one key per provider with Helm (`modelKeys`), or any file the gateway
+can read, named in the provider's `key_file`.
 
 Until its key is there, a provider's route answers 503 with a message that says so, and
 the gateway serves the rest of its routes as usual. The route starts working within a few
-seconds of the key appearing.
+seconds of the key appearing. To rotate a key on Kubernetes, update the Secret and restart
+the gateway ([Kubernetes](deploy/kubernetes.md#how-the-parts-find-each-other)).
 
 ## Which agents may call which models
 
@@ -85,7 +84,7 @@ spec:
 Models are globs (`gpt-4.1*`). An agent's own `model_access` adds to its blueprint's, and
 its own `daily_token_budget` replaces its blueprint's. In the CLI:
 `agentgov agents update support-bot --model-access 'openai:gpt-4.1*' --token-budget 50000`.
-The agent's page shows what it may call and what it used this week.
+The agent's page shows what it may call and what it used in the last 7 days.
 
 ## What is checked
 
@@ -102,9 +101,14 @@ enforced, monitored or off:
 | `data-protection` | Refuses a prompt that holds credentials, and withholds an answer that does. Masks personal data in prompts to providers that aren't verified. A conversation that holds tool calls can't be masked without breaking them, so it is refused instead |
 | `prompt-injection` | Refuses a prompt whose conversation holds a tool result with instructions aimed at the agent |
 | `jailbreak-detection` | Looks for a jailbreak in the conversation's latest message from a person: "ignore your previous instructions", "you have no restrictions", a made-up system turn. Monitored by default, so such prompts go through and are recorded; enforce it to refuse them. Either way it raises a finding |
+| `acting-for-people` | Refuses a prompt for a person the blueprint doesn't allow, or without the person it requires ([acting for people](acting-for-people.md)) |
 | `risk-based-access` | Refuses agents at critical risk |
 | `token-budgets` | Refuses agents that have used their daily token budget |
 | `unknown-callers` | In monitor mode, lets callers without an agent's token through and records them; with `discovery` on, they join the inventory as discovered agents |
+
+Organisation policies' `redact` masks prompts too, and a model call that carries a
+delegation (`X-AgentGov-Delegation`) shows the chain of agents in `input.chain`
+([agent to agent](agent-to-agent.md#the-chain-of-delegation)).
 
 The `model-gateway` feature publishes the providers on the gateway; off, no provider is
 reachable. To see what policy would decide for a model call, use **What if** on the

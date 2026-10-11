@@ -1,7 +1,7 @@
 # A developer's machine
 
 MCP clients set up the way a developer's might be, for the demo's last steps and for
-trying `agentgov mcp scan` (docs/developer-tools.md):
+trying `agentgov mcp scan` ([developer tools](../../docs/developer-tools.md)):
 
 ```bash
 agentgov mcp scan --home examples/developer-machine/home --dir examples/developer-machine/project
@@ -14,4 +14,5 @@ agentgov mcp scan --home examples/developer-machine/home --dir examples/develope
 * `project/.vscode/mcp.json` (VS Code): the CRM server at its own address, past the
   gateway.
 
-The credentials in them are placeholders, and none of them is reported.
+The credentials in them are placeholders, and the scan reports only variable and header
+names, never their values.

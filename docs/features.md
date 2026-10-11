@@ -1,7 +1,8 @@
 # Features
 
-AgentGov is one application, but you don't have to use all of it. Each feature can be
-turned off, and each control the gateway enforces can also run in **monitor** mode. In
+AgentGov is one application, but you don't have to use all of it. Every feature but
+`unknown-callers` can be turned off, and most controls the gateway enforces can also run in
+**monitor** mode. In
 monitor mode AgentGov decides as usual and records what it would have done, but lets the
 call through, like Conditional Access's report-only mode. Use it to try a control on real
 traffic before you enforce it.
@@ -42,10 +43,10 @@ Modes run from the weakest to the strongest. The default is in bold.
 
 | Feature | Modes | What it does |
 |---|---|---|
-| `least-privilege` | off, monitor, **enforce** | Agents may call only the tools, models and other agents their blueprint and their own grants allow, and see only those tools when they list a server's. In monitor mode, agents see and call every tool, model and agent, and calls they weren't granted are recorded. Telemetry showing a tool used without a grant raises a finding unless this control is off |
+| `least-privilege` | off, monitor, **enforce** | Agents may call only the tools, models and other agents their blueprint, their own grants and their [access packages](access-packages.md) allow, and see only those tools when they list a server's. In monitor mode, agents see and call every tool, model and agent, and calls they weren't granted are recorded. Telemetry showing a tool used without a grant raises a finding unless this control is off |
 | `acting-for-people` | off, monitor, **enforce** | Agents act for the people their blueprints allow ([acting for people](acting-for-people.md)). A blueprint can say that its agents act only for a person, with a token they got for that person, or only on their own, and only for people in some groups. Monitor lets other calls through and records them. Off, who agents act for isn't checked; the ledger still records the person |
 | `approvals` | off, monitor, **enforce** | Calls to tools their servers mark destructive, and calls organisation policies single out (`require_approval`), wait for a person to approve them |
-| `approvals-by-person` | **off**, on | Sends the approval requests an agent makes while it acts for a person to that person, where its blueprint says so (`approvals_by: person`). People sign in to AgentGov to decide them, people without an AgentGov role too, who see only the requests sent to them. Administrators can always decide. Off, approvers decide every request and people without an AgentGov role can't sign in. Needs AgentGov's sign-in through the Keycloak realm that issues agents' tokens ([acting for people](acting-for-people.md)) |
+| `approvals-by-person` | **off**, on | Sends the approval requests an agent makes while it acts for a person to that person, where its blueprint says so (`approvals_by: person`). People sign in to AgentGov to decide them, people without an AgentGov role too, who see only the requests sent to them. Administrators can always decide. Off, approvers decide every request, and people without an AgentGov role can't sign in unless `issues` is on. Needs AgentGov's sign-in through the Keycloak realm that issues agents' tokens ([acting for people](acting-for-people.md)) |
 | `data-protection` | off, monitor, **enforce** | Inspects tool calls and model calls for credentials and personal data. Credentials stop the call (and an answer that contains them is withheld), and personal data is masked unless policy allows it. Off, nothing is inspected and Presidio isn't called. Monitor records what was found. Only an enforced control stops calls when Presidio is down (`AGENTGOV_PRESIDIO_FAILURE_MODE=closed`) |
 | `prompt-injection` | off, monitor, **enforce** | Withholds tool results that carry instructions aimed at the agent (indirect prompt injection) and raises a finding, and refuses model calls whose conversation holds such a result. Monitor lets them through and still raises the finding |
 | `jailbreak-detection` | off, **monitor**, enforce | Looks for jailbreaks, prompts that try to talk a model out of its instructions or its safety rules, in the latest message from a person in each [model call](models.md). Enforced, they are refused; monitored, they go through. Either way they are recorded and raise a finding. It starts in monitor mode because people's own words vary more than tool results do: see what it would refuse before you enforce it |
@@ -80,6 +81,8 @@ Modes run from the weakest to the strongest. The default is in bold.
 | Feature | Modes | What it does |
 |---|---|---|
 | `registration-approval` | off, **on** | Agents registered by people who aren't administrators start pending, until an administrator approves them. Off, they are active at once |
+| `access-packages` | off, **monitor**, enforce | Lets agents hold extra tools, models and agents to call for a while ([access packages](access-packages.md)): requested by their owners, sponsors or approvers, approved, and reminded, renewed or reviewed before they expire. Enforced, an expired package grants nothing. Monitored, the agent keeps its access, each call that needs it is recorded, and an issue asks for the package to be renewed or revoked. Off, packages grant nothing and can't be requested. It starts in monitor mode so that no agent loses access by surprise: enforce it once owners renew in time. Packages only matter while `least-privilege` is enforced |
+| `issues` | off, **on** | Sends findings to the people responsible for them ([issues](issues.md)): an agent's owner first, then its sponsors, then its team, by email and in the team's Teams or Slack channels. An issue nobody acknowledges in time goes on to the next of them. People without an AgentGov role can sign in to see and acknowledge their own. Off, findings stay in AgentGov's list and nothing is sent; people without a role can't sign in unless `approvals-by-person` is on |
 
 ### Microsoft
 
@@ -92,6 +95,7 @@ describes. Turning one off stops it even where it is configured.
 | `entra-agent-id` | off, **on** | Reads agents' Entra identities and links them to their agents |
 | `purview-audit` | off, **on** | Reads agent usage, attacks on agents and makers' changes from the audit log |
 | `defender` | off, **on** | Turns Defender's alerts about agents into findings |
+| `entra-access-packages` | off, **inform**, manage | Reads the access packages Microsoft Entra ID Governance assigns agents' Entra identities, and raises an [issue](issues.md) before one expires. Managed, administrators also assign and remove them from AgentGov; informed, nothing is written into Entra ([Entra access packages](microsoft-connections.md#microsoft-entra-access-packages)) |
 | `copilot-studio-threat-detection` | **off**, monitor, enforce | Answers Copilot Studio before each tool call its agents make. Monitor tells Copilot Studio to go ahead and records what would have been blocked. Off, AgentGov's endpoint refuses Copilot Studio's calls. Needs `AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS` and the tenant ID, and OPA to enforce |
 
 ### Security operations
@@ -124,8 +128,8 @@ organisation policies' denials always apply.
 * **The governance processor** reads the modes from OPA at most five seconds old. It
   doesn't inspect what an off control would look at, and it records `monitored` with
   each decision.
-* **The gateway's configuration** follows `mcp-gateway` and `unknown-callers` when the
-  control plane rewrites it.
+* **The gateway's configuration** follows `mcp-gateway`, `model-gateway`, `a2a-gateway` and
+  `unknown-callers` when the control plane rewrites it.
 * **The control plane** checks the modes when it acts: discovery, posture scans,
   instruction checks, registration, the automatic block, the Microsoft connections, and
   what it sends the security team's tools and lets their `secops` role do.
@@ -135,14 +139,5 @@ organisation policies' denials always apply.
 
 ## Settings that became features
 
-These environment variables are refused now. The message names the feature that replaced
-each one.
-
-| Was | Now |
-|---|---|
-| `AGENTGOV_UNKNOWN_AGENT_MODE=reject\|monitor` | `unknown-callers=enforce\|monitor` |
-| `AGENTGOV_REGISTRATION_REQUIRES_APPROVAL=true\|false` | `registration-approval=on\|off` |
-| `AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION=off\|monitor\|enforce` | `copilot-studio-threat-detection=off\|monitor\|enforce` |
-
-`AGENTGOV_ALERT_WEBHOOK_URL` is refused too: alerts go to Teams and Slack
-[destinations](secops.md) now, with the security-operations feature at inform or above.
+Some environment variables became features, and AgentGov refuses them now, naming the feature
+that replaced each one: [configuration](configuration.md#settings-that-changed) lists them.

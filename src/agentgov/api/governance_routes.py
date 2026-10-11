@@ -27,7 +27,15 @@ from agentgov.models import (
     LedgerEntry,
     ToolServer,
 )
-from agentgov.registry import agents, approvals, discovery, findings, manifests
+from agentgov.registry import (
+    access_packages,
+    agents,
+    approvals,
+    discovery,
+    findings,
+    issues,
+    manifests,
+)
 from agentgov.registry.errors import ValidationError
 from agentgov.secops import handoff
 
@@ -129,6 +137,84 @@ def list_findings(
         return [findings.to_dict(f) for f in s.scalars(stmt)]
 
 
+def _triages(session: Any, principal: Principal) -> bool:
+    """Approvers and administrators, and the secops role from triage on."""
+    return bool(principal.roles & {"admin", "approver"}) or (
+        "secops" in principal.roles and handoff.at_least(session, handoff.TRIAGE)
+    )
+
+
+@router.get("/me/issues", tags=["findings"])
+def my_issues(
+    request: Request, status: str | None = "open", principal: Principal = Depends(signed_in)
+) -> list[dict[str, Any]]:
+    """The issues that reached the person signed in: about agents they own or sponsor, or
+    sent to a team they are in (docs/issues.md)."""
+    if status not in (None, "all", *findings.STATUSES):
+        raise ValidationError(f"status is {', '.join(findings.STATUSES)} or all")
+    with _rt(request).db.session() as s:
+        return [findings.to_dict(f) for f in issues.for_person(s, principal.name, status=status)]
+
+
+@router.get("/findings/{finding_id}", tags=["findings"])
+def get_finding(
+    request: Request, finding_id: str, principal: Principal = Depends(signed_in)
+) -> dict[str, Any]:
+    """A finding, with the people and teams it goes to, the messages sent about it, and
+    what happened to it. For everyone who reads AgentGov, and the people it reached."""
+    with _rt(request).db.session() as s:
+        finding = findings.get(s, finding_id)
+        mine = issues.may_act(s, finding, principal.name)
+        if not principal.roles & set(READ_ROLES) and not mine:
+            raise HTTPException(403, f"role {principal.role!r} may not do this")
+        agent = s.get(Agent, finding.agent_id) if finding.agent_id else None
+        return {
+            **findings.to_dict(finding),
+            "agent_name": agent.name if agent else None,
+            "chain": issues.describe(s, finding),
+            "notifications": issues.notifications(s, finding),
+            "history": [ledger.to_dict(e) for e in issues.history(s, finding)],
+            "yours": mine,
+        }
+
+
+@router.post("/findings/{finding_id}/acknowledge", tags=["findings"])
+def acknowledge_finding(
+    request: Request, finding_id: str, principal: Principal = Depends(signed_in)
+) -> dict[str, Any]:
+    """Take an issue on: it goes no further up its chain. For the people it reached,
+    approvers and administrators (and the secops role from triage on)."""
+    with _rt(request).db.session() as s:
+        finding = findings.get(s, finding_id)
+        if not _triages(s, principal) and not issues.may_act(s, finding, principal.name):
+            raise HTTPException(
+                403, "the people it went to, approvers and administrators acknowledge it"
+            )
+        return findings.to_dict(issues.acknowledge(s, finding, actor=principal.actor))
+
+
+@router.post("/findings/{finding_id}/accept", tags=["findings"])
+def accept_finding(
+    request: Request,
+    finding_id: str,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(require("approver", "secops")),
+) -> dict[str, Any]:
+    """Accept the risk until a date (``until``: a date, a time or a number of days), saying
+    why (``reason``): it goes to nobody until then, and opens again then if it still
+    holds. The people responsible for an agent don't accept its risks: approvers do."""
+    unknown = sorted(set(body) - {"reason", "until"})
+    if unknown:
+        raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
+    with _rt(request).db.session() as s:
+        handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
+        finding = findings.get(s, finding_id)
+        accepted = issues.accept(
+            s, finding, reason=body.get("reason"), until=body.get("until"), actor=principal.actor
+        )
+        return findings.to_dict(accepted)
+
+
 @router.post("/findings/{finding_id}/{action}", tags=["findings"])
 def finding_action(
     request: Request,
@@ -138,7 +224,7 @@ def finding_action(
 ) -> dict[str, Any]:
     status = {"resolve": "resolved", "dismiss": "dismissed", "reopen": "open"}.get(action)
     if status is None:
-        raise HTTPException(404, "action must be resolve, dismiss or reopen")
+        raise HTTPException(404, "action must be resolve, dismiss, reopen, acknowledge or accept")
     with _rt(request).db.session() as s:
         # The security team's tools, as far as the hand-off lets them.
         handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
@@ -366,7 +452,8 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
                 nodes.setdefault(pid, {"id": pid, "kind": "person", "label": person})
                 edges.append({"from": pid, "to": f"agent:{a.id}", "kind": relation})
             granted_servers = set()
-            for grant in agents.effective_grants(a):
+            held = access_packages.current(s, a.id)["permissions"]
+            for grant in [*agents.effective_grants(a), *held]:
                 for ts in servers:
                     if _glob(grant["server"], ts.name):
                         granted_servers.add(ts.name)

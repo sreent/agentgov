@@ -16,7 +16,7 @@ A tool server can be used by agents, by developers, or both:
 | `gateway` | Published on the gateway at `/mcp/<name>`, for agents (the default) |
 | `developers` | Listed in the MCP registry for developers' MCP clients |
 | `packages` | For a server developers run on their machines: the package, such as `npm` `@playwright/mcp` `0.0.41` (`registry_type` is one of `npm`, `pypi`, `oci`, `nuget`, `cargo` and `mcpb`) |
-| `registry_name` | Its name in the registry. By default `<namespace>/<name>`, where the namespace is `AGENTGOV_MCP_REGISTRY_NAMESPACE`, or the control plane's host name reversed (`com.contoso.agentgov`) |
+| `registry_name` | Its name in the registry. By default `<namespace>/<name>`, where the namespace is `AGENTGOV_MCP_REGISTRY_NAMESPACE`, or the control plane's host name reversed (`com.contoso.agentgov`), or `local.agentgov` for a host name without a dot, such as `localhost` |
 
 A server listed for developers and published on the gateway is listed with the
 gateway's address. A server only for developers (`gateway: false`) is listed with its
@@ -69,7 +69,8 @@ match servers by URL and by command instead. **Developer tools** → *managed-se
 `allowedMcpServers`: each server's address, and each package's command
 (`npx @playwright/mcp@0.0.41`, `uvx <package>==<version>`,
 `docker run -i --rm <image>:<version>`). Where developers start a package differently,
-give the package its own `command`. Store the file in your enterprise's
+give the package its own `command` (in the API or a manifest; the CLI's `--package` doesn't
+set it). Store the file in your enterprise's
 `.github-private` repository, or deploy it to developers' machines with your device
 management ([GitHub's documentation](https://docs.github.com/en/enterprise-cloud@latest/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-enterprise-allowlist)).
 
@@ -89,8 +90,9 @@ and in the projects given with `--dir` (by default the current directory).
 | Gemini CLI | `~/.gemini/settings.json`; a project's `.gemini/settings.json` |
 | Codex | `~/.codex/config.toml` |
 
-With `--report`, it sends the list to AgentGov, with an API key of the `registrar` role
-(or an administrator's). Each report replaces the previous one from the same machine and
+With `--report`, it sends the list to AgentGov, at `AGENTGOV_URL` with the API key in
+`AGENTGOV_TOKEN` ([the command line](configuration.md#the-command-line)), of the `registrar`
+role or an administrator's. Each report replaces the previous one from the same machine and
 person. Run it from your device management to cover every machine; `--home` scans
 another person's home directory.
 
@@ -113,7 +115,8 @@ Findings resolve themselves when the server is approved, or no report includes i
 more. **Developer tools** lists every server reported, with the machines and people
 that have it; **Register** starts a tool server from one that isn't approved. In the
 CLI, `agentgov mcp sightings`; in the API, `GET /v1/mcp/sightings`. Servers no machine
-has reported for 90 days are forgotten. The `mcp-discovery` feature turns reports off.
+has reported for 90 days are forgotten. Turning the `mcp-discovery` feature off refuses
+reports.
 
 ## Limits
 

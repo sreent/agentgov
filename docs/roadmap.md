@@ -17,7 +17,7 @@ come second: they report, but they don't enforce.
 
 | | Theme | Item | Building block |
 |---|---|---|---|
-| 0 | Deployment | **Upgradeable and deployable**: database migrations and a [Helm chart](../deploy/helm/agentgov/README.md) (done) | Alembic, Helm |
+| 0 | Deployment | **Upgradeable and deployable**: database migrations and a [Helm chart](deploy/kubernetes.md) (done) | Alembic, Helm |
 | | Administration | **Choose the features you use** (done): each one on or off, and the controls at the gateway in monitor mode to try them before enforcing them ([features](features.md)). Every item below arrives as a feature | — |
 | 1 | Model calls | **Govern agents' calls to models** (done, [model calls](models.md)): provider keys held by the gateway, the models each blueprint allows, personal data masked and credentials refused before prompts leave, jailbreak and injection checks, token budgets, spend per agent, owner and sponsor, and callers the gateway doesn't know discovered as shadow agents | agentgateway's LLM routes and guardrail webhook |
 | 2 | Developer tools | **An enterprise MCP registry** (done, [developer tools](developer-tools.md)): the approved tool servers in the MCP registry format, for GitHub Copilot and VS Code in "registry only" mode, and as a managed-settings allowlist; discovery of the MCP servers configured on developer machines | MCP Registry API |
@@ -25,6 +25,7 @@ come second: they report, but they don't enforce.
 | 4 | Identity | **Bring your own agent identity** (done, [agents' own identities](agent-identity.md)): agents authenticate with the identity they already have, Kubernetes service account tokens, SPIFFE JWT-SVIDs, or tokens from Microsoft Entra Agent ID, Okta, AWS and other OpenID Connect issuers, mapped to registry agents; no client secrets, and a kill switch per issuer | Keycloak federated client authentication (Kubernetes, SPIFFE and OpenID Connect identity providers) |
 | 5 | Security operations | **Hand-off at the level you choose** (done, [security operations](secops.md)): the ledger, findings included, to SIEMs as OCSF events through OpenTelemetry, an HTTP input or Splunk; alerts, approval requests and kill switches in Teams and Slack; and a `secops` role whose tools may triage, contain or decide as far as you let them | OCSF, OpenTelemetry logs, Splunk HEC, Teams workflows, Slack webhooks |
 | 6 | Interoperability | **Agent-to-agent (A2A) governance** (done, [agent to agent](agent-to-agent.md)): calls between agents through the gateway, who may call whom on blueprints and agents, the controls of tool calls on each call, and the chain of agents that handed the work down, with the person at its head, in policy and the ledger of every call further down | agentgateway A2A routes and external authorization |
+| 7 | Lifecycle | **Access packages, and issues to the people responsible** (done, [access packages](access-packages.md), [issues](issues.md)): tools, models and agents held for a while once approved, with reminders, renewals, reviews and expiry at the gateway; Microsoft Entra's access packages for agents' identities, read or managed; and findings sent to each agent's owner, sponsors and team, by email and in their chats, escalating until someone acknowledges them | OPA, Microsoft Graph entitlement management, SMTP, Teams workflows, Slack webhooks |
 
 ## Later
 
@@ -40,7 +41,6 @@ come second: they report, but they don't enforce.
 | Registry | **Management rules**: declarative registry rules (for example "block agents without an owner for 14 days") on top of posture findings | OPA |
 | Registry | **More platform connectors**: import agents from cloud agent platforms and SaaS agent builders (AWS, Google, Salesforce, Databricks) the way [Microsoft 365 and Copilot Studio](platforms.md) are, when someone needs one | Platform APIs |
 | Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
-| Access | **Access packages**: time-bound, requestable bundles of tool grants with approval | — |
 | Policy | **AuthZEN interface** so the decision point can be swapped (for example to Cedar) without touching enforcement points | OpenID AuthZEN |
 | Evidence | **External anchoring** of ledger checkpoints, and signed OPA bundles | Sigstore, OPA bundle signing |
 | Evidence | **Retention policies** for activity, decisions and ledger exports | — |

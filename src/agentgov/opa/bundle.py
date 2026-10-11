@@ -28,8 +28,8 @@ from sqlalchemy.orm import Session
 from agentgov import ids
 from agentgov.db import Database
 from agentgov.models import DELETED, Agent, ApprovedConnector, Blueprint, Policy, ToolServer
+from agentgov.registry import access_packages, features, model_providers, model_usage
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import features, model_providers, model_usage
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +81,7 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
     clients: dict[str, str] = {}
     names: dict[str, str] = {}
     used = model_usage.tokens_used(session)
+    held = access_packages.held(session)
     for agent in session.scalars(select(Agent).where(Agent.status != DELETED)).unique():
         bp = agent.blueprint
         budget = model_providers.effective_budget(agent)
@@ -108,6 +109,8 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
             # Agent to agent: whether it serves A2A, and the agents it may call.
             "a2a": bool(agent.a2a_url),
             "agent_access": agents_svc.effective_agent_access(agent),
+            # Access packages it holds: their grants, and when each expires.
+            "packages": held.get(agent.id, []),
         }
         names[agent.name] = agent.id
         if agent.client_id:

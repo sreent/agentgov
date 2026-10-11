@@ -42,13 +42,110 @@ annotations := object.get(tool, "annotations", {})
 # glob match in which "*" spans every character, including "." and "/".
 matches(pattern, value) if glob.match(pattern, ["\u0000"], value)
 
-# True when one of the agent's grants (blueprint + agent-specific) covers the tool.
-granted(server_name, tool_name) if {
-	some grant in agent.grants
+# ---------------------------------------------------------------------------
+# Grants: the agent's blueprint's, its own, and those of the access packages it
+# holds (docs/access-packages.md). Off, packages grant nothing. Once expired, a
+# package still counts as a grant, and the access-packages control says so in
+# expired_*: enforced, it refuses the call; monitored, the call goes through and
+# is recorded.
+# ---------------------------------------------------------------------------
+
+packages := [p |
+	mode("access-packages") != "off"
+	some p in object.get(agent, "packages", [])
+]
+
+expired(held) if time.now_ns() >= time.parse_rfc3339_ns(held.expires_at)
+
+covers_tool(grants, server_name, tool_name) if {
+	some grant in grants
 	matches(grant.server, server_name)
 	some pattern in grant.tools
 	matches(pattern, tool_name)
 }
+
+# True when one of the agent's grants covers the tool.
+granted(server_name, tool_name) if covers_tool(agent.grants, server_name, tool_name)
+
+granted(server_name, tool_name) if {
+	some p in packages
+	covers_tool(object.get(p, "grants", []), server_name, tool_name)
+}
+
+granted_in_force(server_name, tool_name) if covers_tool(agent.grants, server_name, tool_name)
+
+granted_in_force(server_name, tool_name) if {
+	some p in packages
+	not expired(p)
+	covers_tool(object.get(p, "grants", []), server_name, tool_name)
+}
+
+# The expired packages that are all that grants the tool (empty: something else does).
+expired_tool_grants(server_name, tool_name) := {p.name |
+	some p in packages
+	expired(p)
+	covers_tool(object.get(p, "grants", []), server_name, tool_name)
+} if {
+	not granted_in_force(server_name, tool_name)
+} else := set()
+
+covers_model(access, provider, model) if {
+	some grant in access
+	grant.provider == provider
+	some pattern in grant.models
+	matches(pattern, model)
+}
+
+model_granted(provider, model) if covers_model(object.get(agent, "model_access", []), provider, model)
+
+model_granted(provider, model) if {
+	some p in packages
+	covers_model(object.get(p, "model_access", []), provider, model)
+}
+
+model_granted_in_force(provider, model) if covers_model(object.get(agent, "model_access", []), provider, model)
+
+model_granted_in_force(provider, model) if {
+	some p in packages
+	not expired(p)
+	covers_model(object.get(p, "model_access", []), provider, model)
+}
+
+expired_model_grants(provider, model) := {p.name |
+	some p in packages
+	expired(p)
+	covers_model(object.get(p, "model_access", []), provider, model)
+} if {
+	not model_granted_in_force(provider, model)
+} else := set()
+
+covers_agent(access, target_name) if {
+	some pattern in access
+	matches(pattern, target_name)
+}
+
+agent_granted(target_name) if covers_agent(object.get(agent, "agent_access", []), target_name)
+
+agent_granted(target_name) if {
+	some p in packages
+	covers_agent(object.get(p, "agent_access", []), target_name)
+}
+
+agent_granted_in_force(target_name) if covers_agent(object.get(agent, "agent_access", []), target_name)
+
+agent_granted_in_force(target_name) if {
+	some p in packages
+	not expired(p)
+	covers_agent(object.get(p, "agent_access", []), target_name)
+}
+
+expired_agent_grants(target_name) := {p.name |
+	some p in packages
+	expired(p)
+	covers_agent(object.get(p, "agent_access", []), target_name)
+} if {
+	not agent_granted_in_force(target_name)
+} else := set()
 
 label(name) := value if {
 	value := agent.labels[name]
