@@ -22,19 +22,27 @@ from a stand-in Kubernetes cluster (examples/identity/workload-issuer). Last, th
 security team's tools get what happened: their SIEM the ledger as OCSF events, their
 chats alerts, and their SOAR blocks a shadow agent once the hand-off lets it; and the
 teams responsible for agents get their issues in their own channels
-(examples/secops/sink stands in for all of them).
+(examples/secops/sink stands in for all of them). A management rule tells the agent's
+people before it would act. And the ledger gets a checkpoint, time-stamped by an
+authority (the sink stands in for one too) and checked with OpenSSL, next to a compliance
+report and the evidence pack for assessors.
 """
 
 from __future__ import annotations
 
 import asyncio
 import html
+import io
 import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -1050,13 +1058,61 @@ def management_rules(name: str) -> None:
 
 
 def evidence(name: str) -> None:
-    step("20. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("20. Evidence: a hash-chained ledger, time-stamped from outside, for assessors")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
         verify["valid"],
         f"{verify['checked']} entries",
     )
+    # A checkpoint of the chain, signed with its time by a time-stamping authority (the
+    # sink stands in for one), which anyone can check with OpenSSL, without AgentGov.
+    point = admin("POST", "/v1/ledger/checkpoints")
+    show(
+        "checkpoint:",
+        point["timestamped"],
+        f"entry #{point['seq']}, time-stamped at {point['timestamped_at']} by "
+        f"{point['tsa_url'] or 'no authority'}",
+    )
+    if point["timestamped"] and shutil.which("openssl"):
+        with tempfile.TemporaryDirectory() as work:
+            files = Path(work)
+            (files / "statement.txt").write_text(point["statement"])
+            stamp = httpx.get(
+                f"{CONTROL_PLANE}/v1/ledger/checkpoints/{point['seq']}/timestamp",
+                headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+                timeout=30,
+            )
+            (files / "stamp.tsr").write_bytes(stamp.content)
+            (files / "authority.pem").write_bytes(httpx.get(f"{SINK}/tsa/cert", timeout=30).content)
+            checked = subprocess.run(
+                ["openssl", "ts", "-verify", "-data", files / "statement.txt",
+                 "-in", files / "stamp.tsr", "-CAfile", files / "authority.pem"],
+                capture_output=True, text=True, check=False,
+            )  # fmt: skip
+        show("OpenSSL:", "Verification: OK" in checked.stdout, checked.stdout.strip())
+    # What AgentGov does towards the EU AI Act, and the evidence pack for assessors.
+    report = admin("GET", "/v1/evidence/report", params={"framework": "eu-ai-act", "days": 1})
+    controls = {c["id"]: c for c in report["controls"]}
+    counts = ", ".join(f"{n} {s.replace('_', ' ')}" for s, n in report["summary"].items() if n)
+    show(
+        "EU AI Act report:",
+        controls["Art. 12"]["status"] == "in_place",
+        f"{counts}; Art. 12 record-keeping {controls['Art. 12']['status'].replace('_', ' ')}",
+    )
+    pack = httpx.get(
+        f"{CONTROL_PLANE}/v1/evidence/pack",
+        params={"days": 1},
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+        timeout=60,
+    )
+    with zipfile.ZipFile(io.BytesIO(pack.content)) as z:
+        lines = len(z.read("ledger.jsonl").splitlines())
+        show(
+            "evidence pack:",
+            pack.status_code == 200,
+            f"{len(z.namelist())} files, {lines} ledger entries",
+        )
     for entry in reversed(admin("GET", "/v1/ledger", params={"agent": name, "limit": 8})):
         person = f"for {entry['on_behalf_of']}" if entry.get("on_behalf_of") else ""
         print(

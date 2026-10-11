@@ -348,9 +348,11 @@ build_demo_images() {
     docker_build agentgov-demo-billing:local examples/agents/billing
 }
 
-# What the demo's destinations (examples/manifests/secops.yaml) need, for the chart: the
-# sink's Slack and Teams webhook URLs and its Splunk token.
+# What the demo needs from the chart: the destinations' secrets
+# (examples/manifests/secops.yaml), the sink's Slack and Teams webhook URLs and its Splunk
+# token; and the sink as the authority that time-stamps the ledger's checkpoints.
 DEMO_DESTINATION_SECRETS=(
+  --set controlPlane.env.AGENTGOV_LEDGER_TSA_URL=http://demo-sink:9300/tsa
   --set destinationSecrets.values.soc-slack=http://demo-sink:9300/slack/T0000/B0000/demo-only
   --set destinationSecrets.values.soc-teams=http://demo-sink:9300/teams/workflows/demo-only
   --set destinationSecrets.values.soc-splunk=demo-hec-token

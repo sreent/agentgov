@@ -204,6 +204,7 @@ The chart always sets `AGENTGOV_OIDC_CLIENT_SECRET` from the Secret, so a value 
 | `controlPlane.autoMigrate` | `true` | Migrate the database when the control plane starts |
 | `controlPlane.env`, `controlPlane.envFrom`, `processor.env`, `processor.envFrom` | — | More settings ([configuration](../configuration.md#helm)) |
 | `controlPlane.extraVolumes`, `controlPlane.extraVolumeMounts` | — | More volumes, such as the database's certificate authority |
+| `controlPlane.ledgerArchive.enabled`, `.retentionDays`, `.existingClaim`, `.size`, `.storageClass` | off, 365, —, 20Gi, — | Keep the ledger's entries in the database for `retentionDays` (183 at least), then archive them to a volume, the chart's or yours ([evidence](../evidence.md#retention)). The chart's volume is kept when the release is uninstalled |
 | `features` | — | Features the deployment pins, such as `{least-privilege: monitor}` ([features](../features.md)); administrators choose the rest in the app |
 | `controlPlane.ingress`, `gateway.ingress`, `keycloak.ingress` | off | Ingresses, at the hosts of the addresses above unless `host` is set |
 | `controlPlane.httpRoute`, `gateway.httpRoute`, `keycloak.httpRoute` | off | Gateway API routes instead, attached to the Gateway in `parentRefs`, with optional `timeouts` |

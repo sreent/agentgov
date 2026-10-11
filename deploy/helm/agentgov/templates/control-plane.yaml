@@ -31,6 +31,10 @@ spec:
         {{- include "agentgov.podSecurity" . | nindent 8 }}
         runAsUser: 10001
         runAsGroup: 10001
+        {{- if $v.ledgerArchive.enabled }}
+        # The archive volume is the control plane's to write.
+        fsGroup: 10001
+        {{- end }}
       containers:
         - name: control-plane
           image: {{ include "agentgov.image" . }}
@@ -100,6 +104,12 @@ spec:
             - name: AGENTGOV_GATEWAY_OTLP_ENDPOINT
               value: "http://{{ include "agentgov.name" (list . "otel-collector") }}:4317"
             {{- end }}
+            {{- if $v.ledgerArchive.enabled }}
+            - name: AGENTGOV_LEDGER_RETENTION_DAYS
+              value: {{ $v.ledgerArchive.retentionDays | quote }}
+            - name: AGENTGOV_LEDGER_ARCHIVE_DIR
+              value: /ledger-archive
+            {{- end }}
             {{- range $key, $value := $v.env }}
             - name: {{ $key }}
               value: {{ $value | toString | quote }}
@@ -130,6 +140,10 @@ spec:
             - name: destination-secrets
               mountPath: /destination-secrets
               readOnly: true
+            {{- if $v.ledgerArchive.enabled }}
+            - name: ledger-archive
+              mountPath: /ledger-archive
+            {{- end }}
             {{- with $v.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -142,6 +156,11 @@ spec:
           secret:
             secretName: {{ include "agentgov.destinationSecretsSecret" . }}
             optional: true
+        {{- if $v.ledgerArchive.enabled }}
+        - name: ledger-archive
+          persistentVolumeClaim:
+            claimName: {{ $v.ledgerArchive.existingClaim | default (printf "%s-ledger-archive" $name) }}
+        {{- end }}
         {{- with $v.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -161,3 +180,23 @@ spec:
     - name: http
       port: {{ $v.service.port }}
       targetPort: http
+{{- if and $v.ledgerArchive.enabled (not $v.ledgerArchive.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-ledger-archive
+  labels:
+    {{- include "agentgov.labels" (list . "control-plane") | nindent 4 }}
+  annotations:
+    # The archives are evidence: an uninstall leaves them.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with $v.ledgerArchive.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $v.ledgerArchive.size }}
+{{- end }}

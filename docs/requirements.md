@@ -105,7 +105,7 @@ Going out, as you use them:
 | From | To |
 |---|---|
 | Gateway | Your MCP servers, model providers' APIs, the A2A endpoints of agents it publishes, and Keycloak's keys, to check agents' tokens |
-| Control plane | Keycloak's admin API; Microsoft Entra ID (`login.microsoftonline.com`), Microsoft Graph and the Power Platform API; your SIEM, Splunk, Teams and Slack; the Granite Guardian server |
+| Control plane | Keycloak's admin API; Microsoft Entra ID (`login.microsoftonline.com`), Microsoft Graph and the Power Platform API; your SIEM, Splunk, Teams and Slack; the Granite Guardian server; your mail server; a time-stamping authority, for the ledger's checkpoints ([evidence](evidence.md)) |
 | Keycloak | The keys of the identity issuers agents authenticate with, and the identity providers people sign in through |
 
 ## Accounts and permissions

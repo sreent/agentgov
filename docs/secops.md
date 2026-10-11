@@ -125,7 +125,8 @@ what is newer, in order, as soon as the ledger changes and at least every
 `AGENTGOV_DELIVERY_INTERVAL_SECONDS` (10), in batches of up to 200 events. The cursor
 moves only once the SIEM or chat accepted what was sent, so a SIEM gets every event **at
 least once**: after a timeout it may get one twice, and drops it by `metadata.uid`, the
-ledger entry's ID.
+ledger entry's ID. With a retention period for the ledger, entries an active destination
+hasn't got yet stay in the database until it has ([evidence](evidence.md#retention)).
 
 * A new destination starts **from now**; `backfill: true` (`--backfill`) sends a SIEM the
   ledger from its start.

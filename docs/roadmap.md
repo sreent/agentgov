@@ -27,6 +27,7 @@ come second: they report, but they don't enforce.
 | 6 | Interoperability | **Agent-to-agent (A2A) governance** (done, [agent to agent](agent-to-agent.md)): calls between agents through the gateway, who may call whom on blueprints and agents, the controls of tool calls on each call, and the chain of agents that handed the work down, with the person at its head, in policy and the ledger of every call further down | agentgateway A2A routes and external authorization |
 | 7 | Lifecycle | **Access packages, and issues to the people responsible** (done, [access packages](access-packages.md), [issues](issues.md)): tools, models and agents held for a while once approved, with reminders, renewals, reviews and expiry at the gateway; Microsoft Entra's access packages for agents' identities, read or managed; and findings sent to each agent's owner, sponsors and team, by email and in their chats, escalating until someone acknowledges them | OPA, Microsoft Graph entitlement management, SMTP, Teams workflows, Slack webhooks |
 | 8 | Lifecycle | **Management rules** (done, [management rules](management-rules.md)): what to do about agents that meet some conditions for long enough (no activity, no owner, an attestation long overdue, an open finding, a risk level, a status): raise an issue, give them an owner, block, delete or revoke their access packages, after telling their people, monitored before they are enforced, and on a few agents at once at most | — |
+| 9 | Evidence | **Retention and compliance evidence** (done, [evidence](evidence.md)): daily checkpoints of the ledger time-stamped by an authority, retention of at least six months with archives that verify offline, operational records kept for a period you choose, and reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors | RFC 3161 time-stamping authorities, OpenSSL |
 
 ## Later
 
@@ -41,10 +42,8 @@ come second: they report, but they don't enforce.
 | Detection | **Classifier for tool and model traffic**: ask the Granite Guardian that already checks [agent instructions](instructions.md) about tool results (prompt injection) and prompts (jailbreaks) too, next to the processor's heuristics | IBM Granite Guardian |
 | Registry | **More platform connectors**: import agents from cloud agent platforms and SaaS agent builders (AWS, Google, Salesforce, Databricks) the way [Microsoft 365 and Copilot Studio](platforms.md) are, when someone needs one | Platform APIs |
 | Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
+| Evidence | **Signed OPA bundles**, and ledger checkpoints in a transparency log as well as time-stamped | OPA bundle signing, Sigstore Rekor |
 | Policy | **AuthZEN interface** so the decision point can be swapped (for example to Cedar) without touching enforcement points | OpenID AuthZEN |
-| Evidence | **External anchoring** of ledger checkpoints, and signed OPA bundles | Sigstore, OPA bundle signing |
-| Evidence | **Retention policies** for activity, decisions and ledger exports | — |
-| Evidence | **Compliance reports** that map the registry and the ledger to the EU AI Act, ISO/IEC 42001 and the NIST AI RMF | — |
 
 ## Out of scope
 

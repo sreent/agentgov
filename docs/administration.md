@@ -106,6 +106,10 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | See the management rules an agent matches, and what each will do | Agent → *Management rules* | `agentgov rules agent AGENT` | `GET /v1/agents/{ref}/rules` |
 | Name the team issues about an agent escalate to | Blueprint or agent → **Edit** → *Team* | `agentgov blueprints update B --team T` (agents: the same option) | `team` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |
 | Browse, verify and export the ledger | Ledger → filters, **Verify chain**, **Export JSONL** | `agentgov ledger tail --agent A`, `ledger verify`, `ledger export` | `GET /v1/ledger`, `/v1/ledger/verify`, `/v1/ledger/export` |
+| Check an export or the ledger's archives offline ([evidence](evidence.md)) | — | `agentgov ledger verify --file F [--file F ...]` | — |
+| Keep a checkpoint of the ledger, and get its time-stamp | Ledger → *Checkpoints and retention* → **Make a checkpoint**, **Time-stamp** | `agentgov ledger checkpoint`, `ledger checkpoints`, `ledger proof SEQ` | `POST`/`GET /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp` |
+| See how long things are kept, and run retention now | Ledger → *Checkpoints and retention* | `agentgov ledger retention [--run]` | `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run` |
+| Read a compliance report, and download the evidence pack | Ledger → *Compliance* → **Evidence pack** | `agentgov evidence report --framework F`, `agentgov evidence pack -o FILE` | `GET /v1/evidence/report`, `GET /v1/evidence/pack` |
 | See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |
 | See the calls between agents, and the chain of agents behind any call | Ledger, type `decision.a2a.*`; an entry's *Chain* | `agentgov ledger tail --type 'decision.a2a.*'` | `GET /v1/ledger?type=decision.a2a.*` (`details.chain`) |
 | Open the trace of a gateway decision | Ledger or an agent's Recent activity → **Open trace** | `agentgov ledger tail --traces` | `trace_url` on `GET /v1/ledger` entries (set `AGENTGOV_TRACE_URL`) |

@@ -73,7 +73,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Telemetry via OpenTelemetry (invoke_agent / execute_tool / chat spans) | ✅ | **OTel Collector** → control plane; the same GenAI semantic conventions, so Agent 365-instrumented agents can report here |
 | Trace exploration | ✅ | Optional **Langfuse** (`deploy/compose/docker-compose.langfuse.yml`): the collector sends it every agent and gateway trace, and each gateway decision in the ledger links to its trace |
 | Usage and cost of agents' model calls | ✅ | Tokens and cost per agent, day, provider and model, metered from the gateway's access logs ([model calls](models.md)) |
-| Audit of agent activity | ✅ | Hash-chained evidence ledger with verification and JSONL export; the use of Microsoft 365 and Copilot Studio agents, and Copilot Studio makers' changes, read from the Purview audit log ([connections](microsoft-connections.md#microsoft-purview-audit-log)) |
+| Audit of agent activity | ✅ | Hash-chained evidence ledger with verification and JSONL export, daily checkpoints time-stamped by an authority (RFC 3161), and retention you choose, with archives that verify offline ([evidence](evidence.md)), where Purview keeps audit records 180 days (Standard), a year (Premium) or up to ten years (an add-on); the use of Microsoft 365 and Copilot Studio agents, and Copilot Studio makers' changes, read from the Purview audit log ([connections](microsoft-connections.md#microsoft-purview-audit-log)) |
 
 ### Interoperability
 
@@ -107,7 +107,9 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Connectors used by Copilot Studio agents; risky agent settings | ✅ | Connector allowlist with findings for agents that use other connectors, publish without authentication, use their maker's connections or are shared with everyone; enforced by pushing it into Power Platform's advanced connector policies, and by Copilot Studio threat detection ([connections](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform)) |
 | Human approval for sensitive actions | ✅ | Destructive tools (and any policy you write) route to an approver, or to the person the agent acted for; single-use approvals ([acting for people](acting-for-people.md#approvals-sent-to-the-person)) |
 | Alerts / incidents | ✅ | Findings, with alerts in Teams and Slack; Defender's alerts about agents become findings ([connections](microsoft-connections.md#microsoft-defender-alerts)); the ledger to SIEMs as OCSF events, and the security team's tools may triage, contain or decide as far as you choose ([security operations](secops.md)) |
-| Insider risk, eDiscovery, retention policies | ➖ / ⏳ | Ledger export provides evidence; retention policy ⏳ |
+| Compliance assessments (Purview Compliance Manager: EU AI Act, ISO/IEC 42001, NIST AI RMF) | ✅ | Reports for the same three frameworks, control by control, with what is in place and the evidence, and an evidence pack for assessors ([evidence](evidence.md)) |
+| Retention policies | ✅ | The ledger kept for at least six months, then archived; operational records kept for a period you choose ([evidence](evidence.md#retention)) |
+| Insider risk, eDiscovery | ➖ | Outside AgentGov; the ledger export and the evidence pack provide evidence |
 
 ## Sources
 
@@ -130,7 +132,9 @@ Microsoft documentation and announcements, checked October 2026:
   [bring-your-own MCP servers](https://learn.microsoft.com/en-us/microsoft-365/admin/manage/manage-byo-mcp-server)
 - Security: [Defender real-time protection](https://learn.microsoft.com/en-us/defender-xdr/security-for-ai/ai-agent-real-time-protection),
   [Purview for Agent 365](https://learn.microsoft.com/en-us/purview/ai-agent-365),
-  [Purview DLP for Microsoft 365 Copilot](https://learn.microsoft.com/en-us/purview/dlp-microsoft365-copilot-location-learn-about)
+  [Purview DLP for Microsoft 365 Copilot](https://learn.microsoft.com/en-us/purview/dlp-microsoft365-copilot-location-learn-about),
+  [audit log retention](https://learn.microsoft.com/en-us/purview/audit-log-retention-policies),
+  [Compliance Manager assessments](https://learn.microsoft.com/en-us/purview/compliance-manager-assessments)
 - Developer tools: [restricting Copilot to an MCP registry](https://docs.github.com/en/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-mcp-server-access),
   [MCP allowlists in enterprise managed settings](https://docs.github.com/en/enterprise-cloud@latest/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-enterprise-allowlist)
 - Models: [AI gateway capabilities in Azure API Management](https://learn.microsoft.com/en-us/azure/api-management/genai-gateway-capabilities),

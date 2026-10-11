@@ -79,6 +79,17 @@ controlPlane:
   # of your database's certificate authority, for sslrootcert in the database URL.
   extraVolumes: []
   extraVolumeMounts: []
+  # Keep the ledger's entries in the database for retentionDays, then archive them to a
+  # volume (docs/evidence.md). Off, every entry stays in the database. The archives are
+  # evidence: back the volume up, or copy them to storage that can't be rewritten.
+  ledgerArchive:
+    enabled: false
+    # At least 183 days (six months).
+    retentionDays: 365
+    # A PersistentVolumeClaim you manage; without one, the chart makes one.
+    existingClaim: ""
+    size: 20Gi
+    storageClass: ""
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}

@@ -97,6 +97,9 @@ services:
       AGENTGOV_GATEWAY_OTLP_ENDPOINT: http://otel-collector:4317
       AGENTGOV_PROCESSOR_ADDRESS: processor:50051
       AGENTGOV_POSTURE_INTERVAL_SECONDS: "60"
+      # The authority that time-stamps the ledger's checkpoints (docs/evidence.md): the demo
+      # sink stands in for one. A real one is, for example, https://freetsa.org/tsr.
+      AGENTGOV_LEDGER_TSA_URL: ${AGENTGOV_LEDGER_TSA_URL:-http://demo-sink:9300/tsa}
       # Features the deployment pins, e.g. "least-privilege=monitor" (docs/features.md).
       # Administrators choose the others on the Features page.
       AGENTGOV_FEATURES: ${AGENTGOV_FEATURES:-}
