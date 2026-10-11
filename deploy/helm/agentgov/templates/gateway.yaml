@@ -49,6 +49,7 @@ spec:
             - {name: gateway-config, mountPath: /gateway}
             - {name: tmp, mountPath: /tmp}
             - {name: model-keys, mountPath: /model-keys, readOnly: true}
+            {{- include "agentgov.tlsMount" . | nindent 12 }}
       containers:
         - name: agentgateway
           image: "{{ $v.image.repository }}:{{ $v.image.tag }}"
@@ -71,6 +72,8 @@ spec:
           volumeMounts:
             - {name: gateway-config, mountPath: /gateway, readOnly: true}
             - {name: model-keys, mountPath: /model-keys, readOnly: true}
+            # Its certificate for the processor (mutual TLS).
+            {{- include "agentgov.tlsMount" . | nindent 12 }}
         # Rewrites the file when tool servers change; agentgateway reloads it.
         - name: config-sync
           image: {{ $sync.image }}
@@ -98,6 +101,7 @@ spec:
             - {name: gateway-config, mountPath: /gateway}
             - {name: tmp, mountPath: /tmp}
             - {name: model-keys, mountPath: /model-keys, readOnly: true}
+            {{- include "agentgov.tlsMount" . | nindent 12 }}
       volumes:
         - name: gateway-config
           emptyDir: {}
@@ -109,6 +113,7 @@ spec:
           secret:
             secretName: {{ include "agentgov.modelKeysSecret" . }}
             optional: true
+        {{- include "agentgov.tlsVolume" (list . "gateway") | nindent 8 }}
       {{- include "agentgov.scheduling" $v | nindent 6 }}
 ---
 apiVersion: v1
@@ -128,7 +133,11 @@ spec:
 
 {{- define "agentgov.gatewayConfigEnv" -}}
 - name: AGENTGOV_CONTROL_PLANE_URL
-  value: {{ include "agentgov.controlPlaneUrl" . | quote }}
+  value: {{ include "agentgov.internalControlPlaneUrl" . | quote }}
+{{- if .Values.internalTLS.enabled }}
+- name: AGENTGOV_TLS_DIR
+  value: /tls
+{{- end }}
 - name: AGENTGOV_SERVICE_TOKEN
   valueFrom:
     secretKeyRef: {name: {{ include "agentgov.secretName" . }}, key: service-token}

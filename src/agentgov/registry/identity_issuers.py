@@ -21,10 +21,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
-from agentgov.db import mark_changed
+from agentgov.db import lock, mark_changed
 from agentgov.models import BLOCKED, ISSUER_KINDS, Agent, IdentityIssuer
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
+from agentgov.registry.versions import edited, start_edit
 
 APPROVED = "approved"
 KUBERNETES, SPIFFE, OIDC = ISSUER_KINDS
@@ -156,10 +157,17 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> IdentityIss
 
 
 def update(
-    session: Session, issuer: IdentityIssuer, data: dict[str, Any], *, actor: str
+    session: Session,
+    issuer: IdentityIssuer,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
 ) -> list[str]:
+    start_edit(session, issuer, version, f"identity issuer {issuer.name}")
     changed = _apply(issuer, data)
     if changed:
+        edited(issuer)
         _unique(session, issuer)
         ledger.append(
             session,
@@ -178,6 +186,7 @@ def set_status(
     """Block an issuer: none of its tokens authenticate an agent until it is unblocked."""
     if action not in ("block", "unblock"):
         raise ValidationError(f"unknown action {action!r}")
+    lock(session, issuer)
     if action == "unblock" and issuer.status != BLOCKED:
         raise InvalidTransition("identity issuer is not blocked")
     if action == "block" and issuer.status == BLOCKED:
@@ -251,6 +260,7 @@ def to_dict(issuer: IdentityIssuer, agents: int | None = None) -> dict[str, Any]
     return {
         "id": issuer.id,
         "name": issuer.name,
+        "version": issuer.version,
         "kind": issuer.kind,
         "description": issuer.description or "",
         "issuer": issuer.issuer,

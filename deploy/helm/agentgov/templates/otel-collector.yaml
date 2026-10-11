@@ -66,10 +66,12 @@ spec:
             {{- include "agentgov.containerSecurity" . | nindent 12 }}
           volumeMounts:
             - {name: config, mountPath: /etc/otelcol, readOnly: true}
+            {{- include "agentgov.tlsMount" . | nindent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ $name }}
+        {{- include "agentgov.tlsVolume" (list . "otel-collector") | nindent 8 }}
       {{- include "agentgov.scheduling" $v | nindent 6 }}
 ---
 apiVersion: v1
@@ -105,10 +107,16 @@ processors:
         - attributes["gen_ai.operation.name"] == nil
 exporters:
   otlp_http/agentgov:
-    endpoint: {{ include "agentgov.controlPlaneUrl" . }}/v1/otlp
+    endpoint: {{ include "agentgov.internalControlPlaneUrl" . }}/v1/otlp
     encoding: json
     headers:
       Authorization: "Bearer ${env:AGENTGOV_SERVICE_TOKEN}"
+    {{- if .Values.internalTLS.enabled }}
+    tls:
+      ca_file: /tls/ca.crt
+      cert_file: /tls/tls.crt
+      key_file: /tls/tls.key
+    {{- end }}
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133

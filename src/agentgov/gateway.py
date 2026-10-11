@@ -123,6 +123,29 @@ PERSON_HEADERS = {
 }
 
 
+def processor_tls(settings: Settings, address: str, *, grpc: bool = False) -> dict[str, Any]:
+    """agentgateway's TLS to the processor (with AGENTGOV_TLS_DIR): it checks the
+    processor's certificate against AgentGov's authority, and shows its own."""
+    folder = settings.gateway_tls_dir.rstrip("/")
+    tls: dict[str, Any] = {
+        "cert": f"{folder}/tls.crt",
+        "key": f"{folder}/tls.key",
+        "root": f"{folder}/ca.crt",
+        "hostname": address.rsplit(":", 1)[0],
+    }
+    if grpc:
+        tls["alpn"] = ["h2"]
+    return tls
+
+
+def _to_processor(settings: Settings, address: str, *, grpc: bool = False) -> dict[str, Any]:
+    """A target's backend policies for the processor at ``address``: mutual TLS, when the
+    components have certificates."""
+    if not settings.tls_dir:
+        return {}
+    return {"policies": {"backendTLS": processor_tls(settings, address, grpc=grpc)}}
+
+
 def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
     policies: dict[str, Any] = {
         "cors": {
@@ -139,6 +162,7 @@ def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict
                     "methods": dict(GUARDED_METHODS),
                     "metadata": {**IDENTITY_METADATA, "server": f'"{ts.name}"'},
                     "requestHeaders": {"disallowed": ["authorization", "cookie"]},
+                    **_to_processor(settings, settings.processor_address, grpc=True),
                 }
             ]
         },
@@ -201,7 +225,10 @@ def model_route_for(
         # The delegation the agent carries, when another agent handed it the work.
         chains.HEADER: f'request.headers["{chains.HEADER}"]',
     }
-    webhook = {"host": settings.processor_webhook_address}
+    webhook = {
+        "host": settings.processor_webhook_address,
+        **_to_processor(settings, settings.processor_webhook_address),
+    }
     policies.update(
         {
             "urlRewrite": {"path": {"full": CHAT_PATH}},
@@ -287,6 +314,7 @@ def a2a_route_for(agent: Agent, settings: Settings, modes: dict[str, str]) -> di
             },
             "includeRequestBody": {"maxRequestBytes": A2A_MAX_BODY},
             "failureMode": "deny",
+            **_to_processor(settings, settings.processor_webhook_address),
         },
     }
     if url.scheme == "https":

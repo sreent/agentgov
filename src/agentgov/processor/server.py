@@ -598,7 +598,10 @@ async def serve(settings: Settings) -> None:
     """Run the processor until cancelled."""
     import httpx
 
-    http = httpx.AsyncClient(timeout=5.0)
+    # Mutual TLS with the other components (agentgov.tls), when it has a certificate: OPA
+    # and the control plane are called with it, and agentgateway must show its own.
+    identity = settings.tls()
+    http = httpx.AsyncClient(timeout=5.0, verify=identity.client_context() if identity else True)
     opa = OpaClient(settings.opa_url or "http://localhost:8181", http=http)
     control_plane = ControlPlaneClient(
         settings.control_plane_url, settings.service_token, http=http
@@ -624,20 +627,24 @@ async def serve(settings: Settings) -> None:
         settings, opa=opa, control_plane=control_plane, recorder=recorder, presidio=presidio
     )
     pb_grpc.add_ExtMcpServicer_to_server(processor, server)
-    server.add_insecure_port(settings.processor_listen)
+    if identity:
+        server.add_secure_port(settings.processor_listen, identity.grpc_credentials())
+    else:
+        server.add_insecure_port(settings.processor_listen)
     # Model calls: agentgateway's guardrail webhook, over HTTP.
     from agentgov.processor import model_guard
 
     webhook = model_guard.server(
-        model_guard.ModelGuard(processor), settings.processor_webhook_listen
+        model_guard.ModelGuard(processor), settings.processor_webhook_listen, tls=identity
     )
     recorder.start()
     await server.start()
     webhook_task = asyncio.create_task(webhook.serve())
     log.info(
-        "governance processor listening on %s (tool calls) and %s (model calls)",
+        "governance processor listening on %s (tool calls) and %s (model calls)%s",
         settings.processor_listen,
         settings.processor_webhook_listen,
+        ", over mutual TLS" if identity else "",
     )
     try:
         await server.wait_for_termination()

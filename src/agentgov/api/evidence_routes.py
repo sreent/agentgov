@@ -13,6 +13,7 @@ from sqlalchemy import select
 from agentgov import compliance, ids, ledger, retention, timestamping
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.models import LedgerCheckpoint
+from agentgov.runtime import JOB_WAIT_SECONDS
 
 router = APIRouter(prefix="/v1", tags=["evidence"])
 read = require(*READ_ROLES)
@@ -42,14 +43,10 @@ def make_checkpoint(request: Request, _: Principal = Depends(admin)) -> dict[str
     """Keep the chain's head as a checkpoint now, and have it time-stamped if an authority
     is set."""
     rt = _rt(request)
-    with rt.db.session() as s:
-        point = ledger.checkpoint(s)
-        if point is None:
-            raise HTTPException(409, "the ledger is empty")
-        seq = point.seq
-    rt.stamp_checkpoints()
-    with rt.db.session() as s:
-        return ledger.checkpoint_dict(s.get(LedgerCheckpoint, seq))
+    point = rt.make_checkpoint(wait=JOB_WAIT_SECONDS)
+    if point is None:
+        raise HTTPException(409, "the ledger is empty")
+    return point
 
 
 @router.get("/ledger/checkpoints/{seq}/timestamp")
@@ -100,7 +97,7 @@ def retention_view(request: Request, _: Principal = Depends(read)) -> dict[str, 
 @router.post("/ledger/retention/run")
 def run_retention(request: Request, _: Principal = Depends(admin)) -> dict[str, Any]:
     """Do now what the hourly retention round does."""
-    return _rt(request).run_retention()
+    return _rt(request).run_retention(wait=JOB_WAIT_SECONDS)
 
 
 # --------------------------------------------------------------- compliance

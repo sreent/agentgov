@@ -47,7 +47,7 @@ For anything beyond evaluation on your own machine, copy `deploy/compose/.env.ex
 | 8000 | Control plane | Admin UI at `/ui`, API reference at `/docs`; OPA bundles, OTLP ingest, and the MCP registry for developers' tools (`/registry`, once `mcp-registry` is on) |
 | 8080 | agentgateway | Tool servers at `/mcp/<server>`, model providers at `/llm/<provider>` and agents that serve A2A at `/a2a/<agent>`, for callers with a token from Keycloak |
 | 8180 | Keycloak | Admin console user `admin`, password `KEYCLOAK_ADMIN_PASSWORD` (default `admin`); realm `agentgov` |
-| 8181 | OPA | Query API, handy for debugging policies |
+| 8181 | OPA | Query API, over mutual TLS: callers show a certificate from the stack's authority (below) |
 | 4317 / 4318 | OpenTelemetry Collector | OTLP over gRPC / HTTP, for agents' traces |
 | 9200 | Demo workload identity issuer | A stand-in Kubernetes cluster that gives out service account tokens, for the demo's agent without a client secret ([agents' own identities](../agent-identity.md)) |
 | 9300 | Demo sink | A stand-in for the security team's SIEM, Splunk, Slack and Teams: what the demo's destinations sent is at `/received` ([security operations](../secops.md)) |
@@ -55,7 +55,13 @@ For anything beyond evaluation on your own machine, copy `deploy/compose/.env.ex
 
 PostgreSQL, Presidio, the processor, the demo CRM tool server, the demo model and the demo
 billing agent are only reachable inside the Compose network, and the last three only
-through the gateway. The billing agent ([examples/agents/billing](../../examples/agents/billing/server.py))
+through the gateway. AgentGov's components talk to each other over mutual TLS
+([production](../production.md#mutual-tls-between-components)): on its first start, the
+`certs` service makes the stack's own authority, a certificate for each component and the
+key that signs OPA's bundles, on the `certs` volume, and each component mounts only its
+own. To ask OPA yourself, use OPA's certificate for instance:
+`docker compose cp opa:/tls ./opa-tls`, then `curl --cacert opa-tls/ca.crt --cert
+opa-tls/tls.crt --key opa-tls/tls.key https://localhost:8181/v1/data`. The billing agent ([examples/agents/billing](../../examples/agents/billing/server.py))
 is the agent other agents call in the demo ([agent to agent](../agent-to-agent.md)). The
 demo's stand-ins are not for real use.
 
@@ -200,7 +206,7 @@ control plane, so `AGENTGOV_PUBLIC_URL` must be an HTTPS address Microsoft can r
 | `docker-compose.yml` | The services and how they connect |
 | `.env.example` | Every secret the stack uses, and its optional settings |
 | `keycloak/agentgov-realm.json` | The realm, imported on Keycloak's first start: the control plane's provisioning client, the `agentgov-admin` sign-in client, the AgentGov roles, the demo users and the demo app people use agents from, `agentgov-demo-chat` |
-| `opa/config.yaml` | OPA's bundle, decision log and status services, all served by the control plane |
+| `opa/config.yaml` | OPA's bundle, decision log and status services, all served by the control plane on its internal port, and the key bundles are signed with |
 | `otel/collector.yaml` | OTLP in; spans to the control plane for discovery and activity, and the gateway's access logs of model calls for usage |
 | `otel/langfuse.yaml` | Merged over the collector's configuration by the Langfuse override |
 | `postgres/init.sql` | Creates Keycloak's database |

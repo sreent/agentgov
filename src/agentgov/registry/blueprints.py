@@ -12,6 +12,7 @@ from agentgov.db import mark_changed
 from agentgov.models import Agent, Blueprint
 from agentgov.registry import teams, validation
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
+from agentgov.registry.versions import edited, start_edit
 
 FIELDS = (
     "description",
@@ -113,9 +114,18 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Blueprint:
     return bp
 
 
-def update(session: Session, bp: Blueprint, data: dict[str, Any], *, actor: str) -> list[str]:
+def update(
+    session: Session,
+    bp: Blueprint,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
+) -> list[str]:
+    start_edit(session, bp, version, f"blueprint {bp.name}")
     changed = _apply(session, bp, data)
     if changed:
+        edited(bp)
         ledger.append(
             session,
             type="blueprint.updated",
@@ -142,6 +152,7 @@ def to_dict(bp: Blueprint) -> dict[str, Any]:
     return {
         "id": bp.id,
         "name": bp.name,
+        "version": bp.version,
         "description": bp.description,
         "risk_tier": bp.risk_tier,
         "permissions": bp.permissions or [],

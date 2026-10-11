@@ -339,7 +339,8 @@ class EmbeddedServer(uvicorn.Server):
         yield
 
 
-def server(guard: ModelGuard, listen: str) -> EmbeddedServer:
+def server(guard: ModelGuard, listen: str, *, tls: Any = None) -> EmbeddedServer:
+    """The webhook's server; with ``tls`` (an agentgov.tls.Identity), over mutual TLS."""
     host, _, port = listen.rpartition(":")
     config = uvicorn.Config(
         guard.app(),
@@ -348,5 +349,6 @@ def server(guard: ModelGuard, listen: str) -> EmbeddedServer:
         log_level="warning",
         access_log=False,
         lifespan="off",
+        **(tls.uvicorn_options() if tls else {}),
     )
     return EmbeddedServer(config)

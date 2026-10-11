@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
+from agentgov.db import lock
 from agentgov.identity import people
 from agentgov.models import Agent, ApprovalRequest
 from agentgov.registry import features, risk
@@ -101,6 +102,8 @@ def check_or_request(
             else ApprovalRequest.on_behalf_of_id.is_(None),
         )
         .order_by(ApprovalRequest.requested_at.desc())
+        # Two identical calls at once: one of them uses an approval.
+        .with_for_update()
     ).all()
     for status in (APPROVED, PENDING, DENIED):
         match = next((r for r in candidates if r.status == status), None)
@@ -208,6 +211,7 @@ def decide(
     session: Session, req: ApprovalRequest, *, approve: bool, actor: str, note: str | None = None
 ) -> ApprovalRequest:
     _expire_stale(session)
+    lock(session, req)
     if req.status != PENDING:
         raise InvalidTransition(f"approval {req.id} is {req.status}, not pending")
     req.status = APPROVED if approve else DENIED
@@ -235,10 +239,12 @@ def decide(
 def cancel_for_agent(session: Session, agent: Agent, *, actor: str, reason: str) -> int:
     """Withdraw an agent's open requests and unused approvals (it was blocked or deleted)."""
     open_requests = session.scalars(
-        select(ApprovalRequest).where(
+        select(ApprovalRequest)
+        .where(
             ApprovalRequest.agent_id == agent.id,
             ApprovalRequest.status.in_((PENDING, APPROVED)),
         )
+        .with_for_update()
     ).all()
     for req in open_requests:
         req.status = CANCELLED

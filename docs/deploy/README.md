@@ -65,6 +65,9 @@ flowchart LR
 - [ ] The ledger handed to your SIEM ([security operations](../secops.md)), its checkpoints
   time-stamped by an authority, and its retention chosen, with somewhere safe for the
   archives ([evidence](../evidence.md)).
+- [ ] Two control-plane replicas or more, on PostgreSQL, so that one can go without
+  anyone noticing; mutual TLS between the components and signed bundles left on
+  ([production](../production.md)).
 - [ ] A staging installation to try upgrades on first.
 
 [SECURITY.md](../../SECURITY.md#deploying-safely) explains why each matters.

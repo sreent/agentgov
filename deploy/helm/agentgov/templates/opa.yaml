@@ -51,6 +51,19 @@ spec:
             - --log-level=info
             # Each instance reports its status under its own name.
             - --set=labels.id=$(POD_NAME)
+            {{- if .Values.bundleSigning.enabled }}
+            # The certificate the control plane's signatures are checked with.
+            - --set-file=keys.agentgov.key=/bundle-signing/cert.pem
+            {{- end }}
+            {{- if .Values.internalTLS.enabled }}
+            # Over mutual TLS: callers show a certificate from AgentGov's authority.
+            - --tls-cert-file=/tls/tls.crt
+            - --tls-private-key-file=/tls/tls.key
+            - --tls-ca-cert-file=/tls/ca.crt
+            - --authentication=tls
+            # A certificate cert-manager renews takes effect within a minute.
+            - --tls-cert-refresh-period=1m
+            {{- end }}
           env:
             - name: POD_NAME
               valueFrom:
@@ -61,6 +74,16 @@ spec:
           ports:
             - name: http
               containerPort: 8181
+          {{- if .Values.internalTLS.enabled }}
+          # Its every port asks for a client certificate, which probes don't have; the
+          # processor refuses calls until OPA has a bundle.
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 20
+          {{- else }}
           readinessProbe:
             # Ready once it has activated the bundle from the control plane.
             httpGet: {path: "/health?bundles", port: http}
@@ -68,6 +91,7 @@ spec:
           livenessProbe:
             httpGet: {path: /health, port: http}
             periodSeconds: 20
+          {{- end }}
           resources:
             {{- toYaml $v.resources | nindent 12 }}
           securityContext:
@@ -76,7 +100,21 @@ spec:
             - name: config
               mountPath: /config
               readOnly: true
+            {{- if .Values.bundleSigning.enabled }}
+            - name: bundle-signing
+              mountPath: /bundle-signing
+              readOnly: true
+            {{- end }}
+            {{- include "agentgov.tlsMount" . | nindent 12 }}
       volumes:
+        {{- include "agentgov.tlsVolume" (list . "opa") | nindent 8 }}
+        {{- if .Values.bundleSigning.enabled }}
+        # Only the certificate, out of the bundle-signing Secret.
+        - name: bundle-signing
+          secret:
+            secretName: {{ include "agentgov.bundleSigningSecret" . }}
+            items: [{key: tls.crt, path: cert.pem}]
+        {{- end }}
         - name: config
           configMap:
             name: {{ $name }}
@@ -99,10 +137,21 @@ spec:
 {{- define "agentgov.opaConfig" -}}
 services:
   controlplane:
-    url: {{ include "agentgov.controlPlaneUrl" . }}/v1/opa
+    url: {{ include "agentgov.internalControlPlaneUrl" . }}/v1/opa
+    {{- if .Values.internalTLS.enabled }}
+    # The control plane's internal port: OPA shows its certificate, and checks the
+    # control plane's.
+    tls:
+      ca_cert: /tls/ca.crt
+    credentials:
+      client_tls:
+        cert: /tls/tls.crt
+        private_key: /tls/tls.key
+    {{- else }}
     credentials:
       bearer:
         token: "${AGENTGOV_SERVICE_TOKEN}"
+    {{- end }}
 bundles:
   agentgov:
     service: controlplane
@@ -111,6 +160,16 @@ bundles:
       min_delay_seconds: 5
       max_delay_seconds: 15
       long_polling_timeout_seconds: 30
+    {{- if .Values.bundleSigning.enabled }}
+    # OPA refuses a bundle that doesn't verify, and keeps the last good one.
+    signing:
+      keyid: agentgov
+    {{- end }}
+{{- if .Values.bundleSigning.enabled }}
+keys:
+  agentgov:
+    algorithm: {{ .Values.bundleSigning.algorithm }}
+{{- end }}
 decision_logs:
   service: controlplane
   reporting:

@@ -11,7 +11,10 @@
 
 x-agentgov-env: &agentgov-env
   AGENTGOV_SERVICE_TOKEN: ${AGENTGOV_SERVICE_TOKEN:-dev-service-token}
-  AGENTGOV_OPA_URL: http://opa:8181
+  AGENTGOV_OPA_URL: https://opa:8181
+  # Each component's certificate, for mutual TLS with the others (docs/architecture.md):
+  # its own directory of the certs volume, at /tls.
+  AGENTGOV_TLS_DIR: /tls
 
 services:
   postgres:
@@ -121,8 +124,11 @@ services:
       AGENTGOV_GUARDIAN_API_KEY: ${AGENTGOV_GUARDIAN_API_KEY:-}
       # Destinations' credentials (docs/secops.md): a file per destination, named after it.
       AGENTGOV_DESTINATION_SECRETS_DIR: /destination-secrets
+      # The key it signs OPA's bundles with (OPA refuses one that doesn't verify).
+      AGENTGOV_BUNDLE_SIGNING_KEY_FILE: /tls/bundle-signing/key.pem
     volumes:
       - ${AGENTGOV_DESTINATION_SECRETS_DIR:-./destination-secrets}:/destination-secrets:ro
+      - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: control-plane}}
     ports:
       - "8000:8000"
     depends_on:
@@ -130,20 +136,43 @@ services:
         condition: service_healthy
       keycloak:
         condition: service_healthy
+      certs:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
       interval: 5s
       timeout: 5s
       retries: 30
 
+  # AgentGov's own certificate authority and a certificate for each component, for mutual
+  # TLS between them, and the key the control plane signs OPA's bundles with: made on the
+  # first start, on a volume of their own, and kept. Each component mounts its own only.
+  certs:
+    image: agentgov:local
+    user: root
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        agentgov internal-certs /certs
+        && agentgov bundle-signing-key /certs/control-plane/bundle-signing
+        && cp /certs/control-plane/bundle-signing/cert.pem /certs/opa/bundle.crt
+        && chmod a+r /certs/*/tls.key /certs/control-plane/bundle-signing/key.pem
+    volumes:
+      - certs:/certs
+
   # Policy decision point: Rego library + registry data, served by the control plane.
   opa:
     image: openpolicyagent/opa:1.21.1-static
-    command: ["run", "--server", "--addr=0.0.0.0:8181", "--config-file=/config/opa.yaml", "--log-level=info"]
+    # Over mutual TLS: callers show a certificate from AgentGov's authority.
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--config-file=/config/opa.yaml", "--log-level=info",
+              "--tls-cert-file=/tls/tls.crt", "--tls-private-key-file=/tls/tls.key",
+              "--tls-ca-cert-file=/tls/ca.crt", "--authentication=tls",
+              "--set-file=keys.agentgov.key=/tls/bundle.crt"]
     environment:
       <<: *agentgov-env
     volumes:
       - ./opa/config.yaml:/config/opa.yaml:ro
+      - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: opa}}
     ports:
       - "8181:8181"
     depends_on:
@@ -164,8 +193,10 @@ services:
     command: ["processor"]
     environment:
       <<: *agentgov-env
-      AGENTGOV_CONTROL_PLANE_URL: http://control-plane:8000
+      AGENTGOV_CONTROL_PLANE_URL: https://control-plane:8443
       AGENTGOV_PRESIDIO_URL: http://presidio-analyzer:3000
+    volumes:
+      - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: processor}}
     depends_on:
       control-plane:
         condition: service_healthy
@@ -181,10 +212,11 @@ services:
     command: ["gateway-config", "--output", "/gateway/config.yaml", "--interval", "2"]
     environment:
       <<: *agentgov-env
-      AGENTGOV_CONTROL_PLANE_URL: http://control-plane:8000
+      AGENTGOV_CONTROL_PLANE_URL: https://control-plane:8443
     volumes:
       - gateway-config:/gateway
       - ${AGENTGOV_MODEL_KEYS_DIR:-./model-keys}:/model-keys:ro
+      - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: gateway}}
     healthcheck:
       test: ["CMD", "test", "-s", "/gateway/config.yaml"]
       interval: 2s
@@ -201,6 +233,7 @@ services:
     volumes:
       - gateway-config:/gateway:ro
       - ${AGENTGOV_MODEL_KEYS_DIR:-./model-keys}:/model-keys:ro
+      - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: gateway}}
     ports:
       - "8080:8080"
     depends_on:
@@ -224,6 +257,7 @@ services:
       <<: *agentgov-env
     volumes:
       - ./otel/collector.yaml:/etc/otelcol/collector.yaml:ro
+      - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: otel-collector}}
     ports:
       - "4317:4317"
       - "4318:4318"
@@ -286,3 +320,4 @@ services:
 volumes:
   postgres-data:
   gateway-config:
+  certs:

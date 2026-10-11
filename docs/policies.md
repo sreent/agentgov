@@ -312,5 +312,11 @@ Things to know, verified against AGT 5.0.0:
 * The agent identity in these calls is self-declared by the agent process. Keep the
   gateway as the enforcement point for anything that must hold against a misbehaving agent.
 * AGT's adapter refuses plain HTTP to a non-local OPA: use TLS, or an OPA sidecar on localhost.
+* With mutual TLS between AgentGov's components ([production](production.md#mutual-tls-between-components),
+  on by default), AgentGov's OPA asks every caller for a certificate from AgentGov's
+  authority, which agents don't have. Run an OPA sidecar next to the agent instead: it
+  fetches AgentGov's bundles from the control plane's internal port with a certificate of
+  its own (`agentgov internal-certs DIR --component NAME`, from the authority's directory,
+  or cert-manager's issuer), and the agent asks it on localhost.
 * Configure AGT with `default_action: deny`. In 5.0.0, `govern()` treats an unreachable OPA
   as "no decision" and falls back to the YAML default.

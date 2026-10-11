@@ -2,11 +2,16 @@
 # decision logs and status back to it. Long polling means registry changes
 # (for example blocking an agent) reach OPA in well under a second.
 services:
+  # The control plane's internal port, over mutual TLS: OPA shows its certificate (from
+  # AgentGov's authority) and checks the control plane's.
   controlplane:
-    url: http://control-plane:8000/v1/opa
+    url: https://control-plane:8443/v1/opa
+    tls:
+      ca_cert: /tls/ca.crt
     credentials:
-      bearer:
-        token: "${AGENTGOV_SERVICE_TOKEN}"
+      client_tls:
+        cert: /tls/tls.crt
+        private_key: /tls/tls.key
 
 bundles:
   agentgov:
@@ -16,6 +21,14 @@ bundles:
       min_delay_seconds: 5
       max_delay_seconds: 15
       long_polling_timeout_seconds: 30
+    # The control plane signs each bundle; OPA refuses one that doesn't verify against
+    # the certificate (--set-file=keys.agentgov.key=...), and keeps the last good one.
+    signing:
+      keyid: agentgov
+
+keys:
+  agentgov:
+    algorithm: RS256
 
 decision_logs:
   service: controlplane

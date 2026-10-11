@@ -63,10 +63,10 @@ them needs the AI administrator or Power Platform administrator role
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
 | **Registry** | Inventory with owners, sponsors and teams; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings, sent as issues to each agent's owner, sponsors and team until someone takes them on; management rules that act on inactive, ownerless or long-blocked agents after telling their people; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
-| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
+| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second, whichever control-plane replica takes it; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tool servers and other agents), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; calls between agents (A2A 1.0) through the gateway, with who may call whom, and the chain of agents that handed work down, from the person at its head, in policy and the ledger; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
-| **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger with checkpoints time-stamped by an authority (RFC 3161), retention with archives that verify offline, and compliance reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), OCSF, OpenTelemetry |
+| **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger with checkpoints time-stamped by an authority (RFC 3161), retention with archives that verify offline, and compliance reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them; mutual TLS between AgentGov's components, and policy bundles OPA verifies before it uses them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), OCSF, OpenTelemetry |
 
 Use only the parts you need. Every [feature](docs/features.md) but the gateway's handling of
 unknown callers can be turned off, and most controls at the gateway can run in monitor mode
@@ -167,7 +167,8 @@ the gateway. It shows each control in turn:
     caller claims, and its own call to the CRM carries the chain `sam > agent >
     billing-agent` into policy and the ledger. A made-up delegation is refused, and so
     is the call once the blueprint no longer grants it.
-13. **Kill switch**: blocking the agent takes effect everywhere within a second.
+13. **Kill switch**: blocking the agent takes effect everywhere within a second (with the
+    chart's two control-plane replicas, whichever one took the block).
 14. **Own identities**: an agent with no client secret at all authenticates with its
     service account token from a stand-in Kubernetes cluster, and calls a tool; blocking
     the cluster's issuer stops Keycloak taking its tokens.
@@ -356,6 +357,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   or malicious content
 * [Security operations](docs/secops.md): the ledger to SIEMs as OCSF events,
   alerts in Teams and Slack, and how much the security team's tools may do
+* [Running in production](docs/production.md): several control-plane replicas, people
+  working at once, mutual TLS between the components, and signed policy bundles
 * [Policies](docs/policies.md)
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)

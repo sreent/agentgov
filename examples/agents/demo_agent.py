@@ -83,6 +83,9 @@ HANDOFF = "/v1/features/security-operations"
 # The agent other agents call (agents.yaml, examples/agents/billing), on the gateway.
 BILLING = "billing-agent"
 A2A_ROUTE = f"/a2a/{BILLING}"
+# How soon a block must stop the agent's calls (it takes well under a second; this leaves
+# room for a busy machine).
+KILL_SWITCH_SECONDS = 5
 
 BOLD, DIM, GREEN, RED, YELLOW, RESET = (
     "\033[1m",
@@ -657,7 +660,13 @@ async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
             while allowed and time.monotonic() - started < 30:
                 allowed, payload = await call(client, "get_customer", {"customer_id": "c-001"})
             elapsed = time.monotonic() - started
-            report(allowed, f"{payload} ({elapsed:.2f}s after the block)", expect_allowed=False)
+            # Whichever control-plane replica OPA asks, the block reaches it at once: seconds
+            # late would mean a replica didn't hear of it.
+            show(
+                "allowed" if allowed else "refused",
+                not allowed and elapsed < KILL_SWITCH_SECONDS,
+                f"{payload} ({elapsed:.2f}s after the block)",
+            )
             answered, text = await chat(http, "mock-small", "Hello?")
             report_answer(answered, text, expect_answered=False, ok="blocked" in text)
 

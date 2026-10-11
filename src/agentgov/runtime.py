@@ -12,13 +12,16 @@ import httpx
 
 from agentgov import ids, ledger, migrations, retention, timestamping
 from agentgov.config import Settings
+from agentgov.coordination import Coordinator
 from agentgov.db import Database
 from agentgov.gateway import GatewayConfigWriter
 from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
+from agentgov.models import LedgerCheckpoint
 from agentgov.notify import Notifier
 from agentgov.opa.bundle import BundleServer
+from agentgov.opa.signing import Signer
 from agentgov.platforms import connections
 from agentgov.platforms.microsoft import (
     MicrosoftAdmin,
@@ -58,6 +61,9 @@ AUDIT_MIN_WINDOW = timedelta(minutes=15)
 AUDIT_FIRST_WINDOW = timedelta(days=1)
 AUDIT_GIVE_UP = timedelta(hours=6)
 DEFENDER_FIRST_WINDOW = timedelta(days=7)
+# How long a job an administrator starts waits for a run of it already going (on this
+# replica or another) before answering that it is busy.
+JOB_WAIT_SECONDS = 15.0
 
 
 def _graph_time(when: datetime) -> str:
@@ -65,12 +71,14 @@ def _graph_time(when: datetime) -> str:
 
 
 class _Worker:
-    """A daemon thread that runs ``fn`` when triggered and every ``interval`` seconds."""
+    """A daemon thread that runs ``fn`` when triggered and every ``interval`` seconds; with
+    ``leading``, only while it says this replica leads (the scheduled work runs on one)."""
 
-    def __init__(self, name: str, fn: Any, interval: float) -> None:
+    def __init__(self, name: str, fn: Any, interval: float, *, leading: Any = None) -> None:
         self.name = name
         self.fn = fn
         self.interval = interval
+        self.leading = leading
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -81,10 +89,11 @@ class _Worker:
     def start(self) -> None:
         def run() -> None:
             while not self._stop.is_set():
-                try:
-                    self.fn()
-                except Exception:
-                    log.exception("%s failed", self.name)
+                if self.leading is None or self.leading():
+                    try:
+                        self.fn()
+                    except Exception:
+                        log.exception("%s failed", self.name)
                 self._wake.wait(timeout=self.interval)
                 self._wake.clear()
 
@@ -111,8 +120,21 @@ class Runtime:
         tsa_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
+        # This component's certificate, for mutual TLS with the others (agentgov.tls).
+        self.tls = settings.tls()
         self.db = Database(settings.database_url, on_commit=self._on_commit)
-        self.bundles = BundleServer(self.db)
+        # OPA's bundles, signed when a key is set (agentgov.opa.signing).
+        signer = (
+            Signer.from_file(settings.bundle_signing_key_file, settings.bundle_signing_key_id)
+            if settings.bundle_signing_key_file
+            else None
+        )
+        # The other replicas: their changes, which one runs the scheduled work, and jobs
+        # that run on one at a time (agentgov.coordination).
+        self.coordination = Coordinator(
+            self.db, on_remote=self._on_remote, on_leader=self._on_leader
+        )
+        self.bundles = BundleServer(self.db, signer=signer)
         self.gateway = GatewayConfigWriter(self.db, settings)
         # The security team's SIEMs and chats (the security-operations feature).
         self.delivery = Delivery(self.db, settings, http=destinations_http)
@@ -125,7 +147,7 @@ class Runtime:
         self.delegations: Delegations | None = None
         self.microsoft_admin: MicrosoftAdmin | None = None
         if settings.microsoft_admin_actions:
-            self.delegations = Delegations(settings, http=oidc_http)
+            self.delegations = Delegations(settings, self.db, http=oidc_http)
             self.microsoft_admin = MicrosoftAdmin(settings, http=microsoft_http)
         self.identity: IdentityReconciler | None = None
         if settings.keycloak_enabled:
@@ -139,9 +161,6 @@ class Runtime:
             self.identity = IdentityReconciler(self.db, settings, admin)
         # The Microsoft 365 agent catalog, read with Microsoft Graph (app-only).
         self.m365 = MicrosoftApp(settings, http=m365_http) if settings.m365_enabled else None
-        self._m365_lock = threading.Lock()
-        # Rules run after the scheduled posture scans and when an administrator asks.
-        self._rules_lock = threading.Lock()
         # Copilot Studio asks AgentGov about each tool call its agents make, while the
         # copilot-studio-threat-detection feature is on.
         self.threat_detection: ThreatDetection | None = None
@@ -151,47 +170,76 @@ class Runtime:
             )
         # Optional classifier for agent instructions (IBM Granite Guardian).
         self.guardian = Guardian(settings, http=guardian_http) if settings.guardian_url else None
+        # Each replica writes the gateway's configuration file (Compose), and sends
+        # destinations what it wrote to the ledger (each claims a destination first).
         self._gateway_worker = _Worker("gateway-config", self.gateway.sync, 300)
+        self._delivery_worker = (
+            _Worker("secops-delivery", self.delivery.run, settings.delivery_interval_seconds)
+            if settings.delivery_interval_seconds > 0
+            else None
+        )
+        # The rest runs on the leader.
+        leading = lambda: self.coordination.leading  # noqa: E731
         self._posture_worker = (
-            _Worker("posture-scan", self.run_posture_scan, settings.posture_interval_seconds)
+            _Worker(
+                "posture-scan",
+                self.run_posture_scan,
+                settings.posture_interval_seconds,
+                leading=leading,
+            )
             if settings.posture_interval_seconds > 0
             else None
         )
         self._classifier_worker = (
-            _Worker("instruction-classifier", self.classify_pending_instructions, 120)
+            _Worker(
+                "instruction-classifier",
+                self.classify_pending_instructions,
+                120,
+                leading=leading,
+            )
             if self.guardian is not None
             else None
         )
         # Checks what arrived while instruction checks were off, once they are on again.
         self._recheck_worker = _Worker(
-            "instruction-recheck", self.check_unchecked_instructions, 3600
+            "instruction-recheck", self.check_unchecked_instructions, 3600, leading=leading
         )
         # Developers' MCP servers against the approved ones, again when tool servers change.
-        self._mcp_worker = _Worker("developer-mcp", self.refresh_developer_mcp, 3600)
+        self._mcp_worker = _Worker(
+            "developer-mcp", self.refresh_developer_mcp, 3600, leading=leading
+        )
         # Deleted agents are purged once they can no longer be restored; the ledger gets its
         # checkpoints, their time-stamps and its archives; old operational records go.
-        self._retention_worker = _Worker("retention", self.run_retention, 3600)
+        self._retention_worker = _Worker("retention", self.run_retention, 3600, leading=leading)
         self._tsa_http = tsa_http
         self._m365_worker = (
             _Worker(
                 "microsoft-sync",
                 self._scheduled_microsoft_sync,
                 settings.m365_sync_interval_seconds,
+                leading=leading,
             )
             if self.m365 is not None and settings.m365_sync_interval_seconds > 0
             else None
         )
-        self._delivery_worker = (
-            _Worker("secops-delivery", self.delivery.run, settings.delivery_interval_seconds)
-            if settings.delivery_interval_seconds > 0
-            else None
-        )
         self._issues_worker = (
-            _Worker("issues", self.run_issues, settings.issues_interval_seconds)
+            _Worker("issues", self.run_issues, settings.issues_interval_seconds, leading=leading)
             if settings.issues_interval_seconds > 0
             else None
         )
         self._started = False
+
+    def _leader_workers(self) -> list[_Worker]:
+        workers = [
+            self._posture_worker,
+            self._classifier_worker,
+            self._recheck_worker,
+            self._mcp_worker,
+            self._retention_worker,
+            self._m365_worker,
+            self._issues_worker,
+        ]
+        return [w for w in workers if w is not None]
 
     # -- lifecycle -----------------------------------------------------------
     def init_db(self) -> None:
@@ -199,17 +247,23 @@ class Runtime:
             migrations.upgrade(self.db.engine)
         else:
             migrations.check(self.db.engine)
-        with self.db.session() as session:
-            ledger.ensure_head(session)
-        with self.db.session() as session:
-            features.apply_pins(session, self.settings)
+        # Replicas starting together: one at a time.
+        with self.coordination.job("startup"):
+            with self.db.session() as session:
+                ledger.ensure_head(session)
+            with self.db.session() as session:
+                features.apply_pins(session, self.settings)
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self.init_db()
         if loop is not None:
             self.bundles.bind_loop(loop)
+        self.coordination.start()
         if self.identity is not None:
-            self.identity.start()
+            self.identity.start(
+                leading=lambda: self.coordination.leading,
+                exclusive=lambda: self.coordination.job("identity"),
+            )
         if self.settings.gateway_config_path:
             self._gateway_worker.start()
         if self._posture_worker is not None:
@@ -246,9 +300,34 @@ class Runtime:
             self._delivery_worker.stop()
         if self._issues_worker is not None:
             self._issues_worker.stop()
+        # Last: another replica takes the lead once this one lets go.
+        self.coordination.stop()
         self.db.dispose()
 
     # -- reconciliation triggers -----------------------------------------------
+    def _on_remote(self, topics: set[str] | None) -> None:
+        """Another replica committed changes to ``topics`` (None: anything may have changed,
+        while this replica wasn't listening)."""
+        if topics is not None:
+            self._on_commit(topics)
+            return
+        self.bundles.notify()
+        for worker in [self._gateway_worker, self._delivery_worker, *self._leader_workers()]:
+            if worker is not None:
+                worker.trigger()
+        if self.identity is not None:
+            self.identity.trigger()
+
+    def _on_leader(self, leading: bool) -> None:
+        """This replica took the lead: run the scheduled work now rather than at its next
+        interval."""
+        if not leading:
+            return
+        for worker in self._leader_workers():
+            worker.trigger()
+        if self.identity is not None:
+            self.identity.trigger()
+
     def _on_commit(self, topics: set[str]) -> None:
         if topics - {"ledger"}:  # OPA's data changed, not only the ledger
             self.bundles.notify()
@@ -268,36 +347,55 @@ class Runtime:
         if "instructions" in topics and self._classifier_worker is not None:
             self._classifier_worker.trigger()
 
-    def run_posture_scan(self) -> dict[str, Any] | None:
-        """Scan, unless posture checks are off (then None); then the management rules."""
-        with self.db.session() as session:
-            scanned = (
-                posture.scan(session, self.settings)
-                if features.is_on(session, "posture-checks")
-                else None
-            )
-        ruled = self.run_rules()
+    def run_posture_scan(self, *, wait: float | None = None) -> dict[str, Any] | None:
+        """Scan, unless posture checks are off (then None); then the management rules.
+
+        ``wait``, for this and the other jobs an administrator can start: how long to wait
+        for a run already going, on this replica or another, before JobBusy (None: as long
+        as it takes, as the scheduled runs do)."""
+        with self.coordination.job("posture-scan", wait=wait):
+            with self.db.session() as session:
+                scanned = (
+                    posture.scan(session, self.settings)
+                    if features.is_on(session, "posture-checks")
+                    else None
+                )
+            ruled = self.run_rules(wait=wait)
         return None if scanned is None else {**scanned, "rules": ruled}
 
-    def run_rules(self) -> dict[str, Any]:
+    def run_rules(self, *, wait: float | None = None) -> dict[str, Any]:
         """A round of the management rules (docs/management-rules.md)."""
-        with self._rules_lock, self.db.session() as session:
+        with self.coordination.job("rules", wait=wait), self.db.session() as session:
             return rules.evaluate(session, self.settings)
 
-    def run_retention(self) -> dict[str, Any]:
+    def run_retention(self, *, wait: float | None = None) -> dict[str, Any]:
         """Purge deleted agents past their retention, keep a ledger checkpoint when one is
         due, time-stamp checkpoints, archive the ledger past its retention, and remove old
         operational records (docs/evidence.md)."""
-        out: dict[str, Any] = {"purged": self.purge_deleted_agents()}
-        with self.db.session() as session:
-            point = retention.checkpoint_if_due(session, self.settings)
-            out["checkpoint"] = point.seq if point is not None else None
-        out["timestamped"] = self.stamp_checkpoints()
-        with self.db.session() as session:
-            out["archived"] = retention.archive(session, self.settings)
-        with self.db.session() as session:
-            out["pruned"] = retention.prune_records(session, self.settings)
-        return out
+        with self.coordination.job("retention", wait=wait):
+            out: dict[str, Any] = {"purged": self.purge_deleted_agents()}
+            with self.db.session() as session:
+                point = retention.checkpoint_if_due(session, self.settings)
+                out["checkpoint"] = point.seq if point is not None else None
+            out["timestamped"] = self.stamp_checkpoints()
+            with self.db.session() as session:
+                out["archived"] = retention.archive(session, self.settings)
+            with self.db.session() as session:
+                out["pruned"] = retention.prune_records(session, self.settings)
+            return out
+
+    def make_checkpoint(self, *, wait: float | None = None) -> dict[str, Any] | None:
+        """A checkpoint at the chain's head now (None for an empty ledger), time-stamped
+        when an authority is set."""
+        with self.coordination.job("retention", wait=wait):
+            with self.db.session() as session:
+                point = ledger.checkpoint(session)
+                if point is None:
+                    return None
+                seq = point.seq
+            self.stamp_checkpoints()
+            with self.db.session() as session:
+                return ledger.checkpoint_dict(session.get(LedgerCheckpoint, seq))
 
     def stamp_checkpoints(self) -> int:
         """Have the time-stamping authority sign the checkpoints it hasn't yet; returns how
@@ -305,20 +403,21 @@ class Runtime:
         url = self.settings.ledger_tsa_url
         if not url:
             return 0
-        with self.db.session() as session:
-            todo = retention.unstamped(session)
-        done = 0
-        for seq, hash_ in todo:  # the network calls happen outside any transaction
-            try:
-                got = timestamping.stamp(url, ledger.statement(seq, hash_), http=self._tsa_http)
-            except timestamping.TimestampError as exc:
-                with self.db.session() as session:
-                    retention.save_stamp(session, seq, url, error=str(exc))
-                continue
+        with self.coordination.job("retention"):
             with self.db.session() as session:
-                retention.save_stamp(session, seq, url, response=got.response, time=got.time)
-            done += 1
-        return done
+                todo = retention.unstamped(session)
+            done = 0
+            for seq, hash_ in todo:  # the network calls happen outside any transaction
+                try:
+                    got = timestamping.stamp(url, ledger.statement(seq, hash_), http=self._tsa_http)
+                except timestamping.TimestampError as exc:
+                    with self.db.session() as session:
+                        retention.save_stamp(session, seq, url, error=str(exc))
+                    continue
+                with self.db.session() as session:
+                    retention.save_stamp(session, seq, url, response=got.response, time=got.time)
+                done += 1
+            return done
 
     def purge_deleted_agents(self) -> list[str]:
         """Purge the agents deleted longer ago than AGENTGOV_SOFT_DELETE_RETENTION_DAYS."""
@@ -332,26 +431,27 @@ class Runtime:
         """Expire access packages and raise their reminders and reviews; route findings to
         the people responsible, escalate those nobody acknowledged, open accepted risks
         whose time ran out, and send what is due."""
-        with self.db.session() as session:
-            access = access_packages.check(session, self.settings)
-        with self.db.session() as session:
-            reopened = issues.reopen_accepted(session)
-            if not features.is_on(session, "issues"):
-                return {"reopened": reopened, **access}
-            routed = issues.route(session, self.settings)
-        return {"reopened": reopened, **access, **routed, **self.notifier.run()}
+        with self.coordination.job("issues"):
+            with self.db.session() as session:
+                access = access_packages.check(session, self.settings)
+            with self.db.session() as session:
+                reopened = issues.reopen_accepted(session)
+                if not features.is_on(session, "issues"):
+                    return {"reopened": reopened, **access}
+                routed = issues.route(session, self.settings)
+            return {"reopened": reopened, **access, **routed, **self.notifier.run()}
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;
         returns how many findings resolved."""
-        with self.db.session() as session:
+        with self.coordination.job("developer-mcp"), self.db.session() as session:
             if not features.is_on(session, "mcp-discovery"):
                 return 0
             return mcp_sightings.refresh(session, self.settings)
 
     def check_unchecked_instructions(self) -> int:
         """Check instructions that arrived while instruction checks were off."""
-        with self.db.session() as session:
+        with self.coordination.job("instruction-checks"), self.db.session() as session:
             if not features.is_on(session, "instruction-checks"):
                 return 0
             checked = instructions.check_unchecked(session, classify=self.guardian is not None)
@@ -364,7 +464,7 @@ class Runtime:
         if self.m365 is None:
             raise PlatformError("Microsoft 365 sync is not configured")
         include = self.settings.m365_types()
-        with self._m365_lock:
+        with self.coordination.job("microsoft-sync"):
             try:
                 packages = self.m365.agents()  # before the transaction: paging can be slow
             except PlatformError as exc:
@@ -407,15 +507,24 @@ class Runtime:
     # -- AgentGov's app connections to Microsoft -------------------------------------
 
     def sync_microsoft(
-        self, keys: list[str] | None = None, *, actor: str | None = None
+        self,
+        keys: list[str] | None = None,
+        *,
+        actor: str | None = None,
+        wait: float | None = None,
     ) -> dict[str, Any]:
         """Run the app connections the app registration may use; returns each outcome.
 
         A connection whose permission the app lacks is skipped (and shown as such);
-        one that fails doesn't stop the others.
+        one that fails doesn't stop the others. One run at a time, on one replica.
         """
         if self.m365 is None:
             raise PlatformError("AgentGov's Microsoft app registration is not configured")
+        with self.coordination.job("microsoft-sync", wait=wait):
+            return self._sync_microsoft(keys, actor=actor)
+
+    def _sync_microsoft(self, keys: list[str] | None, *, actor: str | None) -> dict[str, Any]:
+        assert self.m365 is not None
         with self.db.session() as session:
             turned_on = {k for k in connections.APP_CONNECTIONS if features.is_on(session, k)}
         results: dict[str, Any] = {k: {"off": True} for k in keys or () if k not in turned_on}
@@ -598,6 +707,11 @@ class Runtime:
         """Run the classifier over instructions waiting for it; returns how many."""
         if self.guardian is None:
             return 0
+        with self.coordination.job("instruction-classifier"):
+            return self._classify_pending(limit)
+
+    def _classify_pending(self, limit: int) -> int:
+        assert self.guardian is not None
         with self.db.session() as session:
             if not features.is_on(session, "instruction-checks"):
                 return 0

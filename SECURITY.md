@@ -164,8 +164,17 @@ The defaults of the Compose stack and of the Helm chart are for evaluation
 * Token budgets count usage from the gateway's access logs as calls finish. Calls that
   run at the same time can take an agent past its budget, and the tokens of answers the
   gateway withholds aren't counted.
-* Connections between components are not mutually authenticated yet (mTLS is on the
-  [roadmap](docs/roadmap.md)); rely on network isolation.
+* AgentGov's components authenticate each other with mutual TLS, from an authority of
+  AgentGov's own, and OPA verifies the bundles the control plane signs
+  ([production](docs/production.md)); both are on by default in the Helm chart and the
+  Compose stack. Presidio's analyzer and Keycloak are outside it: keep Presidio reachable
+  from the processor only (the network policies do), and give Keycloak TLS of its own.
+  The authority's key (in the chart, the Secret `<release>-tls-ca`) can issue any
+  component's certificate: guard it as you guard the service token, and don't let the
+  authority issue certificates to anything else (with cert-manager, the chart makes one
+  for the release unless you name an Issuer of your own). The components read their
+  certificates when they start, and OPA every minute: after cert-manager renews one,
+  restart the pods.
 * Administrators' roles are read from the identity provider when they sign in. Removing a
   role or disabling an account there takes effect at the next sign-in; a session that is
   already open lasts until it expires (`AGENTGOV_SESSION_HOURS`, default 8), the person

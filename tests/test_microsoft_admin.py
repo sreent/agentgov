@@ -13,10 +13,13 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from agentgov import cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.identity.delegation import Delegations
+from agentgov.models import MicrosoftGrant
 from agentgov.registry import platforms
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
@@ -233,6 +236,12 @@ def entra_client(
         yield client
 
 
+def grants(rt: Runtime) -> list[str]:
+    """The sessions AgentGov holds a Microsoft sign-in for."""
+    with rt.db.session() as s:
+        return list(s.scalars(select(MicrosoftGrant.session_id)))
+
+
 def admin_signs_in(client: TestClient, entra: FakeEntra) -> None:
     resp = sign_in(client, entra, sub="aad-alice", roles=["agentgov-admin"])
     assert resp.status_code == 302 and resp.headers["location"] == "/ui/", resp.headers
@@ -320,14 +329,14 @@ class TestQuarantine:
         assert apis.calls[0][1].endswith("/SetAsQuarantined?api-version=1")
         # `agentgov logout` forgets the Microsoft sign-in too.
         entra_client.post("/auth/logout", headers=bearer)
-        assert entra_client.app.state.rt.delegations._grants == {}
+        assert grants(entra_client.app.state.rt) == []
 
     def test_a_refused_cli_code_forgets_the_microsoft_sign_in(self, entra_client, entra) -> None:
         _, back = cli_sign_in(entra_client, entra, sub="aad-alice", roles=["agentgov-admin"])
-        assert len(entra_client.app.state.rt.delegations._grants) == 1  # waiting for the CLI
+        assert len(grants(entra_client.app.state.rt)) == 1  # waiting for the CLI
         guess = {"code": at_the_cli(back)["code"], "verifier": secrets.token_urlsafe(64)}
         assert entra_client.post("/auth/cli/token", json=guess).status_code == 400
-        assert entra_client.app.state.rt.delegations._grants == {}
+        assert grants(entra_client.app.state.rt) == []
 
     def test_only_a_signed_in_administrator(self, entra_client, client) -> None:
         import_bots(entra_client)
@@ -367,15 +376,15 @@ class TestQuarantine:
         import_bots(entra_client)
         admin_signs_in(entra_client, entra)
         rt = entra_client.app.state.rt
-        [session_id] = list(rt.delegations._grants)
+        [session_id] = grants(rt)
         entra_client.post("/auth/logout", headers=CSRF).raise_for_status()
         assert not rt.delegations.has(session_id)
 
         # An admin ending someone's sessions does too.
         admin_signs_in(entra_client, entra)
-        assert len(rt.delegations._grants) == 1
+        assert len(grants(rt)) == 1
         entra_client.post("/v1/access/people/aad-alice/sign-out", headers=ADMIN).raise_for_status()
-        assert rt.delegations._grants == {}
+        assert grants(rt) == []
 
     def test_an_expired_microsoft_sign_in(self, entra_client, entra) -> None:
         import_bots(entra_client)
@@ -385,11 +394,34 @@ class TestQuarantine:
         assert resp.status_code == 409
         assert "AADSTS70008" in resp.json()["detail"]
 
-    def test_after_a_restart(self, entra_client, entra) -> None:
+    def test_every_replica_and_a_restart_act_as_the_admin(self, entra_client, entra, apis) -> None:
         import_bots(entra_client)
         admin_signs_in(entra_client, entra)
-        entra_client.app.state.rt.delegations._grants.clear()  # memory only
-        assert entra_client.get("/auth/session").json()["microsoft"] is False
+        rt = entra_client.app.state.rt
+        # Another replica (or this one, restarted): the sign-in is in the database.
+        rt.delegations = Delegations(rt.settings, rt.db, http=rt.delegations._http)
+        assert entra_client.get("/auth/session").json()["microsoft"] is True
+        resp = entra_client.post("/v1/agents/sales-helper/platform/block", headers=CSRF)
+        assert resp.status_code == 200, resp.text
+
+    def test_sealed_in_the_database(self, entra_client, entra) -> None:
+        admin_signs_in(entra_client, entra)
+        rt = entra_client.app.state.rt
+        [token] = entra.refresh_tokens
+        with rt.db.session() as s:
+            [row] = s.scalars(select(MicrosoftGrant))
+            sealed, session_id = row.sealed, row.session_id
+        assert token not in sealed and token not in base64.b64decode(sealed).decode("latin-1")
+        assert rt.delegations._open(session_id, sealed) == token
+        # Bound to its session: it doesn't open for another one.
+        assert rt.delegations._open("someone-else", sealed) is None
+
+    def test_a_new_client_secret_needs_a_new_sign_in(self, entra_client, entra) -> None:
+        import_bots(entra_client)
+        admin_signs_in(entra_client, entra)
+        rt = entra_client.app.state.rt
+        rotated = rt.settings.with_overrides(oidc_client_secret="a-new-secret")
+        rt.delegations = Delegations(rotated, rt.db, http=rt.delegations._http)
         resp = entra_client.post("/v1/agents/sales-helper/platform/block", headers=CSRF)
         assert resp.status_code == 409 and "sign in again" in resp.json()["detail"]
 

@@ -134,8 +134,9 @@ Each email and chat message about an issue is tried until it goes: again five se
 it fails, then twice as long after each failure, up to ten minutes, and given up after about
 an hour. Each one sent
 is a `finding.notified` entry in the ledger, and each one given up on a
-`finding.notification_failed` warning. Every control-plane replica sends: each claims a
-message for a minute before it sends it, so none goes twice. The finding's page lists its
+`finding.notification_failed` warning. The control-plane replica that leads sends them
+([production](production.md#several-replicas)), and claims each message for a minute
+before it sends it, so none goes twice while the lead moves. The finding's page lists its
 messages and how each went.
 
 An email's subject reads `[AgentGov] Medium issue about agent support-bot: …`. It says why

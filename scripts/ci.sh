@@ -334,6 +334,12 @@ lint_chart() {
       >"$out/production-keycloak.yaml" &&
     kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
       "$out/default.yaml" "$out/production.yaml" "$out/production-keycloak.yaml" || rc=1
+  # cert-manager issuing the components' certificates, from an authority of the release's
+  # own, against the CRDs catalog's schemas of its resources.
+  helm template agentgov "$CHART" --set internalTLS.certManager.enabled=true \
+    >"$out/cert-manager.yaml" &&
+    kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
+      -schema-location default -schema-location "$CRDS_CATALOG" "$out/cert-manager.yaml" || rc=1
   # The cloud guides' values (docs/deploy), and the manifests they apply beside the chart,
   # against the Kubernetes schemas and, for their custom resources, the CRDs catalog.
   local cloud
@@ -434,9 +440,11 @@ chart_on_docker() {
   fi
   build_demo_images || return 1
   rendered=$(mktemp)
-  # Keycloak in production mode here (Compose runs it in development mode).
+  # Keycloak in production mode here (Compose runs it in development mode), and two
+  # control-plane replicas: the demo's requests alternate between them.
   helm template agentgov "$CHART" --set image.repository=agentgov --set image.tag=local \
     --set image.pullPolicy=Never --set presidio.image.tag=2.2.364 --set keycloak.mode=production \
+    --set controlPlane.replicas=2 \
     --set modelKeys.keys.demo=demo-model-key "${DEMO_DESTINATION_SECRETS[@]}" >"$rendered" || return 1
   python scripts/chart-on-docker.py down
   if python scripts/chart-on-docker.py up "$rendered" --demo; then

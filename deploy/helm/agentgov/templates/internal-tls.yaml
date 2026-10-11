@@ -1,0 +1,119 @@
+{{- if .Values.internalTLS.enabled }}
+{{- $root := . }}
+{{- $ns := .Release.Namespace }}
+{{- $parts := list "control-plane" "processor" "opa" "gateway" "otel-collector" }}
+{{- if .Values.internalTLS.certManager.enabled }}
+{{- $cm := .Values.internalTLS.certManager }}
+{{- $issuer := $cm.issuerRef }}
+{{- if eq $issuer.kind "ClusterIssuer" }}
+{{- fail "internalTLS.certManager.issuerRef: a ClusterIssuer issues certificates to any namespace that asks, and the control plane and OPA take any certificate from its authority as one of AgentGov's components. Name an Issuer in the release's namespace whose CA issues AgentGov's certificates only, or leave issuerRef.name empty for an authority of the release's own." }}
+{{- end }}
+{{- if not $issuer.name }}
+{{- /* An authority for this release alone: a self-signed CA certificate, and an issuer
+  that signs with it, in the release's namespace. */}}
+{{- $ca := printf "%s-tls-ca" (include "agentgov.fullname" .) }}
+{{- $issuer = dict "name" $ca "kind" "Issuer" "group" "cert-manager.io" }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ printf "%s-tls-selfsigned" (include "agentgov.fullname" .) }}
+  labels:
+    {{- include "agentgov.labels" (list . "secrets") | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $ca }}
+  labels:
+    {{- include "agentgov.labels" (list . "secrets") | nindent 4 }}
+spec:
+  isCA: true
+  commonName: AgentGov internal CA
+  secretName: {{ $ca }}
+  duration: {{ $cm.duration }}
+  privateKey: {algorithm: ECDSA, size: 256}
+  issuerRef:
+    name: {{ printf "%s-tls-selfsigned" (include "agentgov.fullname" .) }}
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $ca }}
+  labels:
+    {{- include "agentgov.labels" (list . "secrets") | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ $ca }}
+{{- end }}
+{{- /* cert-manager issues each component's certificate into its Secret. */}}
+{{- range $parts }}
+{{- $name := include "agentgov.name" (list $root .) }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "agentgov.tlsSecret" (list $root .) }}
+  labels:
+    {{- include "agentgov.labels" (list $root .) | nindent 4 }}
+spec:
+  secretName: {{ include "agentgov.tlsSecret" (list $root .) }}
+  commonName: {{ $name }}
+  dnsNames:
+    - {{ $name }}
+    - {{ $name }}.{{ $ns }}
+    - {{ $name }}.{{ $ns }}.svc
+    - {{ $name }}.{{ $ns }}.svc.cluster.local
+  usages: [server auth, client auth]
+  duration: {{ $cm.duration }}
+  privateKey: {algorithm: ECDSA, size: 256}
+  issuerRef:
+    {{- toYaml $issuer | nindent 4 }}
+{{- end }}
+{{- else }}
+{{- /* AgentGov's own authority, made on install and kept; each component's certificate
+  from it, made once and kept too. */}}
+{{- $caName := printf "%s-tls-ca" (include "agentgov.fullname" .) }}
+{{- $previous := lookup "v1" "Secret" $ns $caName }}
+{{- $ca := "" }}
+{{- if $previous }}
+{{- $ca = buildCustomCert (index $previous.data "tls.crt") (index $previous.data "tls.key") }}
+{{- else }}
+{{- $ca = genCA "AgentGov internal CA" 3650 }}
+{{- end }}
+---
+# AgentGov's internal certificate authority: it signs the components' certificates.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $caName }}
+  labels:
+    {{- include "agentgov.labels" (list . "secrets") | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $ca.Cert | b64enc | quote }}
+  tls.key: {{ $ca.Key | b64enc | quote }}
+{{- range $parts }}
+{{- $secret := include "agentgov.tlsSecret" (list $root .) }}
+{{- $name := include "agentgov.name" (list $root .) }}
+{{- $kept := (lookup "v1" "Secret" $ns $secret).data | default dict }}
+{{- $cert := genSignedCert $name nil (list $name (printf "%s.%s" $name $ns) (printf "%s.%s.svc" $name $ns) (printf "%s.%s.svc.cluster.local" $name $ns)) 3650 $ca }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secret }}
+  labels:
+    {{- include "agentgov.labels" (list $root .) | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ get $kept "tls.crt" | default ($cert.Cert | b64enc) | quote }}
+  tls.key: {{ get $kept "tls.key" | default ($cert.Key | b64enc) | quote }}
+  ca.crt: {{ get $kept "ca.crt" | default ($ca.Cert | b64enc) | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

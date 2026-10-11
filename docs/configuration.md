@@ -259,6 +259,8 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 |---|---|---|
 | `AGENTGOV_OPA_URL` | — | Where the processor asks OPA for decisions, and the control plane for What if, such as `http://opa:8181`. |
 | `AGENTGOV_BUNDLE_LONG_POLL_SECONDS` | `30` | Longest a bundle long-poll request is held open. |
+| `AGENTGOV_BUNDLE_SIGNING_KEY_FILE` | — | A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles with; OPA verifies each with the matching certificate or public key, and refuses one that doesn't verify ([production](production.md)). `agentgov bundle-signing-key DIR` makes a pair. Unset, bundles go unsigned. |
+| `AGENTGOV_BUNDLE_SIGNING_KEY_ID` | `agentgov` | The key's name: OPA's configuration names the same one (bundles.&lt;name&gt;.signing.keyid). |
 
 ### agentgateway (enforcement)
 
@@ -273,6 +275,14 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | `AGENTGOV_GATEWAY_OTLP_ENDPOINT` | — | OTLP/gRPC endpoint for gateway traces, e.g. `http://otel-collector:4317`. |
 | `AGENTGOV_GATEWAY_IPV6` | `false` | agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts. |
 | `AGENTGOV_TRACE_URL` | — | Link to a trace in your trace viewer, with {trace_id} where the W3C trace ID goes, such as `http://localhost:16686/trace/{trace_id}` for Jaeger. Ledger entries recorded at the gateway then link to their trace. |
+
+### Mutual TLS between components
+
+| Variable | Default | What it does |
+|---|---|---|
+| `AGENTGOV_TLS_DIR` | — | Where this component finds its certificate (tls.crt), its key (tls.key) and the certificate of the authority that issued every component's (ca.crt), as cert-manager writes them. Set, AgentGov's components talk over mutual TLS: each serves TLS on its internal ports and asks callers for a certificate from the same authority, and the control plane gives the service role only on its internal port. `agentgov internal-certs DIR` makes an authority and the certificates. |
+| `AGENTGOV_INTERNAL_PORT` | `8443` | The control plane's port for AgentGov's other components, over mutual TLS. |
+| `AGENTGOV_GATEWAY_TLS_DIR` | `/tls` | Where agentgateway finds its tls.crt, tls.key and ca.crt, to call the processor over mutual TLS (the control plane writes it into the gateway's configuration). |
 
 ### Governance processor
 

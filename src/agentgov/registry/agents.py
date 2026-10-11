@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.db import mark_changed
+from agentgov.db import lock, mark_changed
 from agentgov.models import (
     ACTIVE,
     AGENT_STATUSES,
@@ -35,6 +35,7 @@ from agentgov.registry import (
     validation,
 )
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
+from agentgov.registry.versions import edited, start_edit
 
 # action -> (allowed source states, target state)
 TRANSITIONS: dict[str, tuple[frozenset[str], str]] = {
@@ -300,11 +301,20 @@ def register(
     return agent
 
 
-def update(session: Session, agent: Agent, data: dict[str, Any], *, actor: str) -> list[str]:
+def update(
+    session: Session,
+    agent: Agent,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
+) -> list[str]:
+    start_edit(session, agent, version, f"agent {agent.name}")
     if agent.status == DELETED:
         raise Conflict("restore the agent before editing it")
     changed = _apply(session, agent, data)
     if changed:
+        edited(agent)
         ledger.append(
             session,
             type="agent.updated",
@@ -341,6 +351,7 @@ def transition(
 ) -> Agent:
     if action not in TRANSITIONS:
         raise ValidationError(f"unknown lifecycle action {action!r}")
+    lock(session, agent)
     allowed, target = TRANSITIONS[action]
     if agent.status not in allowed:
         raise InvalidTransition(f"cannot {action} an agent that is {agent.status}")
@@ -380,6 +391,7 @@ def transition(
 
 def attest(session: Session, agent: Agent, *, actor: str, note: str | None = None) -> Agent:
     """Record a sponsor's periodic confirmation that the agent is still needed."""
+    lock(session, agent)
     if agent.status not in (ACTIVE, BLOCKED, PENDING):
         raise InvalidTransition(f"cannot attest an agent that is {agent.status}")
     days = (agent.blueprint.attestation_days if agent.blueprint else None) or 90
@@ -400,6 +412,7 @@ def attest(session: Session, agent: Agent, *, actor: str, note: str | None = Non
 
 
 def purge(session: Session, agent: Agent, *, actor: str) -> None:
+    lock(session, agent)
     if agent.status != DELETED:
         raise InvalidTransition("only deleted agents can be purged")
     ledger.append(session, type="agent.purged", actor=actor, agent=agent, severity="warning")
@@ -496,6 +509,7 @@ def to_dict(agent: Agent) -> dict[str, Any]:
     return {
         "id": agent.id,
         "name": agent.name,
+        "version": agent.version,
         "description": agent.description,
         "status": agent.status,
         "status_reason": agent.status_reason,

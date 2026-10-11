@@ -12,6 +12,7 @@ from agentgov.identity.delegation import GRAPH, POWER_PLATFORM, DelegationError
 from agentgov.platforms import connections, threat_detection
 from agentgov.platforms.microsoft import PlatformError
 from agentgov.registry import agents, connector_policy, entra_access, features, platforms
+from agentgov.runtime import JOB_WAIT_SECONDS
 
 router = APIRouter(prefix="/v1/platforms", tags=["platforms"])
 agent_router = APIRouter(prefix="/v1/agents", tags=["platforms"])
@@ -66,7 +67,7 @@ def _app_sync(rt: Any, key: str, actor: str) -> dict[str, Any]:
     if rt.m365 is None:
         raise HTTPException(409, NOT_CONFIGURED)
     try:
-        outcome = rt.sync_microsoft([key], actor=actor)[key]
+        outcome = rt.sync_microsoft([key], actor=actor, wait=JOB_WAIT_SECONDS)[key]
     except PlatformError as exc:
         raise HTTPException(502, str(exc)) from exc
     if outcome.get("off"):
@@ -90,7 +91,7 @@ def sync_all(request: Request, principal: Principal = Depends(admin)) -> dict[st
     if rt.m365 is None:
         raise HTTPException(409, NOT_CONFIGURED)
     try:
-        return rt.sync_microsoft(actor=principal.actor)
+        return rt.sync_microsoft(actor=principal.actor, wait=JOB_WAIT_SECONDS)
     except PlatformError as exc:
         raise HTTPException(502, str(exc)) from exc
 

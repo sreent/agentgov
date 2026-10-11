@@ -11,14 +11,15 @@
   (dict "component" "opa" "ports" (list 8181) "from" (list "control-plane" "processor") "enabled" true)
   (dict "component" "processor" "ports" (list 50051 8091) "from" (list "gateway") "enabled" true)
   (dict "component" "presidio" "ports" (list 3000) "from" (list "processor") "enabled" .Values.presidio.enabled)
-  (dict "component" "postgresql" "ports" (list 5432) "from" (list "control-plane" "keycloak") "enabled" .Values.postgresql.enabled) }}
+  (dict "component" "postgresql" "ports" (list 5432) "from" (list "control-plane" "keycloak") "enabled" .Values.postgresql.enabled)
+  (dict "component" "control-plane" "ports" (list 8443) "from" (list "opa" "processor" "gateway" "otel-collector") "enabled" .Values.internalTLS.enabled "suffix" "-internal") }}
 {{- range $internal }}
 {{- if .enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "agentgov.name" (list $root .component) }}
+  name: {{ include "agentgov.name" (list $root .component) }}{{ .suffix | default "" }}
   labels:
     {{- include "agentgov.labels" (list $root .component) | nindent 4 }}
 spec:

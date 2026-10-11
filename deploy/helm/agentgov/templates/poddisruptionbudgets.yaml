@@ -1,0 +1,27 @@
+{{- /* One replica at a time through a node drain, for each part that runs several. */}}
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- $parts := list
+  (list "control-plane" .Values.controlPlane.replicas true)
+  (list "processor" .Values.processor.replicas true)
+  (list "gateway" .Values.gateway.replicas true)
+  (list "opa" .Values.opa.replicas true)
+  (list "presidio" .Values.presidio.replicas .Values.presidio.enabled)
+  (list "keycloak" .Values.keycloak.replicas .Values.keycloak.enabled) }}
+{{- range $parts }}
+{{- $component := index . 0 }}
+{{- if and (index . 2) (gt (int (index . 1)) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "agentgov.name" (list $ $component) }}
+  labels:
+    {{- include "agentgov.labels" (list $ $component) | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "agentgov.selector" (list $ $component) | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}

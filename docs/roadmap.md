@@ -28,13 +28,13 @@ come second: they report, but they don't enforce.
 | 7 | Lifecycle | **Access packages, and issues to the people responsible** (done, [access packages](access-packages.md), [issues](issues.md)): tools, models and agents held for a while once approved, with reminders, renewals, reviews and expiry at the gateway; Microsoft Entra's access packages for agents' identities, read or managed; and findings sent to each agent's owner, sponsors and team, by email and in their chats, escalating until someone acknowledges them | OPA, Microsoft Graph entitlement management, SMTP, Teams workflows, Slack webhooks |
 | 8 | Lifecycle | **Management rules** (done, [management rules](management-rules.md)): what to do about agents that meet some conditions for long enough (no activity, no owner, an attestation long overdue, an open finding, a risk level, a status): raise an issue, give them an owner, block, delete or revoke their access packages, after telling their people, monitored before they are enforced, and on a few agents at once at most | — |
 | 9 | Evidence | **Retention and compliance evidence** (done, [evidence](evidence.md)): daily checkpoints of the ledger time-stamped by an authority, retention of at least six months with archives that verify offline, operational records kept for a period you choose, and reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors | RFC 3161 time-stamping authorities, OpenSSL |
+| 10 | Deployment | **Production hardening** (done, [production](production.md)): several control-plane replicas on PostgreSQL, with changes reaching every replica at once (a block still stops an agent within a second) and the scheduled work on one leader; decisions that take turns, and edits that can't undo a newer one; mutual TLS between the components; and policy bundles OPA verifies before it uses them. The tests run on PostgreSQL too | PostgreSQL `LISTEN`/`NOTIFY` and advisory locks, OPA bundle signing, cert-manager |
 
 ## Later
 
 | Theme | Item | Building block |
 |---|---|---|
-| Deployment | **Multi-replica control plane**: fan out bundle and config change notifications across replicas | PostgreSQL `LISTEN` / `NOTIFY` |
-| Security | **Mutual TLS between components**: the gateway, processor, OPA and control plane authenticate each other instead of relying on network isolation | SPIFFE / SPIRE or cert-manager certificates |
+| Security | **Workload identities for the components**: certificates from SPIFFE / SPIRE rather than AgentGov's own authority, rotated automatically | SPIFFE / SPIRE (agentgateway takes SVIDs for its backend TLS) |
 | Admin access | **Back-channel logout**: end administrator sessions as soon as the identity provider ends them, instead of at expiry | OpenID Connect Back-Channel Logout (supported by Keycloak) |
 | Identity | **Incremental identity reconciliation**: a change notification per agent instead of a periodic full sync | — |
 | Identity | **Enterprise-managed authorization for MCP**: accept and issue identity assertions (ID-JAG) for MCP servers outside the gateway, and let developers' MCP clients through the gateway with their own tokens | MCP enterprise-managed authorization, agentgateway's MCP authentication |
@@ -42,7 +42,7 @@ come second: they report, but they don't enforce.
 | Detection | **Classifier for tool and model traffic**: ask the Granite Guardian that already checks [agent instructions](instructions.md) about tool results (prompt injection) and prompts (jailbreaks) too, next to the processor's heuristics | IBM Granite Guardian |
 | Registry | **More platform connectors**: import agents from cloud agent platforms and SaaS agent builders (AWS, Google, Salesforce, Databricks) the way [Microsoft 365 and Copilot Studio](platforms.md) are, when someone needs one | Platform APIs |
 | Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
-| Evidence | **Signed OPA bundles**, and ledger checkpoints in a transparency log as well as time-stamped | OPA bundle signing, Sigstore Rekor |
+| Evidence | **Ledger checkpoints in a transparency log** as well as time-stamped | Sigstore Rekor |
 | Policy | **AuthZEN interface** so the decision point can be swapped (for example to Cedar) without touching enforcement points | OpenID AuthZEN |
 
 ## Out of scope

@@ -8,7 +8,9 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
+from agentgov.api.versions import if_match
 from agentgov.registry import access_packages, agents, rules
+from agentgov.runtime import JOB_WAIT_SECONDS
 
 router = APIRouter(prefix="/v1", tags=["management rules"])
 read = require(*READ_ROLES)
@@ -46,7 +48,7 @@ def preview_draft(
 @router.post("/rules/evaluate")
 def evaluate(request: Request, _: Principal = Depends(admin)) -> dict[str, Any]:
     """Run the rules now, instead of after the next posture scan."""
-    result = _rt(request).run_rules()
+    result = _rt(request).run_rules(wait=JOB_WAIT_SECONDS)
     if "skipped" in result:
         raise HTTPException(409, result["skipped"])
     return result
@@ -74,7 +76,7 @@ def update_rule(
 ) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         rule = rules.get(s, ref)
-        rules.update(s, rule, body, actor=principal.actor)
+        rules.update(s, rule, body, actor=principal.actor, version=if_match(request))
         return rules.to_dict(s, rule)
 
 

@@ -69,8 +69,9 @@ Each component's `resources` value changes them ([Kubernetes](deploy/kubernetes.
 Autopilot and AKS Automatic raise requests below their minimums, so AgentGov reserves a
 little more there. The
 decision path scales out together: more gateway, processor and OPA replicas, each about
-260m CPU and 320 MiB more. The control plane stays at one replica
-([scaling notes](architecture.md#scaling-notes)).
+260m CPU and 320 MiB more. For high availability, run two control-plane replicas or more
+on PostgreSQL, connected directly or through a pooler in session mode: they use
+`LISTEN`/`NOTIFY` and advisory locks ([production](production.md#several-replicas)).
 
 Optional additions:
 

@@ -63,8 +63,9 @@ secrets:
   existingSecret: ""
 
 controlPlane:
-  # Keep one: signed-in admins' Microsoft sign-ins and change notifications live in
-  # its memory (docs/architecture.md, "Scaling notes").
+  # Two or more for high availability, on PostgreSQL (the bundled one or yours): the
+  # replicas hear each other's changes through it, and one at a time runs the scheduled
+  # work (docs/architecture.md, "Scaling notes").
   replicas: 1
   # Apply database migrations when it starts. Several replicas starting together
   # migrate one at a time.
@@ -90,6 +91,9 @@ controlPlane:
     existingClaim: ""
     size: 20Gi
     storageClass: ""
+    # Several replicas need ReadWriteMany (a file share such as Azure Files, Filestore or
+    # EFS): any of them may archive.
+    accessMode: ReadWriteOnce
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}
@@ -304,6 +308,48 @@ externalKeycloak:
   realm: agentgov
   # The issuer in its tokens; defaults to url + /realms/ + realm.
   issuer: ""
+
+internalTLS:
+  # Mutual TLS between AgentGov's components (docs/architecture.md): each has a
+  # certificate from AgentGov's own authority, serves TLS on its internal ports and asks
+  # callers for a certificate from the same authority; the control plane gives the
+  # service role only on its internal port (8443). The chart makes the authority and the
+  # certificates on install and keeps them; or let cert-manager issue them.
+  enabled: true
+  certManager:
+    # Certificates from cert-manager instead. The control plane and OPA take any
+    # certificate from the authority as one of AgentGov's components, so the authority
+    # must issue AgentGov's certificates only. Without an issuer named here, cert-manager
+    # makes one for this release alone (a self-signed CA in its namespace, kept in the
+    # <release>-tls-ca Secret). An issuer of yours must be an Issuer in the release's
+    # namespace whose CA issues nothing else; a ClusterIssuer issues to any namespace
+    # that asks, so the chart refuses one.
+    enabled: false
+    issuerRef:
+      name: ""
+      kind: Issuer
+      group: cert-manager.io
+    # How long the components' certificates last. The control plane, the processor, the
+    # gateway and the collector read theirs when they start (OPA every minute), so a
+    # renewed certificate takes effect as they restart: keep it long, or restart the pods
+    # after each renewal (with Reloader, for example).
+    duration: 87600h
+
+bundleSigning:
+  # The control plane signs OPA's bundles, and OPA refuses one that doesn't verify, so
+  # that nobody on the way between them can hand OPA policies or data of their own
+  # (docs/architecture.md). The chart makes the key (RSA) and its certificate on install
+  # and keeps them; or name a kubernetes.io/tls Secret of yours (tls.key and tls.crt),
+  # such as one cert-manager issues.
+  enabled: true
+  existingSecret: ""
+  # RS256 for an RSA key; ES256 or ES384 for an EC key on P-256 or P-384.
+  algorithm: RS256
+
+podDisruptionBudget:
+  # For each part running two or more replicas, a PodDisruptionBudget that lets a node
+  # drain take one replica at a time.
+  enabled: true
 
 networkPolicy:
   # Allow only the traffic AgentGov needs between its parts (your CNI must enforce

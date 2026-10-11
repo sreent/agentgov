@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.db import mark_changed
+from agentgov.db import lock, mark_changed
 from agentgov.models import DELETED, AccessAssignment, AccessPackage, Agent, Blueprint
 from agentgov.registry import features, findings, issues, validation
 from agentgov.registry.errors import (
@@ -35,6 +35,7 @@ from agentgov.registry.errors import (
     NotFound,
     ValidationError,
 )
+from agentgov.registry.versions import edited, start_edit
 
 FEATURE = "access-packages"
 FIELDS = (
@@ -173,13 +174,20 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> AccessPacka
 
 
 def update(
-    session: Session, package: AccessPackage, data: dict[str, Any], *, actor: str
+    session: Session,
+    package: AccessPackage,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
 ) -> list[str]:
+    start_edit(session, package, version, f"access package {package.name}")
     _known(data)
     if "name" in data and data["name"] != package.name:
         raise ValidationError("an access package's name can't change: assignments name it")
     changed = _apply(session, package, data)
     if changed:
+        edited(package)
         mark_changed(session, "access")
         ledger.append(
             session,
@@ -237,6 +245,7 @@ def to_dict(session: Session, package: AccessPackage) -> dict[str, Any]:
     return {
         "id": package.id,
         "name": package.name,
+        "version": package.version,
         **_details(package),
         "assignments": {s: counts.get(s, 0) for s in (REQUESTED, ACTIVE, EXPIRED)},
         "created_at": ids.isoformat(package.created_at),
@@ -373,6 +382,8 @@ def request(
             f"access package {package.name!r} is for agents on {', '.join(allowed)}; "
             f"{agent.name} is on {blueprint or 'no blueprint'}"
         )
+    # One request at a time per agent: two at once would both find none waiting.
+    lock(session, agent)
     pending = session.scalar(
         select(AccessAssignment.id).where(
             AccessAssignment.agent_id == agent.id,
@@ -421,6 +432,7 @@ def _grant(session: Session, row: AccessAssignment, *, actor: str, note: str | N
 def decide(
     session: Session, row: AccessAssignment, *, approve: bool, actor: str, note: Any = None
 ) -> AccessAssignment:
+    lock(session, row)
     if row.status != REQUESTED:
         raise InvalidTransition(f"assignment {row.id} is {row.status}, not requested")
     if actor == row.requested_by:
@@ -439,6 +451,7 @@ def decide(
 def revoke(
     session: Session, row: AccessAssignment, *, actor: str, reason: Any = None
 ) -> AccessAssignment:
+    lock(session, row)
     if row.status not in HELD:
         raise InvalidTransition(f"assignment {row.id} is {row.status}: only held ones are revoked")
     row.status = REVOKED
@@ -455,6 +468,7 @@ def review(
     session: Session, row: AccessAssignment, *, keep: bool, actor: str, note: Any = None
 ) -> AccessAssignment:
     """Someone looked at whether the agent still needs it: kept, or revoked."""
+    lock(session, row)
     if row.status not in HELD:
         raise InvalidTransition(f"assignment {row.id} is {row.status}: only held ones are reviewed")
     if not keep:

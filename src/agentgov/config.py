@@ -258,6 +258,13 @@ class Settings:
     opa_url: str | None = None
     # Longest a bundle long-poll request is held open.
     bundle_long_poll_seconds: int = 30
+    # A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles
+    # with; OPA verifies each with the matching certificate or public key, and refuses one
+    # that doesn't verify (docs/production.md). `agentgov bundle-signing-key DIR` makes a
+    # pair. Unset, bundles go unsigned.
+    bundle_signing_key_file: str | None = None
+    # The key's name: OPA's configuration names the same one (bundles.<name>.signing.keyid).
+    bundle_signing_key_id: str = "agentgov"
 
     # --- agentgateway (enforcement) ---------------------------------------------
     # Where the generated agentgateway config is written (shared volume).
@@ -281,6 +288,20 @@ class Settings:
     # goes, such as http://localhost:16686/trace/{trace_id} for Jaeger. Ledger entries
     # recorded at the gateway then link to their trace.
     trace_url: str | None = None
+
+    # --- Mutual TLS between components (docs/production.md) -----------------------
+    # Where this component finds its certificate (tls.crt), its key (tls.key) and the
+    # certificate of the authority that issued every component's (ca.crt), as
+    # cert-manager writes them. Set, AgentGov's components talk over mutual TLS: each
+    # serves TLS on its internal ports and asks callers for a certificate from the same
+    # authority, and the control plane gives the service role only on its internal port.
+    # `agentgov internal-certs DIR` makes an authority and the certificates.
+    tls_dir: str | None = None
+    # The control plane's port for AgentGov's other components, over mutual TLS.
+    internal_port: int = 8443
+    # Where agentgateway finds its tls.crt, tls.key and ca.crt, to call the processor
+    # over mutual TLS (the control plane writes it into the gateway's configuration).
+    gateway_tls_dir: str = "/tls"
 
     # --- Governance processor ----------------------------------------------------
     # Where it answers agentgateway about tool calls (gRPC).
@@ -398,6 +419,12 @@ class Settings:
         self.m365_types()  # raises on unknown package types
         self.guardian_criteria_list()  # raises on unknown criteria
         self.pii_thresholds()  # raises on malformed entries
+
+    def tls(self) -> Any:
+        """This component's certificate for mutual TLS (agentgov.tls), or None without."""
+        from agentgov.tls import Identity
+
+        return Identity.from_dir(self.tls_dir) if self.tls_dir else None
 
     def feature_pins(self) -> dict[str, str]:
         from agentgov.registry.features import parse_pins, unmet

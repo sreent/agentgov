@@ -18,7 +18,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from agentgov.api.auth import Principal, require
 from agentgov.gateway import etag_of
-from agentgov.opa.bundle import BUNDLE_CONTENT_TYPE, parse_prefer_wait
+from agentgov.opa.bundle import BUNDLE_CONTENT_TYPE, parse_prefer_wait, record_status
 from agentgov.registry import (
     agents,
     approvals,
@@ -106,7 +106,6 @@ async def opa_decision_logs(request: Request, _: Principal = Depends(service)) -
 async def opa_status(request: Request, _: Principal = Depends(service)) -> dict[str, str]:
     rt = _rt(request)
     status = await _json_body(request) or {}
-    rt.bundles.record_status(status)
     errors = {
         name: b.get("errors") or b.get("message")
         for name, b in (status.get("bundles") or {}).items()
@@ -115,6 +114,7 @@ async def opa_status(request: Request, _: Principal = Depends(service)) -> dict[
 
     def store() -> None:
         with rt.db.session() as s:
+            record_status(s, status)
             if errors:
                 findings.raise_finding(
                     s,

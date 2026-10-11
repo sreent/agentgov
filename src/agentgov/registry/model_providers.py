@@ -19,10 +19,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
-from agentgov.db import mark_changed
+from agentgov.db import lock, mark_changed
 from agentgov.models import BLOCKED, MODEL_PROVIDER_KINDS, Agent, ModelProvider
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
+from agentgov.registry.versions import edited, start_edit
 
 APPROVED = "approved"
 KEY_DIR = "/model-keys"
@@ -140,10 +141,17 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> ModelProvid
 
 
 def update(
-    session: Session, provider: ModelProvider, data: dict[str, Any], *, actor: str
+    session: Session,
+    provider: ModelProvider,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
 ) -> list[str]:
+    start_edit(session, provider, version, f"model provider {provider.name}")
     changed = _apply(provider, data)
     if changed:
+        edited(provider)
         ledger.append(
             session,
             type="model_provider.updated",
@@ -160,6 +168,7 @@ def set_status(
 ) -> ModelProvider:
     if action not in ("block", "unblock"):
         raise ValidationError(f"unknown action {action!r}")
+    lock(session, provider)
     if action == "unblock" and provider.status != BLOCKED:
         raise InvalidTransition("model provider is not blocked")
     if action == "block" and provider.status == BLOCKED:
@@ -193,6 +202,7 @@ def to_dict(provider: ModelProvider) -> dict[str, Any]:
     return {
         "id": provider.id,
         "name": provider.name,
+        "version": provider.version,
         "kind": provider.kind,
         "description": provider.description or "",
         "base_url": provider.base_url,

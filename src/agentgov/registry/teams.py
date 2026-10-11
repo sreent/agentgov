@@ -20,6 +20,7 @@ from agentgov.models import DELETED, Agent, Blueprint, Destination, Team
 from agentgov.registry import validation
 from agentgov.registry.destinations import CHAT
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
+from agentgov.registry.versions import edited, start_edit
 
 FIELDS = ("description", "members", "emails", "destinations", "default")
 # Good enough to catch typos; the mail server has the last word.
@@ -157,12 +158,21 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Team:
     return team
 
 
-def update_team(session: Session, team: Team, data: dict[str, Any], *, actor: str) -> list[str]:
+def update_team(
+    session: Session,
+    team: Team,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
+) -> list[str]:
+    start_edit(session, team, version, f"team {team.name}")
     _known(data, ("name",))
     if "name" in data and data["name"] != team.name:
         raise ValidationError("a team's name can't change: agents and blueprints name it")
     changed = _apply(session, team, data)
     if changed:
+        edited(team)
         ledger.append(
             session,
             type="team.updated",
@@ -222,6 +232,7 @@ def to_dict(team: Team) -> dict[str, Any]:
     return {
         "id": team.id,
         "name": team.name,
+        "version": team.version,
         **_details(team),
         "created_at": ids.isoformat(team.created_at),
         "updated_at": ids.isoformat(team.updated_at),
