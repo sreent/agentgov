@@ -30,6 +30,7 @@ from agentgov.registry import (
     identity_issuers,
     model_providers,
     risk,
+    teams,
     validation,
 )
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
@@ -49,6 +50,7 @@ EDITABLE = (
     "description",
     "owner",
     "sponsors",
+    "team",
     "labels",
     "framework",
     "platform",
@@ -191,6 +193,8 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
             continue
         if key in ("sponsors", "models"):
             value = validation.string_list(value, key)
+        elif key == "team":
+            value = teams.reference(session, value)
         elif key == "labels":
             value = validation.labels(value)
         elif key == "permissions":
@@ -495,6 +499,7 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         "blueprint": agent.blueprint.name if agent.blueprint else None,
         "owner": agent.owner,
         "sponsors": agent.sponsors or [],
+        "team": agent.team,
         "labels": agent.labels or {},
         "framework": agent.framework,
         "platform": agent.platform,

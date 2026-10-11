@@ -98,6 +98,22 @@ class Settings:
     # written, on the replica that wrote it). 0 turns delivery off.
     delivery_interval_seconds: int = 10
 
+    # --- Issues (docs/issues.md) ---------------------------------------------------
+
+    # Hours an issue waits at each step of its chain (owner, sponsors, team) for someone
+    # to acknowledge it, before it goes to the next, by severity.
+    issue_escalation_hours: str = "critical:4,high:24,medium:72,low:168,info:168"
+    # Seconds between rounds of routing issues, escalating them and sending what is due.
+    issues_interval_seconds: int = 60
+    # The mail server for issues' emails: smtp://host:587 (STARTTLS) or smtps://host:465
+    # (TLS). Without it, issues reach people in AgentGov and in their teams' chats only.
+    smtp_url: str | None = None
+    # The sender of issues' emails, such as agentgov@example.com.
+    smtp_from: str | None = None
+    # The mail server's user and password, if it needs them.
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+
     # --- Keycloak (agent identity) ---------------------------------------------
     # Base URL the control plane uses to reach Keycloak's admin API.
     keycloak_url: str | None = None
@@ -303,6 +319,18 @@ class Settings:
             raise ValueError("AGENTGOV_PRESIDIO_FAILURE_MODE must be 'open' or 'closed'")
         if self.delivery_interval_seconds < 0:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
+        if self.issues_interval_seconds < 0:
+            raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
+        if self.smtp_url:
+            scheme = self.smtp_url.partition("://")[0]
+            if scheme not in ("smtp", "smtps") or "@" in self.smtp_url:
+                raise ValueError(
+                    "AGENTGOV_SMTP_URL is smtp://host:port or smtps://host:port, without "
+                    "credentials (AGENTGOV_SMTP_USERNAME and AGENTGOV_SMTP_PASSWORD hold them)"
+                )
+            if not self.smtp_from:
+                raise ValueError("AGENTGOV_SMTP_URL needs AGENTGOV_SMTP_FROM, the sender")
+        self.escalation_delays()  # raises on malformed entries
         if self.session_hours <= 0:
             raise ValueError("AGENTGOV_SESSION_HOURS must be positive")
         if self.trace_url and "{trace_id}" not in self.trace_url:
@@ -386,6 +414,25 @@ class Settings:
             except ValueError as exc:
                 raise ValueError(f"bad AGENTGOV_PII_ENTITIES entry {item!r}") from exc
         return thresholds
+
+    def escalation_delays(self) -> dict[str, float]:
+        """Hours an issue of each severity waits at a step of its chain."""
+        from agentgov.models import SEVERITIES
+
+        delays: dict[str, float] = {}
+        for item in filter(None, (p.strip() for p in self.issue_escalation_hours.split(","))):
+            severity, _, hours = item.partition(":")
+            try:
+                delays[severity.strip().lower()] = float(hours)
+            except ValueError as exc:
+                raise ValueError(f"bad AGENTGOV_ISSUE_ESCALATION_HOURS entry {item!r}") from exc
+        unknown = sorted(set(delays) - set(SEVERITIES))
+        if unknown or any(h <= 0 for h in delays.values()):
+            raise ValueError(
+                "AGENTGOV_ISSUE_ESCALATION_HOURS takes severity:hours pairs, hours above 0, for "
+                f"{', '.join(SEVERITIES)}"
+            )
+        return {s: delays.get(s, 72.0) for s in SEVERITIES}
 
     def guardian_criteria_list(self) -> list[str]:
         from agentgov.scanners.guardian import CRITERIA

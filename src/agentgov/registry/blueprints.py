@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.db import mark_changed
 from agentgov.models import Agent, Blueprint
-from agentgov.registry import validation
+from agentgov.registry import teams, validation
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
 FIELDS = (
@@ -27,6 +27,7 @@ FIELDS = (
     "require_sponsor",
     "attestation_days",
     "labels",
+    "team",
 )
 
 
@@ -43,7 +44,7 @@ def list_all(session: Session) -> list[Blueprint]:
     return list(session.scalars(select(Blueprint).order_by(Blueprint.name)))
 
 
-def _apply(bp: Blueprint, data: dict[str, Any]) -> list[str]:
+def _apply(session: Session, bp: Blueprint, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in FIELDS:
         if key not in data:
@@ -67,6 +68,8 @@ def _apply(bp: Blueprint, data: dict[str, Any]) -> list[str]:
             value = validation.approvals_by(value)
         elif key == "labels":
             value = validation.labels(value)
+        elif key == "team":
+            value = teams.reference(session, value)
         elif key in ("require_sponsor", "require_workload_identity"):
             value = bool(value)
         elif key == "attestation_days":
@@ -96,7 +99,7 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Blueprint:
         approvals_by="approvers",
         require_workload_identity=False,
     )
-    _apply(bp, data)
+    _apply(session, bp, data)
     session.add(bp)
     session.flush()
     ledger.append(
@@ -111,7 +114,7 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Blueprint:
 
 
 def update(session: Session, bp: Blueprint, data: dict[str, Any], *, actor: str) -> list[str]:
-    changed = _apply(bp, data)
+    changed = _apply(session, bp, data)
     if changed:
         ledger.append(
             session,
@@ -152,6 +155,7 @@ def to_dict(bp: Blueprint) -> dict[str, Any]:
         "require_sponsor": bp.require_sponsor,
         "attestation_days": bp.attestation_days,
         "labels": bp.labels or {},
+        "team": bp.team,
         "created_at": ids.isoformat(bp.created_at),
         "updated_at": ids.isoformat(bp.updated_at),
     }

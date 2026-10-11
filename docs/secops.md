@@ -33,7 +33,7 @@ The feature's mode is the level. Each level includes the ones before it.
 |---|---|---|
 | **off** (default) | Nothing | Read everything, like `auditor` |
 | `inform` | SIEMs and chats get what their destinations take; the [events API](#the-events-api) answers | Read |
-| `triage` | The same | Also resolve, dismiss and reopen findings |
+| `triage` | The same | Also resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks |
 | `contain` | The same | Also block and unblock agents, tool servers, model providers and identity issuers |
 | `decide` | The same | Also approve and deny the approval requests sent to approvers |
 

@@ -13,6 +13,8 @@ matrix in docs/baseline-agent365.md maps one-to-one:
 * ``ModelProvider`` - a model provider agents call through agentgateway.
 * ``Policy``     - an organisation Rego module distributed to OPA.
 * ``FeatureSetting`` - which of AgentGov's features are used, and how strictly.
+* ``Team``       - people and chat channels that own agents, and that issues about
+                   agents escalate to.
 * ``McpSighting`` - an MCP server set up on a developer's machine, as reported.
 """
 
@@ -95,6 +97,8 @@ class Blueprint(Base):
     )
     # Other agents its agents may call over A2A, by name: ["billing-*", "kb-agent"].
     agent_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    # The team issues about its agents escalate to, after their owners and sponsors.
+    team: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -119,6 +123,8 @@ class Agent(Base):
 
     owner: Mapped[str | None] = mapped_column(String(200), nullable=True)
     sponsors: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Its own escalation team, instead of its blueprint's.
+    team: Mapped[str | None] = mapped_column(String(128), nullable=True)
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     framework: Mapped[str | None] = mapped_column(String(100), nullable=True)
     platform: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -547,6 +553,79 @@ class Finding(Base):
     last_seen: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     resolved_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Who it is with (docs/issues.md): how far up its chain it has gone (owner, sponsors,
+    # team), the people and teams there, and when it goes further if nobody acknowledges it.
+    level: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    assignees: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    escalate_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    acknowledged_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # A risk accepted until a date, and why: it opens again then, if it still holds.
+    accepted_until: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    accepted_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Checks in a row that found it gone (findings from syncs close after two), and
+    # whether the last check could run at all.
+    clean_checks: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    verified: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # How many times it was raised again after being resolved or accepted: each time, its
+    # chain starts over.
+    round: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class Team(Base):
+    """People and chat channels that can own agents, and that issues escalate to."""
+
+    __tablename__ = "teams"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    # The people in it, by email address or user name: they see its issues in AgentGov
+    # and may acknowledge them.
+    members: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Where its issues are emailed: a list's or a shared mailbox's address, or people's
+    # own (without any, its members' addresses). And the Teams and Slack destinations,
+    # by name, that they are posted to.
+    emails: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    destinations: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Issues that have no team of their own escalate to the default team.
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class Notification(Base):
+    """A message about an issue to someone's email address or a team's chat, which the
+    control plane sends and retries (docs/issues.md)."""
+
+    __tablename__ = "notifications"
+    # Once per recipient, at each level of each round of an issue.
+    __table_args__ = (
+        Index(
+            "ix_notifications_once",
+            "finding_id",
+            "round",
+            "level",
+            "channel",
+            "recipient",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    finding_id: Mapped[str] = mapped_column(String(32), index=True)
+    round: Mapped[int] = mapped_column(Integer, default=0)
+    level: Mapped[str] = mapped_column(String(16))
+    # "email" to an address, or "slack" or "teams" to a destination's channel, by name.
+    channel: Mapped[str] = mapped_column(String(16))
+    recipient: Mapped[str] = mapped_column(String(320))
+    # pending, sent, or failed for good after retrying.
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = _created()
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 class RiskSignal(Base):

@@ -16,6 +16,7 @@ from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.models import AgentActivity, IntegrationState
+from agentgov.registry import platforms
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
 from tests.test_cli import _Shared, runner
@@ -285,9 +286,31 @@ class TestEntraAgentId:
         risk = ms.get("/v1/agents/sales-helper/risk", headers=ADMIN).json()
         assert any("disabled by Microsoft" in f["factor"] for f in risk["factors"])
         graph.identities[0]["disabledByMicrosoftStatus"] = "NotDisabled"
+        # It closes once two syncs in a row find it gone (docs/issues.md).
+        sync(ms, "entra-agent-id").raise_for_status()
+        open_ = ms.get("/v1/findings", params={"status": "open"}, headers=ADMIN).json()
+        assert [f["type"] for f in open_ if f["type"].startswith("entra.")] == [
+            "entra.disabled_by_microsoft"
+        ]
         sync(ms, "entra-agent-id").raise_for_status()
         open_ = ms.get("/v1/findings", params={"status": "open"}, headers=ADMIN).json()
         assert not [f for f in open_ if f["type"].startswith("entra.")]
+
+    def test_a_failed_sync_leaves_its_findings_unverified(self, ms, graph) -> None:
+        graph.identities[0]["disabledByMicrosoftStatus"] = "DisabledDueToSuspiciousActivity"
+        sync(ms, "entra-agent-id").raise_for_status()
+        rt = ms.app.state.rt
+        with rt.db.session() as s:
+            platforms.set_sync(s, "entra-agent-id", ok=False, counts={}, message="Graph is down")
+        (finding,) = ms.get(
+            "/v1/findings", params={"type": "entra.disabled_by_microsoft"}, headers=ADMIN
+        ).json()
+        assert (finding["status"], finding["verified"]) == ("open", False)
+        sync(ms, "entra-agent-id").raise_for_status()
+        (finding,) = ms.get(
+            "/v1/findings", params={"type": "entra.disabled_by_microsoft"}, headers=ADMIN
+        ).json()
+        assert finding["verified"] is True
 
     def test_deleted_identities_are_kept_and_marked(self, ms, graph) -> None:
         sync(ms, "entra-agent-id").raise_for_status()

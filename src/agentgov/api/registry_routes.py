@@ -19,6 +19,7 @@ from agentgov.registry import (
     instructions,
     platforms,
     policies,
+    teams,
     toolservers,
 )
 from agentgov.registry.errors import Conflict
@@ -287,6 +288,53 @@ def delete_blueprint(
 ) -> dict[str, str]:
     with _rt(request).db.session() as s:
         blueprints.delete(s, blueprints.get(s, ref), actor=principal.actor)
+        return {"deleted": ref}
+
+
+# ------------------------------------------------------------------------ teams
+
+
+@router.get("/teams", tags=["teams"])
+def list_teams(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+    with _rt(request).db.session() as s:
+        return [teams.to_dict(t) for t in teams.list_all(s)]
+
+
+@router.post("/teams", status_code=201, tags=["teams"])
+def create_team(
+    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
+) -> dict[str, Any]:
+    """People and chat channels that own agents, and that issues escalate to."""
+    with _rt(request).db.session() as s:
+        return teams.to_dict(teams.create(s, body, actor=principal.actor))
+
+
+@router.get("/teams/{ref}", tags=["teams"])
+def get_team(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
+    with _rt(request).db.session() as s:
+        team = teams.get(s, ref)
+        return {**teams.to_dict(team), "named_by": teams.users(s, team.name)}
+
+
+@router.patch("/teams/{ref}", tags=["teams"])
+def update_team(
+    request: Request,
+    ref: str,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(admin),
+) -> dict[str, Any]:
+    with _rt(request).db.session() as s:
+        team = teams.get(s, ref)
+        teams.update_team(s, team, body, actor=principal.actor)
+        return teams.to_dict(team)
+
+
+@router.delete("/teams/{ref}", tags=["teams"])
+def delete_team(
+    request: Request, ref: str, principal: Principal = Depends(admin)
+) -> dict[str, str]:
+    with _rt(request).db.session() as s:
+        teams.delete(s, teams.get(s, ref), actor=principal.actor)
         return {"deleted": ref}
 
 

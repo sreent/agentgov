@@ -63,6 +63,8 @@ class TestAuth:
             "actor": "admin:bootstrap",
             "via": "token",
             "microsoft": False,
+            # What is sent to people themselves (docs/issues.md, docs/acting-for-people.md).
+            "inbox": {"issues": True, "approvals": False},
         }
         ci = client.get("/v1/me", headers=key(client, "registrar", "ci")).json()
         assert (ci["actor"], ci["via"]) == ("registrar:ci", "api_key")

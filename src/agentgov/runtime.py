@@ -17,6 +17,7 @@ from agentgov.gateway import GatewayConfigWriter
 from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
+from agentgov.notify import Notifier
 from agentgov.opa.bundle import BundleServer
 from agentgov.platforms import connections
 from agentgov.platforms.microsoft import (
@@ -31,6 +32,7 @@ from agentgov.registry import agents as agents_svc
 from agentgov.registry import (
     features,
     instructions,
+    issues,
     mcp_sightings,
     microsoft_signals,
     platforms,
@@ -110,6 +112,8 @@ class Runtime:
         self.gateway = GatewayConfigWriter(self.db, settings)
         # The security team's SIEMs and chats (the security-operations feature).
         self.delivery = Delivery(self.db, settings, http=destinations_http)
+        # Issues to the people responsible for them, by email and in their teams' chats.
+        self.notifier = Notifier(self.db, settings, self.delivery)
         self.ledger_integrity = ledger.IntegrityMonitor()
         # Administrator single sign-on (OIDC), when a client secret is configured.
         self.sso = OIDCClient(settings, http=oidc_http) if settings.sso_enabled else None
@@ -174,6 +178,11 @@ class Runtime:
             if settings.delivery_interval_seconds > 0
             else None
         )
+        self._issues_worker = (
+            _Worker("issues", self.run_issues, settings.issues_interval_seconds)
+            if settings.issues_interval_seconds > 0
+            else None
+        )
         self._started = False
 
     # -- lifecycle -----------------------------------------------------------
@@ -209,6 +218,8 @@ class Runtime:
             self._retention_worker.start()
         if self._delivery_worker is not None:
             self._delivery_worker.start()
+        if self._issues_worker is not None:
+            self._issues_worker.start()
         self._started = True
 
     def stop(self) -> None:
@@ -226,6 +237,8 @@ class Runtime:
         self._retention_worker.stop()
         if self._delivery_worker is not None:
             self._delivery_worker.stop()
+        if self._issues_worker is not None:
+            self._issues_worker.stop()
         self.db.dispose()
 
     # -- reconciliation triggers -----------------------------------------------
@@ -262,6 +275,16 @@ class Runtime:
         if purged:
             log.info("purged %d agent(s) deleted over the retention period", len(purged))
         return purged
+
+    def run_issues(self) -> dict[str, Any]:
+        """Route findings to the people responsible, escalate those nobody acknowledged,
+        open accepted risks whose time ran out, and send what is due."""
+        with self.db.session() as session:
+            reopened = issues.reopen_accepted(session)
+            if not features.is_on(session, "issues"):
+                return {"reopened": reopened}
+            routed = issues.route(session, self.settings)
+        return {"reopened": reopened, **routed, **self.notifier.run()}
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;

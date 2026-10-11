@@ -37,6 +37,8 @@
   delegation
 * [Agent instructions](instructions.md): checking agents' system prompts for harmful or
   malicious content
+* [Issues](issues.md): findings sent to the people responsible for each agent (its owner,
+  its sponsors, its team), escalated until someone takes them on
 * [Security operations](secops.md): the ledger to SIEMs as OCSF events, alerts in Teams and
   Slack, and how much the security team's tools may do
 

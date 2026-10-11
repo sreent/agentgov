@@ -372,6 +372,22 @@ CATALOG: tuple[Feature, ...] = (
         },
     ),
     Feature(
+        "issues",
+        "Issues to the people responsible",
+        "lifecycle",
+        "Findings go to the people responsible for them: an agent's owner, then its sponsors, "
+        "then its team, each told by email and in their team's chat, and the issue goes up "
+        "the chain when nobody acknowledges it in time.",
+        SWITCH,
+        ON,
+        {
+            ON: "Findings are routed, escalated and sent to the people responsible.",
+            OFF: "Findings stay in AgentGov's list only, as for administrators.",
+        },
+        needs="teams with email addresses or chat channels; a mail server "
+        "(AGENTGOV_SMTP_URL) for email",
+    ),
+    Feature(
         "microsoft-365",
         "Microsoft 365 agent catalog",
         "microsoft",

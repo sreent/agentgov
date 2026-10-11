@@ -172,6 +172,16 @@ never in a values file you share.
 | `AGENTGOV_DESTINATION_SECRETS_DIR` | `/destination-secrets` | Where destinations' credentials are: a file per destination, named after it (a mounted secret). Never in the database. |
 | `AGENTGOV_DELIVERY_INTERVAL_SECONDS` | `10` | How often destinations are sent what is new in the ledger (also as soon as it is written, on the replica that wrote it). 0 turns delivery off. |
 
+### Issues
+
+| Variable | Default | What it does |
+|---|---|---|
+| `AGENTGOV_ISSUE_ESCALATION_HOURS` | `critical:4,high:24,medium:72,low:168,info:168` | Hours an issue waits at each step of its chain (owner, sponsors, team) for someone to acknowledge it, before it goes to the next, by severity. |
+| `AGENTGOV_ISSUES_INTERVAL_SECONDS` | `60` | Seconds between rounds of routing issues, escalating them and sending what is due. |
+| `AGENTGOV_SMTP_URL` | — | The mail server for issues' emails: smtp://host:587 (STARTTLS) or smtps://host:465 (TLS). Without it, issues reach people in AgentGov and in their teams' chats only. |
+| `AGENTGOV_SMTP_FROM` | — | The sender of issues' emails, such as agentgov@example.com. |
+| `AGENTGOV_SMTP_USERNAME`<br>`AGENTGOV_SMTP_PASSWORD` (secret) | —<br>— | The mail server's user and password, if it needs them. |
+
 ### Keycloak (agent identity)
 
 | Variable | Default | What it does |

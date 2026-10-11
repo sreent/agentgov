@@ -62,6 +62,13 @@ FINDING_TYPES = {
     "platform.maker_credentials",
     "platform.shared_with_everyone",
 }
+# The findings each sync's data raises: while its latest sync failed, they are
+# unverified (docs/issues.md), and verified again when one succeeds.
+SYNCED_FINDINGS = {
+    "copilot-studio": FINDING_TYPES,
+    "entra-agent-id": {"entra.disabled_by_microsoft"},
+    "defender": {"defender.alert"},
+}
 SYSTEM_ACTOR = "system:platforms"
 INVENTORY_TYPE = "microsoft.copilotstudio/agents"
 _CONNECTOR_ID = re.compile(r"^[A-Za-z0-9_.\-]{1,200}$")
@@ -441,8 +448,13 @@ def record_agent_identities(
                 "here until that is resolved.",
             )
             present.add(finding.key)
+    # Gone from two syncs in a row: one odd page from Microsoft Graph doesn't close it.
     findings.resolve_absent(
-        session, types={"entra.disabled_by_microsoft"}, present_keys=present, actor=SYSTEM_ACTOR
+        session,
+        types={"entra.disabled_by_microsoft"},
+        present_keys=present,
+        actor=SYSTEM_ACTOR,
+        clean=2,
     )
     # Identities deleted from Entra stay in the registry, marked as gone.
     others = set(
@@ -659,10 +671,13 @@ def set_sync(
     message: str = "",
     actor: str | None = None,
 ) -> None:
-    """Remember how the latest sync or import went; one a person started is in the ledger."""
+    """Remember how the latest sync or import went; one a person started is in the ledger.
+    The findings a failed sync would have checked are unverified until one succeeds."""
     sync = session.get(PlatformSync, source) or PlatformSync(source=source)
     sync.synced_at, sync.ok, sync.message, sync.counts = ids.utcnow(), ok, message, counts
     session.add(sync)
+    if source in SYNCED_FINDINGS:
+        findings.mark_unverified(session, types=SYNCED_FINDINGS[source], verified=ok)
     if actor:
         ledger.append(
             session,

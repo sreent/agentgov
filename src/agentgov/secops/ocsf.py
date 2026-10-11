@@ -368,15 +368,24 @@ def _authentication(entry: LedgerEntry) -> dict[str, Any]:
 def _finding(entry: LedgerEntry, class_uid: int, agent: Agent | None) -> dict[str, Any]:
     details = entry.details or {}
     verb = entry.type.split(".", 1)[1]
-    activity_id, activity = {"raised": (1, "Create"), "reopened": (2, "Update")}.get(
-        verb, (3, "Close")
-    )
+    # Closed when resolved, dismissed or its risk accepted; anything else that happens to an
+    # open finding (as an issue, docs/issues.md) updates it.
+    activity_id, activity = {
+        "raised": (1, "Create"),
+        "resolved": (3, "Close"),
+        "dismissed": (3, "Close"),
+        "accepted": (3, "Close"),
+    }.get(verb, (2, "Update"))
     event = _base(entry, class_uid, activity_id, activity)
     status_id, status = {
         "raised": (1, "New"),
         "reopened": (1, "New"),
+        "assigned": (1, "New"),
+        "escalated": (1, "New"),
+        "acknowledged": (2, "In Progress"),
         "resolved": (4, "Resolved"),
         "dismissed": (3, "Suppressed"),
+        "accepted": (3, "Suppressed"),
     }.get(verb, (99, "Other"))
     event["status_id"], event["status"] = status_id, status
     severity = SEVERITY_IDS.get(str(details.get("severity")), INFORMATIONAL)
