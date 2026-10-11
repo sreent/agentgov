@@ -139,6 +139,11 @@ def create_app(
             "sso": {"enabled": settings.sso_enabled, "login_url": "/auth/login"},
             # Signed-in administrators can act in Microsoft 365 through AgentGov.
             "microsoft_admin_actions": settings.microsoft_admin_actions,
+            # IBM Granite Guardian, for agent instructions and traffic (docs/detection.md).
+            "classifier": {
+                "enabled": bool(settings.guardian_url),
+                "model": settings.guardian_model if settings.guardian_url else None,
+            },
         }
 
     @app.get("/v1/me", tags=["system"])

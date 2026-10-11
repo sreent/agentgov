@@ -35,10 +35,12 @@
   act for, and approvals sent to the person
 * [Agents' own identities](agent-identity.md): Kubernetes service accounts, SPIFFE IDs and
   Microsoft Entra Agent ID instead of client secrets
-* [Agent to agent](agent-to-agent.md): calls between agents over A2A, and the chain of
-  delegation
+* [Agent to agent](agent-to-agent.md): calls between agents over A2A, their answers, and
+  the chain of delegation
 * [Agent instructions](instructions.md): checking agents' system prompts for harmful or
   malicious content
+* [Detection](detection.md): what the gateway's rules catch, and a classifier's second
+  opinion on tool results, people's prompts and agents' answers
 * [Access packages](access-packages.md): tools, models and agents an agent holds for a
   while once approved, with reminders, renewals and reviews
 * [Issues](issues.md): findings sent to the people responsible for each agent (its owner,

@@ -39,6 +39,12 @@ token:
                       the delegation it carries; the processor's answer hands the called
                       agent a delegation of its own and who called it, in headers that
                       replace any the caller set (``agentgov.identity.chains``).
+* ``extProc``       - every answer goes to the processor as it streams back
+                      (``agentgov.processor.a2a_answers``), which masks credentials and
+                      personal data in it or withholds it, as it does tool results; while
+                      data protection or prompt-injection defence is on. The agent is
+                      asked for answers that aren't compressed (``requestHeaderModifier``),
+                      which the processor couldn't read.
 
 Agents carry their delegation (``X-AgentGov-Delegation``) on the calls they make for the
 work they were handed, to tools and models too: the processor reads it there as well.
@@ -285,6 +291,53 @@ A2A_MAX_BODY = 256 * 1024
 # than not found.
 
 
+def _answer_checks(agent: Agent, settings: Settings) -> dict[str, Any]:
+    """agentgateway's external processing of the agent's answers, by the processor
+    (agentgov.processor.a2a_answers): each answer as it streams, with whom it answers in
+    metadata. Guarded expressions give "" where a claim or a header is missing."""
+
+    def claim(path: str, *, as_json: bool = False) -> str:
+        parts = path.split(".")
+        present = " && ".join(f"has(jwt.{'.'.join(parts[: i + 1])})" for i in range(len(parts)))
+        value = f"toJson(jwt.{path})" if as_json else f"jwt.{path}"
+        return f'{present} ? {value} : ""'
+
+    return {
+        "host": settings.processor_address,
+        "failureMode": "failClosed",
+        "metadataContext": {
+            "agentgov": {
+                "agent": json.dumps(agent.name),
+                "path": "request.path",
+                "agent_id": claim("agent_id"),
+                "client_id": claim("azp"),
+                "subject": claim("sub"),
+                "username": claim("preferred_username"),
+                "email": claim("email"),
+                "groups": claim("groups", as_json=True),
+                "roles": claim("realm_access.roles", as_json=True),
+                "act": claim("act", as_json=True),
+                "traceparent": (
+                    '"traceparent" in request.headers ? request.headers["traceparent"] : ""'
+                ),
+            }
+        },
+        # Only the answers: the call itself went to the processor already (extAuthz).
+        # Streamed, so that a streamed answer reaches the caller as it comes. With a
+        # streamed body agentgateway sends trailers whatever these say (and warns when
+        # they say skip); the processor passes them on.
+        "processingOptions": {
+            "requestHeaderMode": "skip",
+            "requestBodyMode": "none",
+            "requestTrailerMode": "send",
+            "responseHeaderMode": "send",
+            "responseBodyMode": "fullDuplexStreamed",
+            "responseTrailerMode": "send",
+        },
+        **_to_processor(settings, settings.processor_address, grpc=True),
+    }
+
+
 def a2a_route_for(agent: Agent, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
     url = urlsplit(agent.a2a_url or "")
     port = url.port or (443 if url.scheme == "https" else 80)
@@ -317,6 +370,10 @@ def a2a_route_for(agent: Agent, settings: Settings, modes: dict[str, str]) -> di
             **_to_processor(settings, settings.processor_webhook_address),
         },
     }
+    if modes["data-protection"] != features.OFF or modes["prompt-injection"] != features.OFF:
+        policies["extProc"] = _answer_checks(agent, settings)
+        # Answers the processor can read: not compressed, whatever the caller accepts.
+        policies["requestHeaderModifier"] = {"set": {"accept-encoding": "identity"}}
     if url.scheme == "https":
         policies["backendTLS"] = {}
     auth = _jwt_auth(settings, modes)

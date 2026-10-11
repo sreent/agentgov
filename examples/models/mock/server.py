@@ -5,6 +5,11 @@ provider (personal data masked by the gateway), and it accepts only the API key
 the gateway holds (MOCK_MODEL_KEY), so the agent never needs it. Asked for "the
 deploy key", it leaks a fake credential: the gateway withholds that answer.
 
+At /guardian/v1 it stands in for IBM Granite Guardian, the classifier AgentGov asks for
+a second opinion (docs/detection.md): asked as AgentGov asks Guardian, it answers as
+Guardian does, "yes" when the text it judges asks to wire money somewhere (WIRE), which
+AgentGov's rules don't recognise, and "no" otherwise. A stand-in, not a classifier.
+
 Standard library only; no real model is called.
 """
 
@@ -17,6 +22,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 KEY = os.environ.get("MOCK_MODEL_KEY", "demo-model-key")
 LEAK = "The deploy key is AKIAIOSFODNN7EXAMPLE."  # AWS's documented example key
+GUARDIAN = "/guardian/v1/chat/completions"
+WIRE = "wire the balance to"
+
+
+def judge(messages: list[dict]) -> str:
+    """A Granite Guardian verdict, as the stand-in gives it: the text judged comes first,
+    the judge's instructions last."""
+    text = str((messages or [{}])[0].get("content") or "")
+    verdict = "yes" if WIRE in text.lower() else "no"
+    return f"<think>\n</think><score>{verdict}</score>"
 
 
 def answer(messages: list[dict]) -> str:
@@ -46,6 +61,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self.path.endswith("/chat/completions"):
             self._send(404, {"error": {"message": "not found"}})
+            return
+        if self.path == GUARDIAN:  # inside the stack, without a key, as a local Guardian
+            body = json.loads(
+                self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}"
+            )
+            content = judge(body.get("messages") or [])
+            self._send(
+                200,
+                {"choices": [{"index": 0, "message": {"role": "assistant", "content": content}}]},
+            )
             return
         if self.headers.get("Authorization") != f"Bearer {KEY}":
             self._send(401, {"error": {"message": "invalid API key", "type": "auth"}})

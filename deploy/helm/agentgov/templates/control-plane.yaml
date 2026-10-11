@@ -104,6 +104,7 @@ spec:
                 secretKeyRef: {name: {{ $secret }}, key: oidc-client-secret}
             - name: AGENTGOV_DESTINATION_SECRETS_DIR
               value: /destination-secrets
+            {{- include "agentgov.guardianEnv" . | nindent 12 }}
             - name: AGENTGOV_PROCESSOR_ADDRESS
               value: "{{ include "agentgov.name" (list . "processor") }}:50051"
             - name: AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS

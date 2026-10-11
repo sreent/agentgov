@@ -56,7 +56,8 @@ ownership and a UI but no enforcement. This gap is the reason AgentGov exists.
   `supportedInterfaces`, `capabilities`, `skills`, …), and those that serve A2A are called
   through agentgateway's A2A routes, which point their cards at the gateway; the
   governance processor decides each JSON-RPC request (`SendMessage`, `GetTask`, …) as
-  agentgateway's external authorization ([agent to agent](agent-to-agent.md)).
+  agentgateway's external authorization, and checks each answer, streamed or not, as its
+  external processing ([agent to agent](agent-to-agent.md)).
   [Specification](https://a2a-protocol.org/latest/specification/)
 * **OpenTelemetry GenAI semantic conventions.** `gen_ai.operation.name`
   (`invoke_agent`, `execute_tool`, `chat`, …), `gen_ai.agent.id/name`,

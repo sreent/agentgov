@@ -335,6 +335,16 @@ internalTLS:
     # after each renewal (with Reloader, for example).
     duration: 87600h
 
+guardian:
+  # IBM Granite Guardian, for a second opinion on agents' instructions and on their
+  # traffic (docs/detection.md): its OpenAI-compatible API's base URL, such as
+  # http://guardian:8000/v1. The control plane and the governance processor both ask it.
+  # Empty, AgentGov's rules decide alone.
+  url: ""
+  model: ibm-granite/granite-guardian-4.1-8b
+  # A Secret holding the API's key, if it needs one (key: api-key).
+  existingSecret: ""
+
 bundleSigning:
   # The control plane signs OPA's bundles, and OPA refuses one that doesn't verify, so
   # that nobody on the way between them can hand OPA policies or data of their own

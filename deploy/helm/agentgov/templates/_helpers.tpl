@@ -176,3 +176,18 @@ off or on as a boolean: take it as the mode it was meant to be. */}}
 {{- define "agentgov.modelKeysSecret" -}}
 {{- .Values.modelKeys.existingSecret | default (printf "%s-model-keys" (include "agentgov.fullname" .)) -}}
 {{- end -}}
+
+{{- /* IBM Granite Guardian, for the control plane and the processor (guardian.*). */}}
+{{- define "agentgov.guardianEnv" -}}
+{{- if .Values.guardian.url }}
+- name: AGENTGOV_GUARDIAN_URL
+  value: {{ .Values.guardian.url | quote }}
+- name: AGENTGOV_GUARDIAN_MODEL
+  value: {{ .Values.guardian.model | quote }}
+{{- if .Values.guardian.existingSecret }}
+- name: AGENTGOV_GUARDIAN_API_KEY
+  valueFrom:
+    secretKeyRef: {name: {{ .Values.guardian.existingSecret }}, key: api-key}
+{{- end }}
+{{- end }}
+{{- end -}}

@@ -164,19 +164,28 @@ command for the stack (`ps`, `logs`, `down`), or set
 `COMPOSE_FILE=docker-compose.yml:docker-compose.langfuse.yml` in `.env`. Plan on about 3 GB
 more memory.
 
-### Optional: a classifier for agent instructions
+### Optional: a classifier
 
-AgentGov checks every agent's instructions (its system prompt) with its own rules. To add
-IBM Granite Guardian as a second opinion:
+AgentGov checks agents' instructions (their system prompts) and their traffic with its own
+rules. To add IBM Granite Guardian as a second opinion on both:
 
 ```bash
 docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.guardian.yml up -d
 ```
 
-It runs Granite Guardian 4.1 on llama.cpp's server, on the CPU. The first start downloads
-the model (about 5 GB); plan on about 8 GB more memory. Checks run in the background and
-take a few seconds per criterion. With a GPU, serve the model with vLLM instead and set
-`AGENTGOV_GUARDIAN_URL` ([agent instructions](../instructions.md)).
+It runs Granite Guardian 4.1 on llama.cpp's server, on the CPU, for the control plane
+([agent instructions](../instructions.md)) and the governance processor
+([detection](../detection.md)). The first start downloads the model (about 5 GB); plan on
+about 8 GB more memory. Each verdict takes a few seconds on the CPU, so leave the
+`traffic-classifier` feature in monitor mode, where the processor asks in the background.
+With a GPU, serve the model with vLLM instead and set `AGENTGOV_GUARDIAN_URL`.
+
+To try the feature without downloading the model, point AgentGov at the demo's stand-in,
+which flags only text that asks to wire money (step 21 of the demo):
+
+```bash
+AGENTGOV_GUARDIAN_URL=http://demo-model:9100/guardian/v1 docker compose -f deploy/compose/docker-compose.yml up -d
+```
 
 ### Optional: Microsoft 365 and Copilot Studio
 

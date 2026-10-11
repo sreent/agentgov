@@ -236,21 +236,28 @@ class Settings:
     # The answer when AgentGov cannot decide in time (enforce mode): "block" or "allow".
     copilot_studio_on_error: str = "block"
 
-    # --- Instruction classifier (optional) ----------------------------------------
+    # --- Classifier, optional (docs/detection.md) ---------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
-    # Ollama), e.g. http://guardian:8000/v1. Without it, agent instructions are
-    # checked by AgentGov's rules only.
+    # Ollama), e.g. http://guardian:8000/v1. The control plane asks it about agent
+    # instructions, and the processor about tool results, agents' answers and people's
+    # prompts (the traffic-classifier feature). Without it, AgentGov's rules decide alone.
     guardian_url: str | None = None
     # The name the server serves the model under, and its API key if it needs one.
     guardian_model: str = "ibm-granite/granite-guardian-4.1-8b"
     guardian_api_key: str | None = None
-    # Criteria to judge (one classifier call each): harm, jailbreak, social_bias,
-    # violence, profanity, unethical_behavior, exfiltration, deception.
+    # Criteria to judge agent instructions by (one classifier call each): harm, jailbreak,
+    # social_bias, violence, profanity, unethical_behavior, exfiltration, deception.
     guardian_criteria: str = (
         "harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception"
     )
     # The longest one classifier call may take.
     guardian_timeout_seconds: float = 60.0
+    # How long the processor waits for the classifier's verdict on a call where it is
+    # enforced; past that, the rules alone decide, and the ledger says so.
+    classifier_timeout_seconds: float = 3.0
+    # Classifier calls one processor makes at a time. In the background, what waits
+    # beyond a few hundred goes unclassified rather than piling up.
+    classifier_concurrency: int = 4
 
     # --- OPA (policy decisions) --------------------------------------------------
     # Where the processor asks OPA for decisions, and the control plane for What if, such
@@ -368,6 +375,11 @@ class Settings:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
         if self.issues_interval_seconds < 0:
             raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
+        if self.classifier_timeout_seconds <= 0 or self.classifier_concurrency < 1:
+            raise ValueError(
+                "AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS must be positive and "
+                "AGENTGOV_CLASSIFIER_CONCURRENCY at least 1"
+            )
         if self.smtp_url:
             scheme = self.smtp_url.partition("://")[0]
             if scheme not in ("smtp", "smtps") or "@" in self.smtp_url:

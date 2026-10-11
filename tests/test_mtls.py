@@ -22,7 +22,7 @@ from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.gateway import render, to_yaml
 from tests.conftest import ADMIN, SERVICE, seed
-from tests.test_gateway import IMAGE, JWKS, SETTINGS, _docker_ready, providers, servers
+from tests.test_gateway import IMAGE, JWKS, SETTINGS, _docker_ready, a2a_agents, providers, servers
 
 
 @pytest.fixture
@@ -147,16 +147,19 @@ def _processor_policies(config: dict) -> list[dict]:
             found.append(step["webhook"]["target"].get("policies"))
         if "extAuthz" in policies:
             found.append(policies["extAuthz"].get("policies"))
+        if "extProc" in policies:
+            found.append(policies["extProc"].get("policies"))
     return found
 
 
 def test_the_gateway_calls_the_processor_with_its_certificate(certs: Path) -> None:
-    plain = render(servers(), SETTINGS, providers=providers())
+    plain = render(servers(), SETTINGS, providers=providers(), agents=a2a_agents())
     assert all(p is None for p in _processor_policies(plain))
     settings = SETTINGS.with_overrides(tls_dir=str(certs / "server"))
-    config = render(servers(), settings, providers=providers())
+    config = render(servers(), settings, providers=providers(), agents=a2a_agents())
     found = _processor_policies(config)
-    assert found and all(p and p["backendTLS"]["cert"] == "/tls/tls.crt" for p in found)
+    assert len(found) >= 4  # tool calls, model calls, calls between agents, their answers
+    assert all(p and p["backendTLS"]["cert"] == "/tls/tls.crt" for p in found)
     grpc = config["binds"][0]["listeners"][0]["routes"][0]["policies"]["mcpGuardrails"]
     assert grpc["processors"][0]["policies"]["backendTLS"] == {
         "cert": "/tls/tls.crt",
@@ -170,7 +173,7 @@ def test_the_gateway_calls_the_processor_with_its_certificate(certs: Path) -> No
 @pytest.mark.skipif(not _docker_ready(), reason=f"docker or {IMAGE} not available")
 def test_agentgateway_accepts_it(certs: Path, tmp_path: Path) -> None:
     settings = SETTINGS.with_overrides(tls_dir=str(certs / "server"), gateway_tls_dir="/tls")
-    config = render(servers(), settings, providers=providers("/cfg/keys"))
+    config = render(servers(), settings, providers=providers("/cfg/keys"), agents=a2a_agents())
     for route in config["binds"][0]["listeners"][0]["routes"]:
         if "jwtAuth" in route.get("policies", {}):
             route["policies"]["jwtAuth"]["jwks"] = JWKS

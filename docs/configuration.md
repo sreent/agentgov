@@ -244,14 +244,16 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | `AGENTGOV_COPILOT_STUDIO_TENANT_ID` | — | The tenant ID (a GUID) whose apps may call. By default the tenant of `AGENTGOV_M365_TENANT_ID` or of sign-in through Entra ID, when that is a GUID. |
 | `AGENTGOV_COPILOT_STUDIO_ON_ERROR` | `block` | The answer when AgentGov cannot decide in time (enforce mode): `block` or `allow`. |
 
-### Instruction classifier (optional)
+### Classifier, optional
 
 | Variable | Default | What it does |
 |---|---|---|
-| `AGENTGOV_GUARDIAN_URL` | — | IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp, Ollama), e.g. `http://guardian:8000/v1`. Without it, agent instructions are checked by AgentGov's rules only. |
+| `AGENTGOV_GUARDIAN_URL` | — | IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp, Ollama), e.g. `http://guardian:8000/v1`. The control plane asks it about agent instructions, and the processor about tool results, agents' answers and people's prompts (the traffic-classifier feature). Without it, AgentGov's rules decide alone. |
 | `AGENTGOV_GUARDIAN_MODEL`<br>`AGENTGOV_GUARDIAN_API_KEY` (secret) | `ibm-granite/granite-guardian-4.1-8b`<br>— | The name the server serves the model under, and its API key if it needs one. |
-| `AGENTGOV_GUARDIAN_CRITERIA` | `harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception` | Criteria to judge (one classifier call each): harm, jailbreak, social_bias, violence, profanity, unethical_behavior, exfiltration, deception. |
+| `AGENTGOV_GUARDIAN_CRITERIA` | `harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception` | Criteria to judge agent instructions by (one classifier call each): harm, jailbreak, social_bias, violence, profanity, unethical_behavior, exfiltration, deception. |
 | `AGENTGOV_GUARDIAN_TIMEOUT_SECONDS` | `60.0` | The longest one classifier call may take. |
+| `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` | `3.0` | How long the processor waits for the classifier's verdict on a call where it is enforced; past that, the rules alone decide, and the ledger says so. |
+| `AGENTGOV_CLASSIFIER_CONCURRENCY` | `4` | Classifier calls one processor makes at a time. In the background, what waits beyond a few hundred goes unclassified rather than piling up. |
 
 ### OPA (policy decisions)
 

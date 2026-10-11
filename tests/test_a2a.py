@@ -416,9 +416,17 @@ class TestGatewayRoutes:
         ]
         assert http["addRequestHeaders"][chains.HEADER] == f'request.headers["{chains.HEADER}"]'
         assert http["addRequestHeaders"]["x-agentgov-agent-id"] == "jwt.agent_id"
+        # Answers come back through the processor, asked for plain so that it can read them.
+        assert policies["extProc"]["failureMode"] == "failClosed"
+        assert policies["requestHeaderModifier"] == {"set": {"accept-encoding": "identity"}}
         kb = routes["a2a-kb"]["policies"]
         assert kb["urlRewrite"] == {"path": {"prefix": "/a2a"}} and kb["backendTLS"] == {}
         assert routes["a2a-kb"]["backends"] == [{"host": "kb.internal:8443"}]
+
+    def test_answers_go_unchecked_with_both_controls_off(self) -> None:
+        modes = {"data-protection": "off", "prompt-injection": "off"}
+        policies = self.routes([_agent("billing-agent")], **modes)["a2a-billing-agent"]["policies"]
+        assert "extProc" not in policies and "requestHeaderModifier" not in policies
 
     def test_off_publishes_none(self) -> None:
         assert set(self.routes([_agent("billing-agent")], **{"a2a-gateway": "off"})) == {

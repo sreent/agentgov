@@ -222,6 +222,7 @@ The chart always sets `AGENTGOV_OIDC_CLIENT_SECRET` from the Secret, so a value 
 | `gateway.replicas`, `processor.replicas`, `opa.replicas` | `1` | The decision path; scale them together |
 | `gateway.configInterval` | `5` | Seconds between the gateway's checks for configuration changes |
 | `presidio.enabled` | `true` | Personal-data detection |
+| `guardian.url`, `guardian.model`, `guardian.existingSecret` | —, `ibm-granite/granite-guardian-4.1-8b`, — | IBM Granite Guardian, served elsewhere (vLLM, llama.cpp): its API's base URL, the model's name, and a Secret with its API key (key `api-key`) if it needs one. The control plane asks it about agents' instructions and the processor about their traffic ([detection](../detection.md)) |
 | `otelCollector.enabled` | `true` | Receive agents' traces (OTLP) for discovery and activity |
 | `postgresql.enabled` | `true` | The bundled PostgreSQL; otherwise `externalDatabase` |
 | `externalDatabase.existingSecret`, `externalDatabase.key` | —, `database-url` | The Secret with AgentGov's database URL |

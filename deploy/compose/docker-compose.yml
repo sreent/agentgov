@@ -119,7 +119,8 @@ services:
       AGENTGOV_COPILOT_STUDIO_TENANT_ID: ${AGENTGOV_COPILOT_STUDIO_TENANT_ID:-}
       AGENTGOV_COPILOT_STUDIO_AUDIENCES: ${AGENTGOV_COPILOT_STUDIO_AUDIENCES:-}
       AGENTGOV_COPILOT_STUDIO_ON_ERROR: ${AGENTGOV_COPILOT_STUDIO_ON_ERROR:-block}
-      # Classifier for agent instructions (docs/instructions.md); see docker-compose.guardian.yml.
+      # IBM Granite Guardian for agent instructions (docs/instructions.md), as the processor
+      # asks it about traffic (docs/detection.md); see docker-compose.guardian.yml.
       AGENTGOV_GUARDIAN_URL: ${AGENTGOV_GUARDIAN_URL:-}
       AGENTGOV_GUARDIAN_API_KEY: ${AGENTGOV_GUARDIAN_API_KEY:-}
       # Destinations' credentials (docs/secops.md): a file per destination, named after it.
@@ -195,6 +196,9 @@ services:
       <<: *agentgov-env
       AGENTGOV_CONTROL_PLANE_URL: https://control-plane:8443
       AGENTGOV_PRESIDIO_URL: http://presidio-analyzer:3000
+      # IBM Granite Guardian's second opinion on traffic (docs/detection.md).
+      AGENTGOV_GUARDIAN_URL: ${AGENTGOV_GUARDIAN_URL:-}
+      AGENTGOV_GUARDIAN_API_KEY: ${AGENTGOV_GUARDIAN_API_KEY:-}
     volumes:
       - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: processor}}
     depends_on:

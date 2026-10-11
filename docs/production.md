@@ -81,7 +81,7 @@ certificate authority. With them, every hop inside AgentGov is TLS in both direc
 
 | Hop | What each side shows |
 |---|---|
-| Gateway → processor: tool calls (gRPC), model calls (the webhook), calls between agents (external authorization) | The processor asks for the gateway's certificate; the gateway checks the processor's |
+| Gateway → processor: tool calls (gRPC), model calls (the webhook), calls between agents (external authorization) and their answers (external processing, gRPC) | The processor asks for the gateway's certificate; the gateway checks the processor's |
 | Processor → OPA, control plane → OPA | OPA asks every caller for a certificate (its health checks too) |
 | Processor, OPA, the gateway's config sidecar, the collector → control plane | They call the control plane's internal port (8443), which asks for a certificate |
 

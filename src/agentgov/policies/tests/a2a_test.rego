@@ -207,3 +207,64 @@ test_organisation_policies_can_ask_for_approval if {
 	d.effect == "require_approval"
 	d.reasons == ["calls to billing need a person"]
 }
+
+# ---------------------------------------------------------------------------
+# Answers (phase "response").
+# ---------------------------------------------------------------------------
+
+answer(client, target, detections) := {
+	"kind": "a2a",
+	"phase": "response",
+	"method": "answer",
+	"agent": {"client_id": client},
+	"target": target,
+	"detections": detections,
+}
+
+test_a_clean_answer_passes if {
+	d := decide(answer("agent-frontdesk", "billing-agent", {"categories": []}))
+	d.effect == "allow"
+	d.redact == []
+}
+
+test_instructions_in_an_answer_withhold_it if {
+	d := decide(answer("agent-frontdesk", "billing-agent", {"categories": [], "prompt_injection": true}))
+	d.effect == "deny"
+	"Answer from agent billing-agent withheld: it contains instructions aimed at the agent (possible prompt injection)" in d.reasons
+}
+
+test_credentials_and_personal_data_in_answers_are_masked if {
+	d := decide(answer("agent-frontdesk", "billing-agent", {"categories": ["secret", "pii"]}))
+	d.effect == "allow"
+	d.redact == ["pii", "secret"]
+
+	# An agent that may have personal data gets it.
+	reg := object.union(registry, {"agents": {"agt_desk": {"labels": {"pii-access": "true"}}}})
+	entitled := a2a.decision with input as answer("agent-frontdesk", "billing-agent", {"categories": ["secret", "pii"]})
+		with data.registry as reg
+	entitled.redact == ["secret"]
+}
+
+test_monitored_answers_pass_and_say_what_would_have_been_done if {
+	reg := object.union(registry, {"features": {"prompt-injection": "monitor", "data-protection": "monitor"}})
+	d := a2a.decision with input as answer("agent-frontdesk", "billing-agent", {"categories": ["secret"], "prompt_injection": true})
+		with data.registry as reg
+	d.effect == "allow"
+	d.redact == []
+	"data-protection: would mask secret" in d.monitored
+	some m in d.monitored
+	startswith(m, "prompt-injection: Answer from agent billing-agent withheld")
+}
+
+test_what_a_call_is_checked_for_doesnt_hold_up_its_answer if {
+	# billing-agent may not call payroll, nor send credentials; payroll's answer to a
+	# call that went through is checked for what answers are checked for.
+	d := decide(answer("agent-billing-agent", "payroll", {"categories": []}))
+	d.effect == "allow"
+
+	# But a caller blocked meanwhile gets nothing more.
+	reg := object.union(registry, {"agents": {"agt_desk": {"status": "blocked"}}})
+	blocked := a2a.decision with input as answer("agent-frontdesk", "billing-agent", {"categories": []})
+		with data.registry as reg
+	"Agent frontdesk is blocked" in blocked.reasons
+}

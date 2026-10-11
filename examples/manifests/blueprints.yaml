@@ -61,6 +61,10 @@ spec:
   attestation_days: 90
   # No client secrets: its agents authenticate as their workloads (docs/agent-identity.md).
   require_workload_identity: true
+  # Its agents may see customers' contact details, to bill them. The agents they answer
+  # may not, so the gateway masks them in their answers (docs/agent-to-agent.md).
+  labels:
+    pii-access: "true"
   permissions:
     - server: crm
       tools: [get_customer]

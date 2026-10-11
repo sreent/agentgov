@@ -40,7 +40,7 @@ from starlette.routing import Route
 
 from agentgov.identity import chains, people
 from agentgov.opa.client import OpaError
-from agentgov.processor import detectors, jailbreak
+from agentgov.processor import classifier, detectors, jailbreak
 from agentgov.processor.server import Inspection, _delegation, trace_id_from
 
 if TYPE_CHECKING:
@@ -84,6 +84,18 @@ def refuse(status: int, reasons: list[str], effect: str = "deny") -> dict[str, A
 
 def mask(messages: list[dict[str, Any]], categories: list[str]) -> dict[str, Any]:
     return {"action": {"body": {"messages": messages}, "reason": f"masked {', '.join(categories)}"}}
+
+
+def recent_tool_results(messages: list[dict[str, Any]]) -> list[Any]:
+    """The tool results that came in since the model last answered (earlier ones were
+    looked at when they were new)."""
+    found = []
+    for message in reversed(messages):
+        if message.get("role") == "assistant":
+            break
+        if message.get("role") == "tool":
+            found.append(message.get("content"))
+    return found[::-1]
 
 
 def holds_tool_calls(messages: list[dict[str, Any]]) -> bool:
@@ -229,6 +241,9 @@ class ModelGuard:
                 jailbreak_score=round(score, 3),
                 jailbreak_reasons=reasons,
             )
+        # The classifier's second opinion on what the rules let through: the latest prompt
+        # from a person, and the tool results that came in since the model last answered.
+        deferred = await self._second_opinions(messages, modes, inspection)
         monitored: list[str] = []
         finish = self._recorder("request", headers, inspection, monitored)
 
@@ -265,22 +280,65 @@ class ModelGuard:
 
         agent = decision.get("agent")
         monitored.extend(decision.get("monitored") or [])
+
+        def later(agent: dict[str, Any] | None) -> None:
+            for text, criterion, subject in deferred:
+                self.p.classify_later(
+                    text,
+                    criterion,
+                    subject=subject,
+                    phase="request",
+                    method="chat",
+                    server=provider,
+                    target=model,
+                    resource=f"{provider}/{model}" if model else provider,
+                    agent=agent,
+                    identity=identity,
+                    user=person,
+                    trace_id=trace_id_from([headers.get("traceparent") or ""]),
+                )
+
         if agent is None and modes["unknown-callers"] == "monitor":
             self.p._spawn(self.p._observe_unknown(identity, f"llm/{provider}", "chat"))
             finish(
                 "allow", ["monitor mode: caller is not a registered agent"], decision_id=decision_id
             )
+            later(None)
             return PASS
         reasons = list(decision.get("reasons") or [])
         if decision.get("effect") != "allow":
             finish("deny", reasons, agent=agent, decision_id=decision_id)
             return refuse(403, reasons)
+        later(agent)
         redact = set(decision.get("redact") or []) & inspection.scan.categories()
         if redact:
             finish("allow", [], agent=agent, redacted=sorted(redact), decision_id=decision_id)
             return mask(detectors.redact(messages, inspection.scan.spans, redact), sorted(redact))
         finish("allow", [], agent=agent, decision_id=decision_id)
         return PASS
+
+    async def _second_opinions(
+        self, messages: list[dict[str, Any]], modes: dict[str, str], inspection: Inspection
+    ) -> list[tuple[str, str, str]]:
+        """Ask the classifier, waiting for the verdicts where it is enforced; what it is to
+        be asked in the background, once the prompt went on: (text, criterion, subject)."""
+        asks: list[tuple[str, str, str, str]] = []
+        how = self.p.classifier_mode(modes, "jailbreak-detection")
+        if how != "off" and not inspection.summary.get("jailbreak"):
+            asks.append((how, jailbreak.latest_prompt(messages), classifier.JAILBREAK, "prompt"))
+        how = self.p.classifier_mode(modes, "prompt-injection")
+        if how != "off" and not inspection.summary.get("prompt_injection"):
+            text = classifier.text_of(recent_tool_results(messages))
+            asks.append((how, text, classifier.INJECTION, "tool result"))
+        deferred = []
+        for how, text, criterion, subject in asks:
+            if not text.strip():
+                continue
+            if how == "inline":
+                await self.p.second_opinion(inspection, text, criterion)
+            else:
+                deferred.append((text, criterion, subject))
+        return deferred
 
     # ------------------------------------------------------------------ answers
     async def check_answer(self, payload: dict[str, Any], headers: Any) -> dict[str, Any]:

@@ -118,8 +118,10 @@ The defaults of the Compose stack and of the Helm chart are for evaluation
   readable only by that user. It is a bearer credential with the person's roles until it
   expires: run `agentgov logout` on shared machines, and end lost sessions on the Access
   page.
-* If you run the instruction classifier, keep it on the private network: it receives
-  agents' instructions (with credentials already redacted).
+* If you run the classifier (IBM Granite Guardian), keep it on the private network, as
+  Presidio: it receives agents' instructions (with credentials already redacted) and,
+  while `traffic-classifier` is on, the tool results, answers and prompts it judges, as
+  they are.
 * The MCP registry (`mcp-registry`, off by default) is served without credentials, as
   developers' MCP clients read it: anyone who can reach the control plane can read the
   names, descriptions and addresses of the servers listed for developers. Serve it where
@@ -135,8 +137,15 @@ The defaults of the Compose stack and of the Helm chart are for evaluation
 
 ## Known limitations
 
-* The prompt-injection, jailbreak and tool-poisoning detectors are heuristics. They raise the cost
-  of common attacks; they are not a guarantee.
+* The prompt-injection, jailbreak and tool-poisoning detectors are heuristics, and the
+  classifier that can back up the first two is a model. They raise the cost of common and
+  reworded attacks; they are not a guarantee. A verdict the classifier gives in the
+  background (its default, monitored) comes after the call went on: it raises a finding,
+  it doesn't stop the call ([detection](docs/detection.md)).
+* The gateway checks agents' answers to other agents as they stream, event by event. An
+  answer, or an event, over 4 MiB, or one compressed although the gateway asked for it
+  plain, is withheld where `data-protection` or `prompt-injection` is enforced, and goes
+  through unchecked where neither is.
 * The checks on agents' instructions are rules plus, optionally, a model. Both can miss
   reworded or obfuscated instructions and can flag legitimate ones; treat a finding as a
   reason to review, and its absence as no proof of safety.

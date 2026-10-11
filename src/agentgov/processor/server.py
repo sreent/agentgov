@@ -6,7 +6,8 @@ operation. For each one the processor:
 1. identifies the caller from claims agentgateway already validated, and the
    person it acts for, if any (``agentgov.identity.people``),
 2. inspects the content (secrets locally, PII with Presidio, prompt injection
-   and tool poisoning heuristics),
+   and tool poisoning heuristics, and IBM Granite Guardian's second opinion where it
+   is configured: ``agentgov.processor.classifier``),
 3. asks OPA for a decision (data.agentgov.mcp.*), and
 4. enforces it: pass, rewrite (redaction or tools/list filtering), reject, or
    route the call to a human approver,
@@ -16,6 +17,9 @@ then records the outcome in the control plane's evidence ledger.
 Decisions are made on the JSON-RPC body agentgateway parsed, never on the
 ``Mcp-Method``/``Mcp-Name`` headers, so header spoofing on older protocol
 revisions cannot change what is authorised.
+
+The same port serves agentgateway's external processing of the answers agents send each
+other (``agentgov.processor.a2a_answers``).
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ from agentgov import ids
 from agentgov.config import Settings
 from agentgov.identity import chains, people
 from agentgov.opa.client import OpaClient, OpaError
-from agentgov.processor import detectors
+from agentgov.processor import classifier, detectors
 from agentgov.processor.control_plane import (
     ControlPlaneClient,
     ControlPlaneError,
@@ -140,6 +144,22 @@ class Inspection:
         self.scan = scan
         self.summary = scan.summary(threshold)
 
+    def add_verdict(self, verdict: classifier.Verdict) -> None:
+        """The classifier's verdict, waited for: what it flags counts as what the rules
+        flag does."""
+        self.summary["classifier"] = verdict.summary()
+        if verdict.flagged:
+            flag, reasons = _FLAGS[verdict.criterion]
+            self.summary[flag] = True
+            self.summary[reasons] = [*(self.summary.get(reasons) or []), "classifier"]
+
+
+# Where a criterion's verdict goes in the detections: its flag and its reasons.
+_FLAGS = {
+    classifier.INJECTION: ("prompt_injection", "injection_reasons"),
+    classifier.JAILBREAK: ("jailbreak", "jailbreak_reasons"),
+}
+
 
 class GovernanceProcessor(pb_grpc.ExtMcpServicer):
     def __init__(
@@ -150,12 +170,14 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         control_plane: ControlPlaneClient,
         recorder: DecisionRecorder,
         presidio: PresidioClient | None = None,
+        traffic_classifier: classifier.TrafficClassifier | None = None,
     ) -> None:
         self.settings = settings
         self.opa = opa
         self.cp = control_plane
         self.recorder = recorder
         self.presidio = presidio
+        self.classifier = traffic_classifier
         self.features = FeatureModes(opa)
         # Signs and checks the delegations agents carry from agent to agent.
         self.chain_key = chains.signing_key(settings.service_token)
@@ -185,6 +207,32 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
 
     def _record(self, **fields: Any) -> None:
         self.recorder.record({"ts": ids.isoformat(ids.utcnow()), **fields})
+
+    def classifier_mode(self, modes: dict[str, str], check: str) -> str:
+        """How the classifier takes part in ``check`` (a feature): "inline" where both are
+        enforced, "background" where both are on otherwise, else "off"."""
+        mine, checked = modes.get("traffic-classifier", "off"), modes.get(check, "off")
+        if self.classifier is None or "off" in (mine, checked):
+            return "off"
+        return "inline" if mine == checked == "enforce" else "background"
+
+    async def second_opinion(self, inspection: Inspection, text: str, criterion: str) -> None:
+        """The classifier's verdict on ``text``, waited for, into ``inspection``."""
+        assert self.classifier is not None
+        inspection.add_verdict(await self.classifier.inline(text, criterion))
+
+    def classify_later(self, text: str, criterion: str, **context: Any) -> None:
+        """The classifier's verdict in the background: what it flags goes to the ledger,
+        and the control plane raises a finding (``context``: what was classified, the
+        call's resource, agent, identity, person and trace)."""
+        assert self.classifier is not None
+
+        def report(verdict: classifier.Verdict) -> None:
+            if verdict.flagged:
+                self._record(kind="classifier", classifier=verdict.summary(), **context)
+
+        if not self.classifier.later(text, criterion, report):
+            log.warning("the classifier is busy: a %s went unclassified", context.get("subject"))
 
     def _fail_closed(self, modes: dict[str, str]) -> bool:
         """Whether a call must stop when personal data can't be looked for: only while
@@ -464,7 +512,32 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             protect=modes["data-protection"] != "off",
             check_injection=modes["prompt-injection"] != "off",
         )
+        # The classifier's second opinion on a result the rules let through: waited for,
+        # or asked once the result went on.
+        how = self.classifier_mode(modes, "prompt-injection")
+        text = ""
+        if how != "off" and not inspection.summary.get("prompt_injection"):
+            text = classifier.text_of(result)
+        if how == "inline" and text.strip():
+            await self.second_opinion(inspection, text, classifier.INJECTION)
         monitored: list[str] = []
+
+        def later(agent: dict[str, Any] | None) -> None:
+            if how == "background" and text.strip():
+                self.classify_later(
+                    text,
+                    classifier.INJECTION,
+                    subject="tool result",
+                    phase="response",
+                    method=method,
+                    server=server,
+                    target=target,
+                    resource=f"{server}/{target}",
+                    agent=agent,
+                    identity=identity,
+                    user=person,
+                    trace_id=trace_id,
+                )
 
         def finish(
             effect: str,
@@ -530,12 +603,14 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             finish(
                 "allow", ["monitor mode: caller is not a registered agent"], decision_id=decision_id
             )
+            later(None)
             return _pass_response()
         if decision.get("effect") == "deny":
             reasons = list(decision.get("reasons") or [])
             finish("deny", reasons, agent=agent, decision_id=decision_id)
             return withhold(reasons)
         redact = set(decision.get("redact") or []) & inspection.scan.categories()
+        later(agent)
         if redact:
             finish("allow", [], agent=agent, redacted=sorted(redact), decision_id=decision_id)
             mutated = detectors.redact(result, inspection.scan.spans, redact)
@@ -623,10 +698,24 @@ async def serve(settings: Settings) -> None:
             ("grpc.max_send_message_length", 64 * 1024 * 1024),
         ]
     )
+    # IBM Granite Guardian's second opinion on traffic, where it is configured.
+    traffic_classifier = classifier.TrafficClassifier(settings) if settings.guardian_url else None
     processor = GovernanceProcessor(
-        settings, opa=opa, control_plane=control_plane, recorder=recorder, presidio=presidio
+        settings,
+        opa=opa,
+        control_plane=control_plane,
+        recorder=recorder,
+        presidio=presidio,
+        traffic_classifier=traffic_classifier,
     )
     pb_grpc.add_ExtMcpServicer_to_server(processor, server)
+    # Agents' answers to other agents: agentgateway's external processing, on the same port.
+    from agentgov.processor import a2a_answers
+    from agentgov.processor.proto import ext_proc_pb2_grpc
+
+    ext_proc_pb2_grpc.add_ExternalProcessorServicer_to_server(
+        a2a_answers.AnswerChecks(processor), server
+    )
     if identity:
         server.add_secure_port(settings.processor_listen, identity.grpc_credentials())
     else:
@@ -641,7 +730,7 @@ async def serve(settings: Settings) -> None:
     await server.start()
     webhook_task = asyncio.create_task(webhook.serve())
     log.info(
-        "governance processor listening on %s (tool calls) and %s (model calls)%s",
+        "governance processor listening on %s (tool calls, agents' answers) and %s (model calls)%s",
         settings.processor_listen,
         settings.processor_webhook_listen,
         ", over mutual TLS" if identity else "",
@@ -652,5 +741,7 @@ async def serve(settings: Settings) -> None:
         webhook.should_exit = True
         await webhook_task
         await server.stop(grace=5)
+        if traffic_classifier is not None:
+            await traffic_classifier.aclose()
         await recorder.stop()
         await http.aclose()

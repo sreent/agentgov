@@ -17,9 +17,10 @@ flowchart LR
     end
     subgraph runtime[Enforcement path]
       gw[agentgateway<br/>MCP, model and A2A gateway]
-      proc[Governance processor<br/>ExtMcp gRPC · guardrail webhook · A2A authorization]
+      proc[Governance processor<br/>ExtMcp gRPC · guardrail webhook · A2A authorization and answers]
       opa[OPA<br/>Rego library]
       presidio[Presidio<br/>PII detection]
+      guardian[Granite Guardian<br/>classifier, optional]
     end
     kc[Keycloak<br/>agent identities · admin sign-in]
     otel[OTel Collector]
@@ -28,6 +29,7 @@ flowchart LR
     gw -- every tool call, result, tools/list, prompt, answer and call between agents --> proc
     proc --> opa
     proc --> presidio
+    proc -. second opinion .-> guardian
     gw --> mcp[(MCP servers)]
     gw -- provider's API key --> llm[(Model providers)]
     gw -- delegation + who handed the work down --> peer([Agents serving A2A])
@@ -46,14 +48,14 @@ flowchart LR
 | Component | Role | Agent 365 analogue |
 |---|---|---|
 | **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; reads agents from Microsoft 365, Copilot Studio and Entra Agent ID, and their use and alerts from Purview and Defender; answers Copilot Studio's threat-detection calls ([platforms](platforms.md), [connections](microsoft-connections.md)); sends the ledger to SIEMs as OCSF events and alerts to Teams and Slack ([security operations](secops.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance, Defender's SIEM connectors |
-| **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server, its guardrail webhook for model calls, and its external authorization for calls between agents: content inspection, OPA queries, approvals, redaction, the delegations agents pass on, decision records | Defender real-time protection, Purview DLP enforcement |
+| **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server, its guardrail webhook for model calls, and its external authorization for calls between agents and external processing for their answers: content inspection, OPA queries, approvals, redaction, the delegations agents pass on, decision records | Defender real-time protection, Purview DLP enforcement |
 | [Keycloak](https://www.keycloak.org) 26.8 | One OAuth client per agent; issues short-lived tokens with `agent_id` and the gateway audience, for the agent itself or, by token exchange, for a person it acts for ([acting for people](acting-for-people.md)); takes agents' own identities, Kubernetes service account tokens, SPIFFE JWT-SVIDs or other OpenID Connect issuers' tokens, in place of client secrets ([agents' own identities](agent-identity.md)); signs administrators in to the control plane (and can federate an existing directory) | Entra Agent ID (including federated identity credentials), Entra ID sign-in |
 | [OPA](https://www.openpolicyagent.org) 1.21 | Policy decision point; evaluates the Rego library against registry data | Conditional Access |
 | [agentgateway](https://agentgateway.dev) 1.6 | MCP, model and A2A gateway, and policy enforcement point; validates tokens, calls the processor, routes to MCP servers, to model providers with their API keys ([model calls](models.md)) and to agents that serve A2A ([agent to agent](agent-to-agent.md)) | Agent 365 tooling gateway, Azure API Management's AI gateway |
 | [Presidio](https://github.com/data-privacy-stack/presidio) | Personal-data detection | Purview classifiers |
 | [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) | Receives agent and gateway traces, forwards GenAI spans to the control plane (and optionally Langfuse); gateway decisions in the ledger carry the trace ID, so the UI links each one to its trace. Forwards the gateway's access logs of model calls, from which the control plane meters tokens and cost | Agent 365 observability |
 | [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (optional) | In-process enforcement inside agent frameworks, querying the same OPA | — |
-| [IBM Granite Guardian](https://huggingface.co/ibm-granite/granite-guardian-4.1-8b) (optional) | Judges agents' instructions for harmful or malicious content, next to AgentGov's rules ([instructions](instructions.md)); served by vLLM or llama.cpp | Defender's AI security posture |
+| [IBM Granite Guardian](https://huggingface.co/ibm-granite/granite-guardian-4.1-8b) (optional) | Judges agents' instructions for harmful or malicious content, and the traffic for prompt injection and jailbreaks, next to AgentGov's rules ([instructions](instructions.md), [detection](detection.md)); served by vLLM or llama.cpp | Defender's AI security posture; Prompt Shields in Azure AI Content Safety |
 
 ## The path of a tool call
 
@@ -132,7 +134,19 @@ agent called a delegation of its own, a token signed with a key derived from the
 token that names the chain of agents and the person at its head, and agentgateway passes
 it on in headers, over any the caller set. The agent called sends the delegation with
 the calls it makes for that work, and the processor puts the chain into policy and the
-ledger of each one. [Agent to agent](agent-to-agent.md) has the details.
+ledger of each one. The answer comes back through the processor too (external processing
+over gRPC, fail-closed), event by event when it streams: credentials and personal data in
+it are masked, and instructions aimed at the agent that asked are withheld.
+[Agent to agent](agent-to-agent.md) has the details.
+
+## A classifier's second opinion
+
+The processor's rules look at every call. Where IBM Granite Guardian is configured, the
+processor also asks it about what the rules let through: tool results and agents'
+answers (instructions aimed at the agent?) and people's prompts to models (a jailbreak?).
+Where the check it supports is enforced, and the classifier too, the call waits for its
+verdict, a few seconds at most; otherwise the call goes on and the verdict, given in the
+background, is recorded and raises a finding. [Detection](detection.md) has the details.
 
 ## Developers' MCP clients
 
@@ -192,8 +206,9 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | Gateway → model provider | The provider's API key, which only the gateway (and its config sidecar) can read, from a file; the agent's token is never forwarded |
 | Gateway → agent serving A2A | The caller's token is never forwarded; the agent called gets a delegation and who handed it the work in headers AgentGov sets on every call it passes on, so only the gateway should reach agents' A2A endpoints (a NetworkPolicy in Kubernetes) |
 | Agent → agent (delegation) | A JWT for the agent called only, signed by the processors with a key derived from the service token (agents never see it), lasting an hour; checked on each call that carries it (signature, expiry, holder, and the same person as the caller's token) |
-| Gateway → processor | Mutual TLS: each shows a certificate from AgentGov's own authority ([production](production.md#mutual-tls-between-components)); fail-closed (`failureMode: failClosed`, or `deny` for external authorization) for tool calls (gRPC), model calls (the webhook) and calls between agents (external authorization) |
+| Gateway → processor | Mutual TLS: each shows a certificate from AgentGov's own authority ([production](production.md#mutual-tls-between-components)); fail-closed (`failureMode: failClosed`, or `deny` for external authorization) for tool calls (gRPC), model calls (the webhook), calls between agents (external authorization) and their answers (external processing, gRPC) |
 | Processor, control plane → OPA | Mutual TLS: OPA asks every caller for a certificate from AgentGov's authority |
+| Processor, control plane → Granite Guardian | Inside your network, like Presidio; they send it the text it judges, with its API key if it has one |
 | Control plane → OPA (bundles) | Signed: OPA refuses a bundle that doesn't verify against the control plane's certificate, and keeps the last good one ([production](production.md#signed-bundles)) |
 | Components → control plane | Mutual TLS on the control plane's internal port, where a component's certificate is its proof; the service role is no use on the public port, by the service token or an API key. Admin API keys are scoped by role |
 | Copilot Studio → control plane (threat detection) | The only endpoint meant for the internet: a token that Microsoft Entra ID signed (RS256, keys from the tenant's JWKS) for the configured tenant and AgentGov's API, issued to an allowed caller app; anything else gets 401 |
@@ -207,6 +222,7 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | Access logs don't reach the control plane | Model calls go on, unmetered: budgets can't stop an agent whose usage isn't counted |
 | OPA unreachable or bundle missing | Processor denies ("policy engine unavailable") |
 | Presidio unreachable | Deny by default; `AGENTGOV_PRESIDIO_FAILURE_MODE=open` skips PII scanning instead |
+| Granite Guardian unreachable or slow | The rules alone decide. A call that waits for the classifier waits `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` at most, and its decision says the classifier didn't answer; instructions to check stay queued until it is back |
 | A custom Rego policy fails to compile | Rejected at submission, after a compile and a smoke evaluation, so a broken module never reaches OPA |
 | OPA cannot activate a bundle anyway, or it doesn't verify | OPA keeps the last good bundle; its status report raises a critical finding |
 | A control-plane replica stops | The others answer; if it led, another takes the scheduled work over within seconds ([production](production.md#several-replicas)) |
@@ -229,6 +245,10 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
   (~40 ms per KB of text). Text beyond `AGENTGOV_PRESIDIO_MAX_CHARS` is not sent to it.
 * Content scanning is bounded (depth, number of strings, characters) and uses
   linear-time patterns; adversarial 50 KB inputs scan in under 60 ms.
+* Granite Guardian, where it is configured, takes a fraction of a second per verdict on a
+  GPU and several seconds on a CPU. Each processor asks it a few texts at a time
+  (`AGENTGOV_CLASSIFIER_CONCURRENCY`) and remembers its verdicts for ten minutes
+  ([detection](detection.md#what-it-costs-and-the-limits-on-it)).
 
 ## Repository layout
 

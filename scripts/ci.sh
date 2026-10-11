@@ -383,6 +383,10 @@ build_demo_images() {
     docker_build agentgov-demo-billing:local examples/agents/billing
 }
 
+# The demo's stand-in for IBM Granite Guardian (examples/models/mock), which the control
+# plane and the processor ask for a second opinion (docs/detection.md).
+DEMO_GUARDIAN_URL=http://demo-model:9100/guardian/v1
+
 # What the demo needs from the chart: the destinations' secrets
 # (examples/manifests/secops.yaml), the sink's Slack and Teams webhook URLs and its Splunk
 # token; and the sink as the authority that time-stamps the ledger's checkpoints.
@@ -408,7 +412,8 @@ end_to_end() {
   fi
   build_demo_images || return 1
   echo "starting the stack (project agentgov-ci)"
-  if ! "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout 600 >/dev/null; then
+  if ! AGENTGOV_GUARDIAN_URL=$DEMO_GUARDIAN_URL \
+    "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout 600 >/dev/null; then
     e2e_logs
     "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
     return 1
@@ -444,7 +449,7 @@ chart_on_docker() {
   # control-plane replicas: the demo's requests alternate between them.
   helm template agentgov "$CHART" --set image.repository=agentgov --set image.tag=local \
     --set image.pullPolicy=Never --set presidio.image.tag=2.2.364 --set keycloak.mode=production \
-    --set controlPlane.replicas=2 \
+    --set controlPlane.replicas=2 --set guardian.url="$DEMO_GUARDIAN_URL" \
     --set modelKeys.keys.demo=demo-model-key "${DEMO_DESTINATION_SECRETS[@]}" >"$rendered" || return 1
   python scripts/chart-on-docker.py down
   if python scripts/chart-on-docker.py up "$rendered" --demo; then
@@ -501,6 +506,7 @@ kind_end_to_end() {
     # kind loads images by tag: the digest pin would make the node pull it.
     --set presidio.image.tag=2.2.364
     --set modelKeys.keys.demo=demo-model-key
+    --set guardian.url="$DEMO_GUARDIAN_URL"
     "${DEMO_DESTINATION_SECRETS[@]}"
   )
   setup_chart_tools && setup_kind_tools || return 1

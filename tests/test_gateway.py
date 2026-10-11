@@ -12,7 +12,7 @@ import yaml
 
 from agentgov.config import Settings
 from agentgov.gateway import render, to_yaml, with_available_keys, write_if_changed
-from agentgov.models import ModelProvider, ToolServer
+from agentgov.models import Agent, ModelProvider, ToolServer
 
 IMAGE = "ghcr.io/agentgateway/agentgateway:v1.6.0"
 # A throwaway RSA public key, so validation does not need a running Keycloak.
@@ -205,9 +205,25 @@ def _docker_ready() -> bool:
     return probe.returncode == 0
 
 
+def a2a_agents() -> list[Agent]:
+    """An agent other agents call over A2A: its route has external authorization for
+    calls and external processing for answers."""
+    return [
+        Agent(
+            id="agt_billing",
+            name="billing-agent",
+            status="active",
+            a2a_url="http://billing-agent:9200/",
+            source="registered",
+        )
+    ]
+
+
 @pytest.mark.skipif(not _docker_ready(), reason=f"docker or {IMAGE} not available")
 def test_agentgateway_accepts_generated_config(tmp_path: Path) -> None:
-    config = render(servers(), SETTINGS, providers=providers("/cfg/keys"))
+    config = render(servers(), SETTINGS, providers=providers("/cfg/keys"), agents=a2a_agents())
+    routes = {r["name"]: r for r in config["binds"][0]["listeners"][0]["routes"]}
+    assert "extProc" in routes["a2a-billing-agent"]["policies"]
     for route in config["binds"][0]["listeners"][0]["routes"]:
         if "jwtAuth" in route.get("policies", {}):
             route["policies"]["jwtAuth"]["jwks"] = JWKS
