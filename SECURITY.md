@@ -36,6 +36,10 @@ Examples of issues we especially want to hear about:
 * A model provider's API key reaching an agent, the control plane's API, its database
   or the ledger.
 * An agent obtaining another agent's identity or grants, or acting after being blocked.
+* A call between agents that reaches the agent called without passing the processor, or
+  a delegation AgentGov accepts although it didn't give it to that agent for that person
+  (forged, expired, or someone else's), or headers about who handed the work down that a
+  caller can set.
 * Redaction that can be bypassed so that detected personal data or secrets reach an agent.
 * Tampering with the evidence ledger that `agentgov ledger verify` does not detect.
 * Authentication or authorization flaws in the control plane API or UI.
@@ -65,7 +69,9 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   `AGENTGOV_PUBLIC_URL` to the control plane's `https://` address so that session
   cookies are marked `Secure`.
 * Keep OPA, the processor, Presidio and the MCP servers on a private network that agents
-  cannot reach, so that the gateway is the only path to tools. Give model providers' API
+  cannot reach, so that the gateway is the only path to tools. Let only the gateway reach
+  agents' A2A endpoints, so that it is the only path between agents and the headers it
+  sets for the agent called can be relied on ([agent to agent](docs/agent-to-agent.md)). Give model providers' API
   keys to the gateway only ([model calls](docs/models.md)), not to agents, so that the
   gateway is the only path to models too. Keep destinations' credentials (SIEM tokens,
   Teams and Slack webhook URLs) in your secret store, mounted into the control plane only

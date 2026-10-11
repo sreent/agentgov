@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 from datetime import timedelta
 from typing import Any
 
@@ -58,6 +59,8 @@ EDITABLE = (
     "model_access",
     "daily_token_budget",
     "agent_card",
+    "a2a_url",
+    "agent_access",
     "external_ids",
     "blueprint",
 )
@@ -108,6 +111,69 @@ def effective_grants(agent: Agent) -> list[dict[str, Any]]:
     return validation.merge_grants(bp_grants or [], agent.permissions or [])
 
 
+def effective_agent_access(agent: Agent) -> list[str]:
+    """The agents it may call over A2A: its blueprint's, and its own."""
+    blueprint = agent.blueprint.agent_access if agent.blueprint else []
+    return validation.merge_agent_access(blueprint or [], agent.agent_access or [])
+
+
+A2A_PATH = "/a2a/"
+# The agents the gateway publishes for A2A: calls to a blocked one are refused, with why.
+A2A_PUBLISHED = (ACTIVE, BLOCKED)
+
+
+def a2a_route(agent: Agent) -> str | None:
+    """Where other agents call it through the gateway, when it serves A2A."""
+    return f"{A2A_PATH}{agent.name}" if agent.a2a_url else None
+
+
+def a2a_published(agent: Agent) -> bool:
+    """Whether the gateway publishes it for other agents to call (with a2a-gateway on)."""
+    return bool(agent.a2a_url) and agent.status in A2A_PUBLISHED and not agent.on_platform
+
+
+def _unpublished(session: Session, agent: Agent) -> str | None:
+    """Why the gateway doesn't publish an agent that serves A2A, if it doesn't."""
+    if not agent.a2a_url:
+        return None
+    if features.mode(session, "a2a-gateway") == features.OFF:
+        return "the a2a-gateway feature is off"
+    if agent.on_platform:
+        return "it runs on a platform AgentGov inventories"
+    if agent.status not in A2A_PUBLISHED:
+        return f"it is {agent.status}"
+    return None
+
+
+def may_call(caller: Agent, target: Agent) -> bool:
+    """Whether ``caller``'s grants let it call ``target`` over A2A (as policy decides)."""
+    return (
+        caller.id != target.id
+        and bool(target.a2a_url)
+        and any(fnmatch.fnmatchcase(target.name, p) for p in effective_agent_access(caller))
+    )
+
+
+def a2a_view(session: Session, settings: Settings, agent: Agent) -> dict[str, Any]:
+    """Agent to agent: where it is called through the gateway, whom it may call, and who
+    may call it."""
+    others = [a for a in list_agents(session) if a.id != agent.id]
+    route = a2a_route(agent)
+    gateway = settings.gateway_public_url.rstrip("/")
+    unpublished = _unpublished(session, agent)
+    return {
+        "serves": bool(agent.a2a_url),
+        "published": bool(agent.a2a_url) and unpublished is None,
+        "unpublished": unpublished,
+        "a2a_url": agent.a2a_url,
+        "url": f"{gateway}{route}" if route else None,
+        "card_url": f"{gateway}{route}/.well-known/agent-card.json" if route else None,
+        "agent_access": effective_agent_access(agent),
+        "may_call": [a.name for a in others if may_call(agent, a)],
+        "called_by": [a.name for a in others if may_call(a, agent)],
+    }
+
+
 def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in EDITABLE:
@@ -131,6 +197,10 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
             value = validation.permissions(value)
         elif key == "model_access":
             value = validation.model_access(value)
+        elif key == "agent_access":
+            value = validation.agent_access(value)
+        elif key == "a2a_url":
+            value = validation.a2a_url(value)
         elif key == "daily_token_budget":
             value = validation.token_budget(value)
         elif key == "risk_tier":
@@ -201,6 +271,7 @@ def register(
         models=[],
         permissions=[],
         model_access=[],
+        agent_access=[],
         external_ids={},
     )
     _apply(session, agent, data)
@@ -429,6 +500,11 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         "people_groups": (agent.blueprint.people_groups or []) if agent.blueprint else [],
         "approvals_by": agent.blueprint.approvals_by if agent.blueprint else "approvers",
         "agent_card": agent.agent_card,
+        # Agent to agent: where it serves A2A, its route on the gateway, and whom it calls.
+        "a2a_url": agent.a2a_url,
+        "a2a_route": a2a_route(agent),
+        "agent_access": agent.agent_access or [],
+        "effective_agent_access": effective_agent_access(agent),
         "external_ids": agent.external_ids or {},
         "source": agent.source,
         "workload_identity": workload_identity(agent),

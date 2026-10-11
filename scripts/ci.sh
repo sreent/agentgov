@@ -308,12 +308,13 @@ e2e_logs() {
 }
 
 # The control plane's image and the demo's stand-ins: a tool server, a model provider,
-# a workload identity issuer and the security team's tools.
+# a workload identity issuer, the security team's tools and an agent other agents call.
 build_demo_images() {
   docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm &&
     docker_build agentgov-demo-model:local examples/models/mock &&
     docker_build agentgov-demo-issuer:local examples/identity/workload-issuer &&
-    docker_build agentgov-demo-sink:local examples/secops/sink
+    docker_build agentgov-demo-sink:local examples/secops/sink &&
+    docker_build agentgov-demo-billing:local examples/agents/billing
 }
 
 # What the demo's destinations (examples/manifests/secops.yaml) need, for the chart: the
@@ -434,7 +435,7 @@ kind_end_to_end() {
   build_demo_images || return 1
   kind create cluster --name "$KIND_CLUSTER" --wait 180s || return 1
   for image in agentgov-demo-crm:local agentgov-demo-model:local agentgov-demo-issuer:local \
-    agentgov-demo-sink:local \
+    agentgov-demo-sink:local agentgov-demo-billing:local \
     $(helm template agentgov "$CHART" "${values[@]}" |
     awk '$1 == "image:" { gsub(/"/, "", $2); print $2 }' | sort -u); do
     if ! { docker image inspect "$image" >/dev/null 2>&1 || docker pull --quiet "$image" >/dev/null; } ||
@@ -529,6 +530,32 @@ metadata: {name: demo-sink}
 spec:
   selector: {app: demo-sink}
   ports: [{port: 9300}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: billing-agent}
+spec:
+  selector: {matchLabels: {app: billing-agent}}
+  template:
+    metadata: {labels: {app: billing-agent}}
+    spec:
+      containers:
+        - name: agent
+          image: "agentgov-demo-billing:local"
+          imagePullPolicy: Never
+          ports: [{containerPort: 9600}]
+          env:
+            - {name: GATEWAY_URL, value: "http://agentgov-gateway:8080"}
+            - {name: TOKEN_URL, value: "http://agentgov-keycloak:8080/realms/agentgov/protocol/openid-connect/token"}
+            - {name: ASSERTION_AUDIENCE, value: "http://localhost:8180/realms/agentgov"}
+            - {name: WORKLOAD_ISSUER, value: "http://workload-issuer:9200"}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: billing-agent}
+spec:
+  selector: {app: billing-agent}
+  ports: [{port: 9600}]
 EOF
   fi
   if [ "$rc" = 0 ]; then

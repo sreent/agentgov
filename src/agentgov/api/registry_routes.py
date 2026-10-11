@@ -104,6 +104,15 @@ def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[
         return {**agents.to_dict(agent), "platforms": platforms.for_agent(s, agent.id)}
 
 
+@router.get("/agents/{ref}/a2a", tags=["agents"])
+def agent_a2a(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
+    """Agent to agent: where other agents call it through the gateway, whom it may call,
+    and who may call it."""
+    rt = _rt(request)
+    with rt.db.session() as s:
+        return agents.a2a_view(s, rt.settings, agents.get(s, ref))
+
+
 @router.patch("/agents/{ref}", tags=["agents"])
 def update_agent(
     request: Request,

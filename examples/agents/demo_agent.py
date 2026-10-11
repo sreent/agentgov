@@ -13,7 +13,9 @@ the gateway with an MCP client, and a model (examples/models/mock) through the
 gateway's OpenAI-compatible route, with the same token. Then it acts for sam, a
 person in the demo realm: sam signs in to the demo chat app, the agent exchanges
 sam's token for a token of its own, and sam signs in to AgentGov to approve what
-it wants to do for them (AGENTGOV_DEMO_PASSWORD is the demo users' password).
+it wants to do for them (AGENTGOV_DEMO_PASSWORD is the demo users' password). It
+hands sam's question to another agent over A2A (examples/agents/billing), through
+the gateway, which tells that agent who handed it the work, up to sam.
 Then an agent with no secret at all authenticates with its service account token
 from a stand-in Kubernetes cluster (examples/identity/workload-issuer). Last, the
 security team's tools get what happened: their SIEM the ledger as OCSF events, their
@@ -37,6 +39,7 @@ from typing import Any
 
 import httpx
 import httpx2
+import jwt
 from mcp import Client, MCPError
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Implementation, TextContent
@@ -61,6 +64,9 @@ DEVELOPER_MACHINE = Path(__file__).resolve().parent.parent / "developer-machine"
 # and the hand-off feature (secops.yaml).
 SINK = os.environ.get("AGENTGOV_DEMO_SINK", "http://localhost:9300")
 HANDOFF = "/v1/features/security-operations"
+# The agent other agents call (agents.yaml, examples/agents/billing), on the gateway.
+BILLING = "billing-agent"
+A2A_ROUTE = f"/a2a/{BILLING}"
 
 BOLD, DIM, GREEN, RED, YELLOW, RESET = (
     "\033[1m",
@@ -396,6 +402,130 @@ async def acting_for_people(name: str, creds: dict[str, str]) -> None:
             admin("PUT", "/v1/features/approvals-by-person", json={"mode": "off"})
 
 
+def ledger_entry(params: dict[str, Any], timeout: float = 20) -> dict[str, Any] | None:
+    """The latest ledger entry matching ``params``, once the processor has recorded it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        entries = admin("GET", "/v1/ledger", params={**params, "limit": 1})
+        if entries:
+            return entries[0]  # type: ignore[no-any-return]
+        time.sleep(1)
+    return None
+
+
+def chain_of(entry: dict[str, Any] | None) -> list[str]:
+    return [link["name"] for link in ((entry or {}).get("details") or {}).get("chain") or []]
+
+
+async def ask_agent(
+    http: httpx2.AsyncClient, text: str, **headers: str
+) -> tuple[int, dict[str, Any]]:
+    """Send another agent a message over A2A, through the gateway: ``(status, JSON-RPC)``."""
+    message = {"messageId": secrets.token_hex(8), "role": "ROLE_USER", "parts": [{"text": text}]}
+    resp = await http.post(
+        GATEWAY + A2A_ROUTE,
+        json={"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {"message": message}},
+        headers={"A2A-Version": "1.0", **headers},
+    )
+    try:
+        return resp.status_code, resp.json()
+    except ValueError:
+        return resp.status_code, {"error": {"message": f"HTTP {resp.status_code}"}}
+
+
+def answer_of(reply: dict[str, Any]) -> tuple[str, str]:
+    """A task's state and its answer, or the refusal."""
+    if "error" in reply:
+        return "refused", str(reply["error"].get("message"))
+    status = ((reply.get("result") or {}).get("task") or {}).get("status") or {}
+    parts = (status.get("message") or {}).get("parts") or [{}]
+    return str(status.get("state")), str(parts[0].get("text"))
+
+
+async def agent_to_agent(name: str, creds: dict[str, str]) -> None:
+    step("11. Agent to agent: the agent hands sam's question to another agent, as allowed")
+    ready, _ = until(lambda: admin("GET", f"/v1/identity-issuers/{CLUSTER}")["sync"]["synced_at"])
+    if not ready:
+        show("not ready:", False, f"{BILLING} authenticates through {CLUSTER}, not in Keycloak")
+        return
+    token = token_for("sam", creds)
+    blueprint = "/v1/blueprints/customer-support"
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(30.0, read=60.0)) as http:
+        card = (await http.get(f"{GATEWAY}{A2A_ROUTE}/.well-known/agent-card.json")).json()
+        url = card["supportedInterfaces"][0]["url"]
+        show(
+            "card:",
+            url == GATEWAY + A2A_ROUTE,
+            f"{card['name']} serves A2A {card['supportedInterfaces'][0]['protocolVersion']} at "
+            f"{url}: the gateway gave callers its own address",
+        )
+        # The agent says it acts for someone else: the gateway tells billing-agent who
+        # really handed it the work. Its first call may wait for its Keycloak client.
+        deadline = time.monotonic() + 60
+        while True:
+            status, reply = await ask_agent(
+                http, "What does customer c-001 owe?", **{"X-AgentGov-On-Behalf-Of": "the-ceo"}
+            )
+            state, text = answer_of(reply)
+            if state != "TASK_STATE_FAILED" or time.monotonic() > deadline:
+                break
+            await asyncio.sleep(2)
+        show(
+            "completed:" if state == "TASK_STATE_COMPLETED" else f"{state}:",
+            state == "TASK_STATE_COMPLETED" and f"for sam (sam > {name} > " in text,
+            f"{BILLING} answered: {text}",
+        )
+        called = await asyncio.to_thread(
+            ledger_entry, {"agent": name, "type": "decision.a2a.request"}
+        )
+        show(
+            "recorded:",
+            chain_of(called) == ["sam", name, BILLING],
+            f"{(called or {}).get('type')} {(called or {}).get('resource')} for "
+            f"{(called or {}).get('on_behalf_of')}: {' > '.join(chain_of(called))}",
+        )
+        crm = await asyncio.to_thread(ledger_entry, {"agent": BILLING, "type": "decision.request"})
+        show(
+            "recorded:",
+            chain_of(crm) == ["sam", name, BILLING] and (crm or {}).get("on_behalf_of") == "sam",
+            f"{BILLING}'s own call {(crm or {}).get('resource')} for "
+            f"{(crm or {}).get('on_behalf_of')}: {' > '.join(chain_of(crm))}",
+        )
+        # A chain an agent makes up: AgentGov signs the delegations it gives.
+        me = admin("GET", f"/v1/agents/{name}")["id"]
+        forged = jwt.encode(
+            {
+                "iss": "agentgov",
+                "aud": me,
+                "jti": "dlg_forged",
+                "iat": int(time.time()),
+                "exp": int(time.time()) + 600,
+                "chain": [{"type": "person", "id": "ceo", "name": "the-ceo"}],
+            },
+            secrets.token_hex(32),
+            algorithm="HS256",
+        )
+        status, reply = await ask_agent(
+            http, "What does customer c-002 owe?", **{"X-AgentGov-Delegation": forged}
+        )
+        report(status == 200, answer_of(reply)[1], expect_allowed=False)
+        # Least privilege between agents: without the grant, no call.
+        admin("PATCH", blueprint, json={"agent_access": []})
+        print(f"  the blueprint's agents may no longer call {BILLING}")
+        try:
+            deadline = time.monotonic() + 30
+            await asyncio.sleep(2)
+            while True:
+                status, reply = await ask_agent(http, "What does customer c-003 owe?")
+                if status != 200 or time.monotonic() > deadline:
+                    break
+                await asyncio.sleep(1)
+            report(status == 200, answer_of(reply)[1], expect_allowed=False)
+        finally:
+            admin("PATCH", blueprint, json={"agent_access": [BILLING]})
+
+
 async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(30.0, read=60.0)) as http:
@@ -473,8 +603,9 @@ async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
 
             await model_calls(http, name)
             await acting_for_people(name, creds)
+            await agent_to_agent(name, creds)
 
-            step("11. Kill switch: blocking the agent takes effect everywhere within a second")
+            step("12. Kill switch: blocking the agent takes effect everywhere within a second")
             started = time.monotonic()
             admin("POST", f"/v1/agents/{name}/block", json={"reason": "demo kill switch"})
             allowed = True
@@ -521,7 +652,7 @@ def sign_in(creds: dict[str, str], assertion: str) -> httpx.Response:
 
 
 async def own_identity() -> None:
-    step("12. Own identities: an agent with no secret at all authenticates as its workload")
+    step("13. Own identities: an agent with no secret at all authenticates as its workload")
     ready, _ = until(lambda: admin("GET", f"/v1/identity-issuers/{CLUSTER}")["sync"]["synced_at"])
     sync = admin("GET", f"/v1/identity-issuers/{CLUSTER}")["sync"]
     if not ready or sync["error"]:
@@ -588,7 +719,7 @@ async def own_identity() -> None:
 
 
 def shadow_agent() -> str | None:
-    step("13. Shadow AI: telemetry from an unregistered agent is discovered")
+    step("14. Shadow AI: telemetry from an unregistered agent is discovered")
     service = f"notebook-agent-{secrets.token_hex(2)}"
     span = {
         "traceId": secrets.token_hex(16),
@@ -634,7 +765,7 @@ def shadow_agent() -> str | None:
 def developer_tools() -> None:
     from agentgov import mcp_scan
 
-    step("14. Developer tools: approved MCP servers as a registry, and what developers set up")
+    step("15. Developer tools: approved MCP servers as a registry, and what developers set up")
     admin("PUT", "/v1/features/mcp-registry", json={"mode": "on"})
     print("  mcp-registry set to on: GitHub Copilot and VS Code can read it")
     page = httpx.get(f"{CONTROL_PLANE}/registry/v0.1/servers", timeout=10).json()
@@ -687,7 +818,7 @@ def teams_text(message: dict[str, Any]) -> str:
 
 
 def security_operations(name: str, shadow: str | None) -> None:
-    step("15. Security operations: the SOC's SIEM and chats get it all, and its SOAR acts")
+    step("16. Security operations: the SOC's SIEM and chats get it all, and its SOAR acts")
     head = admin("GET", "/v1/ledger", params={"limit": 1})[0]["seq"]
 
     def siem_events() -> list[dict[str, Any]]:
@@ -774,7 +905,7 @@ def security_operations(name: str, shadow: str | None) -> None:
 
 
 def evidence(name: str) -> None:
-    step("16. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("17. Evidence: every decision is in a hash-chained, verifiable ledger")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -791,7 +922,7 @@ def evidence(name: str) -> None:
 
 
 def main() -> None:
-    wait_for_gateway("/mcp/crm", MODEL_ROUTE)
+    wait_for_gateway("/mcp/crm", MODEL_ROUTE, A2A_ROUTE)
     step("1. Registration: a new agent is requested, approved and given an identity")
     name, creds, token = register_agent()
     try:

@@ -1687,17 +1687,18 @@ const ATTESTABLE = new Set(['active', 'blocked', 'pending']);
 async function renderAgent({ match }) {
   const ref = decodeURIComponent(match[1]);
   const agent = await api(`v1/agents/${encodeURIComponent(ref)}`);
-  const [entries, openFindings, instructions, usage] = await Promise.all([
+  const [entries, openFindings, instructions, usage, a2a] = await Promise.all([
     api(`v1/ledger?agent=${encodeURIComponent(agent.id)}&limit=12`).catch((e) => e),
     api(`v1/findings?status=open&agent=${encodeURIComponent(agent.id)}`).catch((e) => e),
     api(`v1/agents/${encodeURIComponent(agent.id)}/instructions`).catch((e) => e),
     api(`v1/models/usage?agent=${encodeURIComponent(agent.id)}&days=7`).catch((e) => e),
+    api(`v1/agents/${encodeURIComponent(agent.id)}/a2a`).catch((e) => e),
   ]);
   // Agents on Microsoft 365 or Copilot Studio don't use the gateway: show what their platform reports.
   const views = agent.platforms || [];
   const where = views.length && agent.status !== 'deleted' ? await platformActionTarget(agent) : null;
   const main = views.length ? views.map((v) => platformCard(agent, v, where))
-    : [permissionsCard(agent), agentModelsCard(agent, usage)];
+    : [permissionsCard(agent), agentModelsCard(agent, usage), agentA2ACard(agent, a2a)];
   // With threat detection enforcing, AgentGov's policies decide about its tool calls.
   const enforced = views.some((v) => v.source === 'copilot-studio')
     && (await featureModes().catch(() => ({})))['copilot-studio-threat-detection'] === 'enforce';
@@ -1944,6 +1945,15 @@ async function agentForm(a) {
       id: 'risk_tier', label: 'Declared risk tier', type: 'select', value: a?.risk_tier || '',
       options: editing ? tiers : [{ value: '', label: "The blueprint's tier (medium without one)" }, ...tiers],
     },
+    { type: 'section', label: 'Agent to agent' },
+    {
+      id: 'a2a_url', label: 'A2A endpoint', value: a?.a2a_url || '', placeholder: 'http://billing-agent:9600', mono: true,
+      hint: 'Where it serves A2A (its JSON-RPC endpoint), reachable only from the gateway. Other agents then call it at /a2a/<name> on the gateway, as their grants allow.',
+    },
+    {
+      id: 'agent_access', label: 'Extra agents it may call', value: (a?.agent_access || []).join(', '), placeholder: 'billing-agent, kb-*', mono: true,
+      hint: "Added to the agents its blueprint may call over A2A, separated by commas; names can use * wildcards.",
+    },
     { type: 'section', label: 'Details' },
     { type: 'row', fields: [
       { id: 'framework', label: 'Framework', value: a?.framework || '' },
@@ -1986,6 +1996,8 @@ async function agentForm(a) {
         permissions: parseGrants(v.permissions),
         model_access: parseModelAccess(v.model_access),
         daily_token_budget: parseBudget(v.daily_token_budget),
+        agent_access: parseList(v.agent_access),
+        a2a_url: orNull(v.a2a_url),
         framework: orNull(v.framework),
         platform: orNull(v.platform),
         models: parseList(v.models),
@@ -2263,6 +2275,33 @@ function identityCard(a) {
   });
 }
 
+// Agent to agent: where other agents call it, whom it may call, and who may call it.
+function agentA2ACard(a, view) {
+  if (view instanceof Error) {
+    return card({ title: 'Agent to agent', body: callout('critical', 'alert-circle', view.message) });
+  }
+  const names = (list) => (list.length
+    ? h('div', { class: 'chip-row' }, list.map((name) => h('a', { class: 'chip chip--plain', href: `#/agents/${encodeURIComponent(name)}` }, name)))
+    : h('span', { class: 'muted' }, 'No agent'));
+  const rows = [
+    view.serves ? ['Serves A2A at', h('code', { class: 'break' }, view.a2a_url)] : null,
+    view.published ? ['Agents call it at', copyable(view.url, 'A2A address')] : null,
+    view.published ? ['Its card', copyable(view.card_url, 'agent card address')] : null,
+    view.serves && !view.published ? ['On the gateway', h('span', { class: 'muted' }, `Not published: ${view.unpublished}`)] : null,
+    ['May call', names(view.may_call)],
+    view.agent_access.length ? ['Its grants', h('span', { class: 'chip-row' }, view.agent_access.map((p) => plainChip(p, { mono: true })))] : null,
+    view.serves ? ['Called by', names(view.called_by)] : null,
+  ];
+  const idle = !view.serves && !view.may_call.length && !view.agent_access.length;
+  return card({
+    title: 'Agent to agent',
+    sub: 'Calls between agents go through the gateway (A2A), where policy checks each one; the agent called gets who handed the work down, with the person at its head.',
+    body: idle
+      ? emptyState("It doesn't serve or call other agents", can('admin') ? 'Give it an A2A endpoint, or agents it may call, with Edit.' : null)
+      : facts(rows),
+  });
+}
+
 function agentCardCard(a) {
   const ac = a.agent_card;
   if (!ac) {
@@ -2411,6 +2450,12 @@ function agentFindingsCard(list) {
 
 /* --------------------------------------------------------------------- map */
 
+// Edges that count calls: agents' use of tool servers, and agents calling other agents.
+const USAGE_EDGES = new Set(['granted', 'ungranted', 'calls', 'calls-ungranted']);
+const isUsage = (e) => USAGE_EDGES.has(e.kind);
+const isAgentCall = (e) => e.kind === 'calls' || e.kind === 'calls-ungranted';
+const isUngranted = (e) => e.kind === 'ungranted' || e.kind === 'calls-ungranted';
+
 function buildGraph(graph) {
   const nodes = new Map((graph.nodes || []).map((n) => [n.id, { ...n }]));
   const edges = (graph.edges || []).filter((e) => nodes.has(e.from) && nodes.has(e.to));
@@ -2557,28 +2602,59 @@ function mapView(model, onFocusNode) {
     for (const e of model.edges) {
       const a = pos.get(e.from);
       const b = pos.get(e.to);
-      const x1 = a.x + nodeW;
-      const y1 = a.y + NODE_H / 2;
-      const x2 = b.x;
-      const y2 = b.y + NODE_H / 2;
-      const dx = (x2 - x1) / 2;
-      const usage = e.kind === 'granted' || e.kind === 'ungranted';
+      const usage = isUsage(e);
       const widthPx = usage ? (e.calls > 0 && maxCalls > 0 ? 1.5 + 4.5 * (Math.log1p(e.calls) / Math.log1p(maxCalls)) : 1.25) : null;
       const from = model.nodes.get(e.from);
       const to = model.nodes.get(e.to);
-      const relText = { owner: 'owns', sponsor: 'sponsors', granted: 'is granted', ungranted: 'used without a grant' }[e.kind] || e.kind;
+      const relText = { owner: 'owns', sponsor: 'sponsors', granted: 'is granted', ungranted: 'used without a grant', calls: 'may call', 'calls-ungranted': 'called without a grant' }[e.kind] || e.kind;
       const tipText = `${from.label} ${relText} ${to.label}${usage ? ` · ${plural(e.calls || 0, 'call')} in 30 days, ${fmt(e.denied || 0)} denied` : ''}`;
+      let x1;
+      let y1;
+      let x2;
+      let y2;
+      let c1;
+      let c2;
+      if (isAgentCall(e)) {
+        // Both ends in the agent column: an arc out to its left, from the caller's box
+        // (upper half) into the called agent's (lower half), with an arrowhead. Calls
+        // back the other way bulge further, so the two arcs stay apart.
+        const rows = Math.abs(from.slot - to.slot);
+        const bulge = Math.min(gap - 12, 20 + 14 * rows + (from.slot > to.slot ? 10 : 0));
+        x1 = a.x;
+        y1 = a.y + NODE_H / 2 - 7;
+        x2 = b.x;
+        y2 = b.y + NODE_H / 2 + 7;
+        c1 = [x1 - bulge, y1];
+        c2 = [x2 - bulge, y2];
+      } else {
+        x1 = a.x + nodeW;
+        y1 = a.y + NODE_H / 2;
+        x2 = b.x;
+        y2 = b.y + NODE_H / 2;
+        const dx = (x2 - x1) / 2;
+        c1 = [x1 + dx, y1];
+        c2 = [x2 - dx, y2];
+      }
       edgeLayer.append(s('path', {
-        d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`,
+        d: `M${x1},${y1} C${c1[0]},${c1[1]} ${c2[0]},${c2[1]} ${x2},${y2}`,
         class: `edge edge-${e.kind}`, 'data-from': e.from, 'data-to': e.to,
         style: widthPx ? `stroke-width: ${widthPx.toFixed(2)}` : null,
       }, s('title', {}, tipText)));
+      if (isAgentCall(e)) {
+        const half = Math.max(4.5, (widthPx || 1.25) + 1.5);
+        edgeLayer.append(s('path', {
+          d: `M${(x2 - half * 1.8).toFixed(1)},${(y2 - half).toFixed(1)} L${x2},${y2} L${(x2 - half * 1.8).toFixed(1)},${(y2 + half).toFixed(1)} Z`,
+          class: `edge edge-head edge-head-${e.kind}`, 'data-from': e.from, 'data-to': e.to,
+        }));
+      }
       if (usage && e.calls > 0) {
         const full = e.denied ? `${fmt(e.calls)} calls · ${fmt(e.denied)} denied` : plural(e.calls, 'call');
         const text = full.length * 6 + 16 <= gap - 8 ? full : fmt(e.calls);
         const tw = text.length * 6 + 16;
-        const px = bezierPoint(x1, x1 + dx, x2 - dx, x2, 0.5);
-        const py = bezierPoint(y1, y1, y2, y2, 0.5);
+        let px = bezierPoint(x1, c1[0], c2[0], x2, 0.5);
+        const py = bezierPoint(y1, c1[1], c2[1], y2, 0.5);
+        // An arc's tag stays clear of the agent column.
+        if (isAgentCall(e)) px = Math.min(px, x1 - tw / 2 - 4);
         tagLayer.append(s('g', { class: 'edge-tag', 'data-from': e.from, 'data-to': e.to, transform: `translate(${px.toFixed(1)},${py.toFixed(1)})` },
           s('title', {}, tipText),
           s('rect', { x: -tw / 2, y: -9, width: tw, height: 18, rx: 9, class: 'edge-label-bg', style: e.denied ? 'stroke: var(--critical)' : null }),
@@ -2660,14 +2736,16 @@ function nodeDetail(model, id) {
   const all = [...model.nodes.values()];
   if (!id) {
     const counts = countBy(all, 'kind');
-    const usage = model.edges.filter((e) => e.kind === 'granted' || e.kind === 'ungranted');
-    const ungranted = usage.filter((e) => e.kind === 'ungranted');
+    const usage = model.edges.filter(isUsage);
+    const ungranted = usage.filter(isUngranted);
+    const calls = usage.filter(isAgentCall);
     const busiest = usage.slice().sort((x, y) => (y.calls || 0) - (x.calls || 0))[0];
     return [
       facts([
         ['People', fmt(counts.person || 0)],
         ['Agents', fmt(counts.agent || 0)],
         ['Tool servers', fmt(counts.server || 0)],
+        calls.length ? ['Agents calling agents', plural(calls.length, 'connection')] : null,
         ['Ungranted use', ungranted.length ? h('span', { class: 'tone-text-critical' }, plural(ungranted.length, 'connection')) : 'None'],
         busiest && busiest.calls ? ['Busiest link', `${model.nodes.get(busiest.from).label} → ${model.nodes.get(busiest.to).label}: ${plural(busiest.calls, 'call')}, ${fmt(busiest.denied)} denied`] : null,
       ]),
@@ -2681,16 +2759,16 @@ function nodeDetail(model, id) {
   const relLabel = (e) => ({
     owner: e.from === id ? 'owns' : 'owned by', sponsor: e.from === id ? 'sponsors' : 'sponsored by',
     granted: e.from === id ? 'granted' : 'granted to', ungranted: e.from === id ? 'used without grant' : 'used without grant by',
+    calls: e.from === id ? 'may call' : 'may be called by', 'calls-ungranted': e.from === id ? 'called without grant' : 'called without grant by',
   }[e.kind] || e.kind);
   const conns = rel.length
     ? h('ul', { class: 'conn-list', role: 'list' }, rel.map((e) => {
       const o = other(e);
-      const usage = e.kind === 'granted' || e.kind === 'ungranted';
       return h('li', {},
         h('span', { class: 'muted' }, relLabel(e)),
         o.kind === 'agent' ? agentLink(o.id.slice(6), o.label) : h('strong', {}, o.label),
-        usage ? h('span', { class: 'muted' }, `· ${plural(e.calls || 0, 'call')}, ${fmt(e.denied || 0)} denied`) : null,
-        e.kind === 'ungranted' ? plainChip('no grant', { tone: 'critical', iconName: 'ban' }) : null);
+        isUsage(e) ? h('span', { class: 'muted' }, `· ${plural(e.calls || 0, 'call')}, ${fmt(e.denied || 0)} denied`) : null,
+        isUngranted(e) ? plainChip('no grant', { tone: 'critical', iconName: 'ban' }) : null);
     }))
     : h('p', { class: 'muted small' }, 'No connections.');
   let head;
@@ -2709,15 +2787,21 @@ function nodeDetail(model, id) {
   return [h('h3', { class: 'break' }, n.label), ...head, h('div', { class: 'field-label' }, 'Connections'), conns, action];
 }
 
-function mapLegend() {
+function mapLegend(model) {
   const line = (cls, extra = '') => s('svg', { width: 28, height: 10, 'aria-hidden': 'true' }, s('path', { d: 'M1,5 H27', class: `edge ${cls}`, style: extra }));
+  const arc = (kind) => s('svg', { width: 28, height: 16, 'aria-hidden': 'true' },
+    s('path', { d: 'M25,3 C9,3 9,12 25,12', class: `edge edge-${kind}`, style: 'stroke-width:2' }),
+    s('path', { d: 'M19,8 L26,12 L19,16 Z', class: `edge edge-head edge-head-${kind}` }));
   const stripe = (tone) => h('span', { class: 'swatch', style: `background:${TONE_COLOR[tone]}; width:6px; height:14px` });
   const item = (mark, label) => h('span', { class: 'legend-item' }, mark, label);
+  const agentCalls = model.edges.filter(isAgentCall);
   return h('div', { class: 'map-legend' },
     item(line('edge-owner'), 'Owner'),
     item(line('edge-sponsor'), 'Sponsor'),
     item(line('edge-granted', 'stroke-width:3'), 'Granted (width = calls)'),
     item(line('edge-ungranted', 'stroke-width:2'), 'Used without a grant'),
+    agentCalls.length ? item(arc('calls'), 'May call another agent') : null,
+    agentCalls.some(isUngranted) ? item(arc('calls-ungranted'), 'Called an agent without a grant') : null,
     item(stripe('good'), 'Active / approved'),
     item(stripe('warning'), 'Pending review'),
     item(stripe('critical'), 'Blocked'),
@@ -2739,14 +2823,21 @@ async function renderMap() {
     ? mapView(model, setDetail)
     : emptyState('Nothing to map yet', 'Register agents and tool servers to see who owns what and which tools each agent reaches.');
   const connections = connectionsTable(model);
+  const agentCalls = model.edges.some(isAgentCall);
   return h('div', { class: 'page' },
     pageHead({
       title: 'Agent map',
-      sub: 'Who is accountable for each agent, and which tool servers each agent can reach or has used in the last 30 days.',
+      sub: 'Who is accountable for each agent, and which tool servers and other agents each agent can reach or has used in the last 30 days.',
       actions: [refreshButton()],
     }),
     h('div', { class: 'map-layout' },
-      card({ title: 'People, agents and tool servers', sub: 'Columns are fixed: accountable people on the left, tool servers on the right.', body: [mapLegend(), view] }),
+      card({
+        title: 'People, agents and tool servers',
+        sub: agentCalls
+          ? 'Columns are fixed: accountable people on the left, tool servers on the right. Arcs beside the agents point from an agent to the agents it calls.'
+          : 'Columns are fixed: accountable people on the left, tool servers on the right.',
+        body: [mapLegend(model), view],
+      }),
       h('section', { class: 'card map-detail', 'aria-labelledby': 'map-detail-title', 'aria-live': 'polite' },
         h('div', { class: 'card-head' }, h('div', { class: 'card-head-text' }, detailTitle)), detailBody)),
     connections);
@@ -2754,9 +2845,9 @@ async function renderMap() {
 
 function connectionsTable(model) {
   if (!model.edges.length) return null;
-  const order = { owner: 0, sponsor: 1, granted: 2, ungranted: 3 };
+  const order = { owner: 0, sponsor: 1, granted: 2, ungranted: 3, calls: 4, 'calls-ungranted': 5 };
   const rows = model.edges.slice().sort((x, y) => String(model.nodes.get(x.from).label).localeCompare(String(model.nodes.get(y.from).label)) || order[x.kind] - order[y.kind]);
-  const label = { owner: 'Owner of', sponsor: 'Sponsor of', granted: 'Granted', ungranted: 'Used without a grant' };
+  const label = { owner: 'Owner of', sponsor: 'Sponsor of', granted: 'Granted', ungranted: 'Used without a grant', calls: 'May call', 'calls-ungranted': 'Called without a grant' };
   const nameCell = (n) => (n.kind === 'agent' ? agentLink(n.id.slice(6), n.label) : n.label);
   return card({
     title: 'Connections',
@@ -2765,10 +2856,10 @@ function connectionsTable(model) {
     body: h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
       h('thead', {}, h('tr', {}, ['From', 'Relation', 'To', 'Calls (30 days)', 'Denied'].map((t, i) => h('th', { scope: 'col', class: i > 2 ? 'num' : null }, t)))),
       h('tbody', {}, rows.map((e) => {
-        const usage = e.kind === 'granted' || e.kind === 'ungranted';
+        const usage = isUsage(e);
         return h('tr', {},
           h('td', { 'data-label': 'From', class: 'break' }, nameCell(model.nodes.get(e.from))),
-          h('td', { 'data-label': 'Relation' }, e.kind === 'ungranted' ? plainChip(label[e.kind], { tone: 'critical', iconName: 'ban' }) : label[e.kind]),
+          h('td', { 'data-label': 'Relation' }, isUngranted(e) ? plainChip(label[e.kind], { tone: 'critical', iconName: 'ban' }) : label[e.kind]),
           h('td', { 'data-label': 'To', class: 'break' }, nameCell(model.nodes.get(e.to))),
           h('td', { 'data-label': 'Calls', class: 'num' }, usage ? fmt(e.calls || 0) : '—'),
           h('td', { 'data-label': 'Denied', class: 'num' }, usage ? fmt(e.denied || 0) : '—'));
@@ -3373,6 +3464,11 @@ async function blueprintFormFlow(b, servers) {
         hint: 'Models its agents may call through the gateway: one provider per line; model names can use * wildcards.',
       },
       { id: 'daily_token_budget', label: 'Daily token budget per agent', type: 'number', min: 0, value: b?.daily_token_budget ?? '', hint: 'Input and output tokens per UTC day. Empty: no budget.' },
+      { type: 'section', label: 'Agent to agent' },
+      {
+        id: 'agent_access', label: 'Agents its agents may call', value: (b?.agent_access || []).join(', '), placeholder: 'billing-agent, kb-*', mono: true,
+        hint: 'Over A2A, through the gateway: agent names separated by commas; names can use * wildcards. Empty: none.',
+      },
       { type: 'section', label: 'People' },
       { id: 'acts_for', label: 'Its agents act for', type: 'select', value: b?.acts_for || 'either', options: Object.entries(ACTS_FOR).map(([value, label]) => ({ value, label })) },
       {
@@ -3393,6 +3489,7 @@ async function blueprintFormFlow(b, servers) {
         attestation_days: days, require_sponsor: v.require_sponsor, labels: parseLabels(v.labels),
         require_workload_identity: v.require_workload_identity,
         model_access: parseModelAccess(v.model_access), daily_token_budget: parseBudget(v.daily_token_budget),
+        agent_access: parseList(v.agent_access),
         acts_for: v.acts_for, people_groups: parseList(v.people_groups), approvals_by: v.approvals_by,
       };
       if (editing) return api(`v1/blueprints/${encodeURIComponent(b.name)}`, { method: 'PATCH', body });
@@ -3554,6 +3651,7 @@ function blueprintCard(b, used, servers) {
         ['Attestation', b.attestation_days ? `Every ${plural(b.attestation_days, 'day')}` : 'Not required'],
         ['Acts for', actsFor(b)],
         b.approvals_by === 'person' ? ['Approvals', APPROVALS_BY.person] : null,
+        (b.agent_access || []).length ? ['May call agents', h('div', { class: 'chip-row' }, b.agent_access.map((x) => plainChip(x, { mono: true })))] : null,
         labels.length ? ['Labels', h('div', { class: 'chip-row' }, labels.map(([k, v]) => plainChip(`${k}=${v}`, { mono: true })))] : null,
       ]),
       h('div', { class: 'field-label' }, 'Permissions'),
@@ -3627,11 +3725,18 @@ function whatIfCard(agents, servers, providers = []) {
   providerInput.addEventListener('change', fillModels);
   agentSel.addEventListener('change', fillModels);
 
+  // A call to another agent over A2A: the agent called.
+  const targetInput = h('input', { type: 'text', id: 'wi-target', list: 'wi-target-list', autocomplete: 'off', spellcheck: 'false' });
+  const serving = agents.filter((a) => a.a2a_url && a.status !== 'deleted');
+  const targetList = h('datalist', { id: 'wi-target-list' }, serving.map((a) => h('option', { value: a.name })));
+  targetInput.value = serving[0]?.name || '';
+
   // The person the agent acts for, if any.
   const userInput = h('input', { type: 'text', id: 'wi-user', placeholder: 'No one: the agent alone', autocomplete: 'off', spellcheck: 'false' });
   const groupsInput = h('input', { type: 'text', id: 'wi-groups', placeholder: 'support, /emea/sales', autocomplete: 'off', spellcheck: 'false' });
   const kindTool = h('input', { type: 'radio', name: 'wi-kind', id: 'wi-kind-tool', value: 'tool', checked: true });
   const kindModel = h('input', { type: 'radio', name: 'wi-kind', id: 'wi-kind-model', value: 'model' });
+  const kindAgent = h('input', { type: 'radio', name: 'wi-kind', id: 'wi-kind-agent', value: 'agent' });
   const phaseRequest = h('input', { type: 'radio', name: 'wi-phase', id: 'wi-phase-request', value: 'request', checked: true });
   const phaseResponse = h('input', { type: 'radio', name: 'wi-phase', id: 'wi-phase-response', value: 'response' });
   const pii = h('input', { type: 'checkbox', id: 'wi-pii', value: 'pii' });
@@ -3651,22 +3756,35 @@ function whatIfCard(agents, servers, providers = []) {
   const modelFields = h('div', { class: 'form-row' },
     h('div', { class: 'field' }, h('label', { for: 'wi-provider' }, 'Model provider'), providerInput, providerList),
     h('div', { class: 'field' }, h('label', { for: 'wi-model' }, 'Model'), modelInput, modelList));
+  const agentFields = h('div', { class: 'field' }, h('label', { for: 'wi-target' }, 'Agent called'), targetInput, targetList,
+    h('p', { class: 'hint' }, 'It calls the agent over A2A, through the gateway (SendMessage).'));
   const modelOnly = [
     h('label', { class: 'check', for: 'wi-jailbreak' }, jailbreak, 'A jailbreak in the prompt'),
     h('label', { class: 'check', for: 'wi-tool-calls' }, toolCalls, 'The conversation holds tool calls'),
   ];
-  const isModel = () => kindModel.checked;
+  const injectionCheck = h('label', { class: 'check', for: 'wi-injection' }, injection, injectionLabel);
+  const phaseField = h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Phase'),
+    h('div', { class: 'radio-row' },
+      h('label', { class: 'check', for: 'wi-phase-request' }, phaseRequest, requestLabel),
+      h('label', { class: 'check', for: 'wi-phase-response' }, phaseResponse, responseLabel)));
+  const kind = () => (kindModel.checked ? 'model' : kindAgent.checked ? 'agent' : 'tool');
+  const isModel = () => kind() === 'model';
   const showKind = () => {
     const model = isModel();
-    toolFields.hidden = model;
+    const agent = kind() === 'agent';
+    toolFields.hidden = model || agent;
     modelFields.hidden = !model;
+    agentFields.hidden = !agent;
+    // AgentGov checks the requests agents send each other, not their answers.
+    phaseField.hidden = agent;
+    injectionCheck.hidden = agent;
     modelOnly.forEach((el) => { el.hidden = !model; });
     requestLabel.textContent = model ? 'Request (the prompt)' : 'Request (the tool call)';
     responseLabel.textContent = model ? 'Response (the answer)' : 'Response (the tool result)';
     injectionLabel.textContent = model ? 'Prompt injection in a tool result in the conversation' : 'Prompt injection in the result';
   };
   showKind();
-  [kindTool, kindModel].forEach((r) => r.addEventListener('change', showKind));
+  [kindTool, kindModel, kindAgent].forEach((r) => r.addEventListener('change', showKind));
 
   function buildInput() {
     const agentId = agentSel.value;
@@ -3679,6 +3797,16 @@ function whatIfCard(agents, servers, providers = []) {
     const detections = { categories, prompt_injection: injection.checked, injection_score: injection.checked ? 0.95 : 0 };
     const name = userInput.value.trim();
     const user = name ? { user: { id: name, username: name, groups: parseList(groupsInput.value), roles: [], via: 'exchange' } } : {};
+    if (kind() === 'agent') {
+      return {
+        path: 'agentgov/a2a/decision',
+        input: {
+          kind: 'a2a', method: 'SendMessage', agent: caller, ...user, target: targetInput.value.trim(),
+          // The person heads the chain of a call made for them.
+          chain: name ? [{ type: 'person', id: name, name }] : [], detections: { categories },
+        },
+      };
+    }
     if (isModel()) {
       return {
         path: 'agentgov/models/decision',
@@ -3696,9 +3824,14 @@ function whatIfCard(agents, servers, providers = []) {
 
   async function evaluate(example) {
     const { path, input } = buildInput();
-    const missing = isModel() ? !input.provider || !input.model : !input.resource.server || !input.resource.name;
+    const missing = {
+      agent: () => !input.target,
+      model: () => !input.provider || !input.model,
+      tool: () => !input.resource.server || !input.resource.name,
+    }[kind()]();
     if (missing) {
-      result.replaceChildren(callout('warning', 'alert-circle', isModel() ? 'Choose a model provider and a model to evaluate.' : 'Choose a tool server and a tool to evaluate.'));
+      const what = { agent: 'the agent it calls', model: 'a model provider and a model', tool: 'a tool server and a tool' }[kind()];
+      result.replaceChildren(callout('warning', 'alert-circle', `Choose ${what} to evaluate.`));
       return;
     }
     submit.disabled = true;
@@ -3716,20 +3849,18 @@ function whatIfCard(agents, servers, providers = []) {
     h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Call'),
       h('div', { class: 'radio-row' },
         h('label', { class: 'check', for: 'wi-kind-tool' }, kindTool, 'A tool call'),
-        h('label', { class: 'check', for: 'wi-kind-model' }, kindModel, 'A model call'))),
+        h('label', { class: 'check', for: 'wi-kind-model' }, kindModel, 'A model call'),
+        h('label', { class: 'check', for: 'wi-kind-agent' }, kindAgent, 'A call to another agent'))),
     h('div', { class: 'field' }, h('label', { for: 'wi-agent' }, 'Agent'), agentSel),
     h('div', { class: 'form-row' },
       h('div', { class: 'field' }, h('label', { for: 'wi-user' }, 'On behalf of'), userInput),
       h('div', { class: 'field' }, h('label', { for: 'wi-groups' }, 'Their groups'), groupsInput)),
-    toolFields, modelFields,
-    h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Phase'),
-      h('div', { class: 'radio-row' },
-        h('label', { class: 'check', for: 'wi-phase-request' }, phaseRequest, requestLabel),
-        h('label', { class: 'check', for: 'wi-phase-response' }, phaseResponse, responseLabel))),
+    toolFields, modelFields, agentFields,
+    phaseField,
     h('fieldset', { class: 'field' }, h('legend', { class: 'field-label' }, 'Detections ', h('span', { class: 'muted' }, '(what Presidio and the detectors found)')),
       h('label', { class: 'check', for: 'wi-pii' }, pii, 'Personal data (pii)'),
       h('label', { class: 'check', for: 'wi-secret' }, secret, 'Credentials (secret)'),
-      h('label', { class: 'check', for: 'wi-injection' }, injection, injectionLabel),
+      injectionCheck,
       ...modelOnly),
     h('div', { class: 'btn-row' }, submit));
   form.addEventListener('submit', (e) => { e.preventDefault(); evaluate(false); });
@@ -3739,7 +3870,7 @@ function whatIfCard(agents, servers, providers = []) {
   return h('section', { class: 'card whatif', 'aria-labelledby': 'whatif-title' },
     h('div', { class: 'card-head' }, h('div', { class: 'card-head-text' },
       h('h2', { id: 'whatif-title' }, 'What if'),
-      h('p', { class: 'card-sub' }, 'Ask the live OPA what it would decide for a tool call or a model call. Nothing is recorded.'))),
+      h('p', { class: 'card-sub' }, 'Ask the live OPA what it would decide for a tool call, a model call or a call to another agent. Nothing is recorded.'))),
     h('div', { class: 'card-body' }, form, h('hr', { style: 'border:0; border-top:1px solid var(--line); margin:4px 0; width:100%' }), result));
 }
 
@@ -3767,8 +3898,9 @@ function whatIfResult(res, input, example) {
         h('ul', { class: 'reasons', role: 'list' }, r.monitored.map((m) => h('li', {}, icon('eye'), h('span', {}, m)))))
       : null,
     facts([
-      ['Redact', (r.redact || []).length ? h('div', { class: 'chip-row' }, r.redact.map((c) => plainChip(c, { mono: true }))) : 'Nothing'],
+      input.kind === 'a2a' ? null : ['Redact', (r.redact || []).length ? h('div', { class: 'chip-row' }, r.redact.map((c) => plainChip(c, { mono: true }))) : 'Nothing'],
       ['Agent seen as', r.agent ? [r.agent.name, ` · ${r.agent.status} · ${r.agent.risk_level} risk`] : h('span', { class: 'muted' }, 'Not a registered agent')],
+      input.kind === 'a2a' ? ['Agent called', r.target ? `${r.target.name} · ${r.target.status}` : h('span', { class: 'muted' }, 'Not a registered agent')] : null,
       ['Policy path', h('code', {}, res.path)],
     ]),
     h('details', { class: 'disclosure' }, h('summary', {}, icon('chevron'), 'Show OPA input and result'),
@@ -3797,7 +3929,17 @@ function traceLink(e) {
     'Open trace', icon('external'), h('span', { class: 'sr-only' }, ' (opens in a new tab)'));
 }
 
+// Who handed the work down, from the person at its head to the agent called.
+function chainView(chain) {
+  return h('span', { class: 'break' }, chain.flatMap((link, i) => [
+    i ? [h('span', { class: 'muted', 'aria-hidden': 'true' }, ' › '), h('span', { class: 'sr-only' }, ', then ')] : null,
+    link.type === 'person' ? personLink(link.name)
+      : String(link.id || '').startsWith('agt_') && !isPerson() ? agentLink(link.id, link.name) : link.name,
+  ]));
+}
+
 function ledgerDetail(e) {
+  const chain = e.details?.chain || [];
   return h('div', { class: 'stack', style: 'gap:10px; padding: 4px 0 6px' },
     facts([
       ['Event ID', h('code', {}, e.id)],
@@ -3805,6 +3947,7 @@ function ledgerDetail(e) {
       ['Severity', humanize(e.severity)],
       ['Action', e.action ? h('code', {}, e.action) : null],
       e.on_behalf_of ? ['On behalf of', personLink(e.on_behalf_of)] : null,
+      chain.length ? ['Chain', chainView(chain)] : null,
       e.trace_id ? ['Trace', h('span', {}, h('code', {}, e.trace_id), e.trace_url ? [' ', traceLink(e)] : null)] : null,
       ['Hash', h('code', { class: 'hash break' }, e.hash)],
       ['Previous hash', h('code', { class: 'hash break' }, e.prev_hash)],

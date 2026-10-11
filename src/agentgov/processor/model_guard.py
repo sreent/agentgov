@@ -38,10 +38,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
-from agentgov.identity import people
+from agentgov.identity import chains, people
 from agentgov.opa.client import OpaError
 from agentgov.processor import detectors, jailbreak
-from agentgov.processor.server import Inspection, trace_id_from
+from agentgov.processor.server import Inspection, _delegation, trace_id_from
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -64,6 +64,8 @@ ROLES = "x-agentgov-roles"
 ACT = "x-agentgov-act"
 
 PASS: dict[str, Any] = {"action": {}}
+# The HTTP methods agentgateway checks A2A requests with (their own).
+A2A_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 
 def refuse(status: int, reasons: list[str], effect: str = "deny") -> dict[str, Any]:
@@ -101,10 +103,15 @@ class ModelGuard:
         self.p = processor
 
     def app(self) -> Starlette:
+        # Calls between agents: agentgateway's external authorization, on the same server.
+        from agentgov.processor.a2a_guard import A2AGuard
+
+        a2a = A2AGuard(self.p)
         return Starlette(
             routes=[
                 Route("/request", self._on_request, methods=["POST"]),
                 Route("/response", self._on_response, methods=["POST"]),
+                Route("/a2a/check/{target}", a2a.check, methods=list(A2A_METHODS)),
                 Route("/healthz", lambda _: PlainTextResponse("ok"), methods=["GET"]),
             ]
         )
@@ -161,6 +168,9 @@ class ModelGuard:
         provider, model = headers.get(PROVIDER) or "unknown", headers.get(MODEL) or ""
         identity = self._identity(headers)
         person = self._person(headers)
+        chain, _ = self.p.delegation(headers.get(chains.HEADER), identity, person)
+        if chain is not None and person is None:
+            person = chain.person
         trace_id = trace_id_from([headers.get("traceparent") or ""])
 
         def finish(
@@ -189,6 +199,7 @@ class ModelGuard:
                 opa_decision_id=decision_id,
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 trace_id=trace_id,
+                delegation=_delegation(chain),
             )
 
         return finish
@@ -221,6 +232,11 @@ class ModelGuard:
         monitored: list[str] = []
         finish = self._recorder("request", headers, inspection, monitored)
 
+        person = self._person(headers)
+        chain, unusable = self.p.delegation(headers.get(chains.HEADER), identity, person)
+        if unusable:
+            finish("deny", [unusable], agent=self.p.holder(identity))
+            return refuse(403, [unusable])
         if inspection.scan.pii_error and self.p._fail_closed(modes):
             reasons = ["Content inspection is unavailable, so the prompt was not sent"]
             finish("deny", reasons)
@@ -234,9 +250,11 @@ class ModelGuard:
             "detections": inspection.summary,
             "tool_calls": holds_tool_calls(messages),
         }
-        person = self._person(headers)
+        person = person or (chain.person if chain else None)
         if person:
             opa_input["user"] = person
+        if chain is not None:
+            opa_input["chain"] = chain.links
         try:
             decision, decision_id = await self.p.opa.evaluate("agentgov/models/decision", opa_input)
         except OpaError as exc:

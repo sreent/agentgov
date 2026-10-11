@@ -50,6 +50,8 @@ drop if startswith(input.path, "agentgov/mcp")
 
 drop if startswith(input.path, "agentgov/models")
 
+drop if startswith(input.path, "agentgov/a2a")
+
 drop if startswith(input.path, "registry")
 """
 
@@ -77,6 +79,7 @@ def custom_package(name: str) -> str:
 def registry_snapshot(session: Session) -> dict[str, Any]:
     agents: dict[str, Any] = {}
     clients: dict[str, str] = {}
+    names: dict[str, str] = {}
     used = model_usage.tokens_used(session)
     for agent in session.scalars(select(Agent).where(Agent.status != DELETED)).unique():
         bp = agent.blueprint
@@ -102,7 +105,11 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
             "people_groups": (bp.people_groups or []) if bp else [],
             # How it authenticates: its workload identity, or (null) a client secret.
             "workload_identity": agents_svc.workload_identity(agent),
+            # Agent to agent: whether it serves A2A, and the agents it may call.
+            "a2a": bool(agent.a2a_url),
+            "agent_access": agents_svc.effective_agent_access(agent),
         }
+        names[agent.name] = agent.id
         if agent.client_id:
             clients[agent.client_id] = agent.id
     servers: dict[str, Any] = {}
@@ -146,6 +153,7 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
     return {
         "agents": agents,
         "clients": clients,
+        "agent_names": names,
         "toolservers": servers,
         "model_providers": providers,
         "blueprints": blueprints,

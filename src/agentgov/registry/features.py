@@ -96,17 +96,32 @@ CATALOG: tuple[Feature, ...] = (
         needs="each provider's API key in a file the gateway reads",
     ),
     Feature(
+        "a2a-gateway",
+        "Agent-to-agent gateway",
+        "gateway",
+        "Agents that serve A2A (the Agent2Agent protocol) are published on agentgateway at "
+        "/a2a/<agent>, where other agents call them with their AgentGov token. The controls "
+        "check every call, and the chain of agents, with the person they act for, goes "
+        "with it to every agent, tool and model further down.",
+        SWITCH,
+        ON,
+        {
+            ON: "Agents with an A2A URL are reachable through the gateway.",
+            OFF: "No agent is published for A2A. The registry keeps their A2A URLs.",
+        },
+    ),
+    Feature(
         "least-privilege",
         "Least-privilege access",
         "controls",
-        "Agents call only the tools and models their blueprint and their own grants allow, and "
-        "see only those tools when they list a server's.",
+        "Agents call only the tools, models and other agents their blueprint and their own "
+        "grants allow, and see only those tools when they list a server's.",
         CONTROL,
         ENFORCE,
         {
-            ENFORCE: "Calls to tools and models an agent wasn't granted are denied.",
-            MONITOR: "Agents see and call every tool and model; calls they weren't granted are "
-            "recorded.",
+            ENFORCE: "Calls to tools, models and agents an agent wasn't granted are denied.",
+            MONITOR: "Agents see and call every tool, model and agent; calls they weren't "
+            "granted are recorded.",
             OFF: "Grants aren't checked.",
         },
     ),

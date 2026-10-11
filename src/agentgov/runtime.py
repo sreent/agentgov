@@ -233,7 +233,8 @@ class Runtime:
         identity = {"agents", "blueprints", "issuers", "feature:workload-identity"}
         if self.identity is not None and topics & identity:
             self.identity.trigger()
-        if topics & {"toolservers", "features"} and self.settings.gateway_config_path:
+        # Agents publish A2A routes, so their changes reach the gateway's configuration too.
+        if topics & {"toolservers", "features", "agents"} and self.settings.gateway_config_path:
             self._gateway_worker.trigger()
         if "feature:instruction-checks" in topics:
             self._recheck_worker.trigger()

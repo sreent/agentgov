@@ -38,7 +38,9 @@ def record_mcp_decisions(
     model calls (``kind: "model"``), whose activity the gateway's access logs count."""
     touched: dict[str, Agent] = {}
     for rec in records:
-        model_call = rec.get("kind") == "model"
+        kind = rec.get("kind")
+        model_call = kind == "model"
+        a2a = kind == "a2a"
         agent_info = rec.get("agent") or {}
         agent = session.get(Agent, agent_info.get("id")) if agent_info.get("id") else None
         identity = rec.get("identity") or {}
@@ -58,9 +60,10 @@ def record_mcp_decisions(
         reason = "; ".join(rec.get("reasons") or []) or None
         if reason is None and monitored:
             reason = "monitored: " + "; ".join(monitored)
+        delegation = rec["delegation"] if isinstance(rec.get("delegation"), dict) else None
         ledger.append(
             session,
-            type=f"decision.model.{phase}" if model_call else f"decision.{phase}",
+            type=f"decision.{kind}.{phase}" if model_call or a2a else f"decision.{phase}",
             actor=actor,
             agent=agent,
             agent_name=None if agent else identity.get("client_id"),
@@ -89,6 +92,10 @@ def record_mcp_decisions(
                 "latency_ms": rec.get("latency_ms"),
                 "identity": identity,
                 **({"user": user} if user else {}),
+                # A call between agents: whom it called.
+                **({"a2a": rec["a2a"]} if a2a and isinstance(rec.get("a2a"), dict) else {}),
+                # Work another agent handed down: the chain, from its head to this call.
+                **(_chain(delegation, agent, identity, rec) if delegation else {}),
             },
             trace_id=_trace_id(rec.get("trace_id")),
             on_behalf_of=people.name_of(user),
@@ -100,6 +107,12 @@ def record_mcp_decisions(
         touched[agent.id] = agent
         if model_call:
             _model_signals(session, agent, phase, effect, detections, resource, user)
+        elif a2a:
+            discovery.record_activity(
+                session, agent.id, when=when, tool_calls=0, denied=1 if effect == "deny" else 0
+            )
+            if effect == "deny":
+                risk.add_signal(session, agent.id, "policy_denied", resource)
         elif phase == "request":
             discovery.record_activity(
                 session, agent.id, when=when, tool_calls=1, denied=1 if effect == "deny" else 0
@@ -148,6 +161,33 @@ def record_mcp_decisions(
     for agent in touched.values():
         agents_svc.refresh_risk(session, settings, agent)
     return len(records)
+
+
+def _chain(
+    delegation: dict[str, Any], agent: Agent | None, identity: dict[str, Any], rec: dict[str, Any]
+) -> dict[str, Any]:
+    """The delegation a call was made under (or, between agents, the one it gave), and the
+    whole chain: who handed the work down, the agent calling, and the agent it called."""
+    caller = {
+        "type": "agent",
+        "id": agent.id if agent else str(identity.get("client_id") or ""),
+        "name": agent.name if agent else str(identity.get("client_id") or "unknown"),
+    }
+    links = [x for x in delegation.get("chain") or [] if isinstance(x, dict)] + [caller]
+    if rec.get("kind") == "a2a":
+        target = rec.get("a2a") or {}
+        links.append(
+            {
+                "type": "agent",
+                "id": str(target.get("target_id") or ""),
+                "name": str(rec.get("target")),
+            }
+        )
+    out: dict[str, Any] = {"chain": links}
+    ids_ = {k: delegation.get(k) for k in ("uid", "parent_uid") if delegation.get(k)}
+    if ids_:
+        out["delegation"] = ids_
+    return out
 
 
 def _model_signals(

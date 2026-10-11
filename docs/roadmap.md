@@ -13,7 +13,7 @@ integration per point covers every vendor that speaks the standard, and each one
 the same identities, policies, registry and ledger. Inventories of more agent platforms
 come second: they report, but they don't enforce.
 
-## Next, in this order
+## Delivered, in this order
 
 | | Theme | Item | Building block |
 |---|---|---|---|
@@ -24,7 +24,7 @@ come second: they report, but they don't enforce.
 | 3 | Identity | **Who the agent acts for** (done, [acting for people](acting-for-people.md)): tokens agents get for people at the gateway, whom each blueprint's agents may act for, the person and their groups in policy, the person in the ledger, and approvals sent to the person | Keycloak token exchange (RFC 8693) |
 | 4 | Identity | **Bring your own agent identity** (done, [agents' own identities](agent-identity.md)): agents authenticate with the identity they already have, Kubernetes service account tokens, SPIFFE JWT-SVIDs, or tokens from Microsoft Entra Agent ID, Okta, AWS and other OpenID Connect issuers, mapped to registry agents; no client secrets, and a kill switch per issuer | Keycloak federated client authentication (Kubernetes, SPIFFE and OpenID Connect identity providers) |
 | 5 | Security operations | **Hand-off at the level you choose** (done, [security operations](secops.md)): the ledger, findings included, to SIEMs as OCSF events through OpenTelemetry, an HTTP input or Splunk; alerts, approval requests and kill switches in Teams and Slack; and a `secops` role whose tools may triage, contain or decide as far as you let them | OCSF, OpenTelemetry logs, Splunk HEC, Teams workflows, Slack webhooks |
-| 6 | Interoperability | **Agent-to-agent (A2A) governance**: calls between agents through the gateway, with the chain of delegation in policy and the ledger | agentgateway A2A routes |
+| 6 | Interoperability | **Agent-to-agent (A2A) governance** (done, [agent to agent](agent-to-agent.md)): calls between agents through the gateway, who may call whom on blueprints and agents, the controls of tool calls on each call, and the chain of agents that handed the work down, with the person at its head, in policy and the ledger of every call further down | agentgateway A2A routes and external authorization |
 
 ## Later
 
@@ -35,6 +35,7 @@ come second: they report, but they don't enforce.
 | Admin access | **Back-channel logout**: end administrator sessions as soon as the identity provider ends them, instead of at expiry | OpenID Connect Back-Channel Logout (supported by Keycloak) |
 | Identity | **Incremental identity reconciliation**: a change notification per agent instead of a periodic full sync | — |
 | Identity | **Enterprise-managed authorization for MCP**: accept and issue identity assertions (ID-JAG) for MCP servers outside the gateway, and let developers' MCP clients through the gateway with their own tokens | MCP enterprise-managed authorization, agentgateway's MCP authentication |
+| Interoperability | **Agents' answers to other agents**: check the answers and streamed events agents send back over A2A, as tool results are, and mask personal data in messages | agentgateway's external processing |
 | Detection | **Classifier for tool and model traffic**: ask the Granite Guardian that already checks [agent instructions](instructions.md) about tool results (prompt injection) and prompts (jailbreaks) too, next to the processor's heuristics | IBM Granite Guardian |
 | Registry | **Management rules**: declarative registry rules (for example "block agents without an owner for 14 days") on top of posture findings | OPA |
 | Registry | **More platform connectors**: import agents from cloud agent platforms and SaaS agent builders (AWS, Google, Salesforce, Databricks) the way [Microsoft 365 and Copilot Studio](platforms.md) are, when someone needs one | Platform APIs |

@@ -26,6 +26,23 @@ agentgateway translates the request for Anthropic and Gemini. Its access logs,
 sent to the OpenTelemetry Collector, carry each call's tokens and the agent's
 identity; the control plane meters them (``agentgov.registry.model_usage``).
 
+Every agent that serves A2A (an ``a2a_url`` in the registry, while the a2a-gateway feature
+is on) becomes a route ``/a2a/<agent>``, where other agents call it with their agent
+token:
+
+* ``jwtAuth``       - as for tool servers.
+* ``a2a``           - agentgateway handles the traffic as A2A: the agent's card, at
+                      ``/a2a/<agent>/.well-known/agent-card.json``, names the gateway as
+                      where to call it.
+* ``extAuthz``      - every request goes to the governance processor first
+                      (``agentgov.processor.a2a_guard``), with the caller's identity and
+                      the delegation it carries; the processor's answer hands the called
+                      agent a delegation of its own and who called it, in headers that
+                      replace any the caller set (``agentgov.identity.chains``).
+
+Agents carry their delegation (``X-AgentGov-Delegation``) on the calls they make for the
+work they were handed, to tools and models too: the processor reads it there as well.
+
 agentgateway watches the file and reloads it, so it only has to be rewritten
 atomically when tool servers or model providers change. The control plane serves
 it (``GET /v1/gateway/config``), and ``agentgov gateway-config``, beside the
@@ -59,8 +76,10 @@ from sqlalchemy import select
 
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.models import PENDING, ModelProvider, ToolServer
+from agentgov.identity import chains
+from agentgov.models import PENDING, Agent, ModelProvider, ToolServer
 from agentgov.registry import features, model_providers
+from agentgov.registry.agents import a2a_published
 
 log = logging.getLogger(__name__)
 
@@ -179,6 +198,8 @@ def model_route_for(
         "x-agentgov-provider": f'"{name}"',
         "x-agentgov-model": "llmRequest.model",
         **PERSON_HEADERS,
+        # The delegation the agent carries, when another agent handed it the work.
+        chains.HEADER: f'request.headers["{chains.HEADER}"]',
     }
     webhook = {"host": settings.processor_webhook_address}
     policies.update(
@@ -224,11 +245,69 @@ def model_route_for(
     }
 
 
+# What agentgateway passes on from the processor's answer to the called agent.
+A2A_PASSED_ON = [
+    chains.HEADER,
+    chains.CALLER_HEADER,
+    chains.PERSON_HEADER,
+    chains.CHAIN_HEADER,
+]
+# A2A requests are checked with their body (a message, with its parts), up to this size.
+A2A_MAX_BODY = 256 * 1024
+# Agents called while they are blocked are refused by policy, with the reason, rather
+# than not found.
+
+
+def a2a_route_for(agent: Agent, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
+    url = urlsplit(agent.a2a_url or "")
+    port = url.port or (443 if url.scheme == "https" else 80)
+    host = f"[{url.hostname}]" if ":" in (url.hostname or "") else url.hostname
+    route = f"/a2a/{agent.name}"
+    check_headers = {
+        "x-agentgov-agent-id": "jwt.agent_id",
+        "x-agentgov-client-id": "jwt.azp",
+        **PERSON_HEADERS,
+        chains.HEADER: f'request.headers["{chains.HEADER}"]',
+        "traceparent": 'request.headers["traceparent"]',
+        "x-agentgov-path": "request.path",
+    }
+    policies: dict[str, Any] = {
+        "cors": {"allowOrigins": ["*"], "allowHeaders": ["*"]},
+        "a2a": {},
+        # /a2a/<agent>/... reaches the agent at its own path.
+        "urlRewrite": {"path": {"prefix": url.path.rstrip("/") or "/"}},
+        "extAuthz": {
+            "host": settings.processor_webhook_address,
+            "protocol": {
+                "http": {
+                    "path": f'"/a2a/check/{agent.name}"',
+                    "includeResponseHeaders": list(A2A_PASSED_ON),
+                    "addRequestHeaders": check_headers,
+                }
+            },
+            "includeRequestBody": {"maxRequestBytes": A2A_MAX_BODY},
+            "failureMode": "deny",
+        },
+    }
+    if url.scheme == "https":
+        policies["backendTLS"] = {}
+    auth = _jwt_auth(settings, modes)
+    if auth:
+        policies["jwtAuth"] = auth
+    return {
+        "name": f"a2a-{agent.name}",
+        "matches": [{"path": {"pathPrefix": route}}],
+        "policies": policies,
+        "backends": [{"host": f"{host}:{port}"}],
+    }
+
+
 def render(
     servers: list[ToolServer],
     settings: Settings,
     modes: dict[str, str] | None = None,
     providers: list[ModelProvider] | None = None,
+    agents: list[Agent] | None = None,
 ) -> dict[str, Any]:
     modes = {**{f.key: f.default for f in features.CATALOG}, **(modes or {})}
     routes = []
@@ -241,6 +320,8 @@ def render(
         ]
     if modes["model-gateway"] != features.OFF:
         routes += [model_route_for(p, settings, modes) for p in providers or []]
+    if modes["a2a-gateway"] != features.OFF:
+        routes += [a2a_route_for(a, settings, modes) for a in agents or [] if a2a_published(a)]
     # A static health route keeps the listener valid when no servers exist yet.
     routes.append(
         {
@@ -329,11 +410,17 @@ class GatewayConfigWriter:
     def render_config(self) -> dict[str, Any]:
         with self.db.session() as session:
             servers = list(session.scalars(select(ToolServer).order_by(ToolServer.name)))
+            agents = list(
+                session.scalars(
+                    select(Agent).where(Agent.a2a_url.is_not(None)).order_by(Agent.name)
+                ).unique()
+            )
             return render(
                 servers,
                 self.settings,
                 features.modes(session),
                 model_providers.list_all(session),
+                agents,
             )
 
     def render_current(self) -> str:

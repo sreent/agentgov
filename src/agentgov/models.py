@@ -93,6 +93,8 @@ class Blueprint(Base):
     require_workload_identity: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0"
     )
+    # Other agents its agents may call over A2A, by name: ["billing-*", "kb-agent"].
+    agent_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
@@ -137,6 +139,10 @@ class Agent(Base):
     daily_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # A2A AgentCard (v1.0) describing the agent's skills and interfaces.
     agent_card: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Where it serves A2A (its JSON-RPC endpoint), for other agents to call through the
+    # gateway at /a2a/<name>; and the agents it may call, in addition to the blueprint's.
+    a2a_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
     # Identifiers in other systems (OTel agent id, platform ids, fingerprints).
     external_ids: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source: Mapped[str] = mapped_column(String(64), default="registered")

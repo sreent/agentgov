@@ -740,6 +740,39 @@ WORKLOAD_IDENTITY = typer.Option(
 )
 
 
+A2A_URL = typer.Option(
+    None,
+    "--a2a-url",
+    help="Where it serves A2A (its JSON-RPC endpoint): other agents call it through the "
+    "gateway at /a2a/<name>.",
+)
+AGENT_ACCESS = typer.Option(
+    None,
+    "--agent-access",
+    help="Agents it may call over A2A, by name or pattern such as billing-* (repeatable or "
+    "comma-separated).",
+)
+
+
+def _a2a_fields(
+    a2a_url: str | None,
+    agent_access: list[str] | None,
+    *,
+    no_a2a: bool = False,
+    no_agent_access: bool = False,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if no_a2a:
+        body["a2a_url"] = None
+    elif a2a_url is not None:
+        body["a2a_url"] = a2a_url
+    if no_agent_access:
+        body["agent_access"] = []
+    elif agent_access is not None:
+        body["agent_access"] = _split(agent_access)
+    return body
+
+
 def _workload_identity(value: str | None, *, clear: bool = False) -> dict[str, Any]:
     if clear:
         return {"workload_identity": None}
@@ -771,12 +804,15 @@ def agents_create(
     label: list[str] | None = LABEL,
     risk_tier: str | None = RISK_TIER,
     workload_identity: str | None = WORKLOAD_IDENTITY,
+    a2a_url: str | None = A2A_URL,
+    agent_access: list[str] | None = AGENT_ACCESS,
     approve: bool = typer.Option(False, "--approve", help="Activate it now (admins only)."),
 ) -> None:
     """Register an agent. It waits in pending review unless --approve is given."""
     body = (
         _model_fields(model_access, token_budget, False)
         | _workload_identity(workload_identity)
+        | _a2a_fields(a2a_url, agent_access)
         | _agent_fields(
             description=description,
             blueprint=blueprint,
@@ -825,11 +861,20 @@ def agents_update(
     no_workload_identity: bool = typer.Option(
         False, "--no-workload-identity", help="Go back to a client secret."
     ),
+    a2a_url: str | None = A2A_URL,
+    no_a2a: bool = typer.Option(False, "--no-a2a", help="It no longer serves A2A."),
+    agent_access: list[str] | None = typer.Option(
+        None, "--agent-access", help="Agents it may call over A2A (replace them)."
+    ),
+    no_agent_access: bool = typer.Option(
+        False, "--no-agent-access", help="Only the agents its blueprint may call."
+    ),
 ) -> None:
     """Change an agent's details. Only the options you pass are changed."""
     body = (
         _model_fields(model_access, token_budget, no_token_budget)
         | _workload_identity(workload_identity, clear=no_workload_identity)
+        | _a2a_fields(a2a_url, agent_access, no_a2a=no_a2a, no_agent_access=no_agent_access)
         | _agent_fields(
             description=description,
             blueprint=blueprint,
@@ -848,6 +893,23 @@ def agents_update(
         _fail("nothing to change: pass at least one option (see --help)")
     agent = _call("PATCH", f"/v1/agents/{ref}", json=body)
     _done("agent", agent["name"], "updated")
+
+
+@agents_app.command("a2a")
+def agents_a2a(ref: str) -> None:
+    """Agent to agent: where other agents call it, whom it may call, who may call it."""
+    view = _call("GET", f"/v1/agents/{ref}/a2a")
+    if view["published"]:
+        typer.echo(f"serves A2A at {view['a2a_url']}; other agents call it at {view['url']}")
+        typer.echo(f"its card: {view['card_url']}")
+    elif view["serves"]:
+        typer.echo(f"serves A2A at {view['a2a_url']}; not on the gateway: {view['unpublished']}")
+    else:
+        typer.echo("doesn't serve A2A (agentgov agents update REF --a2a-url URL)")
+    typer.echo(f"may call: {', '.join(view['may_call']) or 'no agent'}")
+    if view["agent_access"]:
+        typer.echo(f"  (grants: {', '.join(view['agent_access'])})")
+    typer.echo(f"called by: {', '.join(view['called_by']) or 'no agent'}")
 
 
 def _lifecycle(ref: str, action: str, reason: str | None) -> None:
@@ -1160,6 +1222,7 @@ def blueprints_create(
     people_groups: list[str] | None = PEOPLE_GROUPS,
     approvals_by: str | None = APPROVALS_BY,
     require_workload_identity: bool | None = REQUIRE_WORKLOAD_IDENTITY,
+    agent_access: list[str] | None = AGENT_ACCESS,
     label: list[str] | None = LABEL,
 ) -> None:
     """Create a blueprint."""
@@ -1168,6 +1231,7 @@ def blueprints_create(
             description, grant, risk_tier, review_days, no_review, require_sponsor, label
         )
         | _model_fields(model_access, token_budget, False)
+        | _a2a_fields(None, agent_access)
         | _people_fields(acts_for, people_groups, False, approvals_by)
         | _given(require_workload_identity=require_workload_identity)
     )
@@ -1198,6 +1262,12 @@ def blueprints_update(
     all_people: bool = ALL_PEOPLE,
     approvals_by: str | None = APPROVALS_BY,
     require_workload_identity: bool | None = REQUIRE_WORKLOAD_IDENTITY,
+    agent_access: list[str] | None = typer.Option(
+        None, "--agent-access", help="Agents its agents may call over A2A (replace them)."
+    ),
+    no_agent_access: bool = typer.Option(
+        False, "--no-agent-access", help="Its agents may call no other agent."
+    ),
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
 ) -> None:
     """Change a blueprint. Every agent on it gets the change."""
@@ -1208,6 +1278,7 @@ def blueprints_update(
         | _model_fields(model_access, token_budget, no_token_budget)
         | _people_fields(acts_for, people_groups, all_people, approvals_by)
         | _given(require_workload_identity=require_workload_identity)
+        | _a2a_fields(None, agent_access, no_agent_access=no_agent_access)
     )
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
@@ -1494,6 +1565,9 @@ def policies_evaluate(
         None, help="Model provider name (with --model), for a model call instead."
     ),
     model: str | None = typer.Option(None, help="Model the agent asks for."),
+    call_agent: str | None = typer.Option(
+        None, "--call-agent", help="Another agent it calls over A2A, for a call between agents."
+    ),
     agent: str | None = typer.Option(None, help="Agent (default: an unregistered caller)."),
     phase: str = typer.Option(
         "request", help="request (the call or prompt) or response (the result or answer)."
@@ -1520,10 +1594,14 @@ def policies_evaluate(
     ),
     as_json: bool = typer.Option(False, "--json", help="Print OPA's full result."),
 ) -> None:
-    """What if: ask the live OPA what it would decide for a tool call or a model call.
-    Nothing is recorded."""
-    if bool(server and tool) == bool(provider and model):
-        _fail("give --server and --tool for a tool call, or --provider and --model")
+    """What if: ask the live OPA what it would decide for a tool call, a model call or a
+    call to another agent. Nothing is recorded."""
+    kinds = [bool(server and tool), bool(provider and model), bool(call_agent)]
+    if kinds.count(True) != 1:
+        _fail(
+            "give --server and --tool for a tool call, --provider and --model for a model "
+            "call, or --call-agent for a call to another agent"
+        )
     if agent:
         found = _call("GET", f"/v1/agents/{agent}")
         caller = {"agent_id": found["id"], "client_id": found["identity"]["client_id"]}
@@ -1535,7 +1613,17 @@ def policies_evaluate(
         "prompt_injection": injection,
         "injection_score": 0.95 if injection else 0,
     }
-    if provider:
+    if call_agent:
+        path = "agentgov/a2a/decision"
+        decision_input = {
+            "kind": "a2a",
+            "method": "SendMessage",
+            "agent": {k: v for k, v in caller.items() if v},
+            "target": call_agent,
+            "chain": [],
+            "detections": detections,
+        }
+    elif provider:
         path = "agentgov/models/decision"
         decision_input: dict[str, Any] = {
             "kind": "model",
@@ -1565,6 +1653,8 @@ def policies_evaluate(
             "roles": [],
             "via": via,
         }
+        if call_agent:
+            decision_input["chain"] = [{"type": "person", "id": user, "name": user}]
     body = {"path": path, "input": decision_input}
     result = _call("POST", "/v1/policies/evaluate", json=body)["result"]
     if as_json or not result:

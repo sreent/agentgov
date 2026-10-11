@@ -164,7 +164,7 @@ Each ledger entry is one event:
 
 | Ledger entries | OCSF class | Activity |
 |---|---|---|
-| `decision.*` (tool and model calls), `approval.*`, tools used without the gateway | API Activity (6003) | Tool call, Model call, list and read calls as Read, approvals as *Approval requested*, *approved*… |
+| `decision.*` (tool and model calls, and calls between agents), `approval.*`, tools used without the gateway | API Activity (6003) | Tool call, Model call, Agent call, list and read calls as Read, approvals as *Approval requested*, *approved*… |
 | `admin.*` (sign-ins and sessions) | Authentication (3002) | Logon, Logoff |
 | `finding.*` about posture | Compliance Finding (2003) | Create, Update, Close |
 | `finding.*` about threats | Detection Finding (2004) | Create, Update, Close |
@@ -173,6 +173,13 @@ Each ledger entry is one event:
 * **The agent** is `ai_agent` (OCSF's AI Operation profile): its ID, name and framework;
   model calls carry `ai_model` with the provider. The person an agent acted for is
   `actor.user`, the agent `actor.application`.
+* **A call between agents** names the agent called as `api.service` and in `resources`
+  (type `AI Agent`), and the A2A context as `message_context`
+  ([agent to agent](agent-to-agent.md)).
+* **Work another agent handed down** carries OCSF's `delegation`: the ID of the
+  delegation the call was made under, or that AgentGov gave the agent called (`uid`), its
+  parent's (`parent_uid`), and `issuer_uid` `agentgov`. `unmapped.agentgov` has the whole
+  chain, from the person at its head.
 * **What a control decided** is `action` and `disposition` (the Security Control profile):
   Allowed, Blocked, Delayed (waiting for approval), Detected (a monitored control),
   Approved, Rejected. Denials and approval requests are `is_alert`.
@@ -208,7 +215,7 @@ A blocked tool call, for example:
 The reference stack's demo sink (`examples/secops/sink`, port 9300) stands in for a SIEM,
 Splunk, Slack and Teams. `agentgov apply -f examples/manifests` turns the hand-off on at
 `inform` with four destinations ([secops.yaml](../examples/manifests/secops.yaml)), and the
-demo's last steps show what each got, then have a SOAR's `secops` key block a shadow agent:
+demo's later steps show what each got, then have a SOAR's `secops` key block a shadow agent:
 refused at `inform`, done at `contain`. See what arrived at
 `http://localhost:9300/received?kind=otlp` (or `hec`, `slack`, `teams`).
 
