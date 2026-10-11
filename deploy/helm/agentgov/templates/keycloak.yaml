@@ -54,6 +54,8 @@ spec:
       serviceAccountName: {{ include "agentgov.serviceAccountName" . }}
       # Keycloak reads the cluster's service account issuer keys with it.
       automountServiceAccountToken: {{ $v.mountServiceAccountToken }}
+      # No <SERVICE>_PORT variables for each Service: AGENTGOV_GATEWAY_PORT is a setting.
+      enableServiceLinks: false
       securityContext:
         {{- include "agentgov.podSecurity" . | nindent 8 }}
         runAsUser: 1000
