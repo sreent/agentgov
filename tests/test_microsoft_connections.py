@@ -345,11 +345,13 @@ class TestPurviewAudit:
         assert {e["actor"] for e in entries} == {"maker:dana@contoso.com"}
         assert entries[0]["agent_name"] == "sales-helper"
 
-    def test_a_failed_search_is_tried_again(self, ms, graph) -> None:
+    def test_a_failed_search_is_tried_again(self, ms, graph, monkeypatch) -> None:
         sync(ms, "purview-audit")
         graph.query_status = "failed"
+        # Hours later, the same windows are searched again: none of the audit log is skipped.
+        later = ids.utcnow() + timedelta(hours=2)
+        monkeypatch.setattr(ids, "utcnow", lambda: later)
         sync(ms, "purview-audit")
-        # The same windows are searched again.
         starts = [q["filterStartDateTime"] for q in graph.queries.values()]
         assert starts[2:] == starts[:2]
 

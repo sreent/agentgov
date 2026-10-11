@@ -417,10 +417,11 @@ class Runtime:
                     state[kind], state[f"{kind}_until"] = None, pending["end"]
                     connections.save_state(session, "purview-audit", state)
             elif status in ("failed", "cancelled") or ids.utcnow() - started > AUDIT_GIVE_UP:
-                # Search the same window again.
+                # Search the same window again: from where the failed search started, which
+                # for the first search isn't a day before now any more.
                 with self.db.session() as session:
                     state = connections.load_state(session, "purview-audit")
-                    state[kind] = None
+                    state[kind], state[f"{kind}_until"] = None, pending["start"]
                     connections.save_state(session, "purview-audit", state)
             else:
                 counts["searching"] += 1
