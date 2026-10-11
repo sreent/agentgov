@@ -150,17 +150,24 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     since = now - timedelta(days=days)
     agents = list(session.scalars(select(Agent).where(Agent.status != DELETED)).unique())
     f = Facts(now, since, settings, features.modes(session), agents)
-    for type_, decision, reason, n in session.execute(
-        select(LedgerEntry.type, LedgerEntry.decision, LedgerEntry.reason, func.count())
+    for type_, decision, n in session.execute(
+        select(LedgerEntry.type, LedgerEntry.decision, func.count())
         .where(LedgerEntry.ts >= since)
-        .group_by(LedgerEntry.type, LedgerEntry.decision, LedgerEntry.reason.like("monitored:%"))
+        .group_by(LedgerEntry.type, LedgerEntry.decision)
     ):
         f.by_type[type_] += n
         f.entries += n
         if type_.startswith("decision.") and decision == "deny":
             f.denied += n
-        if type_.startswith("decision.") and (reason or "").startswith("monitored:"):
-            f.monitored += n
+    f.monitored = session.scalar(
+        select(func.count())
+        .select_from(LedgerEntry)
+        .where(
+            LedgerEntry.ts >= since,
+            LedgerEntry.type.startswith("decision."),
+            LedgerEntry.reason.startswith("monitored:"),
+        )
+    )
     f.chain = ledger.verify(session)
     points = list(session.scalars(select(LedgerCheckpoint)))
     f.checkpoints = len(points)

@@ -45,6 +45,7 @@ scripts/ci.sh --e2e       # also: the demo and ledger verification against the C
                           # stack and against the Helm chart's pods run with Docker
 scripts/ci.sh --kind      # also: the Helm chart on a kind cluster, with the same demo
 scripts/ci.sh --matrix    # also: the tests on each Python 3.11-3.13 installed
+scripts/ci.sh --postgres  # also: the tests on PostgreSQL, in a throwaway container
 ```
 
 Run `--e2e` when you change the processor, the Rego library, the gateway configuration,
@@ -59,9 +60,16 @@ without a comment: [configuration](docs/configuration.md#reference) is generated
 comments in `src/agentgov/config.py`, so after changing a setting run
 `scripts/settings-doc.py` to regenerate it.
 
+The tests run on SQLite, each on a copy of a database the migrations built. Production
+runs on PostgreSQL, so `--postgres` (and `--e2e`) runs them again there: each test on a
+database of its own, copied from a template. To use a PostgreSQL of your own, give the
+tests its URL, as a role that may create databases:
+`AGENTGOV_TEST_POSTGRES_URL=postgresql+psycopg://postgres:secret@127.0.0.1:5432/postgres pytest`
+(the migrations' test empties the database the URL names).
+
 On GitHub, the `ci` workflow runs the checks on Python
-3.11, 3.12 and 3.13, and the `e2e` workflow runs the end-to-end check for pull requests
-that change code or the deployment.
+3.11, 3.12 and 3.13 and on PostgreSQL, and the `e2e` workflow runs the end-to-end check for
+pull requests that change code or the deployment.
 
 ## Where things live
 

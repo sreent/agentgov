@@ -11,6 +11,7 @@
 #   scripts/ci.sh --kind-only only that (e2e.yml)
 #   scripts/ci.sh --quick     lint, Rego checks and tests; no Docker
 #   scripts/ci.sh --matrix    also run the tests on each Python 3.11-3.13 found
+#   scripts/ci.sh --postgres  also run the tests on PostgreSQL (a throwaway container)
 #   scripts/ci.sh --keep      leave the end-to-end stack running afterwards
 #   scripts/ci.sh --setup     only prepare the toolchain (.venv and opa)
 #
@@ -33,18 +34,20 @@ CRDS_CATALOG='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Gr
 KUBECTL_VERSION=1.34.1
 CHART=deploy/helm/agentgov
 AGENTGATEWAY_IMAGE=ghcr.io/agentgateway/agentgateway:v1.6.0
+POSTGRES_IMAGE=postgres:17-alpine
 COMPOSE=(docker compose -p agentgov-ci -f deploy/compose/docker-compose.yml)
 E2E_PORTS=(8000 8080 8180 8181 4317 4318 9200 9300)
 
-lint=1 tests=1 chart=1 image=1 e2e=0 kind=0 matrix=0 keep=0 setup_only=0
+lint=1 tests=1 chart=1 image=1 e2e=0 kind=0 matrix=0 postgres=0 keep=0 setup_only=0
 for arg in "$@"; do
   case "$arg" in
-    --e2e) e2e=1 ;;
+    --e2e) e2e=1 postgres=1 ;;
     --e2e-only) lint=0 tests=0 chart=0 image=0 e2e=1 ;;
     --kind) kind=1 ;;
     --kind-only) lint=0 tests=0 chart=0 image=0 kind=1 ;;
     --quick) chart=0 image=0 ;;
     --matrix) matrix=1 ;;
+    --postgres) postgres=1 ;;
     --keep) keep=1 ;;
     --setup) setup_only=1 ;;
     -h | --help) awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"; exit 0 ;;
@@ -274,6 +277,32 @@ run_tests() {
 # matrix_tests <version>: the tests in a separate virtualenv for that Python.
 matrix_tests() {
   setup_python ".venv-ci/py$1" "python$1" && run_tests ".venv-ci/py$1"
+}
+
+# postgres_tests <venv>: the tests again, each on a database of its own in a throwaway
+# PostgreSQL, the database production runs on (tests/conftest.py).
+postgres_tests() {
+  local name=agentgov-ci-postgres port="" rc=0
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker run -d --name "$name" -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 "$POSTGRES_IMAGE" \
+    -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null || return 1
+  # Over TCP: the image's first, initialising server listens on its socket only.
+  for _ in $(seq 1 60); do
+    if docker exec "$name" pg_isready -q -h 127.0.0.1 -U postgres; then
+      port=$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$port" ]; then
+    echo "PostgreSQL didn't start"
+    rc=1
+  else
+    AGENTGOV_TEST_POSTGRES_URL="postgresql+psycopg://postgres:ci@127.0.0.1:$port/postgres" \
+      "$1/bin/pytest" -rs || rc=1
+  fi
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  return "$rc"
 }
 
 # The chart: lint, render the default and a production-like configuration, and
@@ -639,7 +668,9 @@ echo "$(python --version), $(first_line opa version), ruff $(ruff --version | cu
 [ "$setup_only" = 1 ] && exit 0
 
 # Docker is started when a step needs it; tests use it only if it is already up.
-if [ "$image" = 1 ] || [ "$e2e" = 1 ] || [ "$kind" = 1 ]; then ensure_docker || true; fi
+if [ "$image" = 1 ] || [ "$e2e" = 1 ] || [ "$kind" = 1 ] || [ "$postgres" = 1 ]; then
+  ensure_docker || true
+fi
 
 if [ "$lint" = 1 ]; then
   run "Lint (ruff)" lint_python
@@ -656,6 +687,11 @@ if [ "$tests" = 1 ]; then
         skip "Tests (Python $version)" "python$version not found"
       fi
     done
+  fi
+  if [ "$postgres" = 1 ]; then
+    if docker_ready; then run "Tests on PostgreSQL" postgres_tests .venv; else
+      skip "Tests on PostgreSQL" "no Docker daemon"
+    fi
   fi
 fi
 if [ "$chart" = 1 ]; then

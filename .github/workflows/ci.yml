@@ -1,6 +1,6 @@
 # Runs scripts/ci.sh, the same checks contributors run locally: ruff, opa
-# fmt/check/test and pytest on each supported Python, plus the image build and
-# smoke test once.
+# fmt/check/test and pytest on each supported Python and on PostgreSQL, plus the
+# image build and smoke test once.
 name: ci
 
 on:
@@ -35,6 +35,9 @@ jobs:
           - name: Python 3.13
             python-version: "3.13"
             args: --quick
+          - name: PostgreSQL
+            python-version: "3.12"
+            args: --quick --postgres
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

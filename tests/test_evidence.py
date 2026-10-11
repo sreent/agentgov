@@ -481,6 +481,20 @@ class TestCompliance:
         assert security["status"] == "partly" and "least-privilege" in security["gaps"][0]
         rt = client.app.state.rt  # type: ignore[attr-defined]
         with rt.db.session() as s:
+            for decision, reason in [
+                ("deny", "crm/export_customers is not granted"),
+                ("deny", "credentials in the arguments"),
+                ("allow", "monitored: least-privilege: crm/export_customers is not granted"),
+                ("allow", None),
+            ]:
+                ledger.append(
+                    s, type="decision.request", actor="agent:a", decision=decision, reason=reason
+                )
+        counts = {e["label"]: e["value"] for e in security["evidence"]}
+        assert counts["Calls refused"] == 0 and counts["Let through in monitor mode"] == 0
+        counts = {e["label"]: e["value"] for e in control("MEASURE 2.7", "nist-ai-rmf")["evidence"]}
+        assert counts["Calls refused"] == 2 and counts["Let through in monitor mode"] == 1
+        with rt.db.session() as s:
             s.get(LedgerEntry, 1).reason = "edited"
         logging = control("A.6.2.8", "iso-42001")
         assert logging["status"] == "attention" and "broken" in logging["gaps"][0]
