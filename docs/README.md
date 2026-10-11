@@ -43,6 +43,8 @@
   its sponsors, its team), escalated until someone takes them on
 * [Management rules](management-rules.md): what to do about agents that meet some
   conditions for long enough (inactive, ownerless, long blocked), after telling their people
+* [Evidence](evidence.md): ledger checkpoints time-stamped by an authority, retention and
+  archives, and compliance reports and an evidence pack for assessors
 * [Security operations](secops.md): the ledger to SIEMs as OCSF events, alerts in Teams and
   Slack, and how much the security team's tools may do
 

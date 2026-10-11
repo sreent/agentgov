@@ -182,6 +182,16 @@ never in a values file you share.
 | `AGENTGOV_SMTP_FROM` | — | The sender of issues' emails, such as agentgov@example.com. |
 | `AGENTGOV_SMTP_USERNAME`<br>`AGENTGOV_SMTP_PASSWORD` (secret) | —<br>— | The mail server's user and password, if it needs them. |
 
+### Evidence and retention
+
+| Variable | Default | What it does |
+|---|---|---|
+| `AGENTGOV_LEDGER_RETENTION_DAYS` | `0` | Days the ledger keeps its entries in the database: older ones are archived to `AGENTGOV_LEDGER_ARCHIVE_DIR`, then removed, and the chain goes on from the checkpoint at their end. 0 keeps every entry; otherwise at least 183 (six months). |
+| `AGENTGOV_LEDGER_ARCHIVE_DIR` | — | Where the ledger's archives go, as gzipped JSON Lines files (a mounted volume, or a bucket mounted as one). Needed with `AGENTGOV_LEDGER_RETENTION_DAYS`. |
+| `AGENTGOV_LEDGER_CHECKPOINT_HOURS` | `24` | Hours between ledger checkpoints: the chain's head, kept, and time-stamped when a time-stamping authority is set. 0 makes them only on demand. |
+| `AGENTGOV_LEDGER_TSA_URL` | — | An RFC 3161 time-stamping authority, such as `https://freetsa.org/tsr`. It signs each checkpoint with its own time, which proves the chain existed then, unchanged since. |
+| `AGENTGOV_DATA_RETENTION_DAYS` | `0` | Days AgentGov keeps the operational records whose history the ledger has: daily activity and model usage, risk signals, notifications sent, decided approvals, resolved findings, ended access assignments, and developers' MCP servers not reported since. 0 keeps them; otherwise at least 30. |
+
 ### Keycloak (agent identity)
 
 | Variable | Default | What it does |

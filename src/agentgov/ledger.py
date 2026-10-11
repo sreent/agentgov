@@ -4,6 +4,10 @@ Every governance-relevant event (lifecycle changes, admin actions, policy
 decisions, approvals, OPA decision logs) is appended to a hash chain. Each
 entry's hash covers the previous entry's hash, so editing or deleting any
 stored entry is detectable by :func:`verify`.
+
+Checkpoints keep points of the chain for good (docs/evidence.md). Once the entries
+up to a checkpoint are archived and removed (agentgov.retention), the chain in the
+database goes on from it, and :func:`verify_records` checks the archives offline.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.db import mark_changed
-from agentgov.models import Agent, LedgerEntry, LedgerHead
+from agentgov.models import Agent, LedgerCheckpoint, LedgerEntry, LedgerHead
 
 GENESIS = "0" * 64
 
@@ -61,6 +65,14 @@ def _payload(entry: LedgerEntry) -> dict[str, Any]:
 
 def compute_hash(prev_hash: str, entry: LedgerEntry) -> str:
     return hashlib.sha256(prev_hash.encode() + _canonical(_payload(entry))).hexdigest()
+
+
+def record_hash(prev_hash: str, record: dict[str, Any]) -> str:
+    """The hash of an entry as :func:`to_dict` writes it (an export's or an archive's line)."""
+    payload = {k: v for k, v in record.items() if k not in ("prev_hash", "hash")}
+    if payload.get("on_behalf_of") is None:
+        payload.pop("on_behalf_of", None)
+    return hashlib.sha256(prev_hash.encode() + _canonical(payload)).hexdigest()
 
 
 def append(
@@ -135,17 +147,31 @@ def iter_entries(
         last = rows[-1].seq
 
 
+def base(session: Session) -> tuple[int, str]:
+    """Where the chain in the database starts: the checkpoint the entries before it were
+    archived up to, or the beginning."""
+    checkpoint = session.scalar(
+        select(LedgerCheckpoint)
+        .where(LedgerCheckpoint.pruned_at.is_not(None))
+        .order_by(LedgerCheckpoint.seq.desc())
+        .limit(1)
+    )
+    return (checkpoint.seq, checkpoint.hash) if checkpoint is not None else (0, GENESIS)
+
+
 def verify(session: Session, *, start: tuple[int, str] | None = None) -> dict[str, Any]:
     """Recompute the chain and report the first inconsistency, if any.
 
     ``start`` is the ``(seq, hash)`` of an entry that was already verified: only the
     entries after it are checked. Only a full verification detects later edits to
-    entries before ``start``.
+    entries before ``start``. A full verification starts where the chain in the
+    database does: after the entries archived (``from``).
     """
     # The head is read first and the chain checked up to it: entries committed while
     # we read are beyond it, so concurrent appends cannot look like a broken chain.
     head = session.get(LedgerHead, 1, populate_existing=True)
-    checked, prev = start or (0, GENESIS)
+    floor = base(session)
+    checked, prev = start if start is not None and start[0] >= floor[0] else floor
     expected_seq = checked + 1
     until = head.last_seq if head is not None else None
     for entry in iter_entries(session, after=checked, until=until):
@@ -175,7 +201,83 @@ def verify(session: Session, *, start: tuple[int, str] | None = None) -> dict[st
             "broken_at": checked + 1,
             "problem": "chain head does not match the last entry (entries removed?)",
         }
-    return {"valid": True, "checked": checked, "broken_at": None, "head": prev}
+    return {"valid": True, "checked": checked, "broken_at": None, "head": prev, "from": floor[0]}
+
+
+def verify_records(records: Any, *, start: tuple[int, str] | None = None) -> dict[str, Any]:
+    """Check a run of entries as :func:`to_dict` writes them (an export, or archives in
+    order), without the database: each links to the one before and matches its hash.
+    ``start`` is the ``(seq, hash)`` the first must follow; by default, whatever its own
+    ``prev_hash`` says (a checkpoint or another archive vouches for that)."""
+    count, first, last = 0, None, None
+    expected: tuple[int, str] | None = start
+    for record in records:
+        seq, prev = record.get("seq"), record.get("prev_hash")
+        if expected is None:
+            expected = (seq - 1, prev)
+        problem = None
+        if seq != expected[0] + 1:
+            problem = f"missing entry before seq {seq}"
+        elif prev != expected[1]:
+            problem = "prev_hash does not match the previous entry"
+        elif record_hash(prev, record) != record.get("hash"):
+            problem = "entry contents do not match its hash"
+        if problem:
+            return {"valid": False, "checked": count, "broken_at": seq, "problem": problem}
+        first = seq if first is None else first
+        expected, last = (seq, record["hash"]), record
+        count += 1
+    return {
+        "valid": True,
+        "checked": count,
+        "first": first,
+        "follows": start[1] if start else None,
+        "last": last["seq"] if last else None,
+        "head": last["hash"] if last else None,
+    }
+
+
+def statement(seq: int, hash_: str) -> bytes:
+    """What a time-stamping authority signs for a checkpoint: the head it vouches for."""
+    return f"agentgov ledger checkpoint seq={seq} hash={hash_}\n".encode()
+
+
+def checkpoint(session: Session) -> LedgerCheckpoint | None:
+    """Keep the chain's current head as a checkpoint (the one there already is, if the
+    chain hasn't grown since). None while the ledger is empty."""
+    head = session.get(LedgerHead, 1, populate_existing=True)
+    if head is None or head.last_seq == 0:
+        return None
+    existing = session.get(LedgerCheckpoint, head.last_seq)
+    if existing is not None:
+        return existing
+    entry = session.get(LedgerEntry, head.last_seq)
+    point = LedgerCheckpoint(
+        seq=head.last_seq,
+        hash=head.last_hash,
+        entry_ts=entry.ts if entry is not None else ids.utcnow(),
+    )
+    session.add(point)
+    session.flush()
+    return point
+
+
+def checkpoint_dict(point: LedgerCheckpoint) -> dict[str, Any]:
+    return {
+        "seq": point.seq,
+        "hash": point.hash,
+        "entry_ts": ids.isoformat(point.entry_ts),
+        "created_at": ids.isoformat(point.created_at),
+        "statement": statement(point.seq, point.hash).decode(),
+        "tsa_url": point.tsa_url,
+        "timestamped": point.timestamp is not None,
+        "timestamped_at": ids.isoformat(point.timestamped_at),
+        "timestamp_error": point.timestamp_error,
+        "archive": point.archive,
+        "archive_sha256": point.archive_sha256,
+        "archived_from": point.archived_from,
+        "pruned_at": ids.isoformat(point.pruned_at),
+    }
 
 
 class IntegrityMonitor:

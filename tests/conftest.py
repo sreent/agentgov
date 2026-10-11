@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import os
 import shutil
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine, create_engine, make_url
+from sqlalchemy.pool import NullPool
 
 from agentgov import migrations
 from agentgov.api.app import create_app
@@ -25,10 +29,32 @@ def opa_available() -> bool:
 requires_opa = pytest.mark.skipif(not opa_available(), reason="opa binary not installed")
 
 
+# With a PostgreSQL server here (an SQLAlchemy URL to any database on it, such as
+# postgresql+psycopg://postgres:secret@127.0.0.1:5432/postgres), every test that takes the
+# `settings` fixture runs on a database of its own there instead of SQLite.
+POSTGRES = os.environ.get("AGENTGOV_TEST_POSTGRES_URL")
+TEMPLATE = "agentgov_test_template"
+
+
+def postgres_admin() -> Engine:
+    assert POSTGRES
+    return create_engine(POSTGRES, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+
+
 @pytest.fixture(scope="session")
-def migrated_database(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def migrated_database(tmp_path_factory: pytest.TempPathFactory) -> Path | str:
     """A database built by the migrations once, copied for each test (tests/test_migrations.py
-    covers the migrations themselves)."""
+    covers the migrations themselves): a file, or a template database on PostgreSQL."""
+    if POSTGRES:
+        admin = postgres_admin()
+        with admin.connect() as connection:
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {TEMPLATE} WITH (FORCE)")
+            connection.exec_driver_sql(f"CREATE DATABASE {TEMPLATE}")
+        db = Database(make_url(POSTGRES).set(database=TEMPLATE).render_as_string(False))
+        migrations.upgrade(db.engine)
+        db.dispose()
+        admin.dispose()
+        return TEMPLATE
     path = tmp_path_factory.mktemp("schema") / "agentgov.db"
     db = Database(f"sqlite:///{path}")
     migrations.upgrade(db.engine)
@@ -40,10 +66,28 @@ def migrated_database(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture
-def settings(tmp_path: Path, migrated_database: Path) -> Settings:
-    shutil.copyfile(migrated_database, tmp_path / "agentgov.db")
+def database_url(tmp_path: Path, migrated_database: Path | str) -> Iterator[str]:
+    """A fresh copy of the migrated database, for one test."""
+    if isinstance(migrated_database, Path):
+        shutil.copyfile(migrated_database, tmp_path / "agentgov.db")
+        yield f"sqlite:///{tmp_path / 'agentgov.db'}"
+        return
+    name = f"agentgov_test_{uuid.uuid4().hex[:16]}"
+    admin = postgres_admin()
+    with admin.connect() as connection:
+        connection.exec_driver_sql(f"CREATE DATABASE {name} TEMPLATE {migrated_database}")
+    try:
+        yield make_url(POSTGRES).set(database=name).render_as_string(False)
+    finally:
+        with admin.connect() as connection:
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+        admin.dispose()
+
+
+@pytest.fixture
+def settings(database_url: str) -> Settings:
     return Settings(
-        database_url=f"sqlite:///{tmp_path / 'agentgov.db'}",
+        database_url=database_url,
         admin_token="test-admin",
         service_token="test-service",
         posture_interval_seconds=0,

@@ -424,6 +424,13 @@ const STATUS = {
     monitored: ['neutral', 'eye', 'Would have acted'],
     off: ['neutral', 'minus', 'Off'],
   },
+  compliance: {
+    in_place: ['good', 'check-circle', 'In place'],
+    partly: ['warning', 'alert-circle', 'Partly'],
+    not_set_up: ['neutral', 'minus', 'Not set up'],
+    attention: ['critical', 'octagon', 'Needs attention'],
+    outside: ['neutral', 'info', 'Outside AgentGov'],
+  },
   notification: {
     pending: ['neutral', 'clock', 'Sending'],
     sent: ['good', 'check-circle', 'Sent'],
@@ -894,6 +901,7 @@ const PAGES = [
   { re: /^\/findings\/([^/]+)$/, nav: 'findings', title: 'Finding', render: renderFinding },
   { re: /^\/policies$/, nav: 'policies', title: 'Policies', render: renderPolicies },
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
+  { re: /^\/ledger\/compliance$/, nav: 'ledger', title: 'Compliance', render: renderCompliance },
   { re: /^\/access$/, nav: 'access', title: 'Access', render: renderAccess },
   { re: /^\/platforms$/, nav: 'platforms', title: 'Platforms', render: renderPlatforms },
   { re: /^\/features$/, nav: 'features', title: 'Features', render: renderFeatures },
@@ -4947,12 +4955,13 @@ async function renderLedger({ params }) {
   const verifyBtn = h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'verify' }, icon('shield-check'), 'Verify chain');
   verifyBtn.addEventListener('click', async () => {
     verifyBtn.disabled = true;
-    banner.replaceChildren(callout('neutral', 'clock', 'Recomputing every hash from the genesis entry…'));
+    banner.replaceChildren(callout('neutral', 'clock', 'Recomputing every hash in the database…'));
     try {
       const v = await api('v1/ledger/verify');
+      const origin = v.from ? `the checkpoint at entry #${fmt(v.from)} (the entries before it are archived)` : 'the genesis entry';
       banner.replaceChildren(v.valid
         ? callout('good', 'shield-check', h('span', {}, h('strong', {}, 'Chain intact. '),
-          `Recomputed ${plural(v.checked, 'hash', 'hashes')} from the genesis entry; nothing was edited, removed or reordered. Head `,
+          `Recomputed ${plural(v.checked - (v.from || 0), 'hash', 'hashes')} from ${origin}; nothing was edited, removed or reordered. Head `,
           h('code', { class: 'hash', title: v.head }, shortHash(v.head)), '.'))
         : callout('critical', 'octagon', h('span', {}, h('strong', {}, `Chain broken at entry #${v.broken_at}. `),
           `${cap(v.problem)}. The ${plural(v.checked, 'entry', 'entries')} before it verified; entries from #${v.broken_at} on can't be trusted.`)));
@@ -5039,6 +5048,9 @@ async function renderLedger({ params }) {
     if (err.status === 401) throw err;
     renderEntries([], err);
   }
+  const [kept, points] = await Promise.all([
+    api('v1/ledger/retention').catch(() => null), api('v1/ledger/checkpoints?limit=10').catch(() => null),
+  ]);
 
   return h('div', { class: 'page' },
     pageHead({
@@ -5046,6 +5058,7 @@ async function renderLedger({ params }) {
       sub: "Tamper-evident record of lifecycle changes, admin actions and policy decisions. Each entry's SHA-256 hash covers the previous entry's hash, so any edit breaks the chain.",
       actions: [verifyBtn, exportBtn],
     }),
+    ledgerTabs('entries'),
     banner,
     h('div', { class: 'filters' },
       h('div', { class: 'field' }, h('label', { for: 'ledger-agent' }, 'Agent'), agentInput, agentList),
@@ -5054,7 +5067,118 @@ async function renderLedger({ params }) {
       h('div', { class: 'field' }, h('label', { for: 'ledger-decision' }, 'Decision'), decisionSel),
       h('div', { class: 'field', style: 'flex:0 0 auto; align-self:flex-end' }, clearBtn),
       countEl),
-    h('section', { class: 'card', 'aria-label': 'Ledger entries' }, tableHost));
+    h('section', { class: 'card', 'aria-label': 'Ledger entries' }, tableHost),
+    kept && points ? checkpointsCard(kept, points) : null);
+}
+
+function ledgerTabs(current) {
+  return h('nav', { class: 'tabs', 'aria-label': 'Ledger views' },
+    h('a', { class: 'tab', href: '#/ledger', 'aria-current': current === 'entries' ? 'page' : null }, 'Entries'),
+    h('a', { class: 'tab', href: '#/ledger/compliance', 'aria-current': current === 'compliance' ? 'page' : null }, 'Compliance'));
+}
+
+/* -------------------------------------------------------------- compliance */
+
+const COMPLIANCE_PERIODS = [[30, 'Last 30 days'], [90, 'Last 90 days'], [365, 'Last year']];
+
+async function renderCompliance({ params }) {
+  const frameworks = await api('v1/evidence/frameworks');
+  const state = {
+    framework: frameworks.some((f) => f.key === params.get('framework')) ? params.get('framework') : frameworks[0].key,
+    days: Number(params.get('days')) || 90,
+  };
+  const report = await api(`v1/evidence/report?framework=${encodeURIComponent(state.framework)}&days=${state.days}`);
+  const go = () => { location.hash = `#/ledger/compliance?framework=${encodeURIComponent(state.framework)}&days=${state.days}`; };
+  const frameworkSel = h('select', { id: 'compliance-framework', 'data-focus-key': 'compliance-framework' },
+    frameworks.map((f) => h('option', { value: f.key, selected: f.key === state.framework }, f.title)));
+  frameworkSel.addEventListener('change', () => { state.framework = frameworkSel.value; go(); });
+  const periodSel = h('select', { id: 'compliance-days', 'data-focus-key': 'compliance-days' },
+    COMPLIANCE_PERIODS.map(([d, label]) => h('option', { value: d, selected: d === state.days }, label)));
+  periodSel.addEventListener('change', () => { state.days = Number(periodSel.value); go(); });
+  const packBtn = h('button', {
+    type: 'button', class: 'btn btn--primary', 'data-focus-key': 'evidence-pack',
+    onclick: guarded(async () => {
+      const blob = await saveDownload(`v1/evidence/pack?days=${state.days}`, `agentgov-evidence-${fileStamp()}.zip`);
+      toast(`Downloaded the evidence pack (${fmtBytes(blob.size)}).`);
+    }),
+  }, icon('download'), 'Evidence pack');
+  const l = report.ledger;
+  const counts = Object.entries(report.summary).filter(([, n]) => n);
+  return h('div', { class: 'page', 'data-title': 'Compliance' },
+    pageHead({
+      title: 'Compliance',
+      sub: 'What AgentGov does towards each control, how far it is set up here, and the evidence it holds. It doesn\u2019t say that your organisation complies: that is for its assessors, and the evidence pack is for them.',
+      actions: [packBtn],
+    }),
+    ledgerTabs('compliance'),
+    h('div', { class: 'filters' },
+      h('div', { class: 'field' }, h('label', { for: 'compliance-framework' }, 'Framework'), frameworkSel),
+      h('div', { class: 'field', style: 'flex:0 1 200px' }, h('label', { for: 'compliance-days' }, 'Period'), periodSel)),
+    callout('neutral', 'info', h('span', {}, report.framework.note, ' ', h('a', { href: report.framework.url, target: '_blank', rel: 'noopener' }, 'The framework'), '.')),
+    h('div', { class: 'chip-row' }, counts.map(([status, n]) => chip('compliance', status, { extra: n }))),
+    h('p', { class: 'muted' }, l.valid
+      ? `The ledger verifies: ${plural(l.checked - (l.from || 0), 'entry', 'entries')} in the database; ${plural(l.checkpoints, 'checkpoint')}, ${fmt(l.timestamped)} time-stamped${l.last_timestamp ? ` (last on ${l.last_timestamp.slice(0, 10)})` : ''}.`
+      : 'The ledger\u2019s chain is broken: see the Entries tab.'),
+    h('div', { class: 'bp-grid' }, report.controls.map(complianceCard)));
+}
+
+function complianceCard(c) {
+  const value = (e) => (e.link ? h('a', { href: e.link }, String(e.value)) : String(e.value));
+  return card({
+    title: `${c.id} ${c.title}`, level: 'h3',
+    sub: c.asks,
+    actions: [chip('compliance', c.status)],
+    body: [
+      h('p', {}, c.agentgov),
+      c.evidence.length ? facts(c.evidence.map((e) => [e.label, value(e)])) : null,
+      c.gaps.length ? callout(c.status === 'attention' ? 'critical' : 'warning', 'triangle',
+        h('div', {}, c.gaps.map((g) => h('div', {}, g)))) : null,
+    ],
+  });
+}
+
+// Checkpoints of the chain, their time-stamps and archives, and how long things are kept.
+function checkpointsCard(kept, points) {
+  const make = can('admin') ? h('button', {
+    type: 'button', class: 'btn btn--sm', 'data-focus-key': 'make-checkpoint',
+    onclick: guarded(async () => {
+      const point = await api('v1/ledger/checkpoints', { method: 'POST' });
+      toast(point.timestamped ? `Checkpoint at entry #${fmt(point.seq)}, time-stamped.` : `Checkpoint at entry #${fmt(point.seq)}.`);
+      await refresh();
+    }),
+  }, icon('plus'), 'Make a checkpoint') : null;
+  const stamp = (c) => {
+    if (c.timestamped) {
+      return h('span', {}, plainChip('Time-stamped', { tone: 'good', iconName: 'shield-check' }), ' ', timeEl(c.timestamped_at), ' ',
+        h('button', {
+          type: 'button', class: 'btn btn--sm btn--ghost', 'data-focus-key': `tsr-${c.seq}`,
+          onclick: guarded(async () => { await saveDownload(`v1/ledger/checkpoints/${c.seq}/timestamp`, `checkpoint-${c.seq}.tsr`); }),
+        }, icon('download'), 'Time-stamp'));
+    }
+    if (c.timestamp_error) return plainChip('Not time-stamped', { tone: 'warning', iconName: 'triangle', title: c.timestamp_error });
+    return h('span', { class: 'muted' }, kept.tsa_url ? 'Waiting for its time-stamp' : 'Not time-stamped');
+  };
+  const line = (c) => h('li', { class: 'access-row' },
+    h('div', { class: 'access-main' },
+      h('div', { class: 'cell-title' }, `Entry #${fmt(c.seq)} `, h('code', { class: 'hash', title: c.hash }, shortHash(c.hash))),
+      h('div', { class: 'cell-sub break' }, 'Kept ', timeEl(c.created_at),
+        c.archive ? [' · entries ', fmt(c.archived_from), '–', fmt(c.seq), ' archived to ', h('code', {}, c.archive)] : '')),
+    h('div', {}, stamp(c)));
+  return card({
+    title: 'Checkpoints and retention',
+    sub: 'Points of the chain kept for good, time-stamped by an authority when one is set; what leaves the database is archived first.',
+    actions: make ? [make] : null,
+    body: [
+      facts([
+        ['Ledger', kept.ledger_retention_days ? `${plural(kept.ledger_retention_days, 'day')} in the database, then archived` : 'Every entry kept in the database'],
+        ['Chain in the database', kept.chain_from ? `From the checkpoint at entry #${fmt(kept.chain_from)}` : 'From the genesis entry'],
+        ['Checkpoints', kept.checkpoint_hours ? `Every ${plural(kept.checkpoint_hours, 'hour')}` : 'On demand'],
+        ['Time-stamping authority', kept.tsa_url ? h('code', {}, kept.tsa_url) : h('span', { class: 'muted' }, 'None')],
+        ['Operational records', kept.data_retention_days ? `${plural(kept.data_retention_days, 'day')}` : 'Kept'],
+      ]),
+      points.length ? h('ul', { class: 'access-list', role: 'list' }, points.map(line)) : emptyState('No checkpoints yet', 'The first is kept within the hour.'),
+    ],
+  });
 }
 
 /* ------------------------------------------------------------------ access */

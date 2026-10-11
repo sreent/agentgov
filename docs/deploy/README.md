@@ -62,7 +62,9 @@ flowchart LR
   agents that serve A2A, letting in only the gateway.
 - [ ] The controls at the gateway enforced. Monitor mode is for rolling a control out
   ([features](../features.md)).
-- [ ] The ledger handed to your SIEM ([security operations](../secops.md)).
+- [ ] The ledger handed to your SIEM ([security operations](../secops.md)), its checkpoints
+  time-stamped by an authority, and its retention chosen, with somewhere safe for the
+  archives ([evidence](../evidence.md)).
 - [ ] A staging installation to try upgrades on first.
 
 [SECURITY.md](../../SECURITY.md#deploying-safely) explains why each matters.

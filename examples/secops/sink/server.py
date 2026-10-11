@@ -11,6 +11,12 @@ hands off, as a SIEM, Slack and Microsoft Teams would, and shows what arrived.
     GET  /received?path=<path>       what one webhook got: one channel, such as
                                      /slack/T0000/B0000/demo-only
 
+It also stands in for a time-stamping authority (RFC 3161), for the ledger's checkpoints
+(docs/evidence.md), with the openssl command and a key it makes when it first signs:
+
+    POST /tsa                        a TimeStampReq; answers a TimeStampResp
+    GET  /tsa/cert                   its certificate, to verify its time-stamps with
+
 Not for real use: it keeps everything in memory and anyone can read it.
 """
 
@@ -18,8 +24,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 PORT = int(os.environ.get("PORT", "9300"))
@@ -29,6 +38,53 @@ received: dict[str, list] = {"otlp": [], "hec": [], "webhook": [], "slack": [], 
 # The chats' messages by webhook path too: each path is a channel.
 by_path: dict[str, list] = {}
 lock = threading.Lock()
+
+
+TSA_CONFIG = """[ tsa ]
+default_tsa = demo
+[ demo ]
+serial = {dir}/serial
+signer_cert = {dir}/tsa.crt
+signer_key = {dir}/tsa.key
+signer_digest = sha256
+default_policy = 1.3.6.1.4.1.99999.1.1
+digests = sha256
+accuracy = secs:1
+ordering = yes
+ess_cert_id_alg = sha256
+"""
+tsa_lock = threading.Lock()
+tsa_home: str | None = None
+
+
+def tsa() -> str:
+    """The stand-in authority's key, certificate and configuration, made once."""
+    global tsa_home
+    if tsa_home is None:
+        home = tempfile.mkdtemp(prefix="tsa-")
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", f"{home}/tsa.key", "-out", f"{home}/tsa.crt", "-days", "3650",
+             "-subj", "/CN=AgentGov demo time-stamping authority",
+             "-addext", "extendedKeyUsage=critical,timeStamping"],
+            check=True, capture_output=True,
+        )  # fmt: skip
+        Path(home, "serial").write_text("01\n")
+        Path(home, "tsa.cnf").write_text(TSA_CONFIG.format(dir=home))
+        tsa_home = home
+    return tsa_home
+
+
+def timestamp(query: bytes) -> bytes:
+    with tsa_lock, tempfile.TemporaryDirectory() as work:
+        home = tsa()
+        Path(work, "query.tsq").write_bytes(query)
+        subprocess.run(
+            ["openssl", "ts", "-reply", "-config", f"{home}/tsa.cnf",
+             "-queryfile", f"{work}/query.tsq", "-out", f"{work}/reply.tsr"],
+            check=True, capture_output=True,
+        )  # fmt: skip
+        return Path(work, "reply.tsr").read_bytes()
 
 
 def keep(kind: str, items: list, path: str | None = None) -> None:
@@ -84,7 +140,10 @@ def json_lines(text: str) -> list:
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, status: int, body: object, content_type: str = "application/json") -> None:
-        data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+        if isinstance(body, bytes):
+            data = body
+        else:
+            data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -95,6 +154,9 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.path == "/healthz":
             self._send(200, {"status": "ok"})
+        elif url.path == "/tsa/cert":
+            with tsa_lock:
+                self._send(200, Path(tsa(), "tsa.crt").read_bytes(), "application/x-pem-file")
         elif url.path == "/received":
             query = parse_qs(url.query)
             kind, path = query.get("kind", [None])[0], query.get("path", [None])[0]
@@ -108,7 +170,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
-        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if path == "/tsa":
+            try:
+                self._send(200, timestamp(body), "application/timestamp-reply")
+            except (OSError, subprocess.CalledProcessError) as exc:
+                self._send(503, {"error": f"can't time-stamp: {exc}"})
+            return
+        raw = body.decode()
         try:
             if path == "/v1/logs":
                 keep("otlp", otlp_records(json.loads(raw)))

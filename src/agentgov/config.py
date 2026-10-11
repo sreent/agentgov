@@ -16,6 +16,11 @@ from typing import Any
 
 _GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 M365_PACKAGE_TYPES = ("custom", "shared", "external", "microsoft")
+# The least the ledger keeps its entries for, when it doesn't keep them all: six months, as
+# the EU AI Act asks of providers' and deployers' logs (Articles 19 and 26(6)).
+LEDGER_MIN_DAYS = 183
+# The least operational records are kept: risk windows and budgets look back that far.
+DATA_MIN_DAYS = 30
 # Settings that became features (docs/features.md), and the feature that replaced each.
 RETIRED = {
     "AGENTGOV_UNKNOWN_AGENT_MODE": "unknown-callers",
@@ -113,6 +118,26 @@ class Settings:
     # The mail server's user and password, if it needs them.
     smtp_username: str | None = None
     smtp_password: str | None = None
+
+    # --- Evidence and retention (docs/evidence.md) ----------------------------------
+    # Days the ledger keeps its entries in the database: older ones are archived to
+    # AGENTGOV_LEDGER_ARCHIVE_DIR, then removed, and the chain goes on from the checkpoint
+    # at their end. 0 keeps every entry; otherwise at least 183 (six months).
+    ledger_retention_days: int = 0
+    # Where the ledger's archives go, as gzipped JSON Lines files (a mounted volume, or a
+    # bucket mounted as one). Needed with AGENTGOV_LEDGER_RETENTION_DAYS.
+    ledger_archive_dir: str | None = None
+    # Hours between ledger checkpoints: the chain's head, kept, and time-stamped when a
+    # time-stamping authority is set. 0 makes them only on demand.
+    ledger_checkpoint_hours: int = 24
+    # An RFC 3161 time-stamping authority, such as https://freetsa.org/tsr. It signs each
+    # checkpoint with its own time, which proves the chain existed then, unchanged since.
+    ledger_tsa_url: str | None = None
+    # Days AgentGov keeps the operational records whose history the ledger has: daily
+    # activity and model usage, risk signals, notifications sent, decided approvals,
+    # resolved findings, ended access assignments, and developers' MCP servers not
+    # reported since. 0 keeps them; otherwise at least 30.
+    data_retention_days: int = 0
 
     # --- Keycloak (agent identity) ---------------------------------------------
     # Base URL the control plane uses to reach Keycloak's admin API.
@@ -332,6 +357,24 @@ class Settings:
             if not self.smtp_from:
                 raise ValueError("AGENTGOV_SMTP_URL needs AGENTGOV_SMTP_FROM, the sender")
         self.escalation_delays()  # raises on malformed entries
+        if self.ledger_retention_days < 0 or 0 < self.ledger_retention_days < LEDGER_MIN_DAYS:
+            raise ValueError(
+                f"AGENTGOV_LEDGER_RETENTION_DAYS is 0 (keep every entry) or at least "
+                f"{LEDGER_MIN_DAYS}: six months, the least the EU AI Act asks of AI systems' logs"
+            )
+        if self.ledger_retention_days and not self.ledger_archive_dir:
+            raise ValueError(
+                "AGENTGOV_LEDGER_RETENTION_DAYS needs AGENTGOV_LEDGER_ARCHIVE_DIR: entries are "
+                "archived there before they leave the database"
+            )
+        if self.ledger_checkpoint_hours < 0:
+            raise ValueError("AGENTGOV_LEDGER_CHECKPOINT_HOURS must be 0 (on demand) or more")
+        if self.ledger_tsa_url and not self.ledger_tsa_url.startswith(("https://", "http://")):
+            raise ValueError("AGENTGOV_LEDGER_TSA_URL is the authority's http(s) URL")
+        if self.data_retention_days < 0 or 0 < self.data_retention_days < DATA_MIN_DAYS:
+            raise ValueError(
+                f"AGENTGOV_DATA_RETENTION_DAYS is 0 (keep everything) or at least {DATA_MIN_DAYS}"
+            )
         if self.session_hours <= 0:
             raise ValueError("AGENTGOV_SESSION_HOURS must be positive")
         if self.trace_url and "{trace_id}" not in self.trace_url:

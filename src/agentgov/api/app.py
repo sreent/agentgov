@@ -24,6 +24,7 @@ from agentgov import __version__
 from agentgov.api import (
     access_routes,
     copilot_studio_routes,
+    evidence_routes,
     feature_routes,
     governance_routes,
     identity_routes,
@@ -149,6 +150,7 @@ def create_app(
     app.include_router(package_routes.router)
     app.include_router(rule_routes.router)
     app.include_router(governance_routes.router)
+    app.include_router(evidence_routes.router)
     app.include_router(integration_routes.router)
     app.include_router(sso_routes.router)
     app.include_router(access_routes.router)

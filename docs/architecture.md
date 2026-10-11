@@ -169,7 +169,11 @@ Appenders take a row lock on the chain head, so concurrent writers extend it one
 time. `GET /v1/ledger/verify` recomputes the chain and reports the first broken entry
 (edited, deleted or truncated). The overview's integrity badge checks new entries as they
 arrive and re-verifies the whole chain every five minutes. `GET /v1/ledger/export`
-streams the ledger as JSON Lines for offline verification.
+streams the ledger as JSON Lines for offline verification
+(`agentgov ledger verify --file`). Every day the chain's head is kept as a checkpoint,
+which a time-stamping authority signs when one is set (RFC 3161); with a retention period,
+older entries are archived, checked link by link, before they leave the database, and the
+chain there goes on from the checkpoint at their end ([evidence](evidence.md)).
 
 The security team's tools get the ledger as it grows ([security operations](secops.md)):
 a delivery loop in the control plane sends each destination the entries after its

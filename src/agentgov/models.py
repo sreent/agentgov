@@ -801,6 +801,32 @@ class LedgerHead(Base):
     last_hash: Mapped[str] = mapped_column(String(64))
 
 
+class LedgerCheckpoint(Base):
+    """A point of the ledger's hash chain kept for good (docs/evidence.md): made every so
+    often, time-stamped by a time-stamping authority when one is set (RFC 3161), and,
+    once the entries up to it are archived and removed, where the chain goes on from."""
+
+    __tablename__ = "ledger_checkpoints"
+
+    # The last entry it covers, and that entry's hash and time.
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    hash: Mapped[str] = mapped_column(String(64))
+    entry_ts: Mapped[datetime] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = _created()
+    # The authority's time-stamp of the checkpoint's statement: its whole response, base64,
+    # the time it gives, and why there is none, if it failed.
+    tsa_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timestamp: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timestamped_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    timestamp_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The archive of the entries since the previous archive, up to this one, and its
+    # SHA-256; and when the entries left the database.
+    archive: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archive_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    archived_from: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pruned_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
 class McpSighting(Base):
     """An MCP server set up in one client on one developer's machine, as last reported
     by ``agentgov mcp scan --report``. Credentials never arrive here: environment

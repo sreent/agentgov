@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from agentgov import ids, ledger, migrations
+from agentgov import ids, ledger, migrations, retention, timestamping
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.gateway import GatewayConfigWriter
@@ -108,6 +108,7 @@ class Runtime:
         microsoft_http: httpx.Client | None = None,
         copilot_studio_http: httpx.Client | None = None,
         destinations_http: httpx.Client | None = None,
+        tsa_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
         self.db = Database(settings.database_url, on_commit=self._on_commit)
@@ -167,8 +168,10 @@ class Runtime:
         )
         # Developers' MCP servers against the approved ones, again when tool servers change.
         self._mcp_worker = _Worker("developer-mcp", self.refresh_developer_mcp, 3600)
-        # Deleted agents are purged once they can no longer be restored.
-        self._retention_worker = _Worker("agent-retention", self.purge_deleted_agents, 3600)
+        # Deleted agents are purged once they can no longer be restored; the ledger gets its
+        # checkpoints, their time-stamps and its archives; old operational records go.
+        self._retention_worker = _Worker("retention", self.run_retention, 3600)
+        self._tsa_http = tsa_http
         self._m365_worker = (
             _Worker(
                 "microsoft-sync",
@@ -219,8 +222,7 @@ class Runtime:
             self._classifier_worker.start()
         self._recheck_worker.start()
         self._mcp_worker.start()
-        if self.settings.soft_delete_retention_days > 0:
-            self._retention_worker.start()
+        self._retention_worker.start()
         if self._delivery_worker is not None:
             self._delivery_worker.start()
         if self._issues_worker is not None:
@@ -281,6 +283,42 @@ class Runtime:
         """A round of the management rules (docs/management-rules.md)."""
         with self._rules_lock, self.db.session() as session:
             return rules.evaluate(session, self.settings)
+
+    def run_retention(self) -> dict[str, Any]:
+        """Purge deleted agents past their retention, keep a ledger checkpoint when one is
+        due, time-stamp checkpoints, archive the ledger past its retention, and remove old
+        operational records (docs/evidence.md)."""
+        out: dict[str, Any] = {"purged": self.purge_deleted_agents()}
+        with self.db.session() as session:
+            point = retention.checkpoint_if_due(session, self.settings)
+            out["checkpoint"] = point.seq if point is not None else None
+        out["timestamped"] = self.stamp_checkpoints()
+        with self.db.session() as session:
+            out["archived"] = retention.archive(session, self.settings)
+        with self.db.session() as session:
+            out["pruned"] = retention.prune_records(session, self.settings)
+        return out
+
+    def stamp_checkpoints(self) -> int:
+        """Have the time-stamping authority sign the checkpoints it hasn't yet; returns how
+        many it did. Its failures are kept on the checkpoints, and tried again."""
+        url = self.settings.ledger_tsa_url
+        if not url:
+            return 0
+        with self.db.session() as session:
+            todo = retention.unstamped(session)
+        done = 0
+        for seq, hash_ in todo:  # the network calls happen outside any transaction
+            try:
+                got = timestamping.stamp(url, ledger.statement(seq, hash_), http=self._tsa_http)
+            except timestamping.TimestampError as exc:
+                with self.db.session() as session:
+                    retention.save_stamp(session, seq, url, error=str(exc))
+                continue
+            with self.db.session() as session:
+                retention.save_stamp(session, seq, url, response=got.response, time=got.time)
+            done += 1
+        return done
 
     def purge_deleted_agents(self) -> list[str]:
         """Purge the agents deleted longer ago than AGENTGOV_SOFT_DELETE_RETENTION_DAYS."""

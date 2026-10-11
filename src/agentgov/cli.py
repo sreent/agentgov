@@ -125,6 +125,12 @@ rules_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(rules_app, name="rules")
+evidence_app = typer.Typer(
+    help="Compliance evidence: what AgentGov does towards the EU AI Act, ISO/IEC 42001 and "
+    "the NIST AI RMF, and an evidence pack for assessors.",
+    no_args_is_help=True,
+)
+app.add_typer(evidence_app, name="evidence")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -1881,12 +1887,103 @@ def findings_reopen(finding_id: str) -> None:
 
 
 @ledger_app.command("verify")
-def ledger_verify() -> None:
-    """Recompute the hash chain and report tampering."""
-    result = _call("GET", "/v1/ledger/verify")
-    _print(result)
-    if not result.get("valid"):
-        raise typer.Exit(2)
+def ledger_verify(
+    file: list[Path] | None = typer.Option(
+        None,
+        "--file",
+        help="Check these exports or archives offline, in order, without the control "
+        "plane (repeatable).",
+    ),
+    follows: str | None = typer.Option(
+        None, "--follows", help="Offline: the hash the first entry must follow (a checkpoint's)."
+    ),
+) -> None:
+    """Recompute the hash chain and report tampering; offline, check exports and archives."""
+    if not file:
+        result = _call("GET", "/v1/ledger/verify")
+        _print(result)
+        if not result.get("valid"):
+            raise typer.Exit(2)
+        return
+    from agentgov import ledger, retention
+
+    start: tuple[int, str] | None = None
+    for path in file:
+        records = list(retention.read_archive(path))
+        if start is None and follows and records:
+            start = (records[0]["seq"] - 1, follows)
+        result = ledger.verify_records(records, start=start)
+        state = (
+            "valid" if result["valid"] else f"BROKEN at {result['broken_at']}: {result['problem']}"
+        )
+        typer.echo(
+            f"{path}: {state}, entries {result.get('first')} to {result.get('last')} "
+            f"({result['checked']} checked)"
+        )
+        if not result["valid"]:
+            raise typer.Exit(2)
+        if result["last"] is not None:
+            # The next file must go on from this one.
+            start = (result["last"], result["head"])
+    if start is not None:
+        typer.echo(f"last entry {start[0]}, hash {start[1]}")
+
+
+@ledger_app.command("checkpoints")
+def ledger_checkpoints(limit: int = 20) -> None:
+    """List the ledger's checkpoints: their time-stamps and archives."""
+    rows = _call("GET", "/v1/ledger/checkpoints", params={"limit": limit})
+    for row in rows:
+        row["stamped"] = (
+            row["timestamped_at"]
+            if row["timestamped"]
+            else (f"failed: {row['timestamp_error']}" if row["timestamp_error"] else "")
+        )
+        row["archived"] = (
+            f"{row['archived_from']}-{row['seq']} {row['archive']}" if row["archive"] else ""
+        )
+    _table(rows, ["seq", "entry_ts", "stamped", "archived", "hash"])
+
+
+@ledger_app.command("checkpoint")
+def ledger_checkpoint() -> None:
+    """Keep the chain's head as a checkpoint now (time-stamped, if an authority is set)."""
+    out = _call("POST", "/v1/ledger/checkpoints")
+    stamped = f", time-stamped at {out['timestamped_at']}" if out["timestamped"] else ""
+    _done("checkpoint", str(out["seq"]), f"{out['hash']}{stamped}")
+
+
+@ledger_app.command("proof")
+def ledger_proof(
+    seq: int,
+    out: Path = typer.Option(Path("."), "--out", "-o", help="The directory to write to."),
+) -> None:
+    """Write a checkpoint's statement and its time-stamp, to verify with OpenSSL."""
+    points = _call("GET", "/v1/ledger/checkpoints", params={"limit": 1000})
+    point = next((p for p in points if p["seq"] == seq), None)
+    if point is None:
+        _fail(f"no checkpoint at entry {seq}: see agentgov ledger checkpoints")
+    with _client() as client:
+        resp = client.get(f"/v1/ledger/checkpoints/{seq}/timestamp")
+    if resp.status_code >= 400:
+        _fail(resp.json().get("detail", resp.text))
+    out.mkdir(parents=True, exist_ok=True)
+    statement, token = out / f"checkpoint-{seq}.txt", out / f"checkpoint-{seq}.tsr"
+    statement.write_text(point["statement"])
+    token.write_bytes(resp.content)
+    typer.echo(f"wrote {statement} and {token}; check them with:")
+    typer.echo(f"  openssl ts -verify -data {statement} -in {token} -CAfile TSA-CA.pem")
+
+
+@ledger_app.command("retention")
+def ledger_retention(
+    run: bool = typer.Option(False, "--run", help="Do now what the hourly round does."),
+) -> None:
+    """How long the ledger and operational records are kept, and where the chain starts."""
+    if run:
+        _print(_call("POST", "/v1/ledger/retention/run"))
+        return
+    _print(_call("GET", "/v1/ledger/retention"))
 
 
 @ledger_app.command("tail")
@@ -3516,6 +3613,65 @@ def rules_agent(agent: str) -> None:
     """The rules that match an agent, and what each will do or did."""
     rows = _call("GET", f"/v1/agents/{quote(agent)}/rules")
     _table(rows, ["rule", "action", "mode", "since", "state", "detail"])
+
+
+# ------------------------------------------------------------------ evidence
+
+EVIDENCE_DAYS = typer.Option(90, "--days", help="The period: the last N days.")
+STATUS_NAMES = {
+    "in_place": "in place",
+    "partly": "partly",
+    "not_set_up": "not set up",
+    "attention": "NEEDS ATTENTION",
+    "outside": "outside AgentGov",
+}
+
+
+@evidence_app.command("report")
+def evidence_report(
+    framework: str = typer.Option(
+        "eu-ai-act", "--framework", help="eu-ai-act, iso-42001 or nist-ai-rmf."
+    ),
+    days: int = EVIDENCE_DAYS,
+    as_json: bool = typer.Option(False, "--json", help="The whole report, as JSON."),
+) -> None:
+    """What AgentGov does towards a framework's controls, how far that is set up, and the
+    evidence. It doesn't say that the organisation complies."""
+    report = _call("GET", "/v1/evidence/report", params={"framework": framework, "days": days})
+    if as_json:
+        _print(report)
+        return
+    typer.echo(f"{report['framework']['title']}, the last {report['period']['days']} days")
+    rows = []
+    for c in report["controls"]:
+        evidence = "; ".join(f"{e['label']}: {e['value']}" for e in c["evidence"][:3])
+        rows.append({"control": c["id"], "status": STATUS_NAMES[c["status"]], "evidence": evidence})
+    _table(rows, ["control", "status", "evidence"])
+    for c in report["controls"]:
+        for gap in c["gaps"]:
+            typer.echo(f"{c['id']}: {gap}")
+
+
+@evidence_app.command("pack")
+def evidence_pack(
+    days: int = EVIDENCE_DAYS,
+    out: Path | None = typer.Option(None, "--out", "-o", help="The zip file to write."),
+) -> None:
+    """The reports, the ledger for the period, the checkpoints and their time-stamps, the
+    inventory and the registry as code, in one zip, for whoever assesses compliance."""
+    with (
+        _client() as client,
+        client.stream("GET", "/v1/evidence/pack", params={"days": days}) as resp,
+    ):
+        if resp.status_code >= 400:
+            resp.read()
+            _fail(resp.text)
+        name = resp.headers.get("content-disposition", "").partition('filename="')[2].rstrip('"')
+        target = out or Path(name or "agentgov-evidence.zip")
+        with target.open("wb") as file:
+            for chunk in resp.iter_bytes():
+                file.write(chunk)
+    typer.echo(f"wrote {target} ({target.stat().st_size} bytes)")
 
 
 def main() -> None:

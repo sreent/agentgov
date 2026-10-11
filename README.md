@@ -66,7 +66,7 @@ them needs the AI administrator or Power Platform administrator role
 | **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tool servers and other agents), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; calls between agents (A2A 1.0) through the gateway, with who may call whom, and the chain of agents that handed work down, from the person at its head, in policy and the ledger; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
-| **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), OCSF, OpenTelemetry |
+| **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger with checkpoints time-stamped by an authority (RFC 3161), retention with archives that verify offline, and compliance reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), OCSF, OpenTelemetry |
 
 Use only the parts you need. Every [feature](docs/features.md) but the gateway's handling of
 unknown callers can be turned off, and most controls at the gateway can run in monitor mode
@@ -186,7 +186,10 @@ the gateway. It shows each control in turn:
 19. **Management rules**: a rule that deletes agents blocked for 30 days matches the demo
     agent, blocked in step 13. Enforced, it tells the agent's owner and sponsor first, with
     the date; alice accepts the risk until a later one, and the rule leaves the agent be.
-20. **Evidence**: every decision is in a ledger whose hash chain verifies.
+20. **Evidence**: every decision is in a ledger whose hash chain verifies. An
+    administrator keeps a checkpoint of it, which a time-stamping authority signs (the
+    sink stands in for one) and OpenSSL verifies; then the EU AI Act report and the
+    evidence pack.
 
 Then look around:
 
@@ -340,6 +343,9 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   and in their chats, until someone takes them on
 * [Management rules](docs/management-rules.md): what to do about agents that meet some
   conditions for long enough, such as blocking agents nobody uses, after telling their people
+* [Evidence](docs/evidence.md): checkpoints time-stamped by an authority, retention with
+  archives, and compliance reports and an evidence pack for the EU AI Act, ISO/IEC 42001
+  and the NIST AI RMF
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin
