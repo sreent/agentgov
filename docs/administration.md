@@ -92,6 +92,12 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Set, forget or rescan an agent's instructions | Agent → Instructions → **Add instructions** / **Edit**, **Forget**, **Rescan** | `agentgov agents set-instructions\|clear-instructions\|rescan-instructions REF` | `PUT`/`DELETE /v1/agents/{ref}/instructions`, `POST …/rescan` |
 | Check instructions before deploying an agent | — | `agentgov instructions check FILE` | `POST /v1/instructions/check` |
 
+Two commands run where the control plane runs, against its database
+(`AGENTGOV_DATABASE_URL`) rather than its API: `agentgov db status` shows the schema's
+revision and the migrations pending, and `agentgov db upgrade` applies them (`--sql`
+prints them instead). The control plane also applies them when it starts, unless
+`AGENTGOV_DATABASE_AUTO_MIGRATE` is `false` ([upgrading](../deploy/compose/README.md#upgrading)).
+
 Every CLI command has `--help`. Commands that cannot be undone (`purge`, `delete` of
 blueprints, tool servers and policies, `apikeys revoke`) ask for confirmation unless you
 pass `--yes`.

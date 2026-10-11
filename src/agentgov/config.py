@@ -41,6 +41,9 @@ class Settings:
     # SQLite is fine for development; use PostgreSQL (postgresql+psycopg://...)
     # for anything shared.
     database_url: str = "sqlite:///./agentgov.db"
+    # Bring the database's schema up to date when the control plane starts. Turn it
+    # off where a deployment job runs `agentgov db upgrade` before new versions start.
+    database_auto_migrate: bool = True
     # Externally reachable URL of the control plane (UI, API, OPA bundles).
     public_url: str = "http://localhost:8000"
     # Bootstrap administrator bearer token for the admin API and UI.

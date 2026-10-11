@@ -1,0 +1,77 @@
+{{- if .Values.presidio.enabled }}
+{{- $name := include "agentgov.name" (list . "presidio") }}
+{{- $v := .Values.presidio }}
+# Personal-data detection for the governance processor.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agentgov.labels" (list . "presidio") | nindent 4 }}
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "agentgov.selector" (list . "presidio") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agentgov.labels" (list . "presidio") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agentgov.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "agentgov.podSecurity" . | nindent 8 }}
+        runAsUser: 1001
+        runAsGroup: 1001
+      containers:
+        - name: presidio-analyzer
+          image: "{{ $v.image.repository }}:{{ $v.image.tag }}"
+          imagePullPolicy: {{ $v.image.pullPolicy }}
+          env:
+            - {name: PORT, value: "3000"}
+            - {name: WORKERS, value: "2"}
+            - {name: REGEX_TIMEOUT_SECONDS, value: "2"}
+            - {name: TLDEXTRACT_CACHE_TIMEOUT, value: "1"}
+            - {name: HOME, value: /tmp}
+          ports:
+            - name: http
+              containerPort: 3000
+          startupProbe:
+            # Loading the language model takes a while.
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- include "agentgov.scheduling" $v | nindent 6 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agentgov.labels" (list . "presidio") | nindent 4 }}
+spec:
+  selector:
+    {{- include "agentgov.selector" (list . "presidio") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+{{- end }}

@@ -149,6 +149,7 @@ Then look around:
 * Keycloak: <http://localhost:8180> (`admin` / `admin`), realm `agentgov`, which has one
   client per agent
 
+On Kubernetes, the [Helm chart](deploy/helm/agentgov/README.md) installs the same stack.
 For trace exploration, add Langfuse with
 `-f deploy/compose/docker-compose.langfuse.yml` (see the
 [deployment guide](deploy/compose/README.md)).
@@ -255,7 +256,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)
 * [Roadmap](docs/roadmap.md)
-* [Reference deployment](deploy/compose/README.md)
+* [Reference deployment](deploy/compose/README.md) (Docker Compose) and the
+  [Helm chart](deploy/helm/agentgov/README.md) for Kubernetes
 
 ## Repository layout
 
@@ -267,9 +269,11 @@ src/agentgov/
   identity/     Keycloak reconciler
   gateway.py    agentgateway config generator
   processor/    ExtMcp governance processor and detectors
+  migrations/   database schema migrations (Alembic)
   api/  ui/     HTTP API and admin UI
   cli.py        the agentgov command
 deploy/compose/ reference deployment
+deploy/helm/    Helm chart
 examples/       manifests, a demo MCP server and the demo agent
 docs/           design documents and ADRs
 tests/          unit and integration tests

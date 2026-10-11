@@ -1,0 +1,35 @@
+AgentGov {{ .Chart.AppVersion }} is starting in namespace {{ .Release.Namespace }}.
+
+Admin UI and API:  {{ .Values.urls.controlPlane }}/ui
+MCP gateway:       {{ .Values.urls.gateway }}/mcp/<server>
+{{- if .Values.keycloak.enabled }}
+Keycloak:          {{ .Values.urls.keycloak }}  (realm agentgov)
+{{- end }}
+
+{{- if not (or .Values.controlPlane.ingress.enabled (ne .Values.controlPlane.service.type "ClusterIP")) }}
+
+Nothing is exposed outside the cluster yet. To try it from this machine:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agentgov.name" (list . "control-plane") }} 8000:{{ .Values.controlPlane.service.port }} &
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agentgov.name" (list . "gateway") }} 8080:{{ .Values.gateway.service.port }} &
+{{- if .Values.keycloak.enabled }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agentgov.name" (list . "keycloak") }} 8180:8080 &
+{{- end }}
+{{- end }}
+
+The bootstrap admin token (keep it for break-glass access; create API keys instead):
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "agentgov.secretName" . }} -o jsonpath='{.data.admin-token}' | base64 -d
+{{- if and .Values.keycloak.enabled .Values.keycloak.demoUsers }}
+
+Demo users admin, alice and audrey sign in with the password:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "agentgov.secretName" . }} -o jsonpath='{.data.demo-password}' | base64 -d
+
+Turn them off (keycloak.demoUsers=false) before anyone else can reach Keycloak.
+{{- end }}
+{{- if or .Values.postgresql.enabled .Values.keycloak.enabled }}
+
+This release runs its own {{ if .Values.postgresql.enabled }}PostgreSQL{{ end }}{{ if and .Values.postgresql.enabled .Values.keycloak.enabled }} and {{ end }}{{ if .Values.keycloak.enabled }}Keycloak (in development mode){{ end }}, for evaluation.
+For production, use your own (see the chart's README).
+{{- end }}

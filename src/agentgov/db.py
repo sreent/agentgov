@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, create_engine, event
+from sqlalchemy import DateTime, MetaData, create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -51,8 +51,19 @@ class UTCDateTime(TypeDecorator):
         return value.replace(tzinfo=UTC)
 
 
+# Constraint names as PostgreSQL gives them when none is set, so databases made before
+# migrations existed and databases built by them name every constraint the same way.
+NAMING_CONVENTION = {
+    "pk": "%(table_name)s_pkey",
+    "uq": "%(table_name)s_%(column_0_name)s_key",
+    "fk": "%(table_name)s_%(column_0_name)s_fkey",
+    "ix": "ix_%(column_0_label)s",
+    "ck": "%(table_name)s_%(constraint_name)s_check",
+}
+
+
 class Base(DeclarativeBase):
-    pass
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 def _configure_sqlite(engine: Engine, in_memory: bool) -> None:
@@ -105,11 +116,6 @@ class Database:
 
     def _after_rollback(self, session: Session) -> None:
         session.info.pop(_CHANGED, None)
-
-    def create_all(self) -> None:
-        from agentgov import models  # noqa: F401  (register mappers)
-
-        Base.metadata.create_all(self.engine)
 
     @contextmanager
     def session(self) -> Iterator[Session]:

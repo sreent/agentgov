@@ -73,6 +73,12 @@ instructions_app = typer.Typer(
     help="Check agent instructions (system prompts) for unsafe content.", no_args_is_help=True
 )
 app.add_typer(instructions_app, name="instructions")
+db_app = typer.Typer(
+    help="The control plane's database schema (run where the control plane runs, with "
+    "AGENTGOV_DATABASE_URL).",
+    no_args_is_help=True,
+)
+app.add_typer(db_app, name="db")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -450,6 +456,98 @@ def processor() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     asyncio.run(serve(Settings.from_env()))
+
+
+def _database() -> Any:
+    from agentgov.config import Settings
+    from agentgov.db import Database
+
+    return Database(Settings.from_env().database_url)
+
+
+@db_app.command("status")
+def db_status() -> None:
+    """The schema's revision, and the migrations this version would apply."""
+    from agentgov import migrations
+
+    db = _database()
+    try:
+        state = migrations.status(db.engine)
+    except migrations.SchemaError as exc:
+        _fail(str(exc))
+    finally:
+        db.dispose()
+    if state.unversioned:
+        current = "none: created before migrations (adopted at the next upgrade)"
+    else:
+        current = state.current or "none: an empty database"
+    typer.echo(f"current: {current}")
+    typer.echo(f"head:    {state.head}")
+    typer.echo("pending: " + (", ".join(state.pending) or "nothing, the schema is up to date"))
+    if not state.up_to_date:
+        raise typer.Exit(1)
+
+
+@db_app.command("upgrade")
+def db_upgrade(
+    sql: bool = typer.Option(
+        False, "--sql", help="Print the SQL instead of running it, for review."
+    ),
+) -> None:
+    """Bring the schema up to date (the control plane also does this when it starts,
+    unless AGENTGOV_DATABASE_AUTO_MIGRATE is false)."""
+    from agentgov import migrations
+
+    db = _database()
+    try:
+        if sql:
+            typer.echo(migrations.upgrade_sql(db.engine), nl=False)
+            return
+        adopted = migrations.status(db.engine).unversioned
+        applied = migrations.upgrade(db.engine)
+    except migrations.SchemaError as exc:
+        _fail(str(exc))
+    finally:
+        db.dispose()
+    if adopted:
+        _done("database", migrations.BASELINE, "adopted (created before migrations)")
+        applied = [revision for revision in applied if revision != migrations.BASELINE]
+    if applied:
+        _done("database", migrations.head(), "migrated (" + ", ".join(applied) + ")")
+    else:
+        _done("database", migrations.head(), "already up to date")
+
+
+@app.command("gateway-config")
+def gateway_config(
+    output: Path = typer.Option(
+        ..., "--output", "-o", help="The file agentgateway reads (-f), on a shared volume."
+    ),
+    once: bool = typer.Option(
+        False, "--once", help="Write it once and stop (as an init container)."
+    ),
+    interval: float = typer.Option(5.0, help="Seconds between checks for changes."),
+) -> None:
+    """Keep agentgateway's configuration current from the control plane, for gateways
+    that don't share a volume with it (a sidecar in Kubernetes). Uses
+    AGENTGOV_CONTROL_PLANE_URL and AGENTGOV_SERVICE_TOKEN."""
+    import httpx
+
+    from agentgov.config import Settings
+    from agentgov.gateway import keep_current
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    settings = Settings.from_env()
+    if not settings.service_token:
+        _fail("set AGENTGOV_SERVICE_TOKEN (the control plane's service token)")
+    with httpx.Client(
+        base_url=settings.control_plane_url,
+        headers={"Authorization": f"Bearer {settings.service_token}"},
+        timeout=10,
+    ) as client:
+        keep_current(client, str(output), interval=interval, once=once)
 
 
 @app.command()

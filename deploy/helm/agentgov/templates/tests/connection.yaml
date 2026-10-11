@@ -1,0 +1,30 @@
+# `helm test`: the control plane is ready and the gateway serves its configuration.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "agentgov.name" (list . "test") }}
+  labels:
+    {{- include "agentgov.labels" (list . "test") | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    {{- include "agentgov.podSecurity" . | nindent 4 }}
+    runAsUser: 10001
+  containers:
+    - name: check
+      image: {{ include "agentgov.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: ["python", "-c"]
+      args:
+        - |
+          import urllib.request
+          for url in ("{{ include "agentgov.controlPlaneUrl" . }}/readyz",
+                      "http://{{ include "agentgov.name" (list . "gateway") }}:{{ .Values.gateway.service.port }}/healthz"):
+              with urllib.request.urlopen(url, timeout=10) as resp:
+                  print(url, resp.status)
+      securityContext:
+        {{- include "agentgov.containerSecurity" . | nindent 8 }}

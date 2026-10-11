@@ -8,8 +8,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from agentgov import migrations
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.db import Database
 from agentgov.runtime import Runtime
 
 ADMIN = {"Authorization": "Bearer test-admin"}
@@ -23,8 +25,23 @@ def opa_available() -> bool:
 requires_opa = pytest.mark.skipif(not opa_available(), reason="opa binary not installed")
 
 
+@pytest.fixture(scope="session")
+def migrated_database(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A database built by the migrations once, copied for each test (tests/test_migrations.py
+    covers the migrations themselves)."""
+    path = tmp_path_factory.mktemp("schema") / "agentgov.db"
+    db = Database(f"sqlite:///{path}")
+    migrations.upgrade(db.engine)
+    with db.engine.connect() as connection:
+        # Everything into the main file before it is copied (outside a transaction).
+        connection.connection.dbapi_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    db.dispose()
+    return path
+
+
 @pytest.fixture
-def settings(tmp_path: Path) -> Settings:
+def settings(tmp_path: Path, migrated_database: Path) -> Settings:
+    shutil.copyfile(migrated_database, tmp_path / "agentgov.db")
     return Settings(
         database_url=f"sqlite:///{tmp_path / 'agentgov.db'}",
         admin_token="test-admin",

@@ -1,6 +1,7 @@
 """Endpoints used by the composed components rather than by people.
 
 * OPA        - bundle downloads (with long polling), decision logs, status.
+* Gateway    - agentgateway's configuration, where it can't share a file.
 * Processor  - approvals, decision records, tool catalog, unknown callers.
 * Telemetry  - OTLP/HTTP traces (JSON, or protobuf with the otlp-protobuf extra).
 """
@@ -16,6 +17,7 @@ import anyio.to_thread
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from agentgov.api.auth import Principal, require
+from agentgov.gateway import etag_of
 from agentgov.opa.bundle import BUNDLE_CONTENT_TYPE, parse_prefer_wait
 from agentgov.registry import agents, approvals, decisions, discovery, findings, toolservers
 from agentgov.registry.errors import NotFound, ValidationError
@@ -61,6 +63,20 @@ async def opa_bundle(request: Request, _: Principal = Depends(service)) -> Respo
     return Response(
         content=bundle.body, media_type=BUNDLE_CONTENT_TYPE, headers={"ETag": bundle.etag}
     )
+
+
+# ------------------------------------------------------------------------ gateway
+
+
+@router.get("/v1/gateway/config", tags=["gateway"])
+async def gateway_config(request: Request, _: Principal = Depends(service)) -> Response:
+    """agentgateway's configuration, generated from the registry, for gateways that
+    don't share a volume with the control plane (see ``agentgov gateway-config``)."""
+    content = await asyncio.to_thread(_rt(request).gateway.render_current)
+    etag = etag_of(content)
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(content=content, media_type="application/yaml", headers={"ETag": etag})
 
 
 @router.post("/v1/opa/logs", tags=["opa"])

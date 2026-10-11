@@ -105,7 +105,7 @@ The registry is the source of truth. Every committed change notifies three recon
 |---|---|---|
 | Agent approved, blocked, deleted, restored | Identity | Keycloak client created, enabled or disabled; level-triggered, retried every 60 s |
 | Anything OPA needs (agents, grants, risk, tool catalog, policies) | Bundle server | New bundle revision; long-polling OPA instances receive it immediately |
-| Tool server added, approved, blocked | Gateway config | `agentgateway` config rewritten atomically; agentgateway reloads it |
+| Tool server added, approved, blocked | Gateway config | `agentgateway` config rewritten atomically; agentgateway reloads it. Where the gateway doesn't share a volume with the control plane (Kubernetes), a sidecar fetches it from `GET /v1/gateway/config` every few seconds instead |
 
 **Kill switch.** Blocking an agent changes the bundle; OPA, which holds a long-poll
 request open on the control plane, activates the new bundle at once, and the next call
@@ -143,6 +143,7 @@ streams the ledger as JSON Lines for a SIEM or for offline verification.
 | A custom Rego policy fails to compile | Rejected at submission, after a compile and a smoke evaluation, so a broken module never reaches OPA |
 | OPA cannot activate a bundle anyway | OPA keeps the last good bundle; its status report raises a critical finding |
 | Control plane down | Enforcement continues with the last bundle; decision records queue in the processor and are retried |
+| Database schema out of date | The control plane migrates it at start-up (one replica at a time, under a PostgreSQL advisory lock), or, with automatic migration off, refuses to start until `agentgov db upgrade` has run. A schema newer than the version knows stops it with a message |
 | Keycloak down | No new tokens; identity drift is reported on the agent and retried |
 | OPA unreachable during a Copilot Studio threat-detection call | AgentGov answers as `AGENTGOV_COPILOT_STUDIO_ON_ERROR` says (block by default, in enforce mode); if it doesn't answer within a second, Copilot Studio lets the tool run unless the environment is set to block |
 | A Microsoft connection fails or lacks a permission | That connection shows the error or the missing permission on the Platforms page; the others and the rest of AgentGov carry on |
@@ -177,7 +178,9 @@ src/agentgov/
   gateway.py      agentgateway config generator
   telemetry.py    OTLP ingestion (discovery, activity, detective controls)
   ledger.py       hash-chained evidence ledger
+  migrations/     the database schema's migrations (Alembic)
   ui/             admin UI (static)
-deploy/compose/   reference stack
+deploy/compose/   reference stack (Docker Compose)
+deploy/helm/      Helm chart for Kubernetes
 examples/         manifests, demo MCP server, demo agent
 ```

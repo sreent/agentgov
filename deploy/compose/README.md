@@ -147,6 +147,27 @@ The agentgateway configuration is not a file in this directory: the control plan
 generates it from the registry into the shared `gateway-config` volume, and agentgateway
 reloads it when it changes.
 
+## Upgrading
+
+The control plane keeps its database schema up to date: when a new version starts, it
+applies the migrations it brings, one control plane at a time. Back up PostgreSQL first,
+then:
+
+```bash
+git pull
+docker compose up -d --build --wait
+docker compose exec control-plane agentgov db status    # the schema's revision
+```
+
+To review the changes before they are made, print them with
+`docker compose run --rm control-plane db upgrade --sql`. To make them yourself, set
+`AGENTGOV_DATABASE_AUTO_MIGRATE=false` on the control plane and run `docker compose run
+--rm control-plane db upgrade` before starting the new version; it then refuses to start
+until the schema is current. A database created before AgentGov had migrations is
+adopted on its first upgrade, with its data. A newer schema than the version knows (after
+going back to an older version) stops the control plane with a message: run the newer
+version, or restore the backup.
+
 ## Reset
 
 ```bash

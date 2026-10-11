@@ -12,19 +12,25 @@ policies, all enforced by agentgateway:
 * ``cors``          - permissive, since credentials are bearer tokens.
 
 agentgateway watches the file and reloads it, so the control plane only has
-to rewrite it atomically when tool servers change.
+to rewrite it atomically when tool servers change. Where the two can't share a
+volume (in Kubernetes), the control plane serves the file instead
+(``GET /v1/gateway/config``) and ``agentgov gateway-config``, beside the
+gateway, keeps a local copy current (``sync_from_control_plane``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 import yaml
 from sqlalchemy import select
 
@@ -161,3 +167,36 @@ class GatewayConfigWriter:
         if changed:
             log.info("wrote agentgateway config to %s", self.settings.gateway_config_path)
         return changed
+
+
+def etag_of(content: str) -> str:
+    return '"' + hashlib.sha256(content.encode()).hexdigest()[:32] + '"'
+
+
+def sync_from_control_plane(
+    client: httpx.Client, path: str, etag: str | None = None
+) -> tuple[str | None, bool]:
+    """Fetch the configuration from the control plane and write it to ``path`` if it
+    changed; returns the configuration's ETag and whether the file was rewritten."""
+    resp = client.get("/v1/gateway/config", headers={"If-None-Match": etag} if etag else {})
+    if resp.status_code == 304:
+        return etag, False
+    resp.raise_for_status()
+    return resp.headers.get("ETag"), write_if_changed(path, resp.text)
+
+
+def keep_current(client: httpx.Client, path: str, *, interval: float, once: bool) -> None:
+    """Keep ``path`` current until stopped; with ``once``, return after the first write.
+    Errors (the control plane starting, a network blip) are retried."""
+    etag: str | None = None
+    while True:
+        try:
+            etag, changed = sync_from_control_plane(client, path, etag)
+        except httpx.HTTPError as exc:
+            log.warning("could not fetch the gateway configuration: %s", exc)
+        else:
+            if changed:
+                log.info("wrote agentgateway config to %s", path)
+            if once:
+                return
+        time.sleep(interval)

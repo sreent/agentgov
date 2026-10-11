@@ -60,11 +60,14 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
   `AGENTGOV_PUBLIC_URL` to the control plane's `https://` address so that session
   cookies are marked `Secure`.
 * Keep OPA, the processor, Presidio and the MCP servers on a private network that agents
-  cannot reach, so that the gateway is the only path to tools.
+  cannot reach, so that the gateway is the only path to tools. On Kubernetes, turn on the
+  Helm chart's network policies (`networkPolicy.enabled=true`) and its demo users off
+  (`keycloak.demoUsers=false`), or use your own Keycloak.
 * Keep `AGENTGOV_UNKNOWN_AGENT_MODE=reject` (the default) and the processor fail-closed.
   Use `monitor` only for discovery and only where that is acceptable.
-* Back up PostgreSQL, export the ledger regularly (`GET /v1/ledger/export`) and store the
-  exports somewhere the platform cannot modify.
+* Back up PostgreSQL, before every upgrade too (upgrades migrate its schema), export the
+  ledger regularly (`GET /v1/ledger/export`) and store the exports somewhere the platform
+  cannot modify.
 * If you connect AgentGov's app registration to Microsoft, grant it only the application
   permissions of the [connections](docs/microsoft-connections.md) you use
   (`CopilotPackages.Read.All`, `AgentIdentity.Read.All`, `AuditLogsQuery.Read.All`,

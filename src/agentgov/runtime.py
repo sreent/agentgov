@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from agentgov import ids, ledger
+from agentgov import ids, ledger, migrations
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.gateway import GatewayConfigWriter
@@ -180,7 +180,10 @@ class Runtime:
 
     # -- lifecycle -----------------------------------------------------------
     def init_db(self) -> None:
-        self.db.create_all()
+        if self.settings.database_auto_migrate:
+            migrations.upgrade(self.db.engine)
+        else:
+            migrations.check(self.db.engine)
         with self.db.session() as session:
             ledger.ensure_head(session)
 

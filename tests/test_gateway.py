@@ -139,3 +139,66 @@ def test_agentgateway_accepts_generated_config(tmp_path: Path) -> None:
         timeout=120,
     )
     assert "Configuration is valid" in proc.stdout + proc.stderr, proc.stdout + proc.stderr
+
+
+class TestServedConfig:
+    """Gateways that don't share a volume with the control plane fetch their config."""
+
+    def test_the_control_plane_serves_it_to_the_service_only(self, client) -> None:
+        from tests.conftest import ADMIN, SERVICE, seed
+
+        seed(client)
+        auditor = client.post(
+            "/v1/apikeys", json={"name": "audit", "role": "auditor"}, headers=ADMIN
+        ).json()["token"]
+        assert client.get("/v1/gateway/config").status_code == 401
+        refused = client.get("/v1/gateway/config", headers={"Authorization": f"Bearer {auditor}"})
+        assert refused.status_code == 403
+        resp = client.get("/v1/gateway/config", headers=SERVICE)
+        assert resp.status_code == 200 and resp.headers["content-type"] == "application/yaml"
+        routes = yaml.safe_load(resp.text)["binds"][0]["listeners"][0]["routes"]
+        assert [r["name"] for r in routes] == ["mcp-crm", "agentgov-health"]
+        etag = resp.headers["ETag"]
+        unchanged = client.get("/v1/gateway/config", headers={**SERVICE, "If-None-Match": etag})
+        assert unchanged.status_code == 304
+
+    def test_the_sidecar_keeps_a_copy_current(self, client, tmp_path: Path) -> None:
+        from agentgov.gateway import keep_current, sync_from_control_plane
+        from tests.conftest import SERVICE, seed
+
+        path = str(tmp_path / "gateway" / "config.yaml")
+        client.headers.update(SERVICE)
+        keep_current(client, path, interval=0, once=True)
+        assert "mcp-crm" not in Path(path).read_text()
+
+        etag, changed = sync_from_control_plane(client, path)
+        assert changed is False  # same content
+        etag, changed = sync_from_control_plane(client, path, etag)
+        assert changed is False  # 304
+
+        client.headers.pop("Authorization")
+        seed(client)  # registers and approves the crm server
+        client.headers.update(SERVICE)
+        etag, changed = sync_from_control_plane(client, path, etag)
+        assert changed is True and "mcp-crm" in Path(path).read_text()
+
+    def test_the_sidecar_retries_until_the_control_plane_answers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx
+
+        from agentgov import gateway
+
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise httpx.ConnectError("control plane starting")
+            return httpx.Response(200, text="binds: []\n", headers={"ETag": '"x"'})
+
+        monkeypatch.setattr(gateway.time, "sleep", lambda _: None)
+        client = httpx.Client(base_url="http://cp", transport=httpx.MockTransport(handler))
+        path = tmp_path / "config.yaml"
+        gateway.keep_current(client, str(path), interval=1, once=True)
+        assert calls["n"] == 3 and path.read_text() == "binds: []\n"

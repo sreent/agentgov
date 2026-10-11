@@ -1,0 +1,113 @@
+{{- if .Values.otelCollector.enabled }}
+{{- $name := include "agentgov.name" (list . "otel-collector") }}
+{{- $v := .Values.otelCollector }}
+{{- $config := include "agentgov.otelConfig" . }}
+# Agents and the gateway send OTLP here. GenAI spans go to the control plane, which
+# uses them for discovery (shadow agents), activity and detective controls.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agentgov.labels" (list . "otel-collector") | nindent 4 }}
+data:
+  collector.yaml: |
+    {{- $config | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agentgov.labels" (list . "otel-collector") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "agentgov.selector" (list . "otel-collector") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agentgov.labels" (list . "otel-collector") | nindent 8 }}
+      annotations:
+        checksum/config: {{ $config | sha256sum | trunc 16 }}
+    spec:
+      serviceAccountName: {{ include "agentgov.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "agentgov.podSecurity" . | nindent 8 }}
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: otel-collector
+          image: "{{ $v.image.repository }}:{{ $v.image.tag }}"
+          imagePullPolicy: {{ $v.image.pullPolicy }}
+          args: ["--config=/etc/otelcol/collector.yaml"]
+          env:
+            - name: AGENTGOV_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ include "agentgov.secretName" . }}, key: service-token}
+          ports:
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+            - {name: health, containerPort: 13133}
+          readinessProbe:
+            httpGet: {path: /, port: health}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /, port: health}
+            periodSeconds: 30
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            {{- include "agentgov.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/otelcol, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}
+      {{- include "agentgov.scheduling" $v | nindent 6 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agentgov.labels" (list . "otel-collector") | nindent 4 }}
+spec:
+  selector:
+    {{- include "agentgov.selector" (list . "otel-collector") | nindent 4 }}
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc, appProtocol: grpc}
+    - {name: otlp-http, port: 4318, targetPort: otlp-http}
+{{- end }}
+
+{{- define "agentgov.otelConfig" -}}
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+processors:
+  batch:
+    timeout: 2s
+exporters:
+  otlp_http/agentgov:
+    endpoint: {{ include "agentgov.controlPlaneUrl" . }}/v1/otlp
+    encoding: json
+    headers:
+      Authorization: "Bearer ${env:AGENTGOV_SERVICE_TOKEN}"
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/agentgov]
+{{- end -}}
