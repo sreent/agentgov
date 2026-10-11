@@ -79,7 +79,7 @@ many SIEMs map it.
 
 | `events` | Ledger entries |
 |---|---|
-| `decisions` | Tool and model calls the gateway decided, Copilot Studio's tool calls, and tools agents used without the gateway (telemetry) |
+| `decisions` | Tool calls, model calls and calls between agents the gateway decided, Copilot Studio's tool calls, and tools agents used without the gateway (telemetry) |
 | `approvals` | Approval requests, decisions, use and cancellations |
 | `findings` | Findings raised, reopened, resolved and dismissed |
 | `access` | Sign-ins, sign-outs and API keys |
@@ -106,14 +106,11 @@ agents (names, tool names, reasons) is escaped, so it can't mention anyone or hi
 ### Credentials
 
 A destination's credential is never in AgentGov's database, its API or its exports. It is
-a file named after the destination, in the directory `AGENTGOV_DESTINATION_SECRETS_DIR`
-(`/destination-secrets`), which the control plane reads each time it sends, so replacing
-the file rotates the credential. Mount it from your secret store:
-
-* Docker Compose: the files in `deploy/compose/destination-secrets` (or the directory in
-  `AGENTGOV_DESTINATION_SECRETS_DIR`), mounted read-only.
-* Helm: the Secret named in `destinationSecrets.existingSecret`, one key per destination,
-  or, to evaluate, `destinationSecrets.values` and the chart creates it.
+a file named after the destination, which the control plane reads each time it sends, so
+replacing the file rotates the credential. The deployment mounts the files from your secret
+store ([files, not settings](configuration.md#files-not-settings)): the files in
+`deploy/compose/destination-secrets` with Compose, or a Secret with one key per destination
+with Helm (`destinationSecrets`).
 
 The page and `agentgov destinations list` say when a destination's file is missing. For
 **Slack**, create an app with an incoming webhook for the channel. For **Teams**, create a
@@ -182,11 +179,13 @@ Each ledger entry is one event:
   chain, from the person at its head.
 * **What a control decided** is `action` and `disposition` (the Security Control profile):
   Allowed, Blocked, Delayed (waiting for approval), Detected (a monitored control),
-  Approved, Rejected. Denials and approval requests are `is_alert`.
+  Approved, Rejected. Denials, approval requests, monitored detections and tools used
+  without a grant are `is_alert`.
 * `metadata.uid` is the ledger entry's ID and `metadata.sequence` its sequence number;
   `metadata.correlation_uid` is the call's trace ID, when there is one.
-* `unmapped.agentgov` keeps the entry as the ledger has it, with its hash in the chain,
-  so a SIEM can check events against `agentgov ledger verify`.
+* `unmapped.agentgov` keeps the entry's type, actor, resource, decision and details, with
+  its hash, so a SIEM can match events to `agentgov ledger export` by `metadata.uid` and
+  hash; `agentgov ledger verify` checks that chain.
 
 Severity follows the entry: warnings are Medium; findings keep their own severity;
 denied calls are Medium and approval requests Low.
@@ -215,7 +214,7 @@ A blocked tool call, for example:
 The reference stack's demo sink (`examples/secops/sink`, port 9300) stands in for a SIEM,
 Splunk, Slack and Teams. `agentgov apply -f examples/manifests` turns the hand-off on at
 `inform` with four destinations ([secops.yaml](../examples/manifests/secops.yaml)), and the
-demo's later steps show what each got, then have a SOAR's `secops` key block a shadow agent:
+demo's step 16 shows what each got, then has a SOAR's `secops` key block a shadow agent:
 refused at `inform`, done at `contain`. See what arrived at
 `http://localhost:9300/received?kind=otlp` (or `hec`, `slack`, `teams`).
 

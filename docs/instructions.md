@@ -78,27 +78,28 @@ resolves itself when fixed instructions arrive. If it is a false positive, dismi
 it stays dismissed until different problems appear.
 
 An open finding adds to the agent's risk score: 40 points if it is critical, 25 if
-high and 10 if medium. Scores of 50 and above raise a high-risk alert. For agents that
-call tools through the gateway, the baseline policy blocks critical risk (75 points or
-more).
+high and 10 if medium. Scores of 50 and above raise an `agent.high_risk` finding. While
+`risk-based-access` is enforced (the default), the gateway refuses tool calls, model calls
+and calls between agents from agents at critical risk (75 points or more).
+
+The `instruction-checks` [feature](features.md) turns both checks off: instructions that
+arrive meanwhile are kept, and checked once it is on again, and **Rescan** is refused while
+it is off.
 
 ## Setting up the classifier
 
 Any server with an OpenAI-compatible chat completions API can serve Granite
-Guardian. Point the control plane at it:
-
-```bash
-AGENTGOV_GUARDIAN_URL=http://guardian:8000/v1   # the API's base URL
-AGENTGOV_GUARDIAN_MODEL=ibm-granite/granite-guardian-4.1-8b
-AGENTGOV_GUARDIAN_API_KEY=...                   # if the server needs one
-AGENTGOV_GUARDIAN_CRITERIA=harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception
-```
+Guardian. Point the control plane at it with `AGENTGOV_GUARDIAN_URL` (the API's base URL,
+such as `http://guardian:8000/v1`), and `AGENTGOV_GUARDIAN_API_KEY` if the server needs one;
+[configuration](configuration.md#instruction-classifier-optional) has the model name, the
+criteria and the timeout.
 
 * **With a GPU:** use vLLM, `vllm serve ibm-granite/granite-guardian-4.1-8b`. Each
   check takes well under a second.
 * **On a CPU:** use llama.cpp's server with the
   [GGUF build](https://huggingface.co/ibm-granite/granite-guardian-4.1-8b-GGUF).
-  `deploy/compose/docker-compose.guardian.yml` runs it next to the reference stack.
+  `deploy/compose/docker-compose.guardian.yml` runs it next to the reference stack
+  ([local](deploy/local.md#optional-a-classifier-for-agent-instructions)).
   Each criterion takes a few seconds, which is fine because classification runs in
   the background.
 
@@ -120,8 +121,8 @@ agentgov instructions check prompts/support-agent.md
 agentgov instructions check --fail-on medium --no-classifier - < prompt.txt
 ```
 
-Admins, approvers, auditors and registrars may run checks, so a registrar key in CI is
-enough.
+Admins, approvers, the security team (`secops`), auditors and registrars may run checks, so
+a registrar key in CI is enough.
 
 ## Doing it from the CLI or the API
 

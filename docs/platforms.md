@@ -209,10 +209,11 @@ action under their name, and so does the ledger (`platform.agent_blocked`,
    `<AGENTGOV_PUBLIC_URL>/ui/` for coming back after signing out. Under **Certificates &
    secrets**, create a client secret.
 2. Under **App roles**, create the roles AgentGov maps: `agentgov-admin`,
-   `agentgov-approver`, `agentgov-auditor` and `agentgov-registrar` (the value is what
-   counts). Then assign them to people under **Enterprise applications** > the app >
-   **Users and groups** (assigning groups needs Entra ID P1 or P2). People without a role
-   are turned away.
+   `agentgov-approver`, `agentgov-secops`, `agentgov-auditor` and `agentgov-registrar` (the
+   value is what counts). Then assign them to people under **Enterprise applications** > the
+   app > **Users and groups** (assigning groups needs Entra ID P1 or P2). People without a
+   role are turned away, unless the `approvals-by-person` feature is on, which lets them sign
+   in to decide what agents acting for them ask.
 3. Under **API permissions**, add these *delegated* permissions and grant admin consent:
 
    | API | Permission | For |
@@ -226,7 +227,8 @@ action under their name, and so does the ledger (`platform.agent_blocked`,
    the tenant first ([Microsoft's steps][pp-auth]):
    `az ad sp create --id 8578e004-a5c6-46e7-913e-12f58912df43`.
 4. Give the control plane the app and turn the admin actions on. With Docker Compose, put
-   them in `deploy/compose/.env`:
+   them in `deploy/compose/.env` (on Kubernetes, see
+   [Kubernetes](deploy/kubernetes.md#signing-in-with-microsoft-entra-id)):
 
    ```bash
    AGENTGOV_OIDC_ISSUER=https://login.microsoftonline.com/<tenant ID>/v2.0

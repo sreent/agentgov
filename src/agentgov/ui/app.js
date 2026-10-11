@@ -1071,7 +1071,7 @@ async function onSignin(event) {
   } catch (ex) {
     token = null;
     if (ex.status === 401) err.textContent = 'That token was not accepted. Check it for missing or extra characters, or ask an administrator for a new API key.';
-    else if (ex.status === 403) err.textContent = `This token can't open the admin center (${ex.detail || 'its role is not allowed'}). Use an admin, approver or auditor key.`;
+    else if (ex.status === 403) err.textContent = `This token can't open the admin center (${ex.detail || 'its role is not allowed'}). Use an admin, approver, secops or auditor key.`;
     else err.textContent = ex.message;
     err.hidden = false;
     input.focus();
@@ -1124,7 +1124,7 @@ async function start() {
     }
     if (!who.roles.some((r) => READ_ROLES.includes(r) || r === 'person')) {
       if (!token) await api('auth/logout', { method: 'POST', signingIn: true }).catch(() => null);
-      resetToSignin(`Your role (${who.role}) can't open the admin center. Use an admin, approver or auditor account.`);
+      resetToSignin(`Your role (${who.role}) can't open the admin center. Use an admin, approver, secops or auditor account.`);
       return;
     }
     me = who;

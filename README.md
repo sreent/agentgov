@@ -64,13 +64,14 @@ them needs the AI administrator or Power Platform administrator role
 |---|---|---|
 | **Registry** | Inventory with owners and sponsors; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
 | **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; risk-based blocking; a kill switch that applies within a second; single sign-on and roles for the people who govern agents | Keycloak, OPA |
-| **Visualization** | Overview dashboard, agent map (people → agents → tools), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
+| **Visualization** | Overview dashboard, agent map (people → agents → tool servers and other agents), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; calls between agents (A2A 1.0) through the gateway, with who may call whom, and the chain of agents that handed work down, from the person at its head, in policy and the ledger; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
 | **Security** | PII redaction in tool results and prompts, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), OCSF, OpenTelemetry |
 
-Use only the parts you need. Each [feature](docs/features.md) can be turned off, and each
-control at the gateway can run in monitor mode first: it records what it would have
-stopped, without stopping anything, until you enforce it.
+Use only the parts you need. Every [feature](docs/features.md) but the gateway's handling of
+unknown callers can be turned off, and most controls at the gateway can run in monitor mode
+first: they record what they would have stopped, without stopping anything, until you enforce
+them.
 
 ## How it works
 
@@ -113,14 +114,16 @@ flowchart LR
    registered. The gateway's access logs give each model call's tokens, which the
    control plane counts against the agent's daily budget.
 6. People sign in to the admin UI with single sign-on through the same Keycloak, and
-   their roles decide whether they administer agents, approve requests or only audit.
+   their roles decide whether they administer agents, approve requests, work in security
+   operations or only audit.
 
 [Architecture](docs/architecture.md) covers the design in detail: sequence diagrams,
 trust boundaries, failure modes and scaling.
 
 ## Quickstart
 
-You need Docker with Compose v2, Python 3.11 or later, and about 4 GB of free memory.
+You need Docker with Compose v2, Python 3.11 or later, and about 4 GB of free memory
+([requirements](docs/requirements.md)).
 
 ```bash
 git clone https://github.com/sreent/ai-agent-governance-platform.git
@@ -130,7 +133,7 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[demo]"
 export AGENTGOV_TOKEN=dev-admin-token
-agentgov apply -f examples/manifests      # blueprints, the CRM tool server, a model, agents, a policy, an identity issuer, the SOC's destinations
+agentgov apply -f examples/manifests      # blueprints, the CRM tool server, a model, agents, a policy, an identity issuer, the SOC's destinations and its hand-off level
 python examples/agents/demo_agent.py
 ```
 
@@ -190,14 +193,16 @@ Then look around:
 * Keycloak: <http://localhost:8180> (`admin` / `admin`), realm `agentgov`, which has one
   client per agent
 
-On Kubernetes, the [Helm chart](deploy/helm/agentgov/README.md) installs the same stack.
-For trace exploration, add Langfuse with
-`-f deploy/compose/docker-compose.langfuse.yml` (see the
-[deployment guide](deploy/compose/README.md)).
+[Running it locally](docs/deploy/local.md) has every endpoint and demo user, and the optional
+Langfuse for exploring traces. On Kubernetes, the Helm chart installs the same stack
+([Kubernetes](docs/deploy/kubernetes.md)), and guides for [Google Cloud](docs/deploy/gcp.md),
+[Azure](docs/deploy/azure.md) and [AWS](docs/deploy/aws.md) add each cloud's database, secrets
+and load balancer.
 
 ## Governance as code
 
-Blueprints, tool servers, model providers, agents and policies are declarative manifests, applied with
+Blueprints, tool servers, model providers, identity issuers, agents, policies, destinations
+and feature modes are declarative manifests, applied with
 `agentgov apply -f <dir>`, the UI's **Import manifests** or the API. They can also be
 created and edited one at a time in the admin UI or with the CLI, and **Export manifests**
 (`agentgov export`) writes everything back out as YAML:
@@ -298,6 +303,13 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 
 ## Documentation
 
+[The documentation's index](docs/README.md) lists every page. Among them:
+
+* [Deploying AgentGov](docs/deploy/README.md): [on your machine](docs/deploy/local.md),
+  [on Kubernetes](docs/deploy/kubernetes.md), and on [Google Cloud](docs/deploy/gcp.md),
+  [Azure](docs/deploy/azure.md) and [AWS](docs/deploy/aws.md)
+* [Configuration](docs/configuration.md): every setting, and
+  [requirements](docs/requirements.md): versions, resources and network
 * [Agent 365 baseline and parity matrix](docs/baseline-agent365.md)
 * [Architecture](docs/architecture.md)
 * [Administration](docs/administration.md): the same tasks in the admin UI, the CLI and the API
@@ -327,45 +339,18 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)
 * [Roadmap](docs/roadmap.md)
-* [Reference deployment](deploy/compose/README.md) (Docker Compose) and the
-  [Helm chart](deploy/helm/agentgov/README.md) for Kubernetes
-
-## Repository layout
-
-```text
-src/agentgov/
-  registry/     agents, blueprints, tool servers, model providers and usage, identity
-                issuers, approvals, findings, risk, discovery, features, destinations
-  secops/       the ledger as OCSF events, delivery to SIEMs and chats, hand-off levels
-  policies/     Rego library (agentgov.*, agentos) and its tests
-  opa/          bundle server and Rego validation
-  identity/     Keycloak reconciler (agents' clients and identity issuers), and the
-                delegations agents pass on when they hand work to each other
-  gateway.py    agentgateway config generator
-  processor/    governance processor (ExtMcp, the guardrail webhook for model calls, and
-                external authorization for calls between agents) and detectors
-  migrations/   database schema migrations (Alembic)
-  api/  ui/     HTTP API and admin UI
-  cli.py        the agentgov command
-  mcp_scan.py   the MCP servers set up on a developer's machine (agentgov mcp scan)
-deploy/compose/ reference deployment
-deploy/helm/    Helm chart
-examples/       manifests, a demo MCP server, a demo model, a demo workload identity
-                issuer, a stand-in for the security team's tools, a developer's machine,
-                an agent other agents call (A2A) and the demo agent
-docs/           design documents and ADRs
-tests/          unit and integration tests
-```
 
 ## Development
+
+[CONTRIBUTING](CONTRIBUTING.md) has the development setup, the checks and
+[where things live](CONTRIBUTING.md#where-things-live) in the repository.
 
 ```bash
 scripts/ci.sh          # lint, Rego checks, tests, image build; sets up .venv and opa
 scripts/ci.sh --e2e    # plus the full stack and the demo walkthrough
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist, and
-[SECURITY.md](SECURITY.md) to report a vulnerability.
+[SECURITY.md](SECURITY.md) explains how to report a vulnerability.
 
 ## License
 

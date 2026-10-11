@@ -230,3 +230,16 @@ class TestApiKeys:
         key_id = next(line.split()[0] for line in listing.splitlines() if " ci " in line)
         ok(agentgov("apikeys", "revoke", key_id, "--yes"))
         assert agentgov("whoami", token=token).exit_code == 1
+
+
+def test_the_server_keeps_idle_connections_longer_than_load_balancers(monkeypatch) -> None:
+    import uvicorn
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append(kwargs))
+    monkeypatch.delenv("AGENTGOV_HTTP_KEEPALIVE_SECONDS", raising=False)
+    ok(runner.invoke(cli.app, ["server"]))
+    monkeypatch.setenv("AGENTGOV_HTTP_KEEPALIVE_SECONDS", "3700")
+    ok(runner.invoke(cli.app, ["server"]))
+    # Google Cloud's load balancers keep connections to backends for 600 seconds.
+    assert [c["timeout_keep_alive"] for c in calls] == [620, 3700]

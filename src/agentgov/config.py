@@ -60,21 +60,34 @@ class Settings:
     database_auto_migrate: bool = True
     # Externally reachable URL of the control plane (UI, API, OPA bundles).
     public_url: str = "http://localhost:8000"
+    # Seconds the control plane keeps an idle HTTP connection open. Behind a load
+    # balancer, keep it longer than the load balancer's own (600 on Google Cloud), or the
+    # load balancer may send a request on a connection the control plane just closed.
+    http_keepalive_seconds: int = 620
     # Bootstrap administrator bearer token for the admin API and UI.
     admin_token: str | None = None
+    # Development only: without an admin token, the control plane makes one up and logs it.
+    dev_mode: bool = False
     # Shared token for internal components (OPA, governance processor, OTel
     # collector) calling the control plane.
     service_token: str | None = None
     # Features pinned by the deployment, e.g. "least-privilege=monitor,discovery=off"
     # (docs/features.md). Administrators choose the others in the app.
     features: str = ""
+    # How long an approval request waits for a decision before it expires.
     approval_ttl_seconds: int = 86400
-    # Soft-deleted agents can be restored for this many days (Agent 365 parity).
+    # Deleted agents can be restored for this many days, then they are purged (Agent 365
+    # parity). 0 keeps them.
     soft_delete_retention_days: int = 30
     # When > 0, agents whose risk score reaches this value are blocked.
     auto_block_risk_score: int = 0
+    # How long risk signals (denied calls, credentials, prompt injections) count towards
+    # an agent's risk score.
     risk_window_hours: int = 24
+    # Agents not seen for this many days raise a stale-agent finding.
     stale_agent_days: int = 30
+    # Seconds between posture scans (owners, sponsors, attestations, stale agents); 0
+    # turns the scheduled scan off.
     posture_interval_seconds: int = 300
 
     # --- Security operations (docs/secops.md) -------------------------------------
@@ -88,8 +101,11 @@ class Settings:
     # --- Keycloak (agent identity) ---------------------------------------------
     # Base URL the control plane uses to reach Keycloak's admin API.
     keycloak_url: str | None = None
+    # The realm agents' clients, identity issuers and people live in.
     keycloak_realm: str = "agentgov"
+    # The client the control plane provisions agents' clients with.
     keycloak_client_id: str = "agentgov-control-plane"
+    # Its secret. Provisioning in Keycloak is on when this and keycloak_url are set.
     keycloak_client_secret: str | None = None
     # Issuer that appears in agent tokens (Keycloak's frontend URL + realm).
     keycloak_issuer: str | None = None
@@ -107,21 +123,27 @@ class Settings:
     # The control plane signs administrators in with an OIDC provider (Keycloak by
     # default) as a confidential client and keeps the session server-side: the
     # browser only holds an HttpOnly cookie. Enabled when a client secret is set.
+
+    # The client AgentGov signs administrators in as.
     oidc_client_id: str = "agentgov-admin"
+    # Its secret. Single sign-on is on when this is set.
     oidc_client_secret: str | None = None
     # Defaults to keycloak_issuer. Endpoints default to Keycloak's paths: the
     # authorization and logout endpoints under the issuer (browser-facing), the
     # token endpoint and JWKS under keycloak_url when set (server-to-server).
     oidc_issuer: str | None = None
+    # The provider's endpoints, where they aren't Keycloak's or Microsoft Entra ID's.
     oidc_authorization_endpoint: str | None = None
     oidc_token_endpoint: str | None = None
     oidc_jwks_url: str | None = None
     oidc_end_session_endpoint: str | None = None
+    # The scopes asked for at sign-in.
     oidc_scopes: str = "openid profile email"
-    # Where role names are found in the tokens (a dot path), and the prefix that
-    # marks AgentGov roles: "agentgov-approver" grants the approver role.
+    # Where role names are found in the tokens (a dot path).
     oidc_roles_claim: str = "realm_access.roles"
+    # The prefix that marks AgentGov roles: "agentgov-approver" grants the approver role.
     oidc_role_prefix: str = "agentgov-"
+    # The longest an administrator's session lasts.
     session_hours: int = 8
     # Act in Microsoft 365 and Power Platform as the administrator who is signed in
     # (quarantine Copilot Studio agents, read the Power Platform inventory, block
@@ -132,10 +154,15 @@ class Settings:
     microsoft_admin_actions: bool = False
 
     # --- Microsoft 365 agent inventory --------------------------------------------
-    # An Entra app registration with the Microsoft Graph application permission
-    # CopilotPackages.Read.All (admin-consented). Microsoft's Package Management
-    # API needs a Microsoft Agent 365 licence. Sync is enabled when all three are set.
+    # AgentGov's Entra app registration, for the connections to Microsoft's services
+    # (docs/microsoft-connections.md), each turned on by the application permission it
+    # needs: CopilotPackages.Read.All for the agent catalog (which also needs a Microsoft
+    # Agent 365 licence), AgentIdentity.Read.All, AuditLogsQuery.Read.All and
+    # SecurityAlert.Read.All. The connections are on when all three are set.
+
+    # The Microsoft Entra tenant (directory) ID.
     m365_tenant_id: str | None = None
+    # The app registration's application (client) ID, and its client secret.
     m365_client_id: str | None = None
     m365_client_secret: str | None = None
     # 0 turns the scheduled sync off; admins can still sync on demand.
@@ -143,6 +170,8 @@ class Settings:
     # Package types to import: custom (built in your organisation), shared (shared
     # by its users), external (from partners) and microsoft (Microsoft's own).
     m365_package_types: str = "custom,shared,external"
+    # Microsoft's endpoints: change them for a national cloud (such as
+    # https://graph.microsoft.us and https://login.microsoftonline.us).
     graph_url: str = "https://graph.microsoft.com"
     entra_login_url: str = "https://login.microsoftonline.com"
     power_platform_url: str = "https://api.powerplatform.com"
@@ -152,6 +181,7 @@ class Settings:
     # Power Platform admin connects AgentGov to an environment
     # (docs/microsoft-connections.md). Turned on with the feature
     # copilot-studio-threat-detection (monitor or enforce) once these are set.
+
     # The app registrations that may call (the one connected to Copilot Studio),
     # comma-separated application (client) IDs.
     copilot_studio_caller_app_ids: str = ""
@@ -169,6 +199,7 @@ class Settings:
     # Ollama), e.g. http://guardian:8000/v1. Without it, agent instructions are
     # checked by AgentGov's rules only.
     guardian_url: str | None = None
+    # The name the server serves the model under, and its API key if it needs one.
     guardian_model: str = "ibm-granite/granite-guardian-4.1-8b"
     guardian_api_key: str | None = None
     # Criteria to judge (one classifier call each): harm, jailbreak, social_bias,
@@ -176,9 +207,12 @@ class Settings:
     guardian_criteria: str = (
         "harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception"
     )
+    # The longest one classifier call may take.
     guardian_timeout_seconds: float = 60.0
 
     # --- OPA (policy decisions) --------------------------------------------------
+    # Where the processor asks OPA for decisions, and the control plane for What if, such
+    # as http://opa:8181.
     opa_url: str | None = None
     # Longest a bundle long-poll request is held open.
     bundle_long_poll_seconds: int = 30
@@ -186,31 +220,36 @@ class Settings:
     # --- agentgateway (enforcement) ---------------------------------------------
     # Where the generated agentgateway config is written (shared volume).
     gateway_config_path: str | None = None
+    # The gateway's address as agents reach it, which the app and the API show.
     gateway_public_url: str = "http://localhost:8080"
     # The namespace of tool servers' names in the MCP registry ("<namespace>/<name>"); by
     # default the control plane's host name reversed, such as com.contoso.agentgov.
     mcp_registry_namespace: str = ""
+    # The port agentgateway listens on, in the configuration generated for it.
     gateway_port: int = 8080
-    # Addresses agentgateway uses to reach the governance processor: for tool calls
-    # (gRPC) and for model calls (its guardrail webhook, HTTP).
+    # Where agentgateway reaches the governance processor for tool calls (gRPC).
     processor_address: str = "processor:50051"
+    # ...and for model calls and calls between agents (HTTP).
     processor_webhook_address: str = "processor:8091"
     # OTLP/gRPC endpoint for gateway traces, e.g. http://otel-collector:4317.
     gateway_otlp_endpoint: str | None = None
     # agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts.
     gateway_ipv6: bool = False
     # Link to a trace in your trace viewer, with {trace_id} where the W3C trace ID
-    # goes. Ledger entries recorded at the gateway then link to their trace, e.g.
-    # Langfuse: http://localhost:3000/project/<project>/traces/{trace_id}
-    # Jaeger:   http://localhost:16686/trace/{trace_id}
+    # goes, such as http://localhost:16686/trace/{trace_id} for Jaeger. Ledger entries
+    # recorded at the gateway then link to their trace.
     trace_url: str | None = None
 
     # --- Governance processor ----------------------------------------------------
+    # Where it answers agentgateway about tool calls (gRPC).
     processor_listen: str = "0.0.0.0:50051"
-    # Where it answers agentgateway's guardrail webhook for model calls.
+    # Where it answers agentgateway's guardrail webhook for model calls, and its external
+    # authorization of calls between agents.
     processor_webhook_listen: str = "0.0.0.0:8091"
     # Control plane URL as seen from the processor.
     control_plane_url: str = "http://localhost:8000"
+    # Presidio's analyzer, such as http://presidio-analyzer:3000. Without it, personal
+    # data isn't looked for.
     presidio_url: str | None = None
     # Presidio entities treated as personal data, with per-entity minimum scores.
     # Noisy recognisers (DATE_TIME, URL, LOCATION, ...) are deliberately absent;
@@ -222,9 +261,9 @@ class Settings:
     presidio_max_chars: int = 16000
     # When Presidio is unreachable: "closed" denies the call, "open" skips PII scanning.
     presidio_failure_mode: str = "closed"
+    # The score (0 to 1) from which text counts as a prompt injection or a jailbreak (also
+    # for the control plane's Copilot Studio checks).
     prompt_injection_threshold: float = 0.7
-
-    dev_mode: bool = False
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None, **overrides: Any) -> Settings:

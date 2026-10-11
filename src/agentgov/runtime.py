@@ -158,6 +158,8 @@ class Runtime:
         )
         # Developers' MCP servers against the approved ones, again when tool servers change.
         self._mcp_worker = _Worker("developer-mcp", self.refresh_developer_mcp, 3600)
+        # Deleted agents are purged once they can no longer be restored.
+        self._retention_worker = _Worker("agent-retention", self.purge_deleted_agents, 3600)
         self._m365_worker = (
             _Worker(
                 "microsoft-sync",
@@ -203,6 +205,8 @@ class Runtime:
             self._classifier_worker.start()
         self._recheck_worker.start()
         self._mcp_worker.start()
+        if self.settings.soft_delete_retention_days > 0:
+            self._retention_worker.start()
         if self._delivery_worker is not None:
             self._delivery_worker.start()
         self._started = True
@@ -219,6 +223,7 @@ class Runtime:
             self._classifier_worker.stop()
         self._recheck_worker.stop()
         self._mcp_worker.stop()
+        self._retention_worker.stop()
         if self._delivery_worker is not None:
             self._delivery_worker.stop()
         self.db.dispose()
@@ -249,6 +254,14 @@ class Runtime:
             if not features.is_on(session, "posture-checks"):
                 return None
             return posture.scan(session, self.settings)
+
+    def purge_deleted_agents(self) -> list[str]:
+        """Purge the agents deleted longer ago than AGENTGOV_SOFT_DELETE_RETENTION_DAYS."""
+        with self.db.session() as session:
+            purged = agents_svc.purge_expired(session, self.settings)
+        if purged:
+            log.info("purged %d agent(s) deleted over the retention period", len(purged))
+        return purged
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;

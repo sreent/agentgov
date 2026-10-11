@@ -142,7 +142,7 @@ The processor asks `data.agentgov.a2a.decision`:
   "method": "SendMessage",
   "agent": {"agent_id": "agt_…", "client_id": "agent-support-bot"},
   "target": "billing-agent",
-  "user": {"username": "sam", "groups": ["/support"], "via": "exchange"},
+  "user": {"id": "5c0b…", "username": "sam", "groups": ["/support"], "via": "exchange"},
   "chain": [{"type": "person", "id": "5c0b…", "name": "sam"}],
   "detections": {"categories": [], "entities": []}
 }

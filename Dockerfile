@@ -24,6 +24,10 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     && mkdir -p /gateway && chown agentgov /gateway
 USER agentgov
 WORKDIR /home/agentgov
+# psycopg's own copies of libpq and OpenSSL look for trusted certificate authorities
+# where Debian doesn't keep them: point them there, so that database URLs can verify the
+# server with sslrootcert=system.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 EXPOSE 8000 50051
 ENTRYPOINT ["agentgov"]
 CMD ["server"]

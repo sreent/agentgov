@@ -1,0 +1,77 @@
+# AgentGov on EKS Auto Mode (docs/deploy/aws.md): Amazon RDS for PostgreSQL, the Secret
+# synced from Secrets Manager (manifests/secrets.yaml), HTTPS through one Application Load
+# Balancer with an ACM certificate (manifests/ingress-class.yaml). The guide replaces
+# <account>, <region>, <postgres-host> and agentgov.example.com with your names.
+image:
+  repository: <account>.dkr.ecr.<region>.amazonaws.com/agentgov
+  tag: "0.1.0"
+
+urls:
+  controlPlane: https://agentgov.example.com
+  gateway: https://gateway.agentgov.example.com
+  keycloak: https://auth.agentgov.example.com
+
+# Every secret is in the one Secret synced from Secrets Manager.
+secrets:
+  existingSecret: agentgov
+postgresql:
+  enabled: false
+externalDatabase:
+  existingSecret: agentgov          # key database-url
+
+keycloak:
+  mode: production
+  demoUsers: false
+  externalDatabase:
+    # RDS's certificate authorities, in the ConfigMap rds-ca.
+    url: jdbc:postgresql://<postgres-host>:5432/keycloak?sslmode=verify-full&sslrootcert=/etc/rds/global-bundle.pem
+    existingSecret: agentgov        # key keycloak-database-password
+  extraVolumes:
+    - {name: rds-ca, configMap: {name: rds-ca}}
+  extraVolumeMounts:
+    - {name: rds-ca, mountPath: /etc/rds, readOnly: true}
+  ingress:
+    enabled: true
+    className: agentgov
+    annotations:
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/healthcheck-path: /realms/agentgov
+
+controlPlane:
+  extraVolumes:
+    - {name: rds-ca, configMap: {name: rds-ca}}
+  extraVolumeMounts:
+    - {name: rds-ca, mountPath: /etc/rds, readOnly: true}
+  ingress:
+    enabled: true
+    className: agentgov
+    annotations:
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/healthcheck-path: /readyz
+
+# The decision path, two of each.
+gateway:
+  replicas: 2
+  ingress:
+    enabled: true
+    className: agentgov
+    annotations:
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/healthcheck-path: /healthz
+processor:
+  replicas: 2
+opa:
+  replicas: 2
+
+# Model providers' API keys and destinations' credentials, when you add them
+# (docs/deploy/aws.md#model-keys-and-destinations).
+modelKeys:
+  existingSecret: agentgov-model-keys
+destinationSecrets:
+  existingSecret: agentgov-destinations
+
+networkPolicy:
+  enabled: true

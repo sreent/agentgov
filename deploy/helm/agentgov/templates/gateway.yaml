@@ -40,6 +40,9 @@ spec:
           args: ["gateway-config", "--output", "/gateway/config.yaml", "--once"]
           env:
             {{- include "agentgov.gatewayConfigEnv" . | nindent 12 }}
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {memory: 128Mi}
           securityContext:
             {{- include "agentgov.containerSecurity" . | nindent 12 }}
           volumeMounts:
@@ -72,11 +75,22 @@ spec:
         - name: config-sync
           image: {{ $sync.image }}
           imagePullPolicy: {{ $sync.pullPolicy }}
-          args: ["gateway-config", "--output", "/gateway/config.yaml", "--interval", {{ $v.configInterval | quote }}]
+          args: ["gateway-config", "--output", "/gateway/config.yaml", "--interval", {{ $v.configInterval | quote }},
+                 "--heartbeat", "/tmp/gateway-config.alive"]
           env:
             {{- include "agentgov.gatewayConfigEnv" . | nindent 12 }}
+          # Ready while the file agentgateway reads is there, whether or not the control
+          # plane answers; alive while the loop keeps touching its heartbeat.
+          readinessProbe:
+            exec: {command: ["test", "-s", "/gateway/config.yaml"]}
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "test $(( $(date +%s) - $(stat -c %Y /tmp/gateway-config.alive) )) -lt {{ max 60 (mul 6 $v.configInterval) }}"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
           resources:
-            requests: {cpu: 10m, memory: 48Mi}
+            requests: {cpu: 10m, memory: 64Mi}
             limits: {memory: 128Mi}
           securityContext:
             {{- include "agentgov.containerSecurity" . | nindent 12 }}

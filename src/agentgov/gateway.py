@@ -465,11 +465,17 @@ def sync_from_control_plane(client: httpx.Client, path: str, fetched: Fetched) -
     return write_if_changed(path, to_yaml(with_available_keys(fetched.config)))
 
 
-def keep_current(client: httpx.Client, path: str, *, interval: float, once: bool) -> None:
+def keep_current(
+    client: httpx.Client, path: str, *, interval: float, once: bool, heartbeat: str | None = None
+) -> None:
     """Keep ``path`` current until stopped; with ``once``, return after the first write.
-    Errors (the control plane starting, a network blip) are retried."""
+    Errors (the control plane starting, a network blip) are retried. Every round touches
+    ``heartbeat``, so that a liveness probe can tell the loop is still going."""
     fetched = Fetched()
     while True:
+        if heartbeat:
+            with open(heartbeat, "a"):
+                os.utime(heartbeat)
         try:
             changed = sync_from_control_plane(client, path, fetched)
         except httpx.HTTPError as exc:

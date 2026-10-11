@@ -1,7 +1,8 @@
 # Features
 
-AgentGov is one application, but you don't have to use all of it. Each feature can be
-turned off, and each control the gateway enforces can also run in **monitor** mode. In
+AgentGov is one application, but you don't have to use all of it. Every feature but
+`unknown-callers` can be turned off, and most controls the gateway enforces can also run in
+**monitor** mode. In
 monitor mode AgentGov decides as usual and records what it would have done, but lets the
 call through, like Conditional Access's report-only mode. Use it to try a control on real
 traffic before you enforce it.
@@ -124,8 +125,8 @@ organisation policies' denials always apply.
 * **The governance processor** reads the modes from OPA at most five seconds old. It
   doesn't inspect what an off control would look at, and it records `monitored` with
   each decision.
-* **The gateway's configuration** follows `mcp-gateway` and `unknown-callers` when the
-  control plane rewrites it.
+* **The gateway's configuration** follows `mcp-gateway`, `model-gateway`, `a2a-gateway` and
+  `unknown-callers` when the control plane rewrites it.
 * **The control plane** checks the modes when it acts: discovery, posture scans,
   instruction checks, registration, the automatic block, the Microsoft connections, and
   what it sends the security team's tools and lets their `secops` role do.
@@ -135,14 +136,5 @@ organisation policies' denials always apply.
 
 ## Settings that became features
 
-These environment variables are refused now. The message names the feature that replaced
-each one.
-
-| Was | Now |
-|---|---|
-| `AGENTGOV_UNKNOWN_AGENT_MODE=reject\|monitor` | `unknown-callers=enforce\|monitor` |
-| `AGENTGOV_REGISTRATION_REQUIRES_APPROVAL=true\|false` | `registration-approval=on\|off` |
-| `AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION=off\|monitor\|enforce` | `copilot-studio-threat-detection=off\|monitor\|enforce` |
-
-`AGENTGOV_ALERT_WEBHOOK_URL` is refused too: alerts go to Teams and Slack
-[destinations](secops.md) now, with the security-operations feature at inform or above.
+Some environment variables became features, and AgentGov refuses them now, naming the feature
+that replaced each one: [configuration](configuration.md#settings-that-changed) lists them.

@@ -27,3 +27,9 @@ the other components in sync with it, a governance processor for agentgateway's
   Kubernetes packaging on the roadmap.
 * Version compatibility across components must be tested; the checks validate generated
   agentgateway configuration with the real binary and evaluate the bundle with real OPA.
+
+## Update
+
+Kubernetes packaging is no longer on the roadmap: the Helm chart
+([Kubernetes](../deploy/kubernetes.md)) installs the same parts, with guides for Google
+Cloud, Azure and AWS.

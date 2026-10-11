@@ -44,6 +44,29 @@ spec:
   (dict "component" "gateway" "ports" (list 8080) "enabled" true)
   (dict "component" "otel-collector" "ports" (list 4317 4318 13133) "enabled" .Values.otelCollector.enabled)
   (dict "component" "keycloak" "ports" (list 8080 9000) "enabled" .Values.keycloak.enabled) }}
+{{- if and .Values.keycloak.enabled (eq .Values.keycloak.mode "production") }}
+---
+# Keycloak's replicas talk to each other (JGroups, and its failure detection).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "agentgov.name" (list $root "keycloak") }}-cluster
+  labels:
+    {{- include "agentgov.labels" (list $root "keycloak") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "agentgov.selector" (list $root "keycloak") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "agentgov.selector" (list $root "keycloak") | nindent 14 }}
+      ports:
+        - port: 7800
+        - port: 57800
+{{- end }}
 {{- range $public }}
 {{- if .enabled }}
 ---

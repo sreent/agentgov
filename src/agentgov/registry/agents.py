@@ -404,6 +404,23 @@ def purge(session: Session, agent: Agent, *, actor: str) -> None:
     mark_changed(session, "agents")
 
 
+def purge_expired(session: Session, settings: Settings) -> list[str]:
+    """Purge the agents deleted longer ago than the retention period (0 keeps them):
+    until then they can be restored."""
+    days = settings.soft_delete_retention_days
+    if days <= 0:
+        return []
+    cutoff = ids.utcnow() - timedelta(days=days)
+    expired = session.scalars(
+        select(Agent).where(Agent.status == DELETED, Agent.deleted_at < cutoff)
+    ).unique()
+    names = []
+    for agent in list(expired):
+        names.append(agent.name)
+        purge(session, agent, actor="system:retention")
+    return names
+
+
 def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.RiskResult:
     """Recompute the agent's risk; publish level changes and apply auto-block."""
     result = risk.evaluate(session, agent, settings.risk_window_hours)

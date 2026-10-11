@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import select
 
 from agentgov import ids
-from agentgov.models import ACTIVE, BLOCKED, DELETED, DISCOVERED, PENDING
+from agentgov.models import ACTIVE, BLOCKED, DELETED, DISCOVERED, PENDING, LedgerEntry
 from agentgov.registry import (
     agents,
     approvals,
@@ -120,6 +121,29 @@ class TestLifecycle:
             agents.purge(s, agent, actor="test")
         with rt.db.session() as s, pytest.raises(NotFound):
             agents.get(s, "bot")
+
+    def test_deleted_agents_are_purged_after_the_retention_period(self, rt, settings) -> None:
+        with rt.db.session() as s:
+            _blueprint(s)
+            for name in ("old", "recent", "kept"):
+                agent = _agent(s, settings, name=name)
+                if name != "kept":
+                    agents.transition(s, settings, agent, "delete", actor="test")
+            agents.get(s, "old").deleted_at = ids.utcnow() - timedelta(days=31)
+        with rt.db.session() as s:
+            assert agents.purge_expired(s, settings) == ["old"]
+        with rt.db.session() as s:
+            with pytest.raises(NotFound):
+                agents.get(s, "old")
+            assert agents.get(s, "recent").status == DELETED
+            assert agents.get(s, "kept").status == ACTIVE
+            entries = [e for e in s.scalars(select(LedgerEntry)) if e.type == "agent.purged"]
+            assert [e.actor for e in entries] == ["system:retention"]
+        # 0 keeps deleted agents.
+        with rt.db.session() as s:
+            agents.get(s, "recent").deleted_at = ids.utcnow() - timedelta(days=90)
+            keep = settings.with_overrides(soft_delete_retention_days=0)
+            assert agents.purge_expired(s, keep) == []
 
     def test_attestation_extends_expiry(self, rt, settings) -> None:
         with rt.db.session() as s:

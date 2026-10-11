@@ -25,16 +25,14 @@ scripts/ci.sh --setup && . .venv/bin/activate
 
 Claude Code cloud sessions do this automatically (`.claude/hooks/session-start.sh`).
 
-For API or UI work, the control plane runs on its own against a local SQLite file
-(`agentgov.db`); Keycloak, OPA and the gateway are optional and their reconcilers stay
-idle when they are not configured:
+For API or UI work, run the control plane on its own, against a local SQLite file
+([the control plane alone](docs/deploy/local.md#the-control-plane-alone)). For end-to-end
+work, use the [Compose stack](docs/deploy/local.md#docker-compose), and rebuild the parts
+that run AgentGov's image after a change:
 
 ```bash
-AGENTGOV_ADMIN_TOKEN=dev agentgov server     # then open http://localhost:8000/ui
+docker compose -f deploy/compose/docker-compose.yml up -d --build control-plane processor gateway-config
 ```
-
-For end-to-end work, use the Compose stack in [`deploy/compose`](deploy/compose/README.md)
-and rebuild the image with `docker compose up -d --build control-plane processor`.
 
 ## Checks
 
@@ -42,7 +40,7 @@ and rebuild the image with `docker compose up -d --build control-plane processor
 request. Run it before you open one:
 
 ```bash
-scripts/ci.sh             # ruff, opa fmt/check/test, pytest, the Helm chart, the image
+scripts/ci.sh             # ruff, the docs, opa fmt/check/test, pytest, the Helm chart, the image
 scripts/ci.sh --e2e       # also: the demo and ledger verification against the Compose
                           # stack and against the Helm chart's pods run with Docker
 scripts/ci.sh --kind      # also: the Helm chart on a kind cluster, with the same demo
@@ -53,8 +51,15 @@ Run `--e2e` when you change the processor, the Rego library, the gateway configu
 the identity reconciler or the Helm chart. Its chart check runs the chart's pods with
 Docker (`scripts/chart-on-docker.py`), so it works wherever Docker does, including Claude
 Code's cloud sessions. `--kind` installs the chart on a real cluster; kind needs a Docker
-host with cgroup v2, and the `e2e` workflow runs it on GitHub. It uses its own Compose project and the stack's usual ports, so
-stop a running local stack first. On GitHub, the `ci` workflow runs the checks on Python
+host with cgroup v2, and the `e2e` workflow runs it on GitHub. `--e2e` uses its own Compose
+project (`agentgov-ci`) and the stack's usual ports, so stop a running local stack first.
+
+The docs check fails on a link to a file or heading that doesn't exist, and on a setting
+without a comment: [configuration](docs/configuration.md#reference) is generated from the
+comments in `src/agentgov/config.py`, so after changing a setting run
+`scripts/settings-doc.py` to regenerate it.
+
+On GitHub, the `ci` workflow runs the checks on Python
 3.11, 3.12 and 3.13, and the `e2e` workflow runs the end-to-end check for pull requests
 that change code or the deployment.
 
@@ -62,16 +67,28 @@ that change code or the deployment.
 
 | Path | What |
 |---|---|
-| `src/agentgov/registry` | Registry and lifecycle: agents, blueprints, tool servers, approvals, findings, risk, discovery |
-| `src/agentgov/models.py`, `src/agentgov/migrations` | The database schema and its migrations (Alembic) |
+| `src/agentgov/api` | The HTTP API's routes and authentication |
+| `src/agentgov/registry` | The service layer: agents, blueprints, tool servers, model providers and usage, identity issuers, approvals, findings, risk, posture, discovery, platforms, instructions, decisions, features, destinations, manifests, API keys, access |
+| `src/agentgov/secops` | The ledger as OCSF events, delivery to SIEMs and chats, alerts, hand-off levels |
+| `src/agentgov/platforms` | Microsoft's services (Graph, the Power Platform API) and Copilot Studio threat detection |
+| `src/agentgov/scanners` | Checks on agents' instructions: rules and the Granite Guardian client |
+| `src/agentgov/identity` | Keycloak's admin client and the reconciler, single sign-on, the people agents act for, and the delegations agents pass on |
+| `src/agentgov/opa` | Building and long-poll serving of bundles, Rego validation, the OPA client |
 | `src/agentgov/policies` | The Rego library and its tests |
-| `src/agentgov/opa` | Bundle building and serving, Rego validation |
-| `src/agentgov/identity` | Keycloak reconciler |
-| `src/agentgov/gateway.py` | agentgateway configuration generator |
-| `src/agentgov/processor` | ExtMcp governance processor and detectors |
-| `src/agentgov/api` | HTTP API |
+| `src/agentgov/processor` | The governance processor: the ExtMcp gRPC server, the guardrail webhook for model calls, external authorization for calls between agents, detectors, the Presidio client |
+| `src/agentgov/gateway.py` | agentgateway's configuration, and the sidecar that keeps it current |
+| `src/agentgov/telemetry.py` | OTLP ingestion: discovery, activity, detective controls, model usage |
+| `src/agentgov/ledger.py` | The hash-chained evidence ledger |
+| `src/agentgov/mcp_scan.py` | The MCP servers set up on a developer's machine (`agentgov mcp scan`) |
+| `src/agentgov/models.py`, `src/agentgov/migrations` | The database schema and its migrations (Alembic) |
+| `src/agentgov/config.py`, `src/agentgov/cli.py` | The settings, and the `agentgov` command |
 | `src/agentgov/ui` | Admin UI (static files, no build step) |
 | `deploy/compose`, `deploy/helm` | The Compose stack and the Helm chart (keep the chart's realm file in step with Compose's: CI compares them) |
+| `deploy/kubernetes` | Values and manifests for the cloud guides |
+| `examples` | Manifests, a demo MCP server, model, workload identity issuer and agent other agents call, a stand-in for the security team's tools, a developer's machine, and the demo agent |
+| `docs` | The documentation ([index](docs/README.md)) and the ADRs |
+| `scripts` | `ci.sh`, the docs checks, `chart-on-docker.py`, `new-migration.sh` and `gen-protos.sh` |
+| `tests` | Unit and integration tests |
 
 If you change the ExtMcp protocol definition, regenerate the stubs with
 `scripts/gen-protos.sh`.

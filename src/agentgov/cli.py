@@ -269,7 +269,7 @@ LOGIN_WAIT_SECONDS = 600
 # Reasons /auth/callback sends back (?error=...), as the admin UI words them.
 LOGIN_ERRORS = {
     "no_role": "you signed in, but your account has no AgentGov role. Ask an administrator "
-    "for agentgov-admin, agentgov-approver or agentgov-auditor.",
+    "for agentgov-admin, agentgov-approver, agentgov-secops or agentgov-auditor.",
     "state": "that sign-in could not be completed in this browser. Start again.",
     "expired": "that sign-in expired or was already used. Start again.",
     "provider": "the identity provider could not complete the sign-in. Try again.",
@@ -493,12 +493,20 @@ def server(
     """Run the control plane (API, admin UI, OPA bundle server)."""
     import uvicorn
 
+    from agentgov.config import Settings
+
     if dev:
         os.environ.setdefault("AGENTGOV_DEV_MODE", "true")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
-    uvicorn.run("agentgov.api.app:create_app", factory=True, host=host, port=port)
+    uvicorn.run(
+        "agentgov.api.app:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        timeout_keep_alive=Settings.from_env().http_keepalive_seconds,
+    )
 
 
 @app.command()
@@ -582,6 +590,9 @@ def gateway_config(
         False, "--once", help="Write it once and stop (as an init container)."
     ),
     interval: float = typer.Option(5.0, help="Seconds between checks for changes."),
+    heartbeat: Path | None = typer.Option(
+        None, help="A file to touch every round, for a liveness probe."
+    ),
 ) -> None:
     """Keep agentgateway's configuration current from the control plane, for gateways
     that don't share a volume with it (a sidecar in Kubernetes). Uses
@@ -604,7 +615,13 @@ def gateway_config(
         headers={"Authorization": f"Bearer {settings.service_token}"},
         timeout=10,
     ) as client:
-        keep_current(client, str(output), interval=interval, once=once)
+        keep_current(
+            client,
+            str(output),
+            interval=interval,
+            once=once,
+            heartbeat=str(heartbeat) if heartbeat else None,
+        )
 
 
 @app.command()
@@ -1762,7 +1779,9 @@ def ledger_tail(
     type: str | None = typer.Option(None, help="Event type; * is a wildcard (decision.*)."),
     agent: str | None = typer.Option(None, help="Only this agent's entries."),
     user: str | None = typer.Option(None, help="Only what agents did for this person."),
-    decision: str | None = typer.Option(None, help="allow, deny or require_approval."),
+    decision: str | None = typer.Option(
+        None, help="allow, deny, require_approval, or monitored (let through in monitor mode)."
+    ),
     traces: bool = typer.Option(False, "--traces", help="Add links to the trace viewer."),
 ) -> None:
     """Show the latest ledger entries, oldest first."""
@@ -1802,7 +1821,7 @@ def apikeys_list() -> None:
 @apikeys_app.command("create")
 def apikeys_create(
     name: str,
-    role: str = typer.Option(..., help="admin, approver, auditor, registrar or service."),
+    role: str = typer.Option(..., help="admin, approver, secops, auditor, registrar or service."),
 ) -> None:
     """Create a key. It is printed once, on standard output, and only its hash is kept."""
     key = _call("POST", "/v1/apikeys", json={"name": name, "role": role})

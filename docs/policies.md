@@ -3,7 +3,8 @@
 Authorization is decided by [Open Policy Agent](https://www.openpolicyagent.org) using
 the Rego library in `src/agentgov/policies/`. The control plane ships the library and
 the live registry to OPA as a bundle; the governance processor asks OPA for a decision on
-every governed MCP operation, and on every prompt and answer of a [model call](models.md).
+every governed MCP operation, on every prompt and answer of a [model call](models.md), and on
+every [call between agents](agent-to-agent.md).
 
 ## How a decision is made
 
@@ -51,6 +52,7 @@ The decision carries `monitored`, and the ledger records it.
   "agent": {"client_id": "agent-support-bot", "agent_id": "agt_…", "subject": "…"},
   "user": {"id": "…", "username": "sam", "email": "sam@example.com",   // the person the agent
            "groups": ["/support"], "roles": [], "via": "exchange"},      // acts for, if any
+  "chain": [{"type": "person", "id": "5c0b…", "name": "sam"}],          // who handed the work down
   "resource": {"server": "crm", "name": "delete_customer"},
   "arguments": {"customer_id": "c-003"},    // request phase only
   "detections": {
@@ -74,6 +76,7 @@ The decision carries `monitored`, and the ledger records it.
                         "risk_tier": "medium", "risk_level": "low", "risk_score": 10,
                         "grants": [{"server": "crm", "tools": ["get_*"]}],
                         "acts_for": "either", "people_groups": [],
+                        "a2a": false, "agent_access": ["billing-*"],
                         "workload_identity": {"issuer": "prod-cluster",
                                               "subject": "system:serviceaccount:agents:support-bot"}}},
   "clients": {"agent-support-bot": "agt_…"},
@@ -204,6 +207,17 @@ Rules written for tool calls look at `input.resource`, which model calls don't h
 they don't apply to them. To ask the live OPA about a model call, use **What if** on the
 Policies page, `agentgov policies evaluate --provider … --model …`, or send
 `"path": "agentgov/models/decision"` with the input to `POST /v1/policies/evaluate`.
+
+## Calls between agents
+
+Calls between agents ask `data.agentgov.a2a.decision`, with `input.kind == "a2a"` and the
+agent called in `input.target`. Its built-in rules refuse calls to agents that aren't
+registered, active or serving A2A, an agent calling itself, a loop back to an agent already
+in the chain, and chains of more than five agents; under `least-privilege`, a caller may call
+only the agents its `agent_access` names. [Agent to agent](agent-to-agent.md#in-policy) shows
+the input and an organisation policy for these calls. To ask the live OPA, use **What if**,
+`agentgov policies evaluate --agent … --call-agent …`, or send
+`"path": "agentgov/a2a/decision"` to `POST /v1/policies/evaluate`.
 
 ## Copilot Studio's tool calls
 

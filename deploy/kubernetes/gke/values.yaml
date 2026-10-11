@@ -1,0 +1,65 @@
+# AgentGov on GKE (docs/deploy/gcp.md): Cloud SQL for PostgreSQL over its private IP, the
+# Secret synced from Secret Manager (manifests/secrets.yaml), HTTPS through GKE's Gateway
+# (manifests/gateway.yaml). The guide replaces <region>, <project>, <postgres-ip> and
+# agentgov.example.com with your names.
+image:
+  repository: <region>-docker.pkg.dev/<project>/agentgov/agentgov
+  tag: "0.1.0"
+
+urls:
+  controlPlane: https://agentgov.example.com
+  gateway: https://gateway.agentgov.example.com
+  keycloak: https://auth.agentgov.example.com
+
+# Every secret is in the one Secret synced from Secret Manager.
+secrets:
+  existingSecret: agentgov
+postgresql:
+  enabled: false
+externalDatabase:
+  existingSecret: agentgov          # key database-url
+
+keycloak:
+  mode: production
+  demoUsers: false
+  externalDatabase:
+    # The instance's own certificate authority, in the ConfigMap cloudsql-ca.
+    url: jdbc:postgresql://<postgres-ip>:5432/keycloak?sslmode=verify-ca&sslrootcert=/etc/cloudsql/server-ca.pem
+    existingSecret: agentgov        # key keycloak-database-password
+  extraVolumes:
+    - {name: cloudsql-ca, configMap: {name: cloudsql-ca}}
+  extraVolumeMounts:
+    - {name: cloudsql-ca, mountPath: /etc/cloudsql, readOnly: true}
+  httpRoute:
+    enabled: true
+    parentRefs: [{name: agentgov, sectionName: https}]
+
+controlPlane:
+  extraVolumes:
+    - {name: cloudsql-ca, configMap: {name: cloudsql-ca}}
+  extraVolumeMounts:
+    - {name: cloudsql-ca, mountPath: /etc/cloudsql, readOnly: true}
+  httpRoute:
+    enabled: true
+    parentRefs: [{name: agentgov, sectionName: https}]
+
+# The decision path, two of each.
+gateway:
+  replicas: 2
+  httpRoute:
+    enabled: true
+    parentRefs: [{name: agentgov, sectionName: https}]
+processor:
+  replicas: 2
+opa:
+  replicas: 2
+
+# Model providers' API keys and destinations' credentials, when you add them
+# (docs/deploy/gcp.md#model-keys-and-destinations).
+modelKeys:
+  existingSecret: agentgov-model-keys
+destinationSecrets:
+  existingSecret: agentgov-destinations
+
+networkPolicy:
+  enabled: true

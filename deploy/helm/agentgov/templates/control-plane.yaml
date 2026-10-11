@@ -130,6 +130,9 @@ spec:
             - name: destination-secrets
               mountPath: /destination-secrets
               readOnly: true
+            {{- with $v.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -139,6 +142,9 @@ spec:
           secret:
             secretName: {{ include "agentgov.destinationSecretsSecret" . }}
             optional: true
+        {{- with $v.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- include "agentgov.scheduling" $v | nindent 6 }}
 ---
 apiVersion: v1

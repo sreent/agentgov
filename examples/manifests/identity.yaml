@@ -4,8 +4,9 @@
 #   workload_identity: {issuer: demo-cluster, subject: system:serviceaccount:agents:support-bot}
 #
 # This one stands in for a Kubernetes cluster's service account issuer (the demo server
-# in examples/identity/workload-issuer). For the cluster AgentGov runs in, the issuer
-# is https://kubernetes.default.svc.cluster.local.
+# in examples/identity/workload-issuer). A real cluster's issuer is the iss of its tokens:
+# the cloud's OpenID Connect issuer on GKE, AKS and EKS, or
+# https://kubernetes.default.svc.cluster.local on kind and kubeadm.
 apiVersion: agentgov/v1alpha1
 kind: IdentityIssuer
 metadata:
@@ -23,5 +24,5 @@ spec:
 #
 #   kind: oidc                       # Microsoft Entra ID (Agent ID), Okta, AWS, Google...
 #   issuer: https://login.microsoftonline.com/<tenant ID>/v2.0
-#   audience: api://agentgov         # what Entra ID's tokens carry, not the realm's URL
+#   audience: <client ID>            # the API registration's: what Entra ID's v2 tokens carry
 #   allow_reuse: true                # Entra ID's tokens have no jti to take each once

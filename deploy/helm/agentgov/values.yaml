@@ -1,7 +1,8 @@
 # AgentGov on Kubernetes. The defaults install a complete stack, PostgreSQL and
-# Keycloak included, to evaluate it. For production, bring your own PostgreSQL and
-# Keycloak (postgresql.enabled=false, keycloak.enabled=false), put TLS in front
-# (ingress) and turn on the network policies. See README.md.
+# Keycloak included, to evaluate it. For production, use a managed PostgreSQL
+# (postgresql.enabled=false), run Keycloak in production mode or bring your own, put
+# HTTPS in front (ingress or httpRoute) and turn on the network policies: see
+# docs/deploy/kubernetes.md, and the cloud guides beside it.
 
 image:
   # The AgentGov image: the control plane, the governance processor and the gateway's
@@ -55,10 +56,10 @@ destinationSecrets:
 
 secrets:
   # A Secret you manage, with the keys admin-token, service-token,
-  # keycloak-client-secret, oidc-client-secret, demo-password,
-  # keycloak-admin-password and postgres-password (the last two only with the
-  # bundled Keycloak and PostgreSQL). Without one, the chart creates the Secret with
-  # random values and keeps them across upgrades.
+  # keycloak-client-secret and oidc-client-secret; keycloak-admin-password with the
+  # bundled Keycloak, demo-password with its demo users, and postgres-password with the
+  # bundled PostgreSQL. Without one, the chart creates the Secret with random values and
+  # keeps them across upgrades.
   existingSecret: ""
 
 controlPlane:
@@ -68,12 +69,16 @@ controlPlane:
   # Apply database migrations when it starts. Several replicas starting together
   # migrate one at a time.
   autoMigrate: true
-  # More settings, as AGENTGOV_* environment variables (see src/agentgov/config.py),
-  # for example AGENTGOV_AUTO_BLOCK_RISK_SCORE or AGENTGOV_M365_TENANT_ID.
+  # More settings, as AGENTGOV_* environment variables (docs/configuration.md), for
+  # example AGENTGOV_AUTO_BLOCK_RISK_SCORE or AGENTGOV_M365_TENANT_ID.
   env: {}
   # Secrets or ConfigMaps to read settings from, for example one holding
   # AGENTGOV_M365_CLIENT_SECRET: [{secretRef: {name: agentgov-microsoft}}].
   envFrom: []
+  # More volumes, and where the control plane mounts them: for example the certificate
+  # of your database's certificate authority, for sslrootcert in the database URL.
+  extraVolumes: []
+  extraVolumeMounts: []
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}
@@ -87,12 +92,27 @@ controlPlane:
     # Defaults to the host of urls.controlPlane.
     host: ""
     tls: []
+  # Or a Gateway API HTTPRoute, attached to a Gateway you manage.
+  httpRoute:
+    enabled: false
+    # The Gateway, and its listener, for example [{name: agentgov, sectionName: https}].
+    parentRefs: []
+    annotations: {}
+    # Defaults to the host of urls.controlPlane.
+    host: ""
+    # The route's timeouts, where the Gateway's implementation supports them.
+    timeouts: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}
 
 processor:
   replicas: 1
+  # More settings for the governance processor, as AGENTGOV_* environment variables
+  # (docs/configuration.md), for example AGENTGOV_PII_ENTITIES or
+  # AGENTGOV_PRESIDIO_FAILURE_MODE; and Secrets or ConfigMaps to read them from.
+  env: {}
+  envFrom: []
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {memory: 512Mi}
@@ -121,6 +141,15 @@ gateway:
     # Defaults to the host of urls.gateway.
     host: ""
     tls: []
+  httpRoute:
+    enabled: false
+    parentRefs: []
+    annotations: {}
+    # Defaults to the host of urls.gateway.
+    host: ""
+    # Agents' streams stay open for as long as they last: where the default request
+    # timeout of the Gateway's implementation is short, turn it off ({request: "0s"}).
+    timeouts: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -147,9 +176,10 @@ presidio:
     tag: "2.2.364@sha256:ae8f6f111ac2f04e3fec552f7f80edd0dcbfa2dd69ee1b9e030475be31669885"
     pullPolicy: IfNotPresent
   replicas: 1
+  # Its language models take about 1.5 GiB once loaded.
   resources:
-    requests: {cpu: 100m, memory: 512Mi}
-    limits: {memory: 2Gi}
+    requests: {cpu: 100m, memory: 1536Mi}
+    limits: {memory: 2560Mi}
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -194,9 +224,23 @@ externalDatabase:
   key: database-url
 
 keycloak:
-  # Keycloak in development mode, with AgentGov's realm imported on first start,
-  # for evaluation. It stores its data in the bundled PostgreSQL.
+  # Keycloak, with AgentGov's realm imported on its first start. It keeps its data in
+  # the bundled PostgreSQL, or in keycloak.externalDatabase.
   enabled: true
+  # dev: development mode (kc.sh start-dev), for evaluation. production: production mode
+  # (kc.sh start), behind a load balancer that terminates TLS (keycloak.ingress), at
+  # urls.keycloak.
+  mode: dev
+  # In production mode. Start with one, and add more once the realm is imported.
+  replicas: 1
+  # Its database when postgresql.enabled=false: the JDBC URL, for example
+  # jdbc:postgresql://HOST:5432/keycloak?sslmode=verify-full&sslrootcert=..., the user,
+  # and the Secret (and key) with the user's password.
+  externalDatabase:
+    url: ""
+    username: keycloak
+    existingSecret: ""
+    passwordKey: keycloak-database-password
   image:
     repository: quay.io/keycloak/keycloak
     tag: 26.8.0
@@ -208,13 +252,18 @@ keycloak:
   # Keycloak features to turn on (KC_FEATURES): SPIFFE identity issuers need the spiffe
   # preview feature.
   features: [spiffe]
-  # Mount Keycloak's service account token, so that it can read the keys of this
-  # cluster's own service account issuer: agents in the cluster then authenticate with
-  # their service account tokens, through an identity issuer of kind kubernetes and
-  # issuer https://kubernetes.default.svc.cluster.local (docs/agent-identity.md).
+  # Mount Keycloak's service account token, so that it can read the keys of a cluster
+  # issuer that only the cluster's API server publishes, such as kind's and kubeadm's
+  # https://kubernetes.default.svc.cluster.local. GKE, AKS and EKS publish their issuers'
+  # keys on the internet and need nothing here (docs/agent-identity.md).
   mountServiceAccountToken: false
+  # More volumes, and where Keycloak mounts them: for example the certificate of your
+  # database's certificate authority, for sslrootcert in the JDBC URL.
+  extraVolumes: []
+  extraVolumeMounts: []
+  # About 700 MiB in use with AgentGov's realm.
   resources:
-    requests: {cpu: 200m, memory: 512Mi}
+    requests: {cpu: 200m, memory: 768Mi}
     limits: {memory: 1536Mi}
   ingress:
     enabled: false
@@ -223,6 +272,13 @@ keycloak:
     # Defaults to the host of urls.keycloak.
     host: ""
     tls: []
+  httpRoute:
+    enabled: false
+    parentRefs: []
+    annotations: {}
+    # Defaults to the host of urls.keycloak.
+    host: ""
+    timeouts: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}

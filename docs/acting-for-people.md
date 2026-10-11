@@ -80,7 +80,10 @@ Keycloak 26.8 also has a preview of delegation: the person consents to a particu
 agent acting for them, and the agent's token names the agent in an `act` claim. AgentGov
 records such calls as delegated, with the agent the person delegated to. To try it:
 
-1. Start Keycloak with `--features=token-exchange-delegation,parameterized-scopes`.
+1. Turn on Keycloak's `token-exchange-delegation` and `parameterized-scopes` features,
+   keeping `spiffe`: `KC_FEATURES=spiffe,token-exchange-delegation,parameterized-scopes` in
+   Compose, or `keycloak.features` in the Helm chart. (`--features` replaces the list, so
+   leaving out `spiffe` turns SPIFFE identity issuers off.)
 2. On the app's client, require consent and add the optional client scope
    `delegation:client`. The app asks for `scope=openid delegation:client:agent-support-bot`;
    Keycloak asks the person "Allow agent-support-bot to act on your behalf?", and the
@@ -121,7 +124,7 @@ Each blueprint says whom its agents act for:
 | Field | Meaning |
 |---|---|
 | `acts_for` | `people`: every call must be for a person; `itself`: never for a person, and its agents can't exchange people's tokens; `either` (the default) |
-| `people_groups` | When the agent acts for a person, the person must be in one of these Keycloak groups, by name or path (`support`, `/emea/sales`). Empty: anyone |
+| `people_groups` | When the agent acts for a person, the person must be in one of these Keycloak groups: a top-level group by its name (`support`), any group by its full path (`/emea/sales`). Empty: anyone |
 | `approvals_by` | Who decides the approval requests its agents make for a person: `approvers` (the default) or `person` (see below) |
 
 | | How |
@@ -132,13 +135,15 @@ Each blueprint says whom its agents act for:
 | Manifests | The same fields in a `Blueprint`'s spec ([example](../examples/manifests/blueprints.yaml)) |
 
 The `acting-for-people` [feature](features.md) applies these rules to tool calls, the
-tools an agent sees when it lists them, and model calls. Enforced, other calls are
+tools an agent sees when it lists them, model calls, and calls between agents, to the caller
+and to the agent called, which acts for the same person from then on. Enforced, other calls are
 refused; monitored, they go through and the ledger records what would have been
 refused. The agent's page shows whom it acts for.
 
 ## In policy
 
-Policies see the person as `input.user`, on tool calls and model calls alike:
+Policies see the person as `input.user`, on tool calls, model calls and calls between agents
+alike:
 
 ```json
 "user": {
@@ -152,9 +157,11 @@ Policies see the person as `input.user`, on tool calls and model calls alike:
 }
 ```
 
-`input.user` is missing while the agent acts on its own. `data.agentgov.context` adds
-`ctx.user`, `ctx.user_name` and `ctx.member_of(group)`, which matches a group by name or
-path. For example, an organisation policy:
+`input.user` is missing while the agent acts on its own, unless a delegation it carries
+names the person at its head ([agent to agent](agent-to-agent.md#the-chain-of-delegation)).
+`data.agentgov.context` adds `ctx.user`, `ctx.user_name` and `ctx.member_of(group)`, which
+matches a top-level group by its name and any group by its full path. For example, an
+organisation policy:
 
 ```rego
 package agentgov.custom.contractors
@@ -216,15 +223,16 @@ that person only, not for someone else or on its own.
 
 The Compose stack and the Helm chart (with `keycloak.demoUsers`) come with a demo app
 client, `agentgov-demo-chat`, and a person, **sam**, in the group `support`, whose password
-is the demo users'. `python examples/agents/demo_agent.py` signs sam in to the demo app,
+is the demo users'. In step 10 of the demo, `python examples/agents/demo_agent.py` signs sam
+in to the demo app,
 has its agent act for sam through the gateway, and has sam sign in to AgentGov to approve
 what the agent wants to do.
 
 ## Limits
 
 * AgentGov tells a person from the agent's own service account by Keycloak's naming of
-  service accounts, and from `act`. Tokens from other identity providers are a step of
-  the [roadmap](roadmap.md).
+  service accounts, and from `act`. People's tokens come from AgentGov's Keycloak realm:
+  federate your directory into it ([signing in](deploy/local.md#signing-in)).
 * A person decides their requests when AgentGov's sign-in uses the Keycloak realm that
   issues the agents' tokens, so that the IDs match.
 * Groups reach policy from Keycloak's group mapper on each agent's client, as full paths.

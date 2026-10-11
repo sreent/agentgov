@@ -1,0 +1,57 @@
+# AgentGov on AKS (docs/deploy/azure.md): Azure Database for PostgreSQL, the Secret
+# synced from Key Vault (manifests/secrets.yaml), HTTPS through the application routing
+# add-on's Gateway API (manifests/gateway.yaml). The guide replaces <registry>,
+# <postgres> and agentgov.example.com with your names.
+image:
+  repository: <registry>.azurecr.io/agentgov
+  tag: "0.1.0"
+
+urls:
+  controlPlane: https://agentgov.example.com
+  gateway: https://gateway.agentgov.example.com
+  keycloak: https://auth.agentgov.example.com
+
+# Every secret is in the one Secret synced from Key Vault.
+secrets:
+  existingSecret: agentgov
+postgresql:
+  enabled: false
+externalDatabase:
+  existingSecret: agentgov          # key database-url
+
+keycloak:
+  mode: production
+  demoUsers: false
+  externalDatabase:
+    # The server's certificate chains to a public root the JVM trusts.
+    url: jdbc:postgresql://<postgres>.postgres.database.azure.com:5432/keycloak?sslmode=verify-full&sslfactory=org.postgresql.ssl.DefaultJavaSSLFactory
+    existingSecret: agentgov        # key keycloak-database-password
+  httpRoute:
+    enabled: true
+    parentRefs: [{name: agentgov, sectionName: keycloak}]
+
+controlPlane:
+  httpRoute:
+    enabled: true
+    parentRefs: [{name: agentgov, sectionName: control-plane}]
+
+# The decision path, two of each.
+gateway:
+  replicas: 2
+  httpRoute:
+    enabled: true
+    parentRefs: [{name: agentgov, sectionName: gateway}]
+processor:
+  replicas: 2
+opa:
+  replicas: 2
+
+# Model providers' API keys and destinations' credentials, when you add them
+# (docs/deploy/azure.md#model-keys-and-destinations).
+modelKeys:
+  existingSecret: agentgov-model-keys
+destinationSecrets:
+  existingSecret: agentgov-destinations
+
+networkPolicy:
+  enabled: true

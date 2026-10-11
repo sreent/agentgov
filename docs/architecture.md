@@ -188,11 +188,11 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | Gateway → model provider | The provider's API key, which only the gateway (and its config sidecar) can read, from a file; the agent's token is never forwarded |
 | Gateway → agent serving A2A | The caller's token is never forwarded; the agent called gets a delegation and who handed it the work in headers AgentGov sets on every call it passes on, so only the gateway should reach agents' A2A endpoints (a NetworkPolicy in Kubernetes) |
 | Agent → agent (delegation) | A JWT for the agent called only, signed by the processors with a key derived from the service token (agents never see it), lasting an hour; checked on each call that carries it (signature, expiry, holder, and the same person as the caller's token) |
-| Gateway → processor | Internal network, fail-closed (`failureMode: failClosed`) for tool calls (gRPC), model calls (the webhook) and calls between agents (external authorization); mTLS ⏳ |
+| Gateway → processor | Internal network, fail-closed (`failureMode: failClosed`, or `deny` for external authorization) for tool calls (gRPC), model calls (the webhook) and calls between agents (external authorization); mTLS ⏳ |
 | Components → control plane | Service token on internal endpoints; admin API keys are scoped by role |
 | Copilot Studio → control plane (threat detection) | The only endpoint meant for the internet: a token that Microsoft Entra ID signed (RS256, keys from the tenant's JWKS) for the configured tenant and AgentGov's API, issued to an allowed caller app; anything else gets 401 |
 | Control plane → Microsoft | AgentGov's app registration (client credentials, read-only Graph permissions) on a schedule; Power Platform and Graph admin actions only as a signed-in admin, with their delegated token |
-| Admins → control plane | Single sign-on: OIDC authorization code flow with PKCE, run by the control plane as a confidential client; the session stays server-side and the browser holds only an HttpOnly, `SameSite=Strict` cookie; writes also need an `X-AgentGov-CSRF` header. Provider roles map to `admin`, `approver`, `auditor` and `registrar`. Automation uses role-scoped API keys; the bootstrap admin token is for break-glass access |
+| Admins → control plane | Single sign-on: OIDC authorization code flow with PKCE, run by the control plane as a confidential client; the session stays server-side and the browser holds only an HttpOnly, `SameSite=Strict` cookie; writes also need an `X-AgentGov-CSRF` header. Provider roles map to `admin`, `approver`, `secops`, `auditor` and `registrar` (people without one sign in as `person` while `approvals-by-person` is on). Automation uses role-scoped API keys; the bootstrap admin token is for break-glass access |
 
 | Failure | Behaviour |
 |---|---|
@@ -213,10 +213,11 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 ## Scaling notes
 
 * SQLite is for development. Use PostgreSQL (the compose stack does) for anything shared.
-* The control plane is stateless apart from the database, but long-poll wake-ups are
-  in-process: with several replicas, OPA instances connected to another replica see a
-  change within their long-poll timeout (30 s). PostgreSQL `LISTEN/NOTIFY` fan-out is on
-  the roadmap.
+* Run one control-plane replica. Apart from the database, it keeps state in memory: the
+  long-poll wake-ups (OPA instances connected to another replica would see a change only
+  within their 30-second long-poll timeout), the immediate wake-up of security operations'
+  delivery, and signed-in admins' Microsoft sign-ins. PostgreSQL `LISTEN/NOTIFY` fan-out is
+  on the roadmap.
 * The processor is stateless and scales horizontally; Presidio is the slowest hop
   (~40 ms per KB of text). Text beyond `AGENTGOV_PRESIDIO_MAX_CHARS` is not sent to it.
 * Content scanning is bounded (depth, number of strings, characters) and uses
@@ -224,30 +225,4 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 
 ## Repository layout
 
-```
-src/agentgov/
-  api/            FastAPI routes (registry, governance, integrations) and auth
-  registry/       service layer: agents, blueprints, tool servers, model providers and
-                  usage, approvals, findings, risk, posture, discovery, platforms,
-                  instructions, decisions, features, manifests, API keys, access
-  platforms/      Microsoft's services (Graph, the Power Platform API) and Copilot Studio
-                  threat detection
-  scanners/       checks on agent instructions: rules and the Granite Guardian client
-  identity/       Keycloak admin client and identity reconciler, single sign-on, the
-                  people agents act for, and the delegations agents pass on
-  opa/            bundle builder and long-poll server, Rego validation, OPA client
-  policies/       the Rego library (+ tests) shipped to OPA
-  processor/      governance processor: ExtMcp gRPC server, guardrail webhook for model
-                  calls, external authorization for calls between agents, detectors,
-                  Presidio client
-  gateway.py      agentgateway config generator
-  telemetry.py    OTLP ingestion (discovery, activity, detective controls; model usage)
-  mcp_scan.py     the MCP servers set up on a developer's machine (agentgov mcp scan)
-  ledger.py       hash-chained evidence ledger
-  migrations/     the database schema's migrations (Alembic)
-  ui/             admin UI (static)
-deploy/compose/   reference stack (Docker Compose)
-deploy/helm/      Helm chart for Kubernetes
-examples/         manifests, demo MCP server, demo model, a developer's machine, an agent
-                  other agents call, demo agent
-```
+[CONTRIBUTING](../CONTRIBUTING.md#where-things-live) maps the repository.

@@ -23,6 +23,8 @@ htmlcov/
 *.db-shm
 .env
 .agentgov/
+# Local additions to the Compose stack (docs/configuration.md).
+deploy/compose/docker-compose.override.yml
 
 # Editors / OS
 .idea/
