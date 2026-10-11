@@ -1,0 +1,7 @@
+# Destinations' credentials (docs/secops.md): one file per destination, named after it.
+# Never commit them. The demo ones point at the demo sink and hold its placeholder token.
+*
+!.gitignore
+!soc-slack
+!soc-teams
+!soc-splunk

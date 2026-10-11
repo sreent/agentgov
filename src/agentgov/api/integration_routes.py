@@ -157,16 +157,6 @@ def internal_approval_check(
             ttl_seconds=rt.settings.approval_ttl_seconds,
             person=person if person and person.get("id") else None,
         )
-        if outcome == "created":
-            waiting = ""
-            if req.on_behalf_of:
-                waiting = f" for {req.on_behalf_of}"
-                if req.deciders == approvals.PERSON:
-                    waiting += ", who decides it"
-            rt.alerts.send(
-                f"AgentGov: approval {req.id} needed - {agent.name} wants to call "
-                f"{req.resource}{waiting}"
-            )
         return {
             "outcome": outcome,
             "approval": approvals.to_dict(req),

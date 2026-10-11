@@ -19,3 +19,9 @@ class Conflict(RegistryError):
 
 class InvalidTransition(Conflict):
     """A lifecycle action is not allowed from the agent's current state."""
+
+
+class Forbidden(RegistryError):
+    """The caller's role may not do this (here: what the hand-off level doesn't allow)."""
+
+    status_code = 403

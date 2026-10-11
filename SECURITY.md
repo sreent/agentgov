@@ -57,7 +57,7 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
 * Replace every default secret (`deploy/compose/.env.example` lists them), in particular
   `AGENTGOV_ADMIN_TOKEN`, `AGENTGOV_SERVICE_TOKEN`, the Keycloak client secrets and
   database passwords. Use long random values.
-* Delete the realm's demo users (`admin`, `alice`, `audrey`) and sign people in through
+* Delete the realm's demo users (`admin`, `alice`, `sofia`, `audrey`, `sam`) and sign people in through
   your own directory, federated into Keycloak, with the `agentgov-*` roles assigned to
   groups. Use role-scoped API keys for automation, and keep the bootstrap admin token for
   break-glass access only.
@@ -67,7 +67,9 @@ The reference stack in `deploy/compose` is for evaluation. For anything else:
 * Keep OPA, the processor, Presidio and the MCP servers on a private network that agents
   cannot reach, so that the gateway is the only path to tools. Give model providers' API
   keys to the gateway only ([model calls](docs/models.md)), not to agents, so that the
-  gateway is the only path to models too. On Kubernetes, turn on the
+  gateway is the only path to models too. Keep destinations' credentials (SIEM tokens,
+  Teams and Slack webhook URLs) in your secret store, mounted into the control plane only
+  ([security operations](docs/secops.md)). On Kubernetes, turn on the
   Helm chart's network policies (`networkPolicy.enabled=true`) and its demo users off
   (`keycloak.demoUsers=false`), or use your own Keycloak.
 * Keep the controls at the gateway enforced, as they are by default, and the processor

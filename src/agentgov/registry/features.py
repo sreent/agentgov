@@ -36,6 +36,8 @@ OFF, ON, MONITOR, ENFORCE = "off", "on", "monitor", "enforce"
 # Modes from the weakest to the strongest.
 SWITCH = (OFF, ON)
 CONTROL = (OFF, MONITOR, ENFORCE)
+# How much is handed to the security team's tools (agentgov.secops.handoff).
+HANDOFF = (OFF, "inform", "triage", "contain", "decide")
 DEPLOYMENT = "deployment"  # the actor of pinned modes
 
 GROUPS = {
@@ -46,6 +48,7 @@ GROUPS = {
     "identity": "Identity",
     "lifecycle": "Lifecycle",
     "microsoft": "Microsoft",
+    "secops": "Security operations",
 }
 
 
@@ -421,6 +424,29 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "AgentGov refuses Copilot Studio's calls.",
         },
         needs="AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS and the tenant ID (and OPA to enforce)",
+    ),
+    Feature(
+        "security-operations",
+        "Hand-off to security operations",
+        "secops",
+        "The security team's tools get AgentGov's evidence and alerts: SIEMs the ledger as "
+        "OCSF events, Teams and Slack channels alerts. Each level up also lets the secops "
+        "role, which their tools and analysts hold, do more in AgentGov; administrators "
+        "can undo all of it, and the ledger names who did it.",
+        HANDOFF,
+        OFF,
+        {
+            OFF: "Nothing is sent, and the secops role only reads.",
+            "inform": "SIEMs and chats get the destinations' events and alerts, and the "
+            "events API serves them; the secops role reads.",
+            "triage": "As inform, and the secops role resolves, dismisses and reopens findings.",
+            "contain": "As triage, and the secops role blocks and unblocks agents, tool "
+            "servers, model providers and identity issuers.",
+            "decide": "As contain, and the secops role approves and denies approval "
+            "requests sent to approvers.",
+        },
+        needs="destinations for the SIEM and the chats; API keys or a single sign-on role "
+        "with the secops role for the security team's tools and analysts",
     ),
 )
 BY_KEY = {f.key: f for f in CATALOG}

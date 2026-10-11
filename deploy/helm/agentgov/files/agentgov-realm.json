@@ -134,6 +134,24 @@
       ]
     },
     {
+      "username": "sofia",
+      "email": "sofia@example.com",
+      "emailVerified": true,
+      "firstName": "Sofia",
+      "lastName": "Secops",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${AGENTGOV_DEMO_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agentgov-secops"
+      ]
+    },
+    {
       "username": "sam",
       "email": "sam@example.com",
       "emailVerified": true,
@@ -161,6 +179,10 @@
       {
         "name": "agentgov-approver",
         "description": "AgentGov: decide approvals and findings, attest sponsored agents"
+      },
+      {
+        "name": "agentgov-secops",
+        "description": "AgentGov: the security team's tools and analysts: read, and what the security-operations hand-off allows"
       },
       {
         "name": "agentgov-auditor",

@@ -4,7 +4,8 @@
 #   docker compose up -d --build
 #
 # Host ports: control plane + UI :8000, MCP gateway :8080, Keycloak :8180,
-# OPA :8181, OTLP :4317/:4318. The demo MCP server is only reachable through
+# OPA :8181, OTLP :4317/:4318, the demo's stand-ins for a workload issuer :9200 and
+# for the security team's tools :9300. The demo MCP server is only reachable through
 # the gateway. The defaults below are for local evaluation only - set real
 # secrets in a .env file (see .env.example) for anything else.
 
@@ -115,6 +116,10 @@ services:
       # Classifier for agent instructions (docs/instructions.md); see docker-compose.guardian.yml.
       AGENTGOV_GUARDIAN_URL: ${AGENTGOV_GUARDIAN_URL:-}
       AGENTGOV_GUARDIAN_API_KEY: ${AGENTGOV_GUARDIAN_API_KEY:-}
+      # Destinations' credentials (docs/secops.md): a file per destination, named after it.
+      AGENTGOV_DESTINATION_SECRETS_DIR: /destination-secrets
+    volumes:
+      - ${AGENTGOV_DESTINATION_SECRETS_DIR:-./destination-secrets}:/destination-secrets:ro
     ports:
       - "8000:8000"
     depends_on:
@@ -249,6 +254,18 @@ services:
       ISSUER: http://workload-issuer:9200
     ports:
       - "9200:9200"
+
+  # Demo stand-in for the security team's tools: it receives OCSF events as a SIEM (OTLP,
+  # Splunk's HTTP Event Collector) and alerts as Slack and Teams do, and shows them at
+  # localhost:9300/received.
+  demo-sink:
+    build:
+      context: ../../examples/secops/sink
+    image: agentgov-demo-sink:local
+    environment:
+      HEC_TOKEN: demo-hec-token
+    ports:
+      - "9300:9300"
 
 volumes:
   postgres-data:

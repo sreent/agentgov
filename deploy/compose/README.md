@@ -32,6 +32,7 @@ python examples/agents/demo_agent.py
 | 8181 | OPA | Query API, handy for debugging policies |
 | 4317 / 4318 | OTel Collector | OTLP gRPC / HTTP for agents |
 | 9200 | Demo workload identity issuer | A stand-in Kubernetes cluster that gives out service account tokens, for the demo's agent without a client secret ([agents' own identities](../../docs/agent-identity.md)); not for real use |
+| 9300 | Demo sink | A stand-in for the security team's SIEM, Splunk, Slack and Teams: what the demo's destinations sent is at `/received` ([security operations](../../docs/secops.md)); not for real use |
 | 3000 | Langfuse | Only with the Langfuse override (below) |
 
 PostgreSQL, Presidio, the processor, the demo MCP server and the demo model are only
@@ -53,16 +54,35 @@ Git ignores the directory, apart from `demo`, the demo model's made-up key. To k
 keys elsewhere, set `AGENTGOV_MODEL_KEYS_DIR` in `.env`. Until a provider's key is there,
 its route answers 503. [Model calls](../../docs/models.md) has the rest.
 
+## Destinations' credentials
+
+The control plane reads the credential of each [destination](../../docs/secops.md) (a
+SIEM, Splunk, Teams or Slack) from `destination-secrets/<destination name>` in this
+directory, mounted read-only as `/destination-secrets`, when it sends: Slack's and Teams'
+webhook URLs, Splunk's HTTP Event Collector token, or headers for OpenTelemetry and
+webhook destinations.
+
+```bash
+printf '%s' "$SLACK_WEBHOOK_URL" > destination-secrets/soc-slack
+agentgov destinations create soc-slack --kind slack
+agentgov secops level inform
+```
+
+Git ignores the directory, apart from the demo's `soc-slack`, `soc-teams` and
+`soc-splunk`, which point at the demo sink. To keep them elsewhere, set
+`AGENTGOV_DESTINATION_SECRETS_DIR` in `.env`.
+
 ## Signing in
 
 The admin UI at <http://localhost:8000/ui> offers single sign-on through Keycloak. The
-realm comes with four demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (default
+realm comes with five demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (default
 `dev-password`):
 
 | User | Realm role | What they can do |
 |---|---|---|
 | `admin` | `agentgov-admin` | Everything |
 | `alice` | `agentgov-approver` | Decide approval requests and findings; attest the agents they sponsor (the demo's `support-bot`) |
+| `sofia` | `agentgov-secops` | The security team: see everything, and triage, contain or decide as far as the hand-off to [security operations](../../docs/secops.md) allows |
 | `audrey` | `agentgov-auditor` | See everything, change nothing |
 | `sam` | none (group `support`) | A person agents act for: signs in to the demo app `agentgov-demo-chat`, and to AgentGov to decide the approval requests sent to them, while `approvals-by-person` is on ([acting for people](../../docs/acting-for-people.md)) |
 
@@ -162,6 +182,7 @@ AgentGov to Microsoft's services](../../docs/microsoft-connections.md) have the 
 | `otel/langfuse.yaml` | Merged over the collector config by the Langfuse override |
 | `postgres/init.sql` | Creates the Keycloak database |
 | `model-keys/` | Model providers' API keys, one file per provider |
+| `destination-secrets/` | Destinations' credentials, one file per destination |
 
 The agentgateway configuration is not a file in this directory: the control plane
 generates it from the registry, and the `gateway-config` service (`agentgov

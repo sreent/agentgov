@@ -32,7 +32,7 @@ from agentgov.config import Settings
 from agentgov.models import AdminSession, CliLogin, LoginState
 
 # AgentGov roles a person can hold through single sign-on, most privileged first.
-SSO_ROLES = ("admin", "approver", "auditor", "registrar")
+SSO_ROLES = ("admin", "approver", "secops", "auditor", "registrar")
 # Someone without an AgentGov role, signed in to decide the approval requests sent to
 # them (the approvals-by-person feature).
 PERSON = "person"

@@ -43,6 +43,16 @@ modelKeys:
   existingSecret: ""
   keys: {}
 
+# Destinations' credentials (docs/secops.md): Teams and Slack webhook URLs, Splunk's HTTP
+# Event Collector token, and headers for OpenTelemetry and webhook destinations. The
+# control plane reads each from /destination-secrets/<destination> when it sends, so they
+# never enter AgentGov's database. Name a Secret you manage, whose keys are destination
+# names, or, to evaluate, give them here and the chart creates the Secret:
+# values: {soc-slack: https://hooks.slack.com/services/...}.
+destinationSecrets:
+  existingSecret: ""
+  values: {}
+
 secrets:
   # A Secret you manage, with the keys admin-token, service-token,
   # keycloak-client-secret, oidc-client-secret, demo-password,
@@ -191,7 +201,7 @@ keycloak:
     repository: quay.io/keycloak/keycloak
     tag: 26.8.0
     pullPolicy: IfNotPresent
-  # Import the demo users admin, alice, audrey and sam (password: demo-password in the
+  # Import the demo users admin, alice, sofia, audrey and sam (password: demo-password in the
   # Secret), and the demo app agentgov-demo-chat, where people sign in with their
   # password. Turn off before anyone else can reach Keycloak.
   demoUsers: true

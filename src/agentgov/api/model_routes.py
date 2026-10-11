@@ -11,6 +11,7 @@ from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.models import Agent
 from agentgov.registry import agents, model_providers, model_usage
 from agentgov.registry.errors import NotFound
+from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1/models", tags=["models"])
 read = require(*READ_ROLES)
@@ -54,12 +55,13 @@ def update_provider(
 
 @router.post("/providers/{ref}/{action}")
 def provider_action(
-    request: Request, ref: str, action: str, principal: Principal = Depends(admin)
+    request: Request, ref: str, action: str, principal: Principal = Depends(require("secops"))
 ) -> dict[str, Any]:
     """``block`` stops every call to the provider at once; ``unblock`` allows them again."""
     if action not in ("block", "unblock"):
         raise NotFound(f"no action {action!r}: block or unblock")
     with request.app.state.rt.db.session() as s:
+        handoff.check_kill_switch(s, principal, action)
         provider = model_providers.get(s, ref)
         model_providers.set_status(s, provider, action, actor=principal.actor)
         return model_providers.to_dict(provider)

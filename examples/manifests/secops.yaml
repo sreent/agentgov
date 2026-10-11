@@ -1,0 +1,58 @@
+# Handing AgentGov's evidence and alerts to the security team (docs/secops.md). Here the
+# demo sink (examples/secops/sink) stands in for their SIEM, Splunk, Slack and Teams.
+#
+# How much is handed over: inform sends what the destinations below take. The secops
+# role, which the team's tools and analysts hold, may also triage findings from triage
+# on, block and unblock from contain on, and decide approval requests at decide.
+apiVersion: agentgov/v1alpha1
+kind: Feature
+metadata:
+  name: security-operations
+spec:
+  mode: inform
+---
+# The whole ledger as OCSF events, as OpenTelemetry logs: point it at an OpenTelemetry
+# Collector, which routes them on to your SIEM.
+apiVersion: agentgov/v1alpha1
+kind: Destination
+metadata:
+  name: soc-siem
+spec:
+  kind: otlp
+  url: http://demo-sink:9300
+  description: OpenTelemetry Collector in front of the SIEM (here the demo sink).
+---
+# Splunk's HTTP Event Collector, with only what the SOC watches there: decisions and
+# findings, from medium severity up. Its token is the file soc-splunk in the destination
+# secrets (deploy/compose/destination-secrets, or the chart's destinationSecrets).
+apiVersion: agentgov/v1alpha1
+kind: Destination
+metadata:
+  name: soc-splunk
+spec:
+  kind: splunk-hec
+  url: http://demo-sink:9300
+  events: [decisions, findings]
+  min_severity: medium
+  description: Splunk HTTP Event Collector (here the demo sink).
+---
+# Alerts in the SOC's Slack channel: high and critical findings, approval requests and
+# kill switches. The incoming webhook's URL is the file soc-slack in the secrets.
+apiVersion: agentgov/v1alpha1
+kind: Destination
+metadata:
+  name: soc-slack
+spec:
+  kind: slack
+  description: "#soc-alerts (here the demo sink)"
+---
+# Kill switches in a Teams channel, through a Teams workflow's webhook (the file
+# soc-teams in the secrets).
+apiVersion: agentgov/v1alpha1
+kind: Destination
+metadata:
+  name: soc-teams
+spec:
+  kind: teams
+  events: [blocks]
+  description: SOC on-call channel in Microsoft Teams (here the demo sink).

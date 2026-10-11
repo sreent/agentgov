@@ -93,6 +93,12 @@ describes. Turning one off stops it even where it is configured.
 | `defender` | off, **on** | Turns Defender's alerts about agents into findings |
 | `copilot-studio-threat-detection` | **off**, monitor, enforce | Answers Copilot Studio before each tool call its agents make. Monitor tells Copilot Studio to go ahead and records what would have been blocked. Off, AgentGov's endpoint refuses Copilot Studio's calls. Needs `AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS` and the tenant ID, and OPA to enforce |
 
+### Security operations
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `security-operations` | **off**, inform, triage, contain, decide | Hands AgentGov's evidence and alerts to the security team's tools ([security operations](secops.md)). From inform, SIEMs get the ledger as OCSF events and Teams and Slack channels get alerts, through the destinations an administrator adds, and the events API serves the events. Each level up also lets the `secops` role, which the security team's tools and analysts hold, do more: triage resolves, dismisses and reopens findings; contain blocks and unblocks agents, tool servers, model providers and identity issuers; decide approves and denies the approval requests sent to approvers. Off, nothing is sent and the `secops` role only reads |
+
 Some things are never switched off: an agent or tool server that is blocked stays
 blocked, callers must be registered agents unless `unknown-callers` is monitored, and
 organisation policies' denials always apply.
@@ -120,7 +126,8 @@ organisation policies' denials always apply.
 * **The gateway's configuration** follows `mcp-gateway` and `unknown-callers` when the
   control plane rewrites it.
 * **The control plane** checks the modes when it acts: discovery, posture scans,
-  instruction checks, registration, the automatic block and the Microsoft connections.
+  instruction checks, registration, the automatic block, the Microsoft connections, and
+  what it sends the security team's tools and lets their `secops` role do.
 * **The Agent Governance Toolkit** (in-process) applies `least-privilege` and
   `risk-based-access` only when they are enforced. It can't record what a monitored
   control would have done.
@@ -135,3 +142,6 @@ each one.
 | `AGENTGOV_UNKNOWN_AGENT_MODE=reject\|monitor` | `unknown-callers=enforce\|monitor` |
 | `AGENTGOV_REGISTRATION_REQUIRES_APPROVAL=true\|false` | `registration-approval=on\|off` |
 | `AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION=off\|monitor\|enforce` | `copilot-studio-threat-detection=off\|monitor\|enforce` |
+
+`AGENTGOV_ALERT_WEBHOOK_URL` is refused too: alerts go to Teams and Slack
+[destinations](secops.md) now, with the security-operations feature at inform or above.

@@ -4,7 +4,7 @@
   Who may reach what. The control plane, the gateway, the collector and Keycloak
   serve people, agents and outside services, so they accept connections from
   anywhere; OPA, the processor, Presidio and PostgreSQL only from AgentGov's own
-  parts. Egress is left open: MCP servers, Microsoft's APIs and model providers
+  parts. Egress is left open: MCP servers, Microsoft's APIs, model providers
   can be anywhere.
 */}}
 {{- $internal := list

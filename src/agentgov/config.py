@@ -22,6 +22,12 @@ RETIRED = {
     "AGENTGOV_REGISTRATION_REQUIRES_APPROVAL": "registration-approval",
     "AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION": "copilot-studio-threat-detection",
 }
+# Settings that something else replaced, and what to use instead.
+REPLACED = {
+    "AGENTGOV_ALERT_WEBHOOK_URL": "alerts go to Teams and Slack destinations now: add a "
+    "destination of kind slack or teams with its webhook URL in its secret file, and turn on "
+    "the security-operations feature (see docs/secops.md)",
+}
 # What Kubernetes sets in each pod for every Service in its namespace (service links), such
 # as AGENTGOV_GATEWAY_PORT=tcp://10.96.0.12:8080 for a Service named agentgov-gateway: never
 # one of these settings.
@@ -70,7 +76,14 @@ class Settings:
     risk_window_hours: int = 24
     stale_agent_days: int = 30
     posture_interval_seconds: int = 300
-    alert_webhook_url: str | None = None
+
+    # --- Security operations (docs/secops.md) -------------------------------------
+    # Where destinations' credentials are: a file per destination, named after it (a
+    # mounted secret). Never in the database.
+    destination_secrets_dir: str = "/destination-secrets"
+    # How often destinations are sent what is new in the ledger (also as soon as it is
+    # written, on the replica that wrote it). 0 turns delivery off.
+    delivery_interval_seconds: int = 10
 
     # --- Keycloak (agent identity) ---------------------------------------------
     # Base URL the control plane uses to reach Keycloak's admin API.
@@ -222,6 +235,9 @@ class Settings:
                     f"{name} is now the {feature} feature: choose its mode in the app, or pin "
                     f"it with AGENTGOV_FEATURES={feature}=<mode> (see docs/features.md)"
                 )
+        for name, instead in REPLACED.items():
+            if env.get(name):
+                raise ValueError(f"{name} is no longer used: {instead}")
         values: dict[str, Any] = {}
         for field in dataclasses.fields(cls):
             name = f"AGENTGOV_{field.name.upper()}"
@@ -246,6 +262,8 @@ class Settings:
             raise ValueError("AGENTGOV_PROMPT_INJECTION_THRESHOLD must be in (0, 1]")
         if self.presidio_failure_mode not in ("open", "closed"):
             raise ValueError("AGENTGOV_PRESIDIO_FAILURE_MODE must be 'open' or 'closed'")
+        if self.delivery_interval_seconds < 0:
+            raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
         if self.session_hours <= 0:
             raise ValueError("AGENTGOV_SESSION_HOURS must be positive")
         if self.trace_url and "{trace_id}" not in self.trace_url:

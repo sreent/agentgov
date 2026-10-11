@@ -18,7 +18,7 @@ from fastapi import HTTPException, Request
 from agentgov.identity import sso
 from agentgov.registry import apikeys, features
 
-READ_ROLES = ("admin", "approver", "auditor")
+READ_ROLES = ("admin", "approver", "secops", "auditor")
 SESSION_COOKIE = "agentgov_session"
 # Cookie-authenticated writes must carry this header. Browsers do not let other
 # sites add custom headers to cross-origin requests (no CORS is enabled), so

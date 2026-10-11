@@ -90,6 +90,8 @@ spec:
             - name: AGENTGOV_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: oidc-client-secret}
+            - name: AGENTGOV_DESTINATION_SECRETS_DIR
+              value: /destination-secrets
             - name: AGENTGOV_PROCESSOR_ADDRESS
               value: "{{ include "agentgov.name" (list . "processor") }}:50051"
             - name: AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS
@@ -125,9 +127,18 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: destination-secrets
+              mountPath: /destination-secrets
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
+        # Destinations' credentials, one per destination name. Optional: without the
+        # Secret, destinations that need one report it missing until it is there.
+        - name: destination-secrets
+          secret:
+            secretName: {{ include "agentgov.destinationSecretsSecret" . }}
+            optional: true
       {{- include "agentgov.scheduling" $v | nindent 6 }}
 ---
 apiVersion: v1

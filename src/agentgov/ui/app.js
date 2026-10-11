@@ -132,6 +132,7 @@ const ICONS = {
   features: 'M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4',
   models: 'M7 7h10v10H7zM10 10h4v4h-4zM10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4',
   developers: 'M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14',
+  secops: 'M10 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8',
 };
 
 function icon(name, { label, cls } = {}) {
@@ -238,14 +239,16 @@ let token = readStore('sessionStorage', TOKEN_KEY);
 let session = false;
 // Who is signed in (GET /v1/me): name, roles and how they authenticated.
 let me = null;
-const READ_ROLES = ['admin', 'approver', 'auditor'];
+const READ_ROLES = ['admin', 'approver', 'secops', 'auditor'];
 
 // What the signed-in person may change. The control plane enforces roles; this
-// only hides controls it would refuse.
+// only hides controls it would refuse. The security team's secops role may triage,
+// contain and decide as far as the hand-off to security operations has reached.
 function can(kind) {
   const roles = me?.roles || [];
   if (roles.includes('admin')) return true;
-  return kind === 'approve' && roles.includes('approver');
+  if (kind === 'approve' && roles.includes('approver')) return true;
+  return roles.includes('secops') && (me?.handoff?.reached || []).includes(kind);
 }
 
 // Someone without an AgentGov role, signed in to decide the approval requests that agents
@@ -256,7 +259,7 @@ function isPerson() {
 
 // Reasons /auth/callback sends back (?sso_error=...). Only these fixed texts are shown.
 const SSO_ERRORS = {
-  no_role: 'You signed in, but your account has no AgentGov role. Ask an administrator for agentgov-admin, agentgov-approver or agentgov-auditor.',
+  no_role: 'You signed in, but your account has no AgentGov role. Ask an administrator for agentgov-admin, agentgov-approver, agentgov-secops or agentgov-auditor.',
   state: 'That sign-in could not be completed in this browser. Start again.',
   expired: 'That sign-in expired or was already used. Start again.',
   provider: 'The identity provider could not complete the sign-in. Try again, or use an API token.',
@@ -421,6 +424,14 @@ const STATUS = {
     monitor: ['warning', 'eye', 'Monitor'],
     on: ['good', 'check-circle', 'On'],
     off: ['neutral', 'minus', 'Off'],
+    inform: ['good', 'secops', 'Inform'],
+    triage: ['good', 'check-circle', 'Triage'],
+    contain: ['warning', 'ban', 'Contain'],
+    decide: ['warning', 'user-check', 'Decide'],
+  },
+  destination: {
+    active: ['good', 'check-circle', 'Active'],
+    paused: ['neutral', 'minus', 'Paused'],
   },
 };
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
@@ -839,6 +850,7 @@ const PAGES = [
   { re: /^\/features$/, nav: 'features', title: 'Features', render: renderFeatures },
   { re: /^\/models$/, nav: 'models', title: 'Models', render: renderModels },
   { re: /^\/developers$/, nav: 'developers', title: 'Developer tools', render: renderDevelopers },
+  { re: /^\/secops$/, nav: 'secops', title: 'Security operations', render: renderSecops },
 ];
 
 let renderSeq = 0;
@@ -1717,7 +1729,9 @@ function mayAttest(a) {
 }
 
 function agentToolbar(a) {
-  const buttons = (can('admin') ? ACTIONS_BY_STATUS[a.status] || [] : []).map((action) => {
+  const allowed = can('admin') ? ACTIONS_BY_STATUS[a.status] || []
+    : can('contain') ? (ACTIONS_BY_STATUS[a.status] || []).filter((x) => x === 'block' || x === 'unblock') : [];
+  const buttons = allowed.map((action) => {
     const spec = lifecycleSpec(a, action);
     return h('button', {
       type: 'button', class: `btn ${spec.cls}`, 'data-focus-key': `lifecycle-${action}`,
@@ -2851,7 +2865,7 @@ function approvalCard(r, agent, mine = false) {
   const headingId = nextId('approval');
   // The person it was sent to decides it, or approvers; administrators can always decide.
   const forPerson = r.deciders === 'person';
-  const mayDecide = can('admin') || (forPerson ? mine : can('approve'));
+  const mayDecide = can('admin') || (forPerson ? mine : can('approve') || can('decide'));
   const deciders = forPerson ? (mine ? 'You decide this request.' : `${r.on_behalf_of} decides this request.`) : 'An approver or admin decides this request.';
   return h('section', { class: 'card approval', 'aria-labelledby': headingId, 'data-focus-key': `approval-${r.id}`, tabindex: '-1' },
     h('div', { class: 'card-head' },
@@ -3036,6 +3050,11 @@ function serverCard(ts) {
     toggle.lastChild.textContent = `${open ? 'Hide' : 'Show'} tool catalog (${tools.length})`;
   });
   const actions = [];
+  if (!can('admin') && can('contain') && ts.status !== 'pending') {
+    actions.push(ts.status === 'blocked'
+      ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': `ts-unblock-${ts.name}`, onclick: () => serverAction(ts, 'unblock') }, icon('undo'), 'Unblock')
+      : h('button', { type: 'button', class: 'btn btn--danger-quiet', 'data-focus-key': `ts-block-${ts.name}`, onclick: () => serverAction(ts, 'block') }, icon('power'), 'Block server'));
+  }
   if (can('admin')) {
     if (ts.status === 'pending') actions.push(h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': `ts-approve-${ts.name}`, onclick: () => serverAction(ts, 'approve') }, icon('check'), 'Approve'));
     actions.push(h('button', { type: 'button', class: 'btn', 'data-focus-key': `ts-edit-${ts.name}`, onclick: guarded(() => editToolserver(ts)) }, icon('edit'), 'Edit'));
@@ -3249,7 +3268,7 @@ function findingCard(f, agentsById, act) {
   const tone = toneOf('severity', f.severity);
   const agent = f.agent_id ? agentsById.get(f.agent_id) : null;
   const headingId = `finding-title-${f.id}`;
-  const actions = !can('approve') ? [] : f.status === 'open'
+  const actions = !(can('approve') || can('triage')) ? [] : f.status === 'open'
     ? [h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('dismiss') }, icon('minus'), 'Dismiss'),
       h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => act('resolve') }, icon('check'), 'Resolve')]
     : [h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('reopen') }, icon('undo'), 'Reopen')];
@@ -3993,6 +4012,7 @@ async function renderLedger({ params }) {
 const KEY_ROLES = [
   ['auditor', 'Auditor: reads everything, including the ledger, and changes nothing'],
   ['approver', 'Approver: reads everything and decides approval requests and findings'],
+  ['secops', "Security operations: the security team's SIEM or SOAR. Reads everything, and does what the hand-off to security operations allows"],
   ['registrar', 'Registrar: registers agents and tool servers for review (CI pipelines, developers)'],
   ['admin', 'Admin: everything'],
   ['service', 'Service: internal components such as OPA and the governance processor'],
@@ -4059,11 +4079,11 @@ function issuersCard(issuers) {
       h('td', { 'data-label': 'Status' }, chip('server', i.status)),
       h('td', { 'data-label': 'Agents', class: 'num' }, fmt(i.agents || 0)),
       h('td', { 'data-label': 'In Keycloak' }, issuerSync(i)),
-      h('td', { 'data-label': '' }, can('admin') ? h('div', { class: 'btn-row' },
-        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `issuer-edit-${i.name}`, onclick: guarded(() => issuerForm(i)) }, icon('edit'), 'Edit'),
+      h('td', { 'data-label': '' }, can('contain') ? h('div', { class: 'btn-row' },
+        can('admin') ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `issuer-edit-${i.name}`, onclick: guarded(() => issuerForm(i)) }, icon('edit'), 'Edit') : null,
         h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `issuer-block-${i.name}`, onclick: guarded(() => blockIssuer(i)) },
           icon(i.status === 'blocked' ? 'undo' : 'ban'), i.status === 'blocked' ? 'Unblock' : 'Block'),
-        h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `issuer-delete-${i.name}`, onclick: guarded(() => deleteIssuer(i)) }, icon('trash'), 'Delete')) : null))))))
+        can('admin') ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `issuer-delete-${i.name}`, onclick: guarded(() => deleteIssuer(i)) }, icon('trash'), 'Delete') : null) : null))))))
     : emptyState('No identity issuers', 'Add one, and agents can authenticate with an identity they already have, such as a Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID, instead of a client secret.');
   return card({
     title: 'Agent identity issuers',
@@ -4756,7 +4776,10 @@ function connectorList(v) {
 
 /* ---------------------------------------------------------------- features */
 
-const MODE_WORDS = { off: 'Off', on: 'On', monitor: 'Monitor', enforce: 'Enforce' };
+const MODE_WORDS = {
+  off: 'Off', on: 'On', monitor: 'Monitor', enforce: 'Enforce',
+  inform: 'Inform', triage: 'Triage', contain: 'Contain', decide: 'Decide',
+};
 
 async function featureModes() {
   const view = await api('v1/features');
@@ -4848,6 +4871,258 @@ async function chooseMode(f, mode) {
   await refresh();
 }
 
+/* ------------------------------------------------------ security operations */
+
+// Destinations by kind: name, whether it is a SIEM or a chat, a URL like its own, and the URL's hint.
+const DEST_KINDS = {
+  otlp: ['OpenTelemetry (OTLP)', 'siem', 'http://otel-collector:4318', "The collector's OTLP/HTTP endpoint. Events go to /v1/logs there."],
+  webhook: ['Webhook (HTTP input)', 'siem', 'https://siem.example.com/ingest', "A SIEM's or log pipeline's HTTP input. Leave it empty when the URL is the credential: it then goes in the secret file."],
+  'splunk-hec': ['Splunk HTTP Event Collector', 'siem', 'https://splunk.example.com:8088', "Splunk's HTTP Event Collector. Events go to /services/collector/event there."],
+  slack: ['Slack', 'chat'],
+  teams: ['Microsoft Teams', 'chat'],
+};
+const DEST_EVENTS = {
+  siem: [
+    ['decisions', 'Decisions', 'tool and model calls at the gateway'],
+    ['approvals', 'Approvals', 'requested, decided, used'],
+    ['findings', 'Findings', 'raised, resolved, dismissed'],
+    ['access', 'Access', 'sign-ins and API keys'],
+    ['changes', 'Changes', 'everything else: what AgentGov governs, and who changed it'],
+  ],
+  chat: [
+    ['findings', 'Findings', 'from the minimum severity up'],
+    ['approvals', 'Approval requests', 'whatever their severity'],
+    ['blocks', 'Kill switches', 'agents, tool servers, model providers and identity issuers blocked, agents deleted'],
+  ],
+};
+const DEST_SECRET = {
+  otlp: 'Optional: HTTP headers to send, one per line, such as Authorization: Bearer <token>.',
+  webhook: 'Optional: HTTP headers to send, one per line; and the URL, on a line of its own, when the URL is the credential (as with Sumo Logic).',
+  'splunk-hec': "The HTTP Event Collector's token.",
+  slack: "The incoming webhook's URL (https://hooks.slack.com/services/…).",
+  teams: "The webhook URL of a Teams workflow that posts to the channel (the workflow \"When a Teams webhook request is received\").",
+};
+const destKind = (kind) => (DEST_KINDS[kind] || [kind])[0];
+const destFamily = (kind) => (DEST_KINDS[kind] || [kind, 'siem'])[1];
+
+async function renderSecops() {
+  const [view, feature] = await Promise.all([api('v1/secops'), api(`v1/features/security-operations`)]);
+  return h('div', { class: 'page' },
+    pageHead({
+      title: 'Security operations',
+      sub: "What AgentGov hands to the security team's tools: the evidence ledger, as OCSF events, to their SIEMs; alerts to their Teams and Slack channels; and how much their secops role may do here.",
+      actions: [refreshButton()],
+    }),
+    view.sending ? null : callout('neutral', 'power', h('span', {}, h('strong', {}, 'Nothing is sent. '),
+      can('admin') ? 'Choose inform or above to send the destinations below their events and alerts.' : 'An administrator chooses how much is handed over.')),
+    handoffCard(view, feature),
+    destinationsCard(view),
+    eventsApiCard(view));
+}
+
+function handoffCard(view, f) {
+  const reached = view.levels.indexOf(view.level);
+  return card({
+    title: 'Hand-off',
+    sub: "Each level includes the ones before it. The secops role is for the security team's tools (an API key) and analysts (the agentgov-secops role at sign-in). Everything it does is in the ledger under its name, and administrators can undo it.",
+    body: h('div', { class: 'stack' },
+      h('div', {}, modeControl(f), featureProvenance(f)),
+      h('ol', { class: 'levels' }, f.modes.map((m, n) => h('li', { 'data-reached': n <= reached ? 'true' : 'false', 'aria-current': m === view.level ? 'step' : null },
+        icon(n <= reached ? 'check-circle' : 'minus'),
+        h('div', {}, h('strong', {}, MODE_WORDS[m] || humanize(m)), h('div', { class: 'cell-sub' }, f.effects[m] || '')))))),
+  });
+}
+
+function destinationState(d) {
+  const delivery = d.delivery;
+  if (d.secret.need === 'required' && !d.secret.present) {
+    return [plainChip('No secret file', { tone: 'warning', iconName: 'key' }), h('div', { class: 'cell-sub break' }, 'Put it in ', h('code', {}, d.secret.file))];
+  }
+  if (delivery.last_error) {
+    return [plainChip(`Failing (${fmt(delivery.failures)})`, { tone: 'critical', iconName: 'octagon', title: delivery.last_error }),
+      h('div', { class: 'cell-sub break' }, delivery.last_error),
+      delivery.retry_at ? h('div', { class: 'cell-sub' }, 'Tries again ', timeEl(delivery.retry_at)) : null];
+  }
+  const sent = delivery.delivered_at
+    ? h('div', { class: 'cell-sub' }, `${plural(delivery.delivered, destFamily(d.kind) === 'chat' ? 'alert' : 'event')} sent, last `, timeEl(delivery.delivered_at))
+    : h('div', { class: 'cell-sub' }, 'Nothing sent yet');
+  const behind = delivery.behind
+    ? plainChip(`${fmt(delivery.behind)} ledger ${delivery.behind === 1 ? 'entry' : 'entries'} to go`, { tone: 'neutral', iconName: 'clock' })
+    : plainChip('Up to date', { tone: 'good', iconName: 'check-circle' });
+  return [behind, sent];
+}
+
+function destinationsCard(view) {
+  const rows = view.destinations;
+  const body = rows.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('caption', { class: 'sr-only' }, 'Destinations'),
+    h('thead', {}, h('tr', {}, ['Destination', 'Gets', 'Status', 'Delivery', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+    h('tbody', {}, rows.map((d) => h('tr', { 'data-destination': d.name },
+      h('td', { 'data-label': 'Destination', class: 'break' }, h('span', { class: 'cell-title' }, d.name),
+        h('div', { class: 'cell-sub' }, destKind(d.kind), d.format === 'ndjson' ? ', JSON lines' : ''),
+        d.url ? h('div', { class: 'cell-sub' }, h('code', {}, d.url)) : null,
+        d.description ? h('div', { class: 'cell-sub' }, d.description) : null),
+      h('td', { 'data-label': 'Gets' }, h('div', { class: 'chip-row' }, d.events.map((e) => plainChip(humanize(e)))),
+        d.min_severity !== 'info' ? h('div', { class: 'cell-sub' }, `${humanize(d.min_severity)} severity and up`) : null),
+      h('td', { 'data-label': 'Status' }, chip('destination', d.status)),
+      h('td', { 'data-label': 'Delivery' }, destinationState(d)),
+      h('td', { 'data-label': '' }, can('admin') ? h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `dest-test-${d.name}`, onclick: guarded(() => testDestination(d)) }, icon('play'), 'Test'),
+        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `dest-edit-${d.name}`, onclick: guarded(() => destinationForm(d)) }, icon('edit'), 'Edit'),
+        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `dest-pause-${d.name}`, onclick: guarded(() => pauseDestination(d)) },
+          icon(d.status === 'paused' ? 'play' : 'minus'), d.status === 'paused' ? 'Resume' : 'Pause'),
+        destFamily(d.kind) === 'siem' ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `dest-replay-${d.name}`, onclick: guarded(() => replayDestination(d)) }, icon('undo'), 'Replay') : null,
+        h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `dest-delete-${d.name}`, onclick: guarded(() => deleteDestination(d)) }, icon('trash'), 'Delete')) : null))))))
+    : emptyState('No destinations', 'Add a SIEM, through OpenTelemetry, an HTTP input or Splunk, to send it the ledger as OCSF events; or a Teams or Slack channel, to send it alerts.');
+  return card({
+    title: 'Destinations',
+    sub: "Each gets what is new in the ledger, at least once and in order, and keeps its place while it is paused or failing. Its credential is a file the control plane reads, named after it: never in AgentGov's database.",
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'add-destination', onclick: guarded(() => destinationForm(null)) }, icon('plus'), 'Add destination')] : null,
+    flush: rows.length > 0,
+    body,
+  });
+}
+
+function eventsApiCard(view) {
+  const url = new URL('v1/secops/events', API_ROOT).href;
+  return card({
+    title: 'Events API',
+    sub: 'For SIEMs that collect rather than receive: the same OCSF events, from an API key with the secops role. Each page says where the next one starts.',
+    body: h('div', { class: 'stack' },
+      facts([
+        ['Events', copyable(`${url}?after=0&limit=200`, 'events URL')],
+        ['From the CLI', copyable('agentgov secops events --follow', 'CLI command')],
+        ['Ledger entries', fmt(view.ledger_head)],
+      ]),
+      view.sending ? null : h('p', { class: 'hint' }, 'It answers once the hand-off is at inform or above.')),
+  });
+}
+
+async function destinationForm(d) {
+  const editing = Boolean(d);
+  const kind0 = d?.kind || 'otlp';
+  const eventFields = (family) => DEST_EVENTS[family].map(([key, label, hint]) => ({
+    id: `ev-${family}-${key}`, label, hint, type: 'checkbox',
+    value: editing ? d.events.includes(key) : true,
+  }));
+  const saved = await ask({
+    title: editing ? `Edit ${d.name}` : 'Add a destination',
+    text: editing
+      ? `${destKind(d.kind)}. Changes apply to what it is sent next, and are recorded in the evidence ledger.`
+      : "A SIEM gets the ledger as OCSF events; a chat gets alerts. Put its credential in its secret file, which the control plane reads when it sends.",
+    iconName: editing ? 'edit' : 'secops', confirm: editing ? 'Save changes' : 'Add destination', wide: true,
+    fields: [
+      editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'soc-splunk', hint: NAME_HINT },
+      editing ? null : {
+        id: 'kind', label: 'Kind', type: 'select', value: kind0,
+        options: Object.entries(DEST_KINDS).map(([value, [label, family]]) => ({ value, label: `${label}${family === 'chat' ? ': alerts' : ': OCSF events'}` })),
+      },
+      { id: 'url', label: 'URL', mono: true, value: d?.url || '', placeholder: DEST_KINDS[kind0][2] || '', hint: DEST_KINDS[kind0][3] || '' },
+      { id: 'format', label: 'Body', type: 'select', value: d?.format || 'json', options: [
+        { value: 'json', label: 'A JSON array of events' }, { value: 'ndjson', label: 'JSON lines: one event per line' },
+      ] },
+      { type: 'section', label: 'What it gets' },
+      ...eventFields('siem'),
+      ...eventFields('chat'),
+      {
+        id: 'min_severity', label: 'Minimum severity', type: 'select', value: d?.min_severity || (destFamily(kind0) === 'chat' ? 'high' : 'info'),
+        options: ['info', 'low', 'medium', 'high', 'critical'].map((value) => ({ value, label: humanize(value) })),
+        hint: 'For a chat, of findings: approval requests and kill switches always go.',
+      },
+      editing ? null : { id: 'backfill', label: 'Send it the ledger from its start, not from now', type: 'checkbox', value: false },
+      { id: 'description', label: 'Description', type: 'textarea', value: d?.description || '' },
+      { id: 'labels', label: 'Labels', value: formatLabels(d?.labels), placeholder: 'team=soc', mono: true },
+    ].filter(Boolean),
+    extra: h('p', { class: 'hint', id: 'dest-secret-hint' }),
+    onReady: (controls) => {
+      const field = (id) => controls[id]?.closest('.field');
+      const secretHint = document.getElementById('dest-secret-hint');
+      const show = () => {
+        const kind = editing ? d.kind : controls.kind.value;
+        const family = destFamily(kind);
+        for (const [key] of DEST_EVENTS.siem) field(`ev-siem-${key}`).hidden = family !== 'siem';
+        for (const [key] of DEST_EVENTS.chat) field(`ev-chat-${key}`).hidden = family !== 'chat';
+        field('url').hidden = family === 'chat';
+        field('format').hidden = kind !== 'webhook';
+        if (field('backfill')) field('backfill').hidden = family === 'chat';
+        controls.url.placeholder = DEST_KINDS[kind][2] || '';
+        const hint = field('url').querySelector('.hint');
+        if (hint) hint.textContent = DEST_KINDS[kind][3] || '';
+        const name = editing ? d.name : (controls.name.value || '<name>');
+        secretHint.textContent = `Secret file: ${d?.secret?.file || `<destination secrets>/${name}`}. ${DEST_SECRET[kind]}`;
+        if (!editing && document.activeElement !== controls.min_severity) controls.min_severity.value = family === 'chat' ? 'high' : 'info';
+      };
+      if (!editing) {
+        controls.kind.addEventListener('change', show);
+        controls.name.addEventListener('input', show);
+      }
+      show();
+    },
+    submit: (v) => {
+      const kind = editing ? d.kind : v.kind;
+      const family = destFamily(kind);
+      const events = DEST_EVENTS[family].map(([key]) => key).filter((key) => v[`ev-${family}-${key}`]);
+      if (!events.length) throw new Error('Choose at least one kind of event to send it.');
+      const body = {
+        events, min_severity: v.min_severity, description: v.description, labels: parseLabels(v.labels),
+        ...(family === 'siem' ? { url: orNull(v.url) } : {}),
+        ...(kind === 'webhook' ? { format: v.format } : {}),
+      };
+      if (editing) return api(`v1/destinations/${encodeURIComponent(d.name)}`, { method: 'PATCH', body });
+      return api('v1/destinations', { method: 'POST', body: { name: v.name, kind, ...body, ...(family === 'siem' && v.backfill ? { backfill: true } : {}) } });
+    },
+  });
+  if (!saved) return;
+  const missing = !saved.secret.present && saved.secret.need === 'required';
+  toast(editing ? `Saved ${saved.name}.` : `Added ${saved.name}.${missing ? ` Put its credential in ${saved.secret.file}.` : ''}`);
+  await refresh();
+}
+
+async function testDestination(d) {
+  const out = await api(`v1/destinations/${encodeURIComponent(d.name)}/test`, { method: 'POST' });
+  if (out.ok) toast(`Sent ${d.name} a test ${destFamily(d.kind) === 'chat' ? 'message' : 'event'}.`);
+  else toast(`${d.name}: ${out.error}`, { tone: 'critical' });
+  await refresh();
+}
+
+async function pauseDestination(d) {
+  const pause = d.status !== 'paused';
+  const done = await ask({
+    title: pause ? `Pause ${d.name}?` : `Resume ${d.name}?`,
+    text: pause ? 'It gets nothing until it is resumed, then everything it missed (alerts older than an hour excepted).' : 'It gets what it missed while it was paused, then what happens next.',
+    tone: pause ? 'danger' : 'primary', iconName: pause ? 'minus' : 'play', confirm: pause ? 'Pause' : 'Resume',
+    submit: () => api(`v1/destinations/${encodeURIComponent(d.name)}/${pause ? 'pause' : 'resume'}`, { method: 'POST' }),
+  });
+  if (!done) return;
+  toast(pause ? `Paused ${d.name}.` : `Resumed ${d.name}.`);
+  await refresh();
+}
+
+async function replayDestination(d) {
+  const done = await ask({
+    title: `Send ${d.name} the ledger again?`,
+    text: 'From after the ledger entry you choose (0: from the start). The SIEM drops events it already has by their metadata.uid.',
+    iconName: 'undo', confirm: 'Replay',
+    fields: [{ id: 'after', label: 'After ledger entry', type: 'number', min: 0, value: 0, required: true }],
+    submit: (v) => api(`v1/destinations/${encodeURIComponent(d.name)}/replay`, { method: 'POST', body: { after: Number(v.after) } }),
+  });
+  if (!done) return;
+  toast(`${d.name} gets the ledger again from after entry ${done.delivery.cursor}.`);
+  await refresh();
+}
+
+async function deleteDestination(d) {
+  const done = await ask({
+    title: `Delete ${d.name}?`,
+    text: 'It gets nothing more. Its secret file stays where it is.',
+    tone: 'danger', iconName: 'trash', confirm: 'Delete destination', busy: 'Deleting…',
+    submit: () => api(`v1/destinations/${encodeURIComponent(d.name)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Deleted ${d.name}.`);
+  await refresh();
+}
+
 /* ------------------------------------------------------------------ models */
 
 const PROVIDER_KINDS = [
@@ -4891,11 +5166,11 @@ function providersCard(providers, gateway) {
       h('td', { 'data-label': 'Prices' }, Object.keys(p.prices || {}).length
         ? h('div', { class: 'chip-row' }, Object.entries(p.prices).map(([m, price]) => plainChip(`${m}: ${price.input} in, ${price.output} out`, { mono: true })))
         : h('span', { class: 'muted' }, 'None: cost is not counted')),
-      h('td', { 'data-label': '' }, can('admin') ? h('div', { class: 'btn-row' },
-        h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `edit-${p.name}`, onclick: guarded(() => providerForm(p)) }, icon('edit'), 'Edit'),
+      h('td', { 'data-label': '' }, can('contain') ? h('div', { class: 'btn-row' },
+        can('admin') ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `edit-${p.name}`, onclick: guarded(() => providerForm(p)) }, icon('edit'), 'Edit') : null,
         h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `block-${p.name}`, onclick: guarded(() => blockProvider(p)) },
           icon(p.status === 'blocked' ? 'undo' : 'ban'), p.status === 'blocked' ? 'Unblock' : 'Block'),
-        h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `delete-${p.name}`, onclick: guarded(() => deleteProvider(p)) }, icon('trash'), 'Delete')) : null))))))
+        can('admin') ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `delete-${p.name}`, onclick: guarded(() => deleteProvider(p)) }, icon('trash'), 'Delete') : null) : null))))))
     : emptyState('No model providers', "Add one, then put its API key where the gateway reads it. Agents call it with their own token and never see the key.");
   return card({ title: 'Providers', flush: Boolean(providers.length), body });
 }

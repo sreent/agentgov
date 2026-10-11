@@ -22,11 +22,14 @@ from agentgov.registry import (
     toolservers,
 )
 from agentgov.registry.errors import Conflict
+from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1")
 
 read = require(*READ_ROLES)
 admin = require("admin")
+# Kill switches: administrators, and the security team's tools as far as the hand-off lets them.
+kill_switch = require("secops")
 
 
 def _rt(request: Request) -> Any:
@@ -182,11 +185,12 @@ def agent_lifecycle(
     ref: str,
     action: str,
     body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(admin),
+    principal: Principal = Depends(kill_switch),
 ) -> dict[str, Any]:
     """Lifecycle actions: approve, block (kill switch), unblock, delete (soft), restore, adopt."""
     rt = _rt(request)
     with rt.db.session() as s:
+        handoff.check_kill_switch(s, principal, action)
         agent = agents.get(s, ref)
         if action == "adopt" and body:
             agents.update(
@@ -195,8 +199,6 @@ def agent_lifecycle(
         agents.transition(
             s, rt.settings, agent, action, actor=principal.actor, reason=body.get("reason")
         )
-        if action in ("block", "delete"):
-            rt.alerts.send(f"AgentGov: agent {agent.name} was {action}ed by {principal.actor}")
         return agents.to_dict(agent)
 
 
@@ -349,11 +351,12 @@ def approve_tool(
 
 @router.post("/toolservers/{ref}/{action}", tags=["toolservers"])
 def toolserver_action(
-    request: Request, ref: str, action: str, principal: Principal = Depends(admin)
+    request: Request, ref: str, action: str, principal: Principal = Depends(kill_switch)
 ) -> dict[str, Any]:
     """approve (pending review), block, unblock."""
     rt = _rt(request)
     with rt.db.session() as s:
+        handoff.check_kill_switch(s, principal, action)
         ts = toolservers.set_status(s, toolservers.get(s, ref), action, actor=principal.actor)
         return toolservers.to_dict(ts, rt.settings.gateway_public_url)
 

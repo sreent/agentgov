@@ -38,8 +38,9 @@ pipelines, use an API key instead.
 
 | Role | Can |
 |---|---|
-| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist and which [features](features.md) are used |
+| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations and which [features](features.md) are used |
 | `approver` | Read everything; decide approval requests; resolve, dismiss and reopen findings; attest the agents it sponsors |
+| `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), and report the MCP servers set up on developers' machines; it cannot read the registry |
 | `person` | Someone without an AgentGov role, signed in to decide the approval requests that agents acting for them sent them, while the `approvals-by-person` feature is on; sees nothing else ([acting for people](acting-for-people.md)) |
@@ -109,6 +110,9 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Set, forget or rescan an agent's instructions | Agent → Instructions → **Add instructions** / **Edit**, **Forget**, **Rescan** | `agentgov agents set-instructions\|clear-instructions\|rescan-instructions REF` | `PUT`/`DELETE /v1/agents/{ref}/instructions`, `POST …/rescan` |
 | Check instructions before deploying an agent | — | `agentgov instructions check FILE` | `POST /v1/instructions/check` |
 | Choose which features are used, and how strictly ([features](features.md)) | Features | `agentgov features list`, `agentgov features set FEATURE MODE` | `GET /v1/features`, `PUT /v1/features/{feature}` |
+| Choose how much is handed to the security team ([security operations](secops.md)) | Security operations → *Hand-off* | `agentgov secops level LEVEL`, `agentgov secops status` | `PUT /v1/features/security-operations`, `GET /v1/secops` |
+| Add, edit, test, pause, resume, replay and delete destinations (SIEMs, Teams, Slack) | Security operations → **Add destination**, **Test**, **Edit**, **Pause**/**Resume**, **Replay**, **Delete** | `agentgov destinations create\|update\|test\|pause\|resume\|replay\|delete` | `POST /v1/destinations`, `PATCH`/`DELETE /v1/destinations/{name}`, `POST /v1/destinations/{name}/{action}` |
+| Read the ledger as OCSF events | Security operations → *Events API* | `agentgov secops events [--after N] [--follow]` | `GET /v1/secops/events?after=N` |
 | See what monitored controls would have stopped | Ledger → decision **Monitored** | `agentgov ledger tail` | `GET /v1/ledger?decision=monitored` |
 
 Two commands run where the control plane runs, against its database
@@ -118,8 +122,9 @@ prints them instead). The control plane also applies them when it starts, unless
 `AGENTGOV_DATABASE_AUTO_MIGRATE` is `false` ([upgrading](../deploy/compose/README.md#upgrading)).
 
 Every CLI command has `--help`. Commands that cannot be undone (`purge`, `delete` of
-blueprints, tool servers, model providers, identity issuers and policies, `apikeys revoke`),
-and `features set` when it weakens a feature, ask for confirmation unless you pass `--yes`.
+blueprints, tool servers, model providers, identity issuers, destinations and policies,
+`apikeys revoke`), `destinations replay`, and `features set` (or `secops level`) when it
+lowers a feature, ask for confirmation unless you pass `--yes`.
 
 ## Registry as code
 

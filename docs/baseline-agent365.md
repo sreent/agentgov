@@ -105,7 +105,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Harmful or malicious agent instructions | ✅ | Agents' system prompts (registered, reported in telemetry, or read from Microsoft 365) are checked by rules and optionally by **IBM Granite Guardian**; problems become findings and add to the risk score ([instructions](instructions.md)) |
 | Connectors used by Copilot Studio agents; risky agent settings | ✅ | Connector allowlist with findings for agents that use other connectors, publish without authentication, use their maker's connections or are shared with everyone; enforced by pushing it into Power Platform's advanced connector policies, and by Copilot Studio threat detection ([connections](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform)) |
 | Human approval for sensitive actions | ✅ | Destructive tools (and any policy you write) route to an approver, or to the person the agent acted for; single-use approvals ([acting for people](acting-for-people.md#approvals-sent-to-the-person)) |
-| Alerts / incidents | 🟡 | Findings + webhook alerts; Defender's alerts about agents become findings ([connections](microsoft-connections.md#microsoft-defender-alerts)); SIEM integration ⏳ |
+| Alerts / incidents | ✅ | Findings, with alerts in Teams and Slack; Defender's alerts about agents become findings ([connections](microsoft-connections.md#microsoft-defender-alerts)); the ledger to SIEMs as OCSF events, and the security team's tools may triage, contain or decide as far as you choose ([security operations](secops.md)) |
 | Insider risk, eDiscovery, retention policies | ➖ / ⏳ | Ledger export provides evidence; retention policy ⏳ |
 
 ## Sources

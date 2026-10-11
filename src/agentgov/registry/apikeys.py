@@ -15,10 +15,12 @@ from agentgov.registry.errors import NotFound, ValidationError
 
 # admin     - everything
 # approver  - read, decide approvals, attest agents they sponsor
+# secops    - the security team's tools (SIEM, SOAR): read, and what the hand-off to
+#             security operations allows (agentgov.secops.handoff)
 # auditor   - read-only, including the ledger
 # registrar - register agents and tool servers for review (CI pipelines, developers)
 # service   - internal components (OPA, governance processor, OTel collector)
-ROLES = ("admin", "approver", "auditor", "registrar", "service")
+ROLES = ("admin", "approver", "secops", "auditor", "registrar", "service")
 
 
 def _hash(token: str) -> str:

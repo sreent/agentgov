@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 from datetime import datetime, timedelta
@@ -38,6 +37,7 @@ from agentgov.registry import (
     posture,
 )
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
+from agentgov.secops.delivery import Delivery
 
 log = logging.getLogger(__name__)
 # Package details (for declarative agents' instructions) read per Microsoft 365 sync.
@@ -91,31 +91,6 @@ class _Worker:
         self._wake.set()
 
 
-class AlertSink:
-    """Posts short alerts to a Slack/Teams-compatible webhook, best effort."""
-
-    def __init__(self, url: str | None) -> None:
-        self.url = url
-
-    def send(self, text: str) -> None:
-        if not self.url:
-            return
-        url = self.url
-
-        def post() -> None:
-            try:
-                httpx.post(
-                    url,
-                    content=json.dumps({"text": text}),
-                    headers={"Content-Type": "application/json"},
-                    timeout=5,
-                )
-            except httpx.HTTPError as exc:
-                log.warning("alert webhook failed: %s", exc)
-
-        threading.Thread(target=post, daemon=True).start()
-
-
 class Runtime:
     def __init__(
         self,
@@ -127,12 +102,14 @@ class Runtime:
         guardian_http: httpx.Client | None = None,
         microsoft_http: httpx.Client | None = None,
         copilot_studio_http: httpx.Client | None = None,
+        destinations_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
         self.db = Database(settings.database_url, on_commit=self._on_commit)
         self.bundles = BundleServer(self.db)
         self.gateway = GatewayConfigWriter(self.db, settings)
-        self.alerts = AlertSink(settings.alert_webhook_url)
+        # The security team's SIEMs and chats (the security-operations feature).
+        self.delivery = Delivery(self.db, settings, http=destinations_http)
         self.ledger_integrity = ledger.IntegrityMonitor()
         # Administrator single sign-on (OIDC), when a client secret is configured.
         self.sso = OIDCClient(settings, http=oidc_http) if settings.sso_enabled else None
@@ -190,6 +167,11 @@ class Runtime:
             if self.m365 is not None and settings.m365_sync_interval_seconds > 0
             else None
         )
+        self._delivery_worker = (
+            _Worker("secops-delivery", self.delivery.run, settings.delivery_interval_seconds)
+            if settings.delivery_interval_seconds > 0
+            else None
+        )
         self._started = False
 
     # -- lifecycle -----------------------------------------------------------
@@ -221,6 +203,8 @@ class Runtime:
             self._classifier_worker.start()
         self._recheck_worker.start()
         self._mcp_worker.start()
+        if self._delivery_worker is not None:
+            self._delivery_worker.start()
         self._started = True
 
     def stop(self) -> None:
@@ -235,11 +219,17 @@ class Runtime:
             self._classifier_worker.stop()
         self._recheck_worker.stop()
         self._mcp_worker.stop()
+        if self._delivery_worker is not None:
+            self._delivery_worker.stop()
         self.db.dispose()
 
     # -- reconciliation triggers -----------------------------------------------
     def _on_commit(self, topics: set[str]) -> None:
-        self.bundles.notify()
+        if topics - {"ledger"}:  # OPA's data changed, not only the ledger
+            self.bundles.notify()
+        secops = {"ledger", "destinations", "feature:security-operations"}
+        if self._delivery_worker is not None and topics & secops:
+            self._delivery_worker.trigger()
         identity = {"agents", "blueprints", "issuers", "feature:workload-identity"}
         if self.identity is not None and topics & identity:
             self.identity.trigger()
