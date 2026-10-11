@@ -43,14 +43,17 @@ request. Run it before you open one:
 
 ```bash
 scripts/ci.sh             # ruff, opa fmt/check/test, pytest, the Helm chart, the image
-scripts/ci.sh --e2e       # also: the Compose stack, the demo agent and ledger verification
+scripts/ci.sh --e2e       # also: the demo and ledger verification against the Compose
+                          # stack and against the Helm chart's pods run with Docker
 scripts/ci.sh --kind      # also: the Helm chart on a kind cluster, with the same demo
 scripts/ci.sh --matrix    # also: the tests on each Python 3.11-3.13 installed
 ```
 
-Run `--e2e` when you change the processor, the Rego library, the gateway configuration or
-the identity reconciler, and `--kind` when you change the Helm chart (kind needs a Docker
-host with cgroup v2; the `e2e` workflow runs it on GitHub). It uses its own Compose project and the stack's usual ports, so
+Run `--e2e` when you change the processor, the Rego library, the gateway configuration,
+the identity reconciler or the Helm chart. Its chart check runs the chart's pods with
+Docker (`scripts/chart-on-docker.py`), so it works wherever Docker does, including Claude
+Code's cloud sessions. `--kind` installs the chart on a real cluster; kind needs a Docker
+host with cgroup v2, and the `e2e` workflow runs it on GitHub. It uses its own Compose project and the stack's usual ports, so
 stop a running local stack first. On GitHub, the `ci` workflow runs the checks on Python
 3.11, 3.12 and 3.13, and the `e2e` workflow runs the end-to-end check for pull requests
 that change code or the deployment.

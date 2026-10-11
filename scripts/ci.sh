@@ -4,7 +4,8 @@
 # local run matches CI.
 #
 #   scripts/ci.sh             lint, Rego checks, tests, the Helm chart and the image build (ci.yml)
-#   scripts/ci.sh --e2e       all of the above, then the full stack and the demo (e2e.yml)
+#   scripts/ci.sh --e2e       all of the above, then the full stack and the demo, with
+#                             Compose and from the Helm chart's pods on Docker (e2e.yml)
 #   scripts/ci.sh --e2e-only  only the end-to-end run
 #   scripts/ci.sh --kind      also install the Helm chart on a kind cluster and run the demo
 #   scripts/ci.sh --kind-only only that (e2e.yml)
@@ -239,7 +240,7 @@ docker_build() {
 # ---------------------------------------------------------------------- checks
 
 lint_python() {
-  ruff check src tests examples && ruff format --check src tests examples
+  ruff check src tests examples scripts && ruff format --check src tests examples scripts
 }
 
 lint_rego() {
@@ -335,6 +336,43 @@ end_to_end() {
   else
     "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   fi
+  return "$rc"
+}
+
+# The chart's pods, run by scripts/chart-on-docker.py where Kubernetes can't run
+# (as in containers without cgroup v2), and the same demo against them.
+chart_on_docker() {
+  local rendered rc=0 busy=() port
+  setup_chart_tools || return 1
+  for port in 8000 8080 8180 4318; do
+    if port_in_use "$port"; then busy+=("$port"); fi
+  done
+  if [ ${#busy[@]} -gt 0 ]; then
+    echo "ports in use: ${busy[*]}; stop what uses them first"
+    return 1
+  fi
+  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm ||
+    return 1
+  rendered=$(mktemp)
+  helm template agentgov "$CHART" --set image.repository=agentgov --set image.tag=local \
+    --set image.pullPolicy=Never --set presidio.image.tag=2.2.364 >"$rendered" || return 1
+  python scripts/chart-on-docker.py down
+  if python scripts/chart-on-docker.py up "$rendered" --demo; then
+    AGENTGOV_TOKEN=$(python scripts/chart-on-docker.py secret "$rendered" admin-token)
+    export AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN
+    agentgov apply -f examples/manifests &&
+      python examples/agents/demo_agent.py &&
+      agentgov ledger verify || rc=1
+  else
+    rc=1
+  fi
+  [ "$rc" = 0 ] || python scripts/chart-on-docker.py logs
+  if [ "$keep" = 1 ]; then
+    echo "pods left running; remove them with: python scripts/chart-on-docker.py down"
+  else
+    python scripts/chart-on-docker.py down
+  fi
+  rm -f "$rendered"
   return "$rc"
 }
 
@@ -474,7 +512,10 @@ if [ "$image" = 1 ]; then
   fi
 fi
 if [ "$e2e" = 1 ]; then
-  if docker_ready; then run "End to end (stack + demo + ledger)" end_to_end; else
+  if docker_ready; then
+    run "End to end (stack + demo + ledger)" end_to_end
+    run "End to end (Helm chart's pods on Docker + demo + ledger)" chart_on_docker
+  else
     skip "End to end (stack + demo + ledger)" "no Docker daemon"
   fi
 fi

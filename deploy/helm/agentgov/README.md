@@ -3,8 +3,9 @@
 Installs AgentGov on Kubernetes: the control plane, the governance processor, OPA,
 agentgateway, Presidio and the OpenTelemetry Collector, plus PostgreSQL and Keycloak for
 evaluation. It runs the same stack as the [Compose deployment](../../compose/README.md),
-and CI installs it on a kind cluster and runs the same demo against it
-(`scripts/ci.sh --kind`).
+and CI runs the same demo against it: `scripts/ci.sh --e2e` runs the chart's pods with
+Docker (`scripts/chart-on-docker.py`), and `scripts/ci.sh --kind` installs it on a kind
+cluster.
 
 ## Try it
 

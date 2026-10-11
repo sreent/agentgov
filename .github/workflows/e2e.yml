@@ -1,9 +1,9 @@
 # Brings up the full reference stack (Keycloak, OPA, agentgateway, Presidio,
 # OTel Collector, control plane, processor, demo MCP server) and drives every
-# governance control with a real MCP client, twice: with Docker Compose
-# (scripts/ci.sh --e2e-only) and from the Helm chart on a kind cluster
-# (scripts/ci.sh --kind-only). Runs on main, on pull requests that change code or
-# the deployment, and on demand.
+# governance control with a real MCP client: with Docker Compose and from the Helm
+# chart's pods on Docker (scripts/ci.sh --e2e-only, as run locally), and from the
+# chart on a kind cluster (scripts/ci.sh --kind-only). Runs on main, on pull
+# requests that change code or the deployment, and on demand.
 name: e2e
 
 on:
@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   compose:
-    name: Stack, demo and ledger
+    name: Compose stack and chart pods, demo and ledger
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
