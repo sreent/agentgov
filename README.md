@@ -234,6 +234,10 @@ what-if evaluation.
 * **Models**: point any OpenAI client at `http://<gateway>/llm/<provider>/v1`, with the
   same token as its API key. The gateway adds the provider's key
   ([model calls](docs/models.md)).
+* **Acting for a person**: exchange the person's token, from the app they use agents in,
+  for a token of the agent's own (Keycloak's token exchange, RFC 8693), and call with that.
+  Policy, the ledger and approvals then know whom the agent acts for
+  ([acting for people](docs/acting-for-people.md)).
 * **Developers' coding assistants**: GitHub Copilot reads the approved MCP servers from
   the MCP registry at `http://<control plane>/registry`, and `agentgov mcp scan --report`
   reports the ones developers set up ([developer tools](docs/developer-tools.md)).
@@ -276,6 +280,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   usage, cost and token budgets
 * [Developer tools](docs/developer-tools.md): an MCP registry for GitHub Copilot and VS
   Code, and the MCP servers developers set up on their machines
+* [Acting for people](docs/acting-for-people.md): agents that act for a person, whom each
+  may act for, the person in policy and the ledger, and approvals sent to the person
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin

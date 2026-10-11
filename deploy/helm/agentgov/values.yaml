@@ -29,6 +29,12 @@ urls:
 # modes of the other features themselves.
 features: {}
 
+# The Keycloak clients of the apps people use agents from, which hand people's tokens
+# to the agents that act for them (docs/acting-for-people.md). AgentGov offers these
+# apps each such agent's client scope. With keycloak.demoUsers, the demo app
+# agentgov-demo-chat is one of them.
+peopleApps: []
+
 # Model providers' API keys (docs/models.md). The gateway reads each from
 # /model-keys/<provider>, so the keys never enter AgentGov. Name a Secret you manage,
 # whose keys are provider names, or, to evaluate, give the keys here and the chart
@@ -185,8 +191,9 @@ keycloak:
     repository: quay.io/keycloak/keycloak
     tag: 26.8.0
     pullPolicy: IfNotPresent
-  # Import the demo users admin, alice and audrey (password: demo-password in the
-  # Secret). Turn off before anyone else can reach Keycloak.
+  # Import the demo users admin, alice, audrey and sam (password: demo-password in the
+  # Secret), and the demo app agentgov-demo-chat, where people sign in with their
+  # password. Turn off before anyone else can reach Keycloak.
   demoUsers: true
   resources:
     requests: {cpu: 200m, memory: 512Mi}

@@ -5,7 +5,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agentgov.models import DATA_CLASSIFICATIONS, RISK_TIERS, TRUST_LEVELS
+from agentgov.models import (
+    ACTS_FOR,
+    APPROVALS_BY,
+    DATA_CLASSIFICATIONS,
+    RISK_TIERS,
+    TRUST_LEVELS,
+)
 from agentgov.registry.errors import ValidationError
 
 # Names become Keycloak client ids, URL path segments (/mcp/<server>) and OPA
@@ -38,6 +44,25 @@ def trust_level(value: Any) -> str:
 
 def data_classification(value: Any) -> str:
     return one_of(value, DATA_CLASSIFICATIONS, "data_classification")
+
+
+def acts_for(value: Any) -> str:
+    return one_of(value, ACTS_FOR, "acts_for")
+
+
+def approvals_by(value: Any) -> str:
+    return one_of(value, APPROVALS_BY, "approvals_by")
+
+
+def people_groups(value: Any) -> list[str]:
+    """Group names or paths (``support``, ``/emea/support``); the leading "/" is optional."""
+    groups = string_list(value, "people_groups")
+    for group in groups:
+        if not group.strip("/") or group != group.strip():
+            raise ValidationError(
+                f"people_groups: {group!r} is not a group, such as support or /emea/support"
+            )
+    return groups
 
 
 def string_list(value: Any, field: str) -> list[str]:

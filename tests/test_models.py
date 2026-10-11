@@ -402,11 +402,22 @@ class TestManifestsAndCli:
         out = ok(runner.invoke(cli.app, [*args, "--jailbreak", "--tool-calls"]))
         assert out.splitlines()[0] == "deny"
         assert "monitored: jailbreak-detection: The prompt looks like a jailbreak" in out
-        [body] = sent
+        body = sent[0]
         assert body["path"] == "agentgov/models/decision"
         assert body["input"]["kind"] == "model" and body["input"]["tool_calls"] is True
         assert body["input"]["detections"]["jailbreak"] is True
         assert body["input"]["agent"] == {"agent_id": "agt_1", "client_id": "agent-bot"}
+        assert "user" not in body["input"]  # the agent acts on its own
+        # On behalf of a person.
+        ok(runner.invoke(cli.app, [*args, "--user", "alice", "--groups", "support,/emea/sales"]))
+        assert sent[-1]["input"]["user"] == {
+            "id": "alice",
+            "username": "alice",
+            "groups": ["support", "/emea/sales"],
+            "roles": [],
+            "via": "exchange",
+        }
+        assert runner.invoke(cli.app, [*args, "--user", "alice", "--via", "magic"]).exit_code == 2
         # A tool call or a model call, not half of one, nor both.
         assert runner.invoke(cli.app, ["policies", "evaluate", "--server", "crm"]).exit_code == 2
         both = [*args, "--server", "crm", "--tool", "get_customer"]

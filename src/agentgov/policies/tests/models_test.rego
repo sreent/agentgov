@@ -226,3 +226,17 @@ test_custom_policies_take_part if {
 	d.reasons == ["EU agents use EU providers"]
 	d.redact == ["pii"]
 }
+
+test_model_calls_follow_who_the_agent_acts_for if {
+	reg := object.union(registry, {"agents": {"agt_support": {"acts_for": "people", "people_groups": ["support"]}}})
+	alone := models.decision with input as prompt("agt_support", "openai", "gpt-4o-mini") with data.registry as reg
+	alone.reasons == ["Agent support-bot acts only for people, and this call is on no one's behalf"]
+	bob := {"id": "u-bob", "username": "bob", "groups": ["sales"], "via": "delegation"}
+	d := models.decision with input as object.union(prompt("agt_support", "openai", "gpt-4o-mini"), {"user": bob})
+		with data.registry as reg
+	d.reasons == ["Agent support-bot acts only for people in support, and bob is in none of them"]
+	carol := {"id": "u-carol", "email": "carol@example.com", "groups": ["/support"], "via": "exchange"}
+	ok := models.decision with input as object.union(prompt("agt_support", "openai", "gpt-4o-mini"), {"user": carol})
+		with data.registry as reg
+	ok.effect == "allow"
+}

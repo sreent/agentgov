@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 
 from agentgov.identity import sso
-from agentgov.registry import apikeys
+from agentgov.registry import apikeys, features
 
 READ_ROLES = ("admin", "approver", "auditor")
 SESSION_COOKIE = "agentgov_session"
@@ -40,6 +40,8 @@ class Principal:
     # sign-in for it (to act as this person in Microsoft 365 and Power Platform).
     session_id: str | None = None
     microsoft: bool = False
+    # For single sign-on: who signed in, as the provider names them (the token's subject).
+    subject: str | None = None
 
     def __post_init__(self) -> None:
         if not self.roles:
@@ -105,9 +107,16 @@ def _signed_in(rt: Any, token: str | None) -> Principal | None:
         return None
     with rt.db.session() as session:
         record = sso.lookup(session, token)
-        roles = [r for r in sso.SSO_ROLES if record is not None and r in (record.roles or [])]
-        if not roles:
+        if record is None:
             return None
+        roles = [r for r in sso.SSO_ROLES if r in (record.roles or [])]
+        if not roles:
+            # Someone without an AgentGov role, there to decide the requests sent to them.
+            if sso.PERSON not in (record.roles or []):
+                return None
+            if not features.is_on(session, "approvals-by-person"):
+                return None
+            roles = [sso.PERSON]
         delegations = getattr(rt, "delegations", None)
         return Principal(
             record.name,
@@ -116,7 +125,20 @@ def _signed_in(rt: Any, token: str | None) -> Principal | None:
             via="session",
             session_id=record.id,
             microsoft=delegations is not None and delegations.has(record.id),
+            subject=record.subject,
         )
+
+
+def signed_in(request: Request) -> Principal:
+    """Anyone authenticated, whatever their role."""
+    principal = authenticate(request)
+    if principal is None:
+        raise HTTPException(
+            status_code=401,
+            detail="missing or invalid bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return principal
 
 
 def require(*roles: str) -> Callable[[Request], Principal]:

@@ -36,7 +36,7 @@ def _canonical(payload: dict[str, Any]) -> bytes:
 
 
 def _payload(entry: LedgerEntry) -> dict[str, Any]:
-    return {
+    payload = {
         "seq": entry.seq,
         "id": entry.id,
         "ts": ids.isoformat(entry.ts),
@@ -52,6 +52,10 @@ def _payload(entry: LedgerEntry) -> dict[str, Any]:
         "details": entry.details or {},
         "trace_id": entry.trace_id,
     }
+    # Added later: hashed only when set, so earlier entries keep their hashes.
+    if entry.on_behalf_of is not None:
+        payload["on_behalf_of"] = entry.on_behalf_of
+    return payload
 
 
 def compute_hash(prev_hash: str, entry: LedgerEntry) -> str:
@@ -73,6 +77,7 @@ def append(
     reason: str | None = None,
     details: dict[str, Any] | None = None,
     trace_id: str | None = None,
+    on_behalf_of: str | None = None,
     ts: datetime | None = None,
 ) -> LedgerEntry:
     """Append an entry inside the caller's transaction.
@@ -101,6 +106,7 @@ def append(
         reason=reason,
         details=details or {},
         trace_id=trace_id,
+        on_behalf_of=on_behalf_of,
         prev_hash=head.last_hash,
     )
     entry.hash = compute_hash(head.last_hash, entry)

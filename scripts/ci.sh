@@ -362,7 +362,8 @@ chart_on_docker() {
   python scripts/chart-on-docker.py down
   if python scripts/chart-on-docker.py up "$rendered" --demo; then
     AGENTGOV_TOKEN=$(python scripts/chart-on-docker.py secret "$rendered" admin-token)
-    export AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN
+    AGENTGOV_DEMO_PASSWORD=$(python scripts/chart-on-docker.py secret "$rendered" demo-password)
+    export AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN AGENTGOV_DEMO_PASSWORD
     agentgov apply -f examples/manifests &&
       python examples/agents/demo_agent.py &&
       agentgov ledger verify || rc=1
@@ -487,7 +488,9 @@ EOF
   if [ "$rc" = 0 ]; then
     AGENTGOV_TOKEN=$(kubectl -n "$KIND_NAMESPACE" get secret agentgov \
       -o jsonpath='{.data.admin-token}' | base64 -d)
-    export AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN
+    AGENTGOV_DEMO_PASSWORD=$(kubectl -n "$KIND_NAMESPACE" get secret agentgov \
+      -o jsonpath='{.data.demo-password}' | base64 -d)
+    export AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN AGENTGOV_DEMO_PASSWORD
     agentgov apply -f examples/manifests &&
       python examples/agents/demo_agent.py &&
       agentgov ledger verify &&

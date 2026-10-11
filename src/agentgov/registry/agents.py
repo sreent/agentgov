@@ -391,6 +391,10 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         "effective_model_access": model_providers.effective_model_access(agent),
         "daily_token_budget": agent.daily_token_budget,
         "effective_daily_token_budget": model_providers.effective_budget(agent),
+        # Who it acts for, and who decides approvals made for a person: its blueprint's.
+        "acts_for": agent.blueprint.acts_for if agent.blueprint else "either",
+        "people_groups": (agent.blueprint.people_groups or []) if agent.blueprint else [],
+        "approvals_by": agent.blueprint.approvals_by if agent.blueprint else "approvers",
         "agent_card": agent.agent_card,
         "external_ids": agent.external_ids or {},
         "source": agent.source,

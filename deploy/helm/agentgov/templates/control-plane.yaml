@@ -61,6 +61,14 @@ spec:
             - name: AGENTGOV_FEATURES
               value: {{ include "agentgov.features" $ | quote }}
             {{- end }}
+            {{- $apps := .Values.peopleApps }}
+            {{- if and .Values.keycloak.enabled .Values.keycloak.demoUsers }}
+            {{- $apps = append $apps "agentgov-demo-chat" }}
+            {{- end }}
+            {{- with $apps }}
+            - name: AGENTGOV_PEOPLE_APP_CLIENTS
+              value: {{ join "," . | quote }}
+            {{- end }}
             - name: AGENTGOV_PUBLIC_URL
               value: {{ .Values.urls.controlPlane | trimSuffix "/" | quote }}
             - name: AGENTGOV_GATEWAY_PUBLIC_URL

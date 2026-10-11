@@ -34,9 +34,8 @@ from agentgov.api import (
     registry_routes,
     sso_routes,
 )
-from agentgov.api.auth import Principal, require
+from agentgov.api.auth import Principal, signed_in
 from agentgov.config import Settings
-from agentgov.registry import apikeys
 from agentgov.registry.errors import RegistryError
 from agentgov.runtime import Runtime
 
@@ -138,7 +137,7 @@ def create_app(
         }
 
     @app.get("/v1/me", tags=["system"])
-    def whoami(principal: Principal = Depends(require(*apikeys.ROLES))) -> dict[str, Any]:
+    def whoami(principal: Principal = Depends(signed_in)) -> dict[str, Any]:
         """The caller's identity and roles, so clients can tailor what they offer."""
         return principal.describe()
 

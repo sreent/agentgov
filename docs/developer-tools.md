@@ -118,9 +118,10 @@ has reported for 90 days are forgotten. The `mcp-discovery` feature turns report
 ## Limits
 
 * Developers' clients reach a server through the gateway with an agent's token, which
-  coding assistants don't hold. Until the gateway accepts people's own tokens (step 3 of
-  the [roadmap](roadmap.md)), list for developers the servers they reach directly, and
-  packages.
+  coding assistants don't hold. Agents [act for people](acting-for-people.md) with a
+  token they get for the person, but the gateway doesn't take people's own tokens from
+  their MCP clients yet (see the [roadmap](roadmap.md)): list for developers the servers
+  they reach directly, and packages.
 * Copilot's registry enforcement matches servers by name, and GitHub notes that editing
   configuration files can get around it. The managed-settings allowlist matches by URL
   and command.

@@ -31,6 +31,7 @@ The decision carries `monitored`, and the ledger records it.
 | Tool not granted to the agent (least privilege) | deny, and hidden from `tools/list` | `least-privilege` |
 | Tool definition changed since it was approved (MCP rug pull) | deny until an admin approves the new definition | `tool-integrity` |
 | Tool description contains hidden instructions (tool poisoning) | deny, and hidden from `tools/list` | `tool-integrity` |
+| The agent acts for someone its blueprint doesn't allow (`acts_for`, `people_groups`), or for no one when it must act for a person | deny, and nothing in `tools/list` | `acting-for-people` |
 | Credentials in tool arguments | deny | `data-protection` |
 | Agent risk level is `critical` | deny (risk-based access) | `risk-based-access` |
 | Tool result contains a prompt-injection payload | result withheld | `prompt-injection` |
@@ -48,6 +49,8 @@ The decision carries `monitored`, and the ledger records it.
   "phase": "request",                       // or "response"
   "method": "tools/call",                   // also resources/read, prompts/get
   "agent": {"client_id": "agent-support-bot", "agent_id": "agt_…", "subject": "…"},
+  "user": {"id": "…", "username": "sam", "email": "sam@example.com",   // the person the agent
+           "groups": ["/support"], "roles": [], "via": "exchange"},      // acts for, if any
   "resource": {"server": "crm", "name": "delete_customer"},
   "arguments": {"customer_id": "c-003"},    // request phase only
   "detections": {
@@ -69,7 +72,8 @@ The decision carries `monitored`, and the ledger records it.
                         "owner": "cx-platform", "sponsors": ["alice@example.com"],
                         "labels": {"pii-access": "true"}, "environment": "prod",
                         "risk_tier": "medium", "risk_level": "low", "risk_score": 10,
-                        "grants": [{"server": "crm", "tools": ["get_*"]}]}},
+                        "grants": [{"server": "crm", "tools": ["get_*"]}],
+                        "acts_for": "either", "people_groups": []}},
   "clients": {"agent-support-bot": "agt_…"},
   "toolservers": {"crm": {"status": "approved", "trust_level": "verified",
                           "data_classification": "confidential", "labels": {},
@@ -81,9 +85,10 @@ The decision carries `monitored`, and the ledger records it.
 ```
 
 `data.agentgov.context` resolves the common lookups for you: `ctx.agent`, `ctx.server`,
-`ctx.tool`, `ctx.annotations`, `ctx.granted(server, tool)`, `ctx.label(name)`, and a
-feature's mode with `ctx.mode(feature)`, `ctx.enforced(feature)` and
-`ctx.monitored(feature)`.
+`ctx.tool`, `ctx.annotations`, `ctx.granted(server, tool)`, `ctx.label(name)`, the person
+the agent acts for with `ctx.user`, `ctx.user_name` and `ctx.member_of(group)`
+([acting for people](acting-for-people.md#in-policy)), and a feature's mode with
+`ctx.mode(feature)`, `ctx.enforced(feature)` and `ctx.monitored(feature)`.
 
 ## Writing an organisation policy
 
@@ -146,6 +151,7 @@ that holds something to decide on (`phase: "response"`). Its built-in rules:
 | Agent is not `active` | deny | always |
 | Model provider unknown or blocked | deny | always |
 | Model not granted to the agent (`model_access`) | deny | `least-privilege` |
+| The agent acts for someone its blueprint doesn't allow, or for no one when it must act for a person | deny | `acting-for-people` |
 | Credentials in the prompt | deny | `data-protection` |
 | Credentials in the answer | answer withheld | `data-protection` |
 | Personal data in a prompt to a provider whose `trust_level` is not `verified` | redact `pii` (masked before the prompt leaves) | `data-protection` |
@@ -164,6 +170,7 @@ as `data-protection` does. A model call can't wait for an approver, so
   "kind": "model",
   "phase": "request",                       // or "response"
   "agent": {"client_id": "agent-support-bot", "agent_id": "agt_…"},
+  "user": {"id": "…", "username": "sam", "groups": ["/support"], "via": "exchange"},  // if any
   "provider": "openai",
   "model": "gpt-4.1-mini",
   "detections": {"categories": ["pii"], "entities": ["EMAIL_ADDRESS"],

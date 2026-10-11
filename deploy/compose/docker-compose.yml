@@ -80,6 +80,9 @@ services:
       AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
       AGENTGOV_KEYCLOAK_ISSUER: http://localhost:8180/realms/agentgov
       AGENTGOV_KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/agentgov/protocol/openid-connect/certs
+      # The apps people use agents from (Keycloak clients), offered each agent's client
+      # scope so that agents can act for the people signed in (docs/acting-for-people.md).
+      AGENTGOV_PEOPLE_APP_CLIENTS: ${AGENTGOV_PEOPLE_APP_CLIENTS:-agentgov-demo-chat}
       # Administrator single sign-on through Keycloak (client agentgov-admin), or through
       # Microsoft Entra ID when AGENTGOV_OIDC_ISSUER names an Entra tenant (docs/platforms.md).
       AGENTGOV_OIDC_ISSUER: ${AGENTGOV_OIDC_ISSUER:-}

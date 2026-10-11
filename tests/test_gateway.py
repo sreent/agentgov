@@ -99,6 +99,10 @@ def test_every_route_is_authenticated_and_governed() -> None:
     assert processor["methods"]["tools/list"] == "response"
     assert processor["metadata"]["client_id"] == "jwt.azp"
     assert processor["metadata"]["request"] == "mcpGuardrails"
+    # The person the agent acts for, if any.
+    assert processor["metadata"]["username"] == "jwt.preferred_username"
+    assert processor["metadata"]["groups"] == "jwt.groups"
+    assert processor["metadata"]["act"] == "jwt.act"
     assert "authorization" in processor["requestHeaders"]["disallowed"]
 
 
@@ -151,6 +155,10 @@ class TestModelRoutes:
             assert webhook["failureMode"] == "failClosed"
             assert webhook["headers"]["x-agentgov-agent-id"] == "jwt.agent_id"
             assert webhook["headers"]["x-agentgov-provider"] == '"openai"'
+            # The person, lists and objects as JSON.
+            assert webhook["headers"]["x-agentgov-subject"] == "jwt.sub"
+            assert webhook["headers"]["x-agentgov-groups"] == "toJson(jwt.groups)"
+            assert webhook["headers"]["x-agentgov-act"] == "toJson(jwt.act)"
 
     def test_model_gateway_off_publishes_no_providers(self) -> None:
         config = render(servers(), SETTINGS, {"model-gateway": "off"}, providers())

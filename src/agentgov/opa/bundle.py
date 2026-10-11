@@ -98,6 +98,8 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
             "model_access": model_providers.effective_model_access(agent),
             "daily_token_budget": budget,
             "over_budget": model_usage.over_budget(budget, used.get(agent.id, 0)),
+            "acts_for": bp.acts_for if bp else "either",
+            "people_groups": (bp.people_groups or []) if bp else [],
         }
         if agent.client_id:
             clients[agent.client_id] = agent.id

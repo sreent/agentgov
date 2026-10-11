@@ -1,10 +1,18 @@
 """Keycloak as the agent identity provider (the open Entra Agent ID).
 
 Each registered agent gets its own confidential OAuth client in the AgentGov
-realm, with a service account for the client-credentials grant. Two protocol
-mappers put an ``agent_id`` claim and the gateway audience into every access
-token, which agentgateway validates before any tool call reaches the
-governance processor.
+realm, with a service account for the client-credentials grant. Protocol mappers
+put an ``agent_id`` claim, the gateway audience and the subject's groups into
+every access token, which agentgateway validates before any tool call reaches
+the governance processor.
+
+An agent that acts for people (its blueprint's ``acts_for`` isn't ``itself``) may
+exchange a person's token for one of its own whose subject is the person
+(Keycloak's standard token exchange, RFC 8693). Keycloak lets a client exchange
+only tokens issued for it, so each such agent also gets a client scope named after
+its client ID, which adds the agent to a token's audience. The apps people use
+agents from request that scope; ``AGENTGOV_PEOPLE_APP_CLIENTS`` names the apps it
+is offered to.
 
 The reconciler is level-triggered: it compares each agent's lifecycle state
 with its Keycloak client and converges them, so a missed notification or a
@@ -30,6 +38,7 @@ from agentgov.models import ACTIVE, DISCOVERED, Agent
 log = logging.getLogger(__name__)
 
 TOKEN_LIFESPAN_SECONDS = 300
+EXCHANGE = "standard.token.exchange.enabled"
 
 
 class KeycloakError(RuntimeError):
@@ -132,6 +141,50 @@ class KeycloakAdmin:
         )
         return resp.json()["value"]
 
+    def add_protocol_mapper(self, uuid: str, mapper: dict[str, Any]) -> None:
+        self._check(
+            self._request("POST", f"/clients/{uuid}/protocol-mappers/models", json=mapper),
+            "protocol mapper create",
+        )
+
+    def list_client_scopes(self) -> list[dict[str, Any]]:
+        return self._check(self._request("GET", "/client-scopes"), "client scope list").json()
+
+    def create_client_scope(self, representation: dict[str, Any]) -> str:
+        resp = self._request("POST", "/client-scopes", json=representation)
+        if resp.status_code == 409:
+            raise KeycloakConflict(f"client scope {representation['name']} already exists")
+        self._check(resp, "client scope create")
+        location = resp.headers.get("Location", "")
+        if location:
+            return location.rstrip("/").rsplit("/", 1)[-1]
+        created = next(
+            (c for c in self.list_client_scopes() if c.get("name") == representation["name"]),
+            None,
+        )
+        if created is None:
+            raise KeycloakError("client scope created but could not be found")
+        return created["id"]
+
+    def delete_client_scope(self, uuid: str) -> None:
+        """Delete a client scope, which also takes it off the clients that had it."""
+        resp = self._request("DELETE", f"/client-scopes/{uuid}")
+        if resp.status_code not in (204, 404):
+            self._check(resp, "client scope delete")
+
+    def optional_scopes(self, uuid: str) -> list[dict[str, Any]]:
+        resp = self._request("GET", f"/clients/{uuid}/optional-client-scopes")
+        return self._check(resp, "optional client scope list").json()
+
+    def add_optional_scope(self, uuid: str, scope_uuid: str) -> None:
+        resp = self._request("PUT", f"/clients/{uuid}/optional-client-scopes/{scope_uuid}")
+        self._check(resp, "optional client scope add")
+
+
+def acts_for_people(agent: Agent) -> bool:
+    """Whether the agent may act for people (its blueprint says so, or has no say)."""
+    return agent.blueprint is None or agent.blueprint.acts_for != "itself"
+
 
 def client_representation(agent: Agent, settings: Settings) -> dict[str, Any]:
     return {
@@ -153,6 +206,8 @@ def client_representation(agent: Agent, settings: Settings) -> dict[str, Any]:
             "agentgov.managed": "true",
             "access.token.lifespan": str(TOKEN_LIFESPAN_SECONDS),
             "client_credentials.use_refresh_token": "false",
+            # Exchanging a person's token for a token of its own, on their behalf.
+            EXCHANGE: "true" if acts_for_people(agent) else "false",
         },
         "protocolMappers": [
             {
@@ -182,8 +237,85 @@ def client_representation(agent: Agent, settings: Settings) -> dict[str, Any]:
                     "introspection.token.claim": "true",
                 },
             },
+            {
+                # The groups of the person the agent acts for, as their paths ("/support").
+                "name": "agentgov-groups",
+                "protocol": "openid-connect",
+                "protocolMapper": "oidc-group-membership-mapper",
+                "consentRequired": False,
+                "config": {
+                    "claim.name": "groups",
+                    "full.path": "true",
+                    "access.token.claim": "true",
+                    "id.token.claim": "false",
+                    "userinfo.token.claim": "false",
+                    "introspection.token.claim": "true",
+                },
+            },
         ],
     }
+
+
+def scope_representation(agent: Agent) -> dict[str, Any]:
+    """The client scope apps request for a person's token the agent can exchange."""
+    return {
+        "name": agent.client_id,
+        "description": f"Lets AgentGov agent {agent.name} act for the person signed in",
+        "protocol": "openid-connect",
+        "attributes": {
+            "agentgov.agent_id": agent.id,
+            "agentgov.managed": "true",
+            "include.in.token.scope": "true",
+            "display.on.consent.screen": "true",
+            "consent.screen.text": f"Let {agent.name} act for you",
+        },
+        "protocolMappers": [
+            {
+                "name": "agentgov-agent-audience",
+                "protocol": "openid-connect",
+                "protocolMapper": "oidc-audience-mapper",
+                "consentRequired": False,
+                "config": {
+                    "included.client.audience": agent.client_id,
+                    "access.token.claim": "true",
+                    "id.token.claim": "false",
+                    "introspection.token.claim": "true",
+                },
+            }
+        ],
+    }
+
+
+def _managed(representation: dict[str, Any]) -> bool:
+    return (representation.get("attributes") or {}).get("agentgov.managed") == "true"
+
+
+class _Scopes:
+    """The realm's client scopes and the people's apps, read at most once per pass."""
+
+    def __init__(self, admin: KeycloakAdmin, apps: list[str]) -> None:
+        self.admin = admin
+        self.app_ids = apps
+        self._by_name: dict[str, dict[str, Any]] | None = None
+        self._apps: list[tuple[str, set[str]]] | None = None
+
+    def by_name(self) -> dict[str, dict[str, Any]]:
+        if self._by_name is None:
+            self._by_name = {s["name"]: s for s in self.admin.list_client_scopes()}
+        return self._by_name
+
+    def apps(self) -> list[tuple[str, set[str]]]:
+        """Each people's app that exists: its UUID and the names of its optional scopes."""
+        if self._apps is None:
+            self._apps = []
+            for client_id in self.app_ids:
+                app = self.admin.find_client(client_id)
+                if app is None:
+                    log.warning("AGENTGOV_PEOPLE_APP_CLIENTS: no Keycloak client %s", client_id)
+                    continue
+                names = {s["name"] for s in self.admin.optional_scopes(app["id"])}
+                self._apps.append((app["id"], names))
+        return self._apps
 
 
 class IdentityReconciler:
@@ -198,14 +330,14 @@ class IdentityReconciler:
         self._sync_lock = threading.Lock()
 
     # -- convergence --------------------------------------------------------
-    def sync(self, agent: Agent) -> None:
+    def sync(self, agent: Agent, scopes: _Scopes | None = None) -> None:
         """Converge one agent's Keycloak client with its lifecycle state."""
         if agent.status == DISCOVERED or not agent.client_id:
             return
         with self._sync_lock:
-            self._sync(agent)
+            self._sync(agent, scopes or _Scopes(self.admin, self.settings.people_apps()))
 
-    def _sync(self, agent: Agent) -> None:
+    def _sync(self, agent: Agent, scopes: _Scopes) -> None:
         existing = self.admin.find_client(agent.client_id or "")
         if existing is None:
             if agent.status != ACTIVE:
@@ -224,10 +356,12 @@ class IdentityReconciler:
         if existing is not None:
             agent.idp_client_uuid = existing["id"]
             desired = client_representation(agent, self.settings)
+            attributes = existing.get("attributes") or {}
             if (
                 existing.get("enabled") != desired["enabled"]
                 or existing.get("description", "") != desired["description"]
-                or (existing.get("attributes") or {}).get("agentgov.agent_id") != agent.id
+                or attributes.get("agentgov.agent_id") != agent.id
+                or attributes.get(EXCHANGE, "false") != desired["attributes"][EXCHANGE]
             ):
                 merged = {
                     **existing,
@@ -241,15 +375,45 @@ class IdentityReconciler:
                 log.info(
                     "updated Keycloak client %s (enabled=%s)", agent.client_id, desired["enabled"]
                 )
+            # Clients made by earlier versions lack the mappers added since.
+            present = {m.get("name") for m in existing.get("protocolMappers") or []}
+            for mapper in desired["protocolMappers"]:
+                if mapper["name"] not in present:
+                    self.admin.add_protocol_mapper(existing["id"], mapper)
+        if agent.idp_client_uuid:
+            self._sync_people_scope(agent, scopes)
         agent.identity_synced_at = ids.utcnow()
         agent.identity_error = None
 
+    def _sync_people_scope(self, agent: Agent, scopes: _Scopes) -> None:
+        """The agent's client scope, offered to the people's apps, while it acts for people."""
+        name = agent.client_id or ""
+        scope = scopes.by_name().get(name)
+        if scope is not None and not _managed(scope):
+            raise KeycloakError(f"client scope {name} exists, and AgentGov didn't make it")
+        if not acts_for_people(agent):
+            if scope is not None:
+                self.admin.delete_client_scope(scope["id"])
+                del scopes.by_name()[name]
+                log.info("removed client scope %s: %s acts only for itself", name, agent.name)
+            return
+        if scope is None:
+            representation = scope_representation(agent)
+            scope = {**representation, "id": self.admin.create_client_scope(representation)}
+            scopes.by_name()[name] = scope
+            log.info("created client scope %s for agent %s", name, agent.name)
+        for app_uuid, optional in scopes.apps():
+            if name not in optional:
+                self.admin.add_optional_scope(app_uuid, scope["id"])
+                optional.add(name)
+
     def reconcile_all(self) -> dict[str, int]:
         synced = failed = 0
+        scopes = _Scopes(self.admin, self.settings.people_apps())
         with self.db.session() as session:
             for agent in session.scalars(select(Agent).where(Agent.status != DISCOVERED)).unique():
                 try:
-                    self.sync(agent)
+                    self.sync(agent, scopes)
                     synced += 1
                 except (KeycloakError, httpx.HTTPError) as exc:
                     failed += 1
@@ -281,6 +445,9 @@ class IdentityReconciler:
             existing = self.admin.find_client(agent.client_id)
             if existing is not None:
                 self.admin.delete_client(existing["id"])
+            scope = _Scopes(self.admin, []).by_name().get(agent.client_id)
+            if scope is not None and _managed(scope):
+                self.admin.delete_client_scope(scope["id"])
 
     # -- background worker --------------------------------------------------
     def trigger(self) -> None:

@@ -33,6 +33,9 @@ from agentgov.models import AdminSession, CliLogin, LoginState
 
 # AgentGov roles a person can hold through single sign-on, most privileged first.
 SSO_ROLES = ("admin", "approver", "auditor", "registrar")
+# Someone without an AgentGov role, signed in to decide the approval requests sent to
+# them (the approvals-by-person feature).
+PERSON = "person"
 LOGIN_TTL = timedelta(minutes=10)
 # How long the CLI has to collect its session once the person has signed in.
 CLI_CODE_TTL = timedelta(minutes=2)

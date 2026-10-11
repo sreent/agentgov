@@ -16,7 +16,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 
 from agentgov import ids, ledger
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.models import (
     DELETED,
     DISCOVERED,
@@ -50,12 +50,29 @@ def list_approvals(
         return [approvals.to_dict(r) for r in approvals.list_requests(s, status=status)]
 
 
+@router.get("/me/approvals", tags=["approvals"])
+def my_approvals(
+    request: Request, status: str | None = None, principal: Principal = Depends(signed_in)
+) -> list[dict[str, Any]]:
+    """The approval requests sent to the person signed in: those an agent made while it
+    acted for them, where its blueprint sends them to the person."""
+    with _rt(request).db.session() as s:
+        rows = approvals.list_for_person(s, principal.subject, status=status)
+        return [approvals.to_dict(r) for r in rows]
+
+
 @router.get("/approvals/{approval_id}", tags=["approvals"])
 def get_approval(
-    request: Request, approval_id: str, _: Principal = Depends(read)
+    request: Request, approval_id: str, principal: Principal = Depends(signed_in)
 ) -> dict[str, Any]:
     with _rt(request).db.session() as s:
-        return approvals.to_dict(approvals.get(s, approval_id))
+        req = approvals.get(s, approval_id)
+        # Everyone who reads AgentGov, and the person it was sent to.
+        if not principal.roles & set(READ_ROLES) and not approvals.may_decide(
+            req, principal.roles, principal.subject
+        ):
+            raise HTTPException(403, f"role {principal.role!r} may not do this")
+        return approvals.to_dict(req)
 
 
 @router.post("/approvals/{approval_id}/{verdict}", tags=["approvals"])
@@ -64,17 +81,21 @@ def decide_approval(
     approval_id: str,
     verdict: str,
     body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(require("approver")),
+    principal: Principal = Depends(signed_in),
 ) -> dict[str, Any]:
     if verdict not in ("approve", "deny"):
         raise HTTPException(404, "verdict must be approve or deny")
     with _rt(request).db.session() as s:
+        req = approvals.get(s, approval_id)
+        if not approvals.may_decide(req, principal.roles, principal.subject):
+            who = (
+                f"{req.on_behalf_of}, whom the agent acted for,"
+                if req.deciders == approvals.PERSON
+                else "an approver"
+            )
+            raise HTTPException(403, f"{who} or an administrator decides this request")
         req = approvals.decide(
-            s,
-            approvals.get(s, approval_id),
-            approve=verdict == "approve",
-            actor=principal.actor,
-            note=body.get("note"),
+            s, req, approve=verdict == "approve", actor=principal.actor, note=body.get("note")
         )
         return approvals.to_dict(req)
 
@@ -134,6 +155,7 @@ def list_ledger(
     request: Request,
     type: str | None = None,
     agent: str | None = None,
+    user: str | None = None,
     decision: str | None = None,
     before_seq: int | None = None,
     limit: int = 100,
@@ -145,6 +167,9 @@ def list_ledger(
             stmt = stmt.where(LedgerEntry.type.like(type.replace("*", "%")))
         if agent:
             stmt = stmt.where(LedgerEntry.agent_id == agents.get(s, agent).id)
+        if user:
+            # The person an agent acted for.
+            stmt = stmt.where(LedgerEntry.on_behalf_of == user)
         if decision == "monitored":
             # Calls that went through because a control was in monitor mode.
             stmt = stmt.where(LedgerEntry.reason.like("monitored:%"))

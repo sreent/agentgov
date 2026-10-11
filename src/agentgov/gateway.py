@@ -76,12 +76,31 @@ GUARDED_METHODS = {
 # validated the token. Missing values are simply omitted. "request" carries the
 # metadata the processor returned for the request (agentgateway exposes it to
 # CEL as mcpGuardrails), which tells the response side which tool was called.
+# When the agent acts for a person, the token's subject is the person: their name,
+# email address, groups and realm roles come with it, and "act" names the agent if
+# the person delegated to it (agentgov.identity.people).
 IDENTITY_METADATA = {
     "client_id": "jwt.azp",
     "agent_id": "jwt.agent_id",
     "subject": "jwt.sub",
     "token_id": "jwt.jti",
+    "username": "jwt.preferred_username",
+    "email": "jwt.email",
+    "groups": "jwt.groups",
+    "roles": "jwt.realm_access.roles",
+    "act": "jwt.act",
     "request": "mcpGuardrails",
+}
+
+# The same for model calls, whose guardrail webhook takes them as headers: lists and
+# objects as JSON.
+PERSON_HEADERS = {
+    "x-agentgov-subject": "jwt.sub",
+    "x-agentgov-username": "jwt.preferred_username",
+    "x-agentgov-email": "jwt.email",
+    "x-agentgov-groups": "toJson(jwt.groups)",
+    "x-agentgov-roles": "toJson(jwt.realm_access.roles)",
+    "x-agentgov-act": "toJson(jwt.act)",
 }
 
 
@@ -159,6 +178,7 @@ def model_route_for(
         "x-agentgov-client-id": "jwt.azp",
         "x-agentgov-provider": f'"{name}"',
         "x-agentgov-model": "llmRequest.model",
+        **PERSON_HEADERS,
     }
     webhook = {"host": settings.processor_webhook_address}
     policies.update(

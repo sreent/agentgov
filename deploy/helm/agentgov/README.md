@@ -26,7 +26,8 @@ agentgov apply -f examples/manifests
 ```
 
 Then open <http://localhost:8000/ui>. The demo users `admin`, `alice` and `audrey` sign in
-with the `demo-password` from the same Secret.
+with the `demo-password` from the same Secret, and `sam`, a person agents act for, signs
+in to the demo app `agentgov-demo-chat` ([acting for people](../../../docs/acting-for-people.md)).
 
 The image is published to `ghcr.io/sreent/agentgov` for each release. To run a build of
 your own, push it to a registry the cluster can pull from and set `image.repository` and
@@ -64,7 +65,8 @@ The defaults are for evaluation. Before anyone else relies on the installation:
   only from AgentGov's own parts. Agents that use the Agent Governance Toolkit query OPA
   directly: allow them with a policy of your own.
 * **Turn off the demo users** (`keycloak.demoUsers=false`) if you keep the bundled
-  Keycloak.
+  Keycloak. That also leaves out the demo app `agentgov-demo-chat`, where people sign in
+  with their password. Name your own apps people use agents from in `peopleApps`.
 
 ## Settings
 
@@ -101,7 +103,8 @@ controlPlane:
 | `otelCollector.enabled` | `true` | Receive agents' traces (OTLP) for discovery and activity |
 | `postgresql.enabled` | `true` | The bundled PostgreSQL; otherwise `externalDatabase` |
 | `keycloak.enabled` | `true` | The bundled Keycloak (development mode); otherwise `externalKeycloak` |
-| `keycloak.demoUsers` | `true` | Import the demo users |
+| `keycloak.demoUsers` | `true` | Import the demo users and the demo app `agentgov-demo-chat` |
+| `peopleApps` | `[]` | Keycloak clients of the apps people use agents from: AgentGov offers them each agent's client scope ([acting for people](../../../docs/acting-for-people.md)) |
 | `networkPolicy.enabled` | `false` | Restrict traffic between AgentGov's parts |
 | `modelKeys.existingSecret`, `modelKeys.keys` | — | Model providers' API keys, one per provider name, for the gateway only ([model calls](../../../docs/models.md)) |
 

@@ -107,6 +107,22 @@ CATALOG: tuple[Feature, ...] = (
         },
     ),
     Feature(
+        "acting-for-people",
+        "Acting for people",
+        "controls",
+        "Agents act for the people their blueprints allow: some act only for a person, with "
+        "a token they got for that person, some only on their own, and some only for people "
+        "in certain groups.",
+        CONTROL,
+        ENFORCE,
+        {
+            ENFORCE: "Calls for people a blueprint doesn't allow, or without the person it "
+            "requires, are refused.",
+            MONITOR: "They go through and are recorded.",
+            OFF: "Who agents act for isn't checked. The ledger still records the person.",
+        },
+    ),
+    Feature(
         "approvals",
         "Human approval",
         "controls",
@@ -119,6 +135,23 @@ CATALOG: tuple[Feature, ...] = (
             MONITOR: "They go through and are recorded as needing approval.",
             OFF: "Nothing waits for approval.",
         },
+    ),
+    Feature(
+        "approvals-by-person",
+        "Approvals by the person",
+        "controls",
+        "Approval requests an agent makes while it acts for a person go to that person, where "
+        "its blueprint says so. People sign in to AgentGov to decide them, people without an "
+        "AgentGov role too: they see only the requests sent to them.",
+        SWITCH,
+        OFF,
+        {
+            ON: "Such requests wait for the person, who signs in to decide them. "
+            "Administrators can decide them too.",
+            OFF: "Approvers decide every request, and people without an AgentGov role can't "
+            "sign in.",
+        },
+        needs="AgentGov's single sign-on through the Keycloak realm that issues agents' tokens",
     ),
     Feature(
         "data-protection",

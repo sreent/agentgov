@@ -188,6 +188,67 @@ def test_python_snapshot_matches_rego_expectations(
     assert decision["effect"] == effect, decision
 
 
+def _decide(rt, tmp_path: Path, inp: dict, path: str = "data.agentgov.mcp.decision") -> dict:
+    """What the real bundle decides, evaluated by real OPA."""
+    bundle_path = tmp_path / "bundle.tar.gz"
+    bundle_path.write_bytes(rt.bundles.current().body)
+    (tmp_path / "input.json").write_text(json.dumps(inp))
+    proc = subprocess.run(
+        ["opa", "eval", "--format", "json", "--bundle", str(bundle_path),
+         "--input", str(tmp_path / "input.json"), path],
+        capture_output=True,
+        text=True,
+        check=True,
+    )  # fmt: skip
+    return json.loads(proc.stdout)["result"][0]["expressions"][0]["value"]
+
+
+@requires_opa
+def test_who_agents_act_for_reaches_policy(rt, settings, tmp_path: Path) -> None:
+    """Blueprints' acts_for and people_groups, and the person in organisation policies."""
+    _seed(rt, settings)
+    with rt.db.session() as s:
+        blueprints.update(
+            s,
+            blueprints.get(s, "support"),
+            {"acts_for": "people", "people_groups": ["support"]},
+            actor="t",
+        )
+        policies.create(
+            s,
+            {
+                "name": "no-deletes-for-contractors",
+                "rego": "package agentgov.custom.no_deletes_for_contractors\n\n"
+                'deny contains "Contractors may not delete" if {\n'
+                '  "/contractors" in input.user.groups\n'
+                '  startswith(input.resource.name, "delete_")\n}\n',
+            },
+            actor="t",
+        )
+    call = {
+        "phase": "request",
+        "method": "tools/call",
+        "agent": {"client_id": "agent-bot"},
+        "resource": {"server": "crm", "name": "get_customer"},
+        "detections": {"categories": []},
+    }
+    alice = {"id": "u-1", "username": "alice", "groups": ["/support"], "via": "exchange"}
+    assert _decide(rt, tmp_path, {**call, "user": alice})["effect"] == "allow"
+    alone = _decide(rt, tmp_path, call)
+    assert alone["reasons"] == [
+        "Agent bot acts only for people, and this call is on no one's behalf"
+    ]
+    bob = {"id": "u-2", "username": "bob", "groups": ["/sales"], "via": "exchange"}
+    assert _decide(rt, tmp_path, {**call, "user": bob})["reasons"] == [
+        "Agent bot acts only for people in support, and bob is in none of them"
+    ]
+    contractor = {**alice, "groups": ["/support", "/contractors"]}
+    delete = {**call, "resource": {"server": "crm", "name": "delete_customer"}}
+    assert _decide(rt, tmp_path, {**delete, "user": contractor})["reasons"] == [
+        "Contractors may not delete"
+    ]
+
+
 @requires_opa
 def test_custom_policy_is_validated_and_shipped(rt, settings) -> None:
     _seed(rt, settings)

@@ -8,6 +8,8 @@
 #   phase:      "request" | "response"
 #   method:     MCP method, e.g. "tools/call"
 #   agent:      {"agent_id", "client_id", "subject"}  (from the validated JWT)
+#   user:       the person the agent acts for, if any (see agentgov.context):
+#               {"id", "username", "email", "groups", "roles", "via"}
 #   resource:   {"server", "name"}
 #   arguments:  tool arguments (request phase)
 #   detections: {"categories": ["pii","secret"], "entities": [...],
@@ -92,6 +94,13 @@ violation contains {
 } if {
 	phase == "request"
 	"secret" in categories
+}
+
+# Who the agent acts for, as its blueprint says.
+violation contains {"control": "acting-for-people", "effect": "deny", "message": msg} if {
+	phase == "request"
+	ctx.agent.status == "active"
+	some msg in ctx.person_refusals
 }
 
 # Risk-based access, like Conditional Access for risky agents.
@@ -224,6 +233,7 @@ visible_tools contains tool.name if {
 	ctx.agent.status == "active"
 	ctx.server.status == "approved"
 	not refused_for_risk
+	not refused_for_person
 	some tool in input.tools
 	may_see(tool.name)
 	not quarantined(tool.name)
@@ -232,6 +242,12 @@ visible_tools contains tool.name if {
 refused_for_risk if {
 	ctx.enforced("risk-based-access")
 	ctx.agent.risk_level == "critical"
+}
+
+# The agent may call no tool for this person (or without one).
+refused_for_person if {
+	ctx.enforced("acting-for-people")
+	count(ctx.person_refusals) > 0
 }
 
 # Monitored or off, least privilege hides nothing: agents may call every tool.

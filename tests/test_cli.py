@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from agentgov import cli
-from tests.conftest import ADMIN, requires_opa, seed
+from tests.conftest import ADMIN, SERVICE, requires_opa, seed
 
 runner = CliRunner()
 
@@ -110,6 +110,23 @@ class TestRegistry:
         bp = client.get("/v1/blueprints/research", headers=ADMIN).json()
         assert (bp["attestation_days"], bp["require_sponsor"]) == (None, True)
         assert "research" in ok(agentgov("blueprints", "list"))
+        # Who its agents act for.
+        ok(
+            agentgov(
+                "blueprints", "update", "research", "--acts-for", "people",
+                "--people-groups", "support,/emea/sales", "--approvals-by", "person",
+            )
+        )  # fmt: skip
+        bp = client.get("/v1/blueprints/research", headers=ADMIN).json()
+        assert (bp["acts_for"], bp["people_groups"], bp["approvals_by"]) == (
+            "people",
+            ["support", "/emea/sales"],
+            "person",
+        )
+        ok(agentgov("blueprints", "update", "research", "--all-people"))
+        assert client.get("/v1/blueprints/research", headers=ADMIN).json()["people_groups"] == []
+        bad = agentgov("blueprints", "update", "research", "--acts-for", "anyone")
+        assert bad.exit_code == 1 and "acts_for must be one of" in bad.output
         ok(agentgov("blueprints", "delete", "research", "--yes"))
         assert client.get("/v1/blueprints/research", headers=ADMIN).status_code == 404
 
@@ -166,6 +183,41 @@ class TestLedger:
         assert len(lines) == len(client.get("/v1/ledger", headers=ADMIN).json())
         assert all(line.startswith("{") for line in lines)
         assert '"valid": true' in ok(agentgov("ledger", "verify"))
+
+    def test_what_agents_did_for_a_person(self, client, agentgov) -> None:
+        agent = seed(client)
+        record = {
+            "phase": "request",
+            "resource": "crm/get_customer",
+            "agent": {"id": agent["id"]},
+            "effect": "allow",
+            "user": {"id": "u-1", "username": "alice", "via": "exchange"},
+        }
+        client.post("/v1/internal/decisions", json={"records": [record]}, headers=SERVICE)
+        tail = ok(agentgov("ledger", "tail", "--user", "alice"))
+        assert "decision.request" in tail and "alice" in tail
+        assert "agent.registered" not in tail
+
+
+class TestApprovals:
+    def test_list_decide_and_mine(self, client, agentgov) -> None:
+        agent = seed(client)
+        check = {
+            "agent_id": agent["id"],
+            "action": "tools/call",
+            "resource": "crm/delete_customer",
+            "arguments": {"id": "c-1"},
+            "reasons": ["destructive"],
+            "user": {"id": "u-1", "username": "alice", "via": "exchange"},
+        }
+        held = client.post("/v1/internal/approvals/check", json=check, headers=SERVICE).json()
+        approval_id = held["approval"]["id"]
+        out = ok(agentgov("approvals", "list"))
+        assert approval_id in out and "alice" in out
+        # The bootstrap administrator is nobody agents act for.
+        assert approval_id not in ok(agentgov("approvals", "list", "--mine"))
+        assert "approved" in ok(agentgov("approvals", "approve", approval_id, "--note", "ok"))
+        assert approval_id in ok(agentgov("approvals", "list", "--status", "all"))
 
 
 class TestApiKeys:
