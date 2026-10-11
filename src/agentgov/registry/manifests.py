@@ -2,7 +2,8 @@
 
 ```yaml
 apiVersion: agentgov/v1alpha1
-kind: Agent            # Feature | Blueprint | ToolServer | ModelProvider | Policy | Agent
+kind: Agent            # Feature | IdentityIssuer | Blueprint | ToolServer | ModelProvider |
+                       # Policy | Agent
 metadata:
   name: support-bot
 spec:
@@ -18,8 +19,8 @@ A ``Feature`` sets how strictly one of AgentGov's features applies
 (docs/features.md): ``metadata.name`` is the feature, ``spec.mode`` its mode.
 
 Applying is idempotent: unchanged resources are reported as ``unchanged``.
-Resources are applied in dependency order (features first, then blueprints and
-tool servers before the agents and policies that reference them).
+Resources are applied in dependency order (features first, then identity issuers,
+blueprints and tool servers before the agents and policies that reference them).
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from agentgov.registry import (
     agents,
     blueprints,
     features,
+    identity_issuers,
     instructions,
     model_providers,
     policies,
@@ -43,7 +45,7 @@ from agentgov.registry import (
 from agentgov.registry.errors import NotFound, ValidationError
 
 API_VERSION = "agentgov/v1alpha1"
-ORDER = ["Feature", "Blueprint", "ToolServer", "ModelProvider", "Policy", "Agent"]
+ORDER = ["Feature", "IdentityIssuer", "Blueprint", "ToolServer", "ModelProvider", "Policy", "Agent"]
 
 
 def parse(text: str) -> list[dict[str, Any]]:
@@ -87,6 +89,7 @@ def apply(
         name = spec["name"]
         action = {
             "Feature": _feature,
+            "IdentityIssuer": _identity_issuer,
             "Blueprint": _blueprint,
             "ToolServer": _toolserver,
             "ModelProvider": _model_provider,
@@ -105,6 +108,24 @@ def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: 
     except NotFound as exc:
         raise ValidationError(str(exc)) from None
     return "configured" if changed else "unchanged"
+
+
+def _identity_issuer(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    desired = spec.pop("status", identity_issuers.APPROVED)
+    if desired not in (identity_issuers.APPROVED, BLOCKED):
+        raise ValidationError(f"identity issuer {spec['name']}: status must be approved or blocked")
+    try:
+        issuer = identity_issuers.get(session, spec["name"])
+        changed = identity_issuers.update(session, issuer, spec, actor=actor)
+        action = "configured" if changed else "unchanged"
+    except NotFound:
+        issuer = identity_issuers.create(session, spec, actor=actor)
+        action = "created"
+    if issuer.status != desired:
+        verb = "block" if desired == BLOCKED else "unblock"
+        identity_issuers.set_status(session, issuer, verb, actor=actor)
+        action = "configured" if action == "unchanged" else action
+    return action
 
 
 def _blueprint(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
@@ -212,6 +233,11 @@ def export(session: Session) -> list[dict[str, Any]]:
     docs: list[dict[str, Any]] = [
         _doc("Feature", key, {"mode": mode}) for key, mode in features.chosen(session).items()
     ]
+    for issuer in identity_issuers.list_all(session):
+        d = identity_issuers.to_dict(issuer)
+        spec = {k: d[k] for k in identity_issuers.FIELDS if d[k] not in (None, "", {}, False)}
+        spec["status"] = issuer.status
+        docs.append(_doc("IdentityIssuer", issuer.name, spec))
     for bp in blueprints.list_all(session):
         d = blueprints.to_dict(bp)
         docs.append(_doc("Blueprint", bp.name, {k: d[k] for k in blueprints.FIELDS}))
@@ -245,6 +271,8 @@ def export(session: Session) -> list[dict[str, Any]]:
             continue
         d = agents.to_dict(agent)
         spec = {k: d[k] for k in agents.EDITABLE if k in d and d[k] not in (None, [], {})}
+        if d["workload_identity"]:
+            spec["workload_identity"] = d["workload_identity"]
         spec["status"] = agent.status
         registered = session.get(AgentInstructions, f"{agent.id}:registered")
         if registered is not None and not registered.truncated:

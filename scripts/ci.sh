@@ -31,7 +31,7 @@ KUBECTL_VERSION=1.34.1
 CHART=deploy/helm/agentgov
 AGENTGATEWAY_IMAGE=ghcr.io/agentgateway/agentgateway:v1.6.0
 COMPOSE=(docker compose -p agentgov-ci -f deploy/compose/docker-compose.yml)
-E2E_PORTS=(8000 8080 8180 8181 4317 4318)
+E2E_PORTS=(8000 8080 8180 8181 4317 4318 9200)
 
 lint=1 tests=1 chart=1 image=1 e2e=0 kind=0 matrix=0 keep=0 setup_only=0
 for arg in "$@"; do
@@ -307,6 +307,14 @@ e2e_logs() {
   "${COMPOSE[@]}" logs --no-color --tail 100 || true
 }
 
+# The control plane's image and the demo's stand-ins: a tool server, a model provider
+# and a workload identity issuer.
+build_demo_images() {
+  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm &&
+    docker_build agentgov-demo-model:local examples/models/mock &&
+    docker_build agentgov-demo-issuer:local examples/identity/workload-issuer
+}
+
 end_to_end() {
   local port busy=() rc=0
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -318,9 +326,7 @@ end_to_end() {
     echo "  docker compose -f deploy/compose/docker-compose.yml down"
     return 1
   fi
-  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm &&
-    docker_build agentgov-demo-model:local examples/models/mock ||
-    return 1
+  build_demo_images || return 1
   echo "starting the stack (project agentgov-ci)"
   if ! "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout 600 >/dev/null; then
     e2e_logs
@@ -345,16 +351,14 @@ end_to_end() {
 chart_on_docker() {
   local rendered rc=0 busy=() port
   setup_chart_tools || return 1
-  for port in 8000 8080 8180 4318; do
+  for port in 8000 8080 8180 4318 9200; do
     if port_in_use "$port"; then busy+=("$port"); fi
   done
   if [ ${#busy[@]} -gt 0 ]; then
     echo "ports in use: ${busy[*]}; stop what uses them first"
     return 1
   fi
-  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm &&
-    docker_build agentgov-demo-model:local examples/models/mock ||
-    return 1
+  build_demo_images || return 1
   rendered=$(mktemp)
   helm template agentgov "$CHART" --set image.repository=agentgov --set image.tag=local \
     --set image.pullPolicy=Never --set presidio.image.tag=2.2.364 \
@@ -417,11 +421,10 @@ kind_end_to_end() {
   )
   setup_chart_tools && setup_kind_tools || return 1
   kind delete cluster --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
-  docker_build agentgov:local . && docker_build agentgov-demo-crm:local examples/mcp-servers/crm &&
-    docker_build agentgov-demo-model:local examples/models/mock ||
-    return 1
+  build_demo_images || return 1
   kind create cluster --name "$KIND_CLUSTER" --wait 180s || return 1
-  for image in agentgov-demo-crm:local agentgov-demo-model:local $(helm template agentgov "$CHART" "${values[@]}" |
+  for image in agentgov-demo-crm:local agentgov-demo-model:local agentgov-demo-issuer:local \
+    $(helm template agentgov "$CHART" "${values[@]}" |
     awk '$1 == "image:" { gsub(/"/, "", $2); print $2 }' | sort -u); do
     if ! { docker image inspect "$image" >/dev/null 2>&1 || docker pull --quiet "$image" >/dev/null; } ||
       ! kind load docker-image --name "$KIND_CLUSTER" "$image" >/dev/null; then
@@ -471,6 +474,28 @@ metadata: {name: demo-model}
 spec:
   selector: {app: demo-model}
   ports: [{port: 9100}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: workload-issuer}
+spec:
+  selector: {matchLabels: {app: workload-issuer}}
+  template:
+    metadata: {labels: {app: workload-issuer}}
+    spec:
+      containers:
+        - name: issuer
+          image: "agentgov-demo-issuer:local"
+          imagePullPolicy: Never
+          ports: [{containerPort: 9200}]
+          env: [{name: ISSUER, value: "http://workload-issuer:9200"}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: workload-issuer}
+spec:
+  selector: {app: workload-issuer}
+  ports: [{port: 9200}]
 EOF
   fi
   if [ "$rc" = 0 ]; then
@@ -478,12 +503,13 @@ EOF
     helm install agentgov "$CHART" -n "$KIND_NAMESPACE" "${values[@]}" --wait --timeout 15m || rc=1
   fi
   if [ "$rc" = 0 ]; then
-    for forward in control-plane:8000:8000 gateway:8080:8080 keycloak:8180:8080 otel-collector:4318:4318; do
+    for forward in agentgov-control-plane:8000:8000 agentgov-gateway:8080:8080 \
+      agentgov-keycloak:8180:8080 agentgov-otel-collector:4318:4318 workload-issuer:9200:9200; do
       IFS=: read -r service local remote <<<"$forward"
-      kubectl -n "$KIND_NAMESPACE" port-forward "svc/agentgov-$service" "$local:$remote" >/dev/null &
+      kubectl -n "$KIND_NAMESPACE" port-forward "svc/$service" "$local:$remote" >/dev/null &
       pids+=($!)
     done
-    for port in 8000 8080 8180 4318; do wait_port "$port" || rc=1; done
+    for port in 8000 8080 8180 4318 9200; do wait_port "$port" || rc=1; done
   fi
   if [ "$rc" = 0 ]; then
     AGENTGOV_TOKEN=$(kubectl -n "$KIND_NAMESPACE" get secret agentgov \

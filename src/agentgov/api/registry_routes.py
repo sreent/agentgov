@@ -15,6 +15,7 @@ from agentgov.registry import (
     apikeys,
     blueprints,
     features,
+    identity_issuers,
     instructions,
     platforms,
     policies,
@@ -136,7 +137,8 @@ def agent_credentials(
     body: dict[str, Any] = Body(default={}),
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
-    """Return the agent's OAuth client credentials (``rotate: true`` issues a new secret)."""
+    """Return the agent's OAuth client credentials (``rotate: true`` issues a new secret), or,
+    for an agent with a workload identity, what token authenticates it instead."""
     rt = _rt(request)
     if rt.identity is None:
         raise HTTPException(409, "identity provider integration is not configured")
@@ -144,6 +146,10 @@ def agent_credentials(
         agent = agents.get(s, ref)
         if agent.status != ACTIVE:
             raise Conflict("credentials are only issued to active agents")
+        if agent.workload_issuer and body.get("rotate"):
+            raise Conflict(
+                "the agent has no secret to rotate: it authenticates with its workload identity"
+            )
         try:
             creds = rt.identity.credentials(agent, rotate=bool(body.get("rotate")))
         except KeycloakError as exc:
@@ -153,6 +159,13 @@ def agent_credentials(
                 rt.settings.keycloak_issuer.rstrip("/") + "/protocol/openid-connect/token"
             )
         creds["audience"] = rt.settings.gateway_audience
+        if creds.get("method") == "workload-identity":
+            # What its issuer's token must look like to authenticate it. Nothing here is
+            # secret, so reading it isn't recorded.
+            issuer = identity_issuers.get(s, creds["issuer"])
+            creds["assertion_type"] = identity_issuers.assertion_type(issuer)
+            creds["assertion_audience"] = issuer.audience or rt.settings.keycloak_issuer
+            return creds
         ledger.append(
             s,
             type="agent.credentials_rotated" if body.get("rotate") else "agent.credentials_read",

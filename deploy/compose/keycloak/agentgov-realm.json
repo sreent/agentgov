@@ -73,7 +73,9 @@
         "realm-management": [
           "manage-clients",
           "view-clients",
-          "query-clients"
+          "query-clients",
+          "manage-identity-providers",
+          "view-identity-providers"
         ]
       }
     },

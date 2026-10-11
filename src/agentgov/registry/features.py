@@ -43,6 +43,7 @@ GROUPS = {
     "controls": "Controls at the gateway",
     "detection": "Detection",
     "developers": "Developer tools",
+    "identity": "Identity",
     "lifecycle": "Lifecycle",
     "microsoft": "Microsoft",
 }
@@ -321,6 +322,23 @@ CATALOG: tuple[Feature, ...] = (
             ON: "Reports are taken, and unapproved servers raise findings.",
             OFF: "Reports are refused. Findings already raised stay until resolved.",
         },
+    ),
+    Feature(
+        "workload-identity",
+        "Agents' own identities",
+        "identity",
+        "Agents authenticate with an identity they already have, such as a Kubernetes "
+        "service account, a SPIFFE ID or a Microsoft Entra Agent ID, from identity issuers an "
+        "administrator approves, instead of a client secret.",
+        SWITCH,
+        ON,
+        {
+            ON: "Agents with a workload identity authenticate with their issuer's tokens.",
+            OFF: "No issuer is trusted: agents with a workload identity can't authenticate "
+            "until it is on again.",
+        },
+        needs="Keycloak 26.6 or later, whose service account for AgentGov may manage identity "
+        "providers; SPIFFE issuers need Keycloak's spiffe preview feature",
     ),
     Feature(
         "registration-approval",

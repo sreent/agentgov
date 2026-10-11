@@ -68,6 +68,12 @@ Modes run from the weakest to the strongest. The default is in bold.
 | `mcp-registry` | **off**, on | Serves the tool servers listed for developers as an MCP registry at `<control plane>/registry`, which GitHub Copilot and VS Code read to offer developers only approved MCP servers ([developer tools](developer-tools.md)). Its readers have no credentials, so the registry is served without them: it is off until you turn it on |
 | `mcp-discovery` | off, **on** | Takes reports of the MCP servers set up on developers' machines (`agentgov mcp scan --report`), compares them with the approved tool servers, and raises findings for those that aren't approved, that skip the gateway or that are blocked. Off, reports are refused; findings already raised stay until resolved |
 
+### Identity
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `workload-identity` | off, **on** | Agents authenticate with an identity they already have, such as a Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID, from the identity issuers an administrator approves, instead of a client secret ([agents' own identities](agent-identity.md)). Off, no issuer is trusted: agents with a workload identity can't authenticate until it is on again. Needs Keycloak 26.6 or later, and Keycloak's `spiffe` preview feature for SPIFFE issuers |
+
 ### Lifecycle
 
 | Feature | Modes | What it does |

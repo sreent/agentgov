@@ -17,6 +17,7 @@ on:
       - "Dockerfile"
       - "pyproject.toml"
       - "scripts/ci.sh"
+      - "scripts/chart-on-docker.py"
       - ".github/workflows/e2e.yml"
   workflow_dispatch:
 

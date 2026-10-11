@@ -12,14 +12,17 @@ kubelet would, as far as containers go:
 * the pod's user and group, read-only root file systems, dropped capabilities
   and no-new-privileges apply as in the chart;
 * environment variables resolve from the rendered Secret, $(VAR) references
-  and the pod's name, as Kubernetes resolves them.
+  and the pod's name, as Kubernetes resolves them, and each Service's
+  <NAME>_SERVICE_HOST, <NAME>_PORT and the like are set in every pod, as
+  Kubernetes sets them, unless the pod turns service links off.
 
 Readiness probes are honoured: the database, Keycloak and the control plane
 start first, each once the one before is ready, and `up` returns when every pod
 is ready. Network policies, ingresses and the scheduler are Kubernetes' own: the
 kind check (scripts/ci.sh --kind) covers them where kind runs.
 
-  chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server and model)
+  chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server, model
+                                                 and workload identity issuer)
   chart-on-docker.py secret RENDERED.yaml KEY    print a value of the chart's Secret
   chart-on-docker.py logs                        state and recent logs, for failures
   chart-on-docker.py down                        remove everything it started
@@ -78,8 +81,42 @@ def secret_values(docs: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
     }
 
 
-def resolve_env(container: dict[str, Any], pod: str, secrets: dict[str, Any]) -> dict[str, str]:
-    values: dict[str, str] = {}
+def service_links(docs: list[dict[str, Any]]) -> dict[str, str]:
+    """The variables Kubernetes sets in a pod for each Service in its namespace (the
+    Service's DNS name stands in for its cluster IP)."""
+    links: dict[str, str] = {}
+    for service in (d for d in docs if d["kind"] == "Service"):
+        host = service["metadata"]["name"]
+        name = host.upper().replace("-", "_")
+        ports = service["spec"].get("ports") or []
+        for i, port in enumerate(ports):
+            proto = port.get("protocol", "TCP")
+            address = f"{proto.lower()}://{host}:{port['port']}"
+            if i == 0:
+                links |= {
+                    f"{name}_SERVICE_HOST": host,
+                    f"{name}_SERVICE_PORT": str(port["port"]),
+                    f"{name}_PORT": address,
+                }
+            if port.get("name"):
+                links[f"{name}_SERVICE_PORT_{port['name'].upper().replace('-', '_')}"] = str(
+                    port["port"]
+                )
+            prefix = f"{name}_PORT_{port['port']}_{proto}"
+            links |= {
+                prefix: address,
+                f"{prefix}_PROTO": proto.lower(),
+                f"{prefix}_PORT": str(port["port"]),
+                f"{prefix}_ADDR": host,
+            }
+    return links
+
+
+def resolve_env(
+    container: dict[str, Any], pod: str, secrets: dict[str, Any], links: dict[str, str]
+) -> dict[str, str]:
+    # The container's own variables win over the Services' ones.
+    values: dict[str, str] = dict(links)
     for e in container.get("env") or []:
         if "value" in e:
             # Kubernetes expands $(VAR) from variables defined earlier in the list.
@@ -105,9 +142,10 @@ def docker_run(
     user: str,
     mounts: dict[str, str],
     secrets: dict[str, Any],
+    links: dict[str, str],
     detach: bool,
 ) -> list[str]:
-    env = resolve_env(container, pod, secrets)
+    env = resolve_env(container, pod, secrets, links)
     args = ["docker", "run", "--name", name, "--label", LABEL, "--network", f"container:{pod}"]
     args += ["-d"] if detach else ["--rm"]
     if user:
@@ -184,7 +222,8 @@ def start_pod(workload: dict[str, Any], docs: list[dict[str, Any]]) -> None:
     # The pod's network namespace, under its Service's name.
     sh("docker", "run", "-d", "--name", pod, "--label", LABEL, "--network", NETWORK,
        "--network-alias", pod, *publish, "--entrypoint", "sleep", HELPER, "infinity")  # fmt: skip
-    common = {"pod": pod, "user": user, "mounts": mounts, "secrets": secrets}
+    links = service_links(docs) if spec.get("enableServiceLinks", True) else {}
+    common = {"pod": pod, "user": user, "mounts": mounts, "secrets": secrets, "links": links}
     for init in spec.get("initContainers") or []:
         print(f"{pod}: init container {init['name']}", flush=True)
         args = docker_run(init, f"{pod}-init-{init['name']}", detach=False, **common)
@@ -254,6 +293,10 @@ def up(rendered: str, demo: bool) -> None:
         sh("docker", "run", "-d", "--name", "agentgov-demo-model", "--label", LABEL,
            "--network", NETWORK, "--network-alias", "demo-model",
            "-e", f"MOCK_MODEL_KEY={DEMO_MODEL_KEY}", "agentgov-demo-model:local")  # fmt: skip
+        # The stand-in cluster whose service account tokens agents authenticate with.
+        sh("docker", "run", "-d", "--name", "agentgov-demo-workload-issuer", "--label", LABEL,
+           "--network", NETWORK, "--network-alias", "workload-issuer", "-p", "9200:9200",
+           "-e", "ISSUER=http://workload-issuer:9200", "agentgov-demo-issuer:local")  # fmt: skip
 
 
 def logs() -> None:

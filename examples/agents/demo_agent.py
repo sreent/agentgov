@@ -14,6 +14,8 @@ gateway's OpenAI-compatible route, with the same token. Then it acts for sam, a
 person in the demo realm: sam signs in to the demo chat app, the agent exchanges
 sam's token for a token of its own, and sam signs in to AgentGov to approve what
 it wants to do for them (AGENTGOV_DEMO_PASSWORD is the demo users' password).
+Last, an agent with no secret at all authenticates with its service account token
+from a stand-in Kubernetes cluster (examples/identity/workload-issuer).
 """
 
 from __future__ import annotations
@@ -45,6 +47,10 @@ DEMO_PASSWORD = os.environ.get("AGENTGOV_DEMO_PASSWORD", "dev-password")
 DEMO_APP = "agentgov-demo-chat"
 TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
 ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token"
+# The stand-in Kubernetes cluster whose service account tokens agents authenticate with
+# (examples/identity/workload-issuer), and its identity issuer (identity.yaml).
+WORKLOAD_ISSUER = os.environ.get("AGENTGOV_DEMO_WORKLOAD_ISSUER", "http://localhost:9200")
+CLUSTER = "demo-cluster"
 # MCP clients set up as on a developer's laptop (examples/developer-machine).
 DEVELOPER_MACHINE = Path(__file__).resolve().parent.parent / "developer-machine"
 
@@ -472,8 +478,109 @@ async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
             report_answer(answered, text, expect_answered=False, ok="blocked" in text)
 
 
+def until(check: Any, timeout: float = 60) -> tuple[bool, float]:
+    """Poll ``check()`` until it is true: Keycloak gets AgentGov's changes within seconds."""
+    started = time.monotonic()
+    while not check():
+        if time.monotonic() - started > timeout:
+            return False, time.monotonic() - started
+        time.sleep(1)
+    return True, time.monotonic() - started
+
+
+def service_account_token(subject: str, audience: str) -> str:
+    """What a pod reads from its projected service account token, from the stand-in
+    cluster (as `kubectl create token` would give it)."""
+    resp = httpx.post(
+        f"{WORKLOAD_ISSUER}/token", json={"subject": subject, "audience": audience}, timeout=30
+    )
+    resp.raise_for_status()
+    return resp.json()["token"]
+
+
+def sign_in(creds: dict[str, str], assertion: str) -> httpx.Response:
+    """Client credentials, with the workload's token in place of a client secret."""
+    return httpx.post(
+        creds["token_endpoint"],
+        data={
+            "grant_type": "client_credentials",
+            "client_id": creds["client_id"],
+            "client_assertion_type": creds["assertion_type"],
+            "client_assertion": assertion,
+        },
+        timeout=30,
+    )
+
+
+async def own_identity() -> None:
+    step("12. Own identities: an agent with no secret at all authenticates as its workload")
+    ready, _ = until(lambda: admin("GET", f"/v1/identity-issuers/{CLUSTER}")["sync"]["synced_at"])
+    sync = admin("GET", f"/v1/identity-issuers/{CLUSTER}")["sync"]
+    if not ready or sync["error"]:
+        show("issuer not in Keycloak:", False, sync["error"] or "did you apply the manifests?")
+        return
+    name = f"secretless-{secrets.token_hex(3)}"
+    subject = f"system:serviceaccount:agents:{name}"
+    admin(
+        "POST",
+        "/v1/agents",
+        json={
+            "name": name,
+            "description": "Demo agent with its own identity (examples/agents/demo_agent.py)",
+            "blueprint": "customer-support",
+            "owner": "cx-platform",
+            "sponsors": ["alice@example.com"],
+            "workload_identity": {"issuer": CLUSTER, "subject": subject},
+            "approve": True,
+        },
+    )
+    try:
+        creds = admin("POST", f"/v1/agents/{name}/credentials", json={})
+        show(
+            "no secret:",
+            creds["method"] == "workload-identity" and "client_secret" not in creds,
+            f"{name} authenticates as {subject} at {CLUSTER}",
+        )
+        assertion = service_account_token(subject, creds["assertion_audience"])
+        issued, elapsed = until(lambda: sign_in(creds, assertion).status_code == 200)
+        show(
+            "token issued" if issued else "refused",
+            issued,
+            f"by Keycloak for its service account token ({elapsed:.1f}s after approval)",
+        )
+        if not issued:
+            return
+        token = sign_in(creds, assertion).json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx2.AsyncClient(headers=headers, timeout=30.0) as http:
+            transport = streamable_http_client(f"{GATEWAY}/mcp/crm", http_client=http)
+            info = Implementation(name=name, version="1.0.0")
+            async with Client(transport, client_info=info) as client:
+                allowed, payload = await call(client, "get_customer", {"customer_id": "c-001"})
+                report(allowed, payload, expect_allowed=True)
+        # The issuer's kill switch: none of its tokens authenticate an agent.
+        admin("POST", f"/v1/identity-issuers/{CLUSTER}/block")
+        try:
+            refused, elapsed = until(lambda: sign_in(creds, assertion).status_code != 200, 30)
+            show(
+                "refused" if refused else "still issued",
+                refused,
+                f"issuer {CLUSTER} blocked: Keycloak takes none of its tokens ({elapsed:.1f}s)",
+            )
+        finally:
+            admin("POST", f"/v1/identity-issuers/{CLUSTER}/unblock")
+        issued, elapsed = until(lambda: sign_in(creds, assertion).status_code == 200, 30)
+        show(
+            "token issued" if issued else "refused",
+            issued,
+            f"issuer unblocked: its tokens work again ({elapsed:.1f}s)",
+        )
+    finally:
+        admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
+
+
 def shadow_agent() -> None:
-    step("12. Shadow AI: telemetry from an unregistered agent is discovered")
+    step("13. Shadow AI: telemetry from an unregistered agent is discovered")
     service = f"notebook-agent-{secrets.token_hex(2)}"
     span = {
         "traceId": secrets.token_hex(16),
@@ -518,7 +625,7 @@ def shadow_agent() -> None:
 def developer_tools() -> None:
     from agentgov import mcp_scan
 
-    step("13. Developer tools: approved MCP servers as a registry, and what developers set up")
+    step("14. Developer tools: approved MCP servers as a registry, and what developers set up")
     admin("PUT", "/v1/features/mcp-registry", json={"mode": "on"})
     print("  mcp-registry set to on: GitHub Copilot and VS Code can read it")
     page = httpx.get(f"{CONTROL_PLANE}/registry/v0.1/servers", timeout=10).json()
@@ -560,7 +667,7 @@ def developer_tools() -> None:
 
 
 def evidence(name: str) -> None:
-    step("14. Evidence: every decision is in a hash-chained, verifiable ledger")
+    step("15. Evidence: every decision is in a hash-chained, verifiable ledger")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -582,6 +689,7 @@ def main() -> None:
     name, creds, token = register_agent()
     try:
         asyncio.run(run_scenarios(name, creds, token))
+        asyncio.run(own_identity())
     finally:
         shadow_agent()
         developer_tools()

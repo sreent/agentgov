@@ -33,6 +33,8 @@ spec:
     spec:
       serviceAccountName: {{ include "agentgov.serviceAccountName" . }}
       automountServiceAccountToken: false
+      # No <SERVICE>_PORT variables for each Service: AGENTGOV_GATEWAY_PORT is a setting.
+      enableServiceLinks: false
       securityContext:
         {{- include "agentgov.podSecurity" . | nindent 8 }}
         # The postgres user of the Alpine image.

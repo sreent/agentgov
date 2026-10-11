@@ -11,6 +11,8 @@ metadata:
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
+  # No <SERVICE>_PORT variables for each Service: AGENTGOV_GATEWAY_PORT is a setting.
+  enableServiceLinks: false
   securityContext:
     {{- include "agentgov.podSecurity" . | nindent 4 }}
     runAsUser: 10001

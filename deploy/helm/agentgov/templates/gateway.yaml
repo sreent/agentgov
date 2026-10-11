@@ -22,6 +22,8 @@ spec:
     spec:
       serviceAccountName: {{ include "agentgov.serviceAccountName" . }}
       automountServiceAccountToken: false
+      # No <SERVICE>_PORT variables for each Service: AGENTGOV_GATEWAY_PORT is a setting.
+      enableServiceLinks: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

@@ -240,7 +240,8 @@ class Runtime:
     # -- reconciliation triggers -----------------------------------------------
     def _on_commit(self, topics: set[str]) -> None:
         self.bundles.notify()
-        if self.identity is not None and topics & {"agents", "blueprints"}:
+        identity = {"agents", "blueprints", "issuers", "feature:workload-identity"}
+        if self.identity is not None and topics & identity:
             self.identity.trigger()
         if topics & {"toolservers", "features"} and self.settings.gateway_config_path:
             self._gateway_worker.trigger()

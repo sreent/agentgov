@@ -31,6 +31,7 @@ python examples/agents/demo_agent.py
 | 8180 | Keycloak | Admin console user `admin`, password `KEYCLOAK_ADMIN_PASSWORD` (default `admin`); realm `agentgov` |
 | 8181 | OPA | Query API, handy for debugging policies |
 | 4317 / 4318 | OTel Collector | OTLP gRPC / HTTP for agents |
+| 9200 | Demo workload identity issuer | A stand-in Kubernetes cluster that gives out service account tokens, for the demo's agent without a client secret ([agents' own identities](../../docs/agent-identity.md)); not for real use |
 | 3000 | Langfuse | Only with the Langfuse override (below) |
 
 PostgreSQL, Presidio, the processor, the demo MCP server and the demo model are only
@@ -188,6 +189,13 @@ until the schema is current. A database created before AgentGov had migrations i
 adopted on its first upgrade, with its data. A newer schema than the version knows (after
 going back to an older version) stops the control plane with a message: run the newer
 version, or restore the backup.
+
+Keycloak imports AgentGov's realm on its first start only. If yours was imported before
+agents could have their own identities, give the control plane's service account the
+two roles it now needs: at <http://localhost:8180>, open the `agentgov` realm, then
+Clients, `agentgov-control-plane`, Service account roles, Assign role, and assign
+`realm-management`'s `manage-identity-providers` and `view-identity-providers`. Until
+then, identity issuers show an error saying so.
 
 ## Reset
 

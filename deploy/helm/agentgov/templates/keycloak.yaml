@@ -52,7 +52,10 @@ spec:
         checksum/realm: {{ $realmJson | sha256sum | trunc 16 }}
     spec:
       serviceAccountName: {{ include "agentgov.serviceAccountName" . }}
-      automountServiceAccountToken: false
+      # Keycloak reads the cluster's service account issuer keys with it.
+      automountServiceAccountToken: {{ $v.mountServiceAccountToken }}
+      # No <SERVICE>_PORT variables for each Service: AGENTGOV_GATEWAY_PORT is a setting.
+      enableServiceLinks: false
       securityContext:
         {{- include "agentgov.podSecurity" . | nindent 8 }}
         runAsUser: 1000
@@ -81,6 +84,9 @@ spec:
               value: {{ .Values.urls.keycloak | trimSuffix "/" | quote }}
             - {name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC, value: "true"}
             - {name: KC_HEALTH_ENABLED, value: "true"}
+            {{- with $v.features }}
+            - {name: KC_FEATURES, value: {{ join "," . | quote }}}
+            {{- end }}
             # Read by the realm import.
             - name: AGENTGOV_KEYCLOAK_CLIENT_SECRET
               valueFrom:

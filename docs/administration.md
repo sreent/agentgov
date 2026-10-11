@@ -38,7 +38,7 @@ pipelines, use an API key instead.
 
 | Role | Can |
 |---|---|
-| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, model providers, policies, credentials, API keys, platform syncs, the connector allowlist and which [features](features.md) are used |
+| `admin` | Everything below, plus agent lifecycle, blueprints, tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist and which [features](features.md) are used |
 | `approver` | Read everything; decide approval requests; resolve, dismiss and reopen findings; attest the agents it sponsors |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), and report the MCP servers set up on developers' machines; it cannot read the registry |
@@ -63,6 +63,9 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Delete a deleted agent permanently | Agent → **Delete permanently** | `agentgov agents purge REF` | `DELETE /v1/agents/{ref}` |
 | Attest an agent | Agent → **Attest** | `agentgov agents attest REF` | `POST /v1/agents/{ref}/attest` |
 | Show or rotate an agent's client secret | Agent → Identity → **Show secret** / **Rotate** | `agentgov agents credentials REF [--rotate]` | `POST /v1/agents/{ref}/credentials` |
+| Approve, edit, block, delete identity issuers ([agents' own identities](agent-identity.md)) | Access → *Agent identity issuers* → **Add issuer**, **Edit**, **Block**/**Unblock**, **Delete** | `agentgov issuers create\|update\|block\|unblock\|delete` | `POST /v1/identity-issuers`, `PATCH`/`DELETE /v1/identity-issuers/{name}`, `POST /v1/identity-issuers/{name}/block\|unblock` |
+| Give an agent its own identity instead of a client secret | Agent → **Edit** → *Authentication* | `agentgov agents update REF --workload-identity ISSUER:SUBJECT` (`--no-workload-identity` to go back) | `workload_identity` in `PATCH /v1/agents/{ref}` |
+| See how an agent with its own identity authenticates | Agent → Identity → **How it authenticates** | `agentgov agents credentials REF` | `POST /v1/agents/{ref}/credentials` |
 | See or recompute risk | Agent → Risk → **Recalculate** | `agentgov agents risk REF [--refresh]` | `GET /v1/agents/{ref}/risk`, `POST /v1/agents/{ref}/risk/refresh` |
 | Create, edit, delete blueprints | Policies → **New blueprint**, **Edit**, **Delete** | `agentgov blueprints create\|update\|delete` | `POST /v1/blueprints`, `PATCH`/`DELETE /v1/blueprints/{name}` |
 | Register, edit, delete tool servers | Tool servers → **Register tool server**, **Edit**, **Delete** | `agentgov toolservers create\|update\|delete` | `POST /v1/toolservers`, `PATCH`/`DELETE /v1/toolservers/{name}` |
@@ -79,6 +82,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | See model usage, cost and budgets, and who is spending | Models; an agent's page → Models | `agentgov models usage [--agent A] [--days N] [--by owner\|sponsor]` | `GET /v1/models/usage` |
 | Add, edit, enable, disable, delete policies | Policies → **Add policy**, **Edit**, **Disable**/**Enable**, **Delete** | `agentgov policies create\|update\|enable\|disable\|delete` | `POST /v1/policies`, `PUT`/`DELETE /v1/policies/{name}` |
 | Say whom a blueprint's agents act for, and who decides their approvals for a person ([acting for people](acting-for-people.md)) | Blueprint → **Edit** → People | `agentgov blueprints update B --acts-for people --people-groups support --approvals-by person` | `acts_for`, `people_groups`, `approvals_by` in `PATCH /v1/blueprints/{name}` |
+| Require a blueprint's agents to authenticate with their own identity, never a client secret | Blueprint → **Edit** → *Require a workload identity* | `agentgov blueprints update B --require-workload-identity` (`--allow-secrets` to stop) | `require_workload_identity` in `PATCH /v1/blueprints/{name}` |
 | Ask what policy would decide, for a tool call or a model call | Policies → **What if** | `agentgov policies evaluate --server crm --tool delete_customer --agent support-bot`, or `--provider openai --model gpt-4.1`; `--user sam --groups support` for a call for a person | `POST /v1/policies/evaluate` |
 | Apply manifests | Policies → **Import manifests** | `agentgov apply -f DIR` | `POST /v1/apply` |
 | Export manifests | Policies → **Export manifests** | `agentgov export` | `GET /v1/export` |
@@ -114,8 +118,8 @@ prints them instead). The control plane also applies them when it starts, unless
 `AGENTGOV_DATABASE_AUTO_MIGRATE` is `false` ([upgrading](../deploy/compose/README.md#upgrading)).
 
 Every CLI command has `--help`. Commands that cannot be undone (`purge`, `delete` of
-blueprints, tool servers, model providers and policies, `apikeys revoke`), and `features set` when it
-weakens a feature, ask for confirmation unless you pass `--yes`.
+blueprints, tool servers, model providers, identity issuers and policies, `apikeys revoke`),
+and `features set` when it weakens a feature, ask for confirmation unless you pass `--yes`.
 
 ## Registry as code
 

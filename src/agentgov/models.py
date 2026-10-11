@@ -49,6 +49,8 @@ MODEL_PROVIDER_KINDS = ("openai", "anthropic", "gemini", "openai-compatible")
 # Who a blueprint's agents act for, and who decides approvals made for a person.
 ACTS_FOR = ("people", "itself", "either")
 APPROVALS_BY = ("approvers", "person")
+# Identity providers whose tokens agents may authenticate with instead of a secret.
+ISSUER_KINDS = ("kubernetes", "spiffe", "oidc")
 
 
 def _created() -> Mapped[datetime]:
@@ -84,12 +86,20 @@ class Blueprint(Base):
     approvals_by: Mapped[str] = mapped_column(
         String(16), default="approvers", server_default="approvers"
     )
+    # Its agents authenticate with a workload identity, never with a client secret.
+    require_workload_identity: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
 
 
 class Agent(Base):
     __tablename__ = "agents"
+    # One agent per workload identity: the issuer's subject names the agent.
+    __table_args__ = (
+        Index("ix_agents_workload_identity", "workload_issuer", "workload_subject", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     name: Mapped[str] = mapped_column(String(200), unique=True, index=True)
@@ -127,6 +137,11 @@ class Agent(Base):
     # Identifiers in other systems (OTel agent id, platform ids, fingerprints).
     external_ids: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source: Mapped[str] = mapped_column(String(64), default="registered")
+
+    # Its workload identity, when it authenticates with a token from an identity issuer
+    # (IdentityIssuer.name) for this subject instead of a client secret.
+    workload_issuer: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    workload_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     # Identity provider binding (Keycloak clientId and internal id).
     client_id: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
@@ -207,6 +222,40 @@ class ModelProvider(Base):
     # USD per million tokens, by model glob: {"gpt-4o*": {"input": 2.5, "output": 10}}.
     prices: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
+
+
+class IdentityIssuer(Base):
+    """An identity provider whose tokens agents may authenticate with instead of a client
+    secret: a Kubernetes cluster, a SPIFFE trust domain, or an OpenID Connect issuer such
+    as Microsoft Entra ID, Okta, AWS or GitHub Actions.
+
+    AgentGov makes it an identity provider in Keycloak, and the client of each agent bound
+    to it one that authenticates with that issuer's token for the agent's subject
+    (Keycloak's federated client authentication).
+    """
+
+    __tablename__ = "identity_issuers"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # As its tokens name it: a URL, or a SPIFFE trust domain (spiffe://example.org).
+    issuer: Mapped[str] = mapped_column(String(512), unique=True)
+    # Where its signing keys are: a Kubernetes issuer discovery URL, an OpenID Connect
+    # JWKS URL, or a SPIFFE bundle endpoint.
+    keys_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # OpenID Connect: the audience its tokens carry, when it can't be Keycloak's realm.
+    audience: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # OpenID Connect: a token may authenticate more than once.
+    allow_reuse: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    status: Mapped[str] = mapped_column(String(16), default="approved")
+    labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()

@@ -94,6 +94,11 @@ features_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(features_app, name="features")
+issuers_app = typer.Typer(
+    help="Identity issuers whose tokens agents authenticate with instead of client secrets.",
+    no_args_is_help=True,
+)
+app.add_typer(issuers_app, name="issuers")
 
 YES = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")
 
@@ -142,6 +147,8 @@ def _call(method: str, path: str, **kwargs: Any) -> Any:
             detail = f"{detail} (sign in with `agentgov login`, or set AGENTGOV_TOKEN)"
         typer.secho(f"error {resp.status_code}: {detail}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+    if not resp.content:  # 204 No Content
+        return None
     content_type = resp.headers.get("content-type", "")
     return resp.json() if content_type.startswith("application/json") else resp.text
 
@@ -715,6 +722,26 @@ MODEL_ACCESS = typer.Option(
 )
 TOKEN_BUDGET = typer.Option(None, help="Tokens it may use per day (UTC), in and out.")
 NO_TOKEN_BUDGET = typer.Option(False, "--no-token-budget", help="No daily token budget.")
+WORKLOAD_IDENTITY = typer.Option(
+    None,
+    "--workload-identity",
+    help="Authenticate with this identity instead of a client secret: ISSUER:SUBJECT, such "
+    "as cluster:system:serviceaccount:agents:support-bot.",
+)
+
+
+def _workload_identity(value: str | None, *, clear: bool = False) -> dict[str, Any]:
+    if clear:
+        return {"workload_identity": None}
+    if value is None:
+        return {}
+    issuer, sep, subject = value.partition(":")
+    if not sep or not issuer or not subject:
+        _fail(
+            "--workload-identity looks like ISSUER:SUBJECT, such as "
+            "cluster:system:serviceaccount:agents:support-bot"
+        )
+    return {"workload_identity": {"issuer": issuer, "subject": subject}}
 
 
 @agents_app.command("create")
@@ -733,21 +760,26 @@ def agents_create(
     token_budget: int | None = TOKEN_BUDGET,
     label: list[str] | None = LABEL,
     risk_tier: str | None = RISK_TIER,
+    workload_identity: str | None = WORKLOAD_IDENTITY,
     approve: bool = typer.Option(False, "--approve", help="Activate it now (admins only)."),
 ) -> None:
     """Register an agent. It waits in pending review unless --approve is given."""
-    body = _model_fields(model_access, token_budget, False) | _agent_fields(
-        description=description,
-        blueprint=blueprint,
-        owner=owner,
-        sponsors=sponsor,
-        environment=environment,
-        framework=framework,
-        platform=platform,
-        models=model,
-        grants=grant,
-        labels=label,
-        risk_tier=risk_tier,
+    body = (
+        _model_fields(model_access, token_budget, False)
+        | _workload_identity(workload_identity)
+        | _agent_fields(
+            description=description,
+            blueprint=blueprint,
+            owner=owner,
+            sponsors=sponsor,
+            environment=environment,
+            framework=framework,
+            platform=platform,
+            models=model,
+            grants=grant,
+            labels=label,
+            risk_tier=risk_tier,
+        )
     )
     agent = _call("POST", "/v1/agents", json={"name": name, **body, "approve": approve})
     _done("agent", agent["name"], agent["status"])
@@ -779,20 +811,28 @@ def agents_update(
     ),
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
     risk_tier: str | None = RISK_TIER,
+    workload_identity: str | None = WORKLOAD_IDENTITY,
+    no_workload_identity: bool = typer.Option(
+        False, "--no-workload-identity", help="Go back to a client secret."
+    ),
 ) -> None:
     """Change an agent's details. Only the options you pass are changed."""
-    body = _model_fields(model_access, token_budget, no_token_budget) | _agent_fields(
-        description=description,
-        blueprint=blueprint,
-        owner=owner,
-        sponsors=sponsor,
-        environment=environment,
-        framework=framework,
-        platform=platform,
-        models=model,
-        grants=[] if clear_grants else grant,
-        labels=label,
-        risk_tier=risk_tier,
+    body = (
+        _model_fields(model_access, token_budget, no_token_budget)
+        | _workload_identity(workload_identity, clear=no_workload_identity)
+        | _agent_fields(
+            description=description,
+            blueprint=blueprint,
+            owner=owner,
+            sponsors=sponsor,
+            environment=environment,
+            framework=framework,
+            platform=platform,
+            models=model,
+            grants=[] if clear_grants else grant,
+            labels=label,
+            risk_tier=risk_tier,
+        )
     )
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
@@ -904,7 +944,8 @@ def agents_attest(
 
 @agents_app.command("credentials")
 def agents_credentials(ref: str, rotate: bool = False) -> None:
-    """Print the agent's OAuth client credentials (--rotate issues a new secret)."""
+    """Print the agent's OAuth client credentials (--rotate issues a new secret), or, for an
+    agent with a workload identity, how it authenticates without a secret."""
     _print(_call("POST", f"/v1/agents/{ref}/credentials", json={"rotate": rotate}))
 
 
@@ -1049,6 +1090,13 @@ def _blueprint_fields(
     return body
 
 
+REQUIRE_WORKLOAD_IDENTITY = typer.Option(
+    None,
+    "--require-workload-identity/--allow-secrets",
+    help="Whether its agents must authenticate with a workload identity, never a secret.",
+)
+
+
 def _people_fields(
     acts_for: str | None,
     people_groups: list[str] | None,
@@ -1101,6 +1149,7 @@ def blueprints_create(
     acts_for: str | None = ACTS_FOR,
     people_groups: list[str] | None = PEOPLE_GROUPS,
     approvals_by: str | None = APPROVALS_BY,
+    require_workload_identity: bool | None = REQUIRE_WORKLOAD_IDENTITY,
     label: list[str] | None = LABEL,
 ) -> None:
     """Create a blueprint."""
@@ -1110,6 +1159,7 @@ def blueprints_create(
         )
         | _model_fields(model_access, token_budget, False)
         | _people_fields(acts_for, people_groups, False, approvals_by)
+        | _given(require_workload_identity=require_workload_identity)
     )
     bp = _call("POST", "/v1/blueprints", json={"name": name, **body})
     _done("blueprint", bp["name"], "created")
@@ -1137,6 +1187,7 @@ def blueprints_update(
     ),
     all_people: bool = ALL_PEOPLE,
     approvals_by: str | None = APPROVALS_BY,
+    require_workload_identity: bool | None = REQUIRE_WORKLOAD_IDENTITY,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
 ) -> None:
     """Change a blueprint. Every agent on it gets the change."""
@@ -1146,6 +1197,7 @@ def blueprints_update(
         )
         | _model_fields(model_access, token_budget, no_token_budget)
         | _people_fields(acts_for, people_groups, all_people, approvals_by)
+        | _given(require_workload_identity=require_workload_identity)
     )
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
@@ -2239,6 +2291,128 @@ def models_delete(name: str, yes: bool = YES) -> None:
     _confirm(f"Delete model provider {name}?", yes)
     _call("DELETE", f"/v1/models/providers/{quote(name)}")
     _done("model-provider", name, "deleted")
+
+
+# ------------------------------------------------------------------- issuers
+
+ISSUER_URL = typer.Option(
+    None, "--issuer", help="As its tokens name it: a URL, or spiffe://<trust domain>."
+)
+KEYS_URL = typer.Option(
+    None,
+    help="Where its keys are: a Kubernetes issuer discovery URL, a JWKS URL (oidc, found "
+    "from the issuer otherwise) or a SPIFFE bundle endpoint ('' to clear).",
+)
+AUDIENCE = typer.Option(
+    None,
+    help="oidc: the audience its tokens carry when it can't be Keycloak's realm, such as "
+    "api://agentgov for Microsoft Entra ID ('' to clear).",
+)
+ALLOW_REUSE = typer.Option(
+    None,
+    "--allow-reuse/--no-reuse",
+    help="oidc: whether a token may authenticate more than once (needed for tokens without a "
+    "jti claim, such as Microsoft Entra ID's).",
+)
+
+
+def _issuer_fields(**fields: Any) -> dict[str, Any]:
+    body = _given(**{k: v for k, v in fields.items() if k != "label"})
+    for key in ("keys_url", "audience"):
+        if body.get(key) == "":
+            body[key] = None
+    if fields.get("label") is not None:
+        body["labels"] = _labels(fields["label"])
+    return body
+
+
+@issuers_app.command("list")
+def issuers_list() -> None:
+    """List identity issuers, with the agents that authenticate with each."""
+    rows = _call("GET", "/v1/identity-issuers")
+    for r in rows:
+        r["sync"] = r["sync"]["error"] or ("synced" if r["sync"]["synced_at"] else "waiting")
+    _table(rows, ["name", "kind", "status", "agents", "issuer", "sync"])
+
+
+@issuers_app.command("get")
+def issuers_get(name: str) -> None:
+    """Show an identity issuer."""
+    _print(_call("GET", f"/v1/identity-issuers/{quote(name)}"))
+
+
+@issuers_app.command("create")
+def issuers_create(
+    name: str,
+    kind: str = typer.Option(..., help="kubernetes, spiffe or oidc."),
+    issuer: str = typer.Option(
+        ..., "--issuer", help="As its tokens name it: a URL, or spiffe://<trust domain>."
+    ),
+    keys_url: str | None = KEYS_URL,
+    audience: str | None = AUDIENCE,
+    allow_reuse: bool | None = ALLOW_REUSE,
+    description: str | None = DESCRIPTION,
+    label: list[str] | None = LABEL,
+) -> None:
+    """Trust an identity issuer: agents then authenticate with its tokens."""
+    body = _issuer_fields(
+        kind=kind,
+        issuer=issuer,
+        keys_url=keys_url,
+        audience=audience,
+        allow_reuse=allow_reuse,
+        description=description,
+        label=label,
+    )
+    out = _call("POST", "/v1/identity-issuers", json={"name": name, **body})
+    _done("identity-issuer", out["name"], out["status"])
+
+
+@issuers_app.command("update")
+def issuers_update(
+    name: str,
+    issuer: str | None = ISSUER_URL,
+    keys_url: str | None = KEYS_URL,
+    audience: str | None = AUDIENCE,
+    allow_reuse: bool | None = ALLOW_REUSE,
+    description: str | None = DESCRIPTION,
+    label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+) -> None:
+    """Change an identity issuer."""
+    body = _issuer_fields(
+        issuer=issuer,
+        keys_url=keys_url,
+        audience=audience,
+        allow_reuse=allow_reuse,
+        description=description,
+        label=label,
+    )
+    if not body:
+        _fail("nothing to change: pass at least one option (see --help)")
+    out = _call("PATCH", f"/v1/identity-issuers/{quote(name)}", json=body)
+    _done("identity-issuer", out["name"], "updated")
+
+
+@issuers_app.command("block")
+def issuers_block(name: str) -> None:
+    """Stop every agent authenticating with the issuer's tokens."""
+    out = _call("POST", f"/v1/identity-issuers/{quote(name)}/block")
+    _done("identity-issuer", out["name"], f"{out['status']} ({out['agents']} agents)")
+
+
+@issuers_app.command("unblock")
+def issuers_unblock(name: str) -> None:
+    """Trust a blocked identity issuer again."""
+    out = _call("POST", f"/v1/identity-issuers/{quote(name)}/unblock")
+    _done("identity-issuer", out["name"], out["status"])
+
+
+@issuers_app.command("delete")
+def issuers_delete(name: str, yes: bool = YES) -> None:
+    """Stop trusting an identity issuer no agent uses."""
+    _confirm(f"Delete identity issuer {name}?", yes)
+    _call("DELETE", f"/v1/identity-issuers/{quote(name)}")
+    _done("identity-issuer", name, "deleted")
 
 
 @models_app.command("usage")

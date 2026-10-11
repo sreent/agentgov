@@ -22,6 +22,10 @@ RETIRED = {
     "AGENTGOV_REGISTRATION_REQUIRES_APPROVAL": "registration-approval",
     "AGENTGOV_COPILOT_STUDIO_THREAT_DETECTION": "copilot-studio-threat-detection",
 }
+# What Kubernetes sets in each pod for every Service in its namespace (service links), such
+# as AGENTGOV_GATEWAY_PORT=tcp://10.96.0.12:8080 for a Service named agentgov-gateway: never
+# one of these settings.
+_SERVICE_LINK = re.compile(r"^(?:tcp|udp|sctp)://[^/\s]+:\d+$")
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
@@ -220,10 +224,18 @@ class Settings:
                 )
         values: dict[str, Any] = {}
         for field in dataclasses.fields(cls):
-            raw = env.get(f"AGENTGOV_{field.name.upper()}")
+            name = f"AGENTGOV_{field.name.upper()}"
+            raw = env.get(name)
             if raw is None or raw == "":
                 continue
-            values[field.name] = _coerce(raw, str(field.type).replace(" | None", ""))
+            target = str(field.type).replace(" | None", "")
+            if target == "int" and _SERVICE_LINK.match(raw):
+                continue
+            try:
+                values[field.name] = _coerce(raw, target)
+            except ValueError:
+                kind = "an integer" if target == "int" else "a number"
+                raise ValueError(f"{name} must be {kind} (got {raw!r})") from None
         values.update({k: v for k, v in overrides.items() if v is not None})
         settings = cls(**values)
         settings.validate()

@@ -23,6 +23,15 @@ def test_environment_values_are_typed() -> None:
     assert settings.keycloak_enabled is False
 
 
+def test_kubernetes_service_links_are_not_settings() -> None:
+    # A Service named agentgov-gateway gives every pod in its namespace this variable.
+    links = Settings.from_env({"AGENTGOV_GATEWAY_PORT": "tcp://10.96.191.160:8080"})
+    assert links.gateway_port == 8080
+    assert Settings.from_env({"AGENTGOV_GATEWAY_PORT": "9090"}).gateway_port == 9090
+    with pytest.raises(ValueError, match="AGENTGOV_GATEWAY_PORT must be an integer"):
+        Settings.from_env({"AGENTGOV_GATEWAY_PORT": "lots"})
+
+
 def test_overrides_win() -> None:
     assert Settings.from_env({}, admin_token="x").admin_token == "x"
 
