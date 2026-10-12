@@ -78,9 +78,7 @@ class GoogleConnector:
                 inventory.found += found
                 inventory.read.add(part)
         if inventory.failed and not inventory.read:
-            raise PlatformError(
-                "; ".join(f"{part}: {error}" for part, error in sorted(inventory.failed.items()))
-            )
+            raise PlatformError(inventory.failures())
         return inventory
 
     # -- calls ---------------------------------------------------------------------
@@ -276,6 +274,7 @@ def runtime_agent(
     else:
         network = "Google's network and the internet"
     container = (spec.get("containerSpec") or {}).get("imageUri")
+    key = (engine.get("encryptionSpec") or {}).get("kmsKeyName")
     memory = (engine.get("contextSpec") or {}).get("memoryBankConfig")
     facts = _facts(
         _fact("Project", project, code=True),
@@ -298,11 +297,7 @@ def runtime_agent(
             **({"tone": "serious"} if everyone else {}),
         ),
         _fact("Network", network),
-        _fact(
-            "Encryption key",
-            (engine.get("encryptionSpec") or {}).get("kmsKeyName") or "Google-managed",
-            code=True,
-        ),
+        _fact("Encryption key", key or "Google-managed", **({"code": True} if key else {})),
         _fact(
             "Memory bank",
             None

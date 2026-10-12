@@ -274,8 +274,12 @@ def test_agents_on_databricks_are_read_into_the_registry(databricks_client, work
         for s in databricks_client.get("/v1/platforms", headers=ADMIN).json()["sources"]
     }
     message = status["databricks"]["last_sync"]["message"]
-    assert "adb-5678.azuredatabricks.net/serving" in message
-    assert "Client authentication failed" in message
+    # The workspace's three kinds of agent failed for one reason: it is said once.
+    assert message.startswith(
+        "adb-5678.azuredatabricks.net/apps, adb-5678.azuredatabricks.net/genie, "
+        "adb-5678.azuredatabricks.net/serving: "
+    )
+    assert message.count("Client authentication failed") == 1
 
 
 def test_kinds_of_agent_can_be_left_out(settings, workspaces) -> None:

@@ -73,3 +73,10 @@ class Inventory:
     failed: dict[str, str] = field(default_factory=dict)
     # The parts read in full, so that agents gone from them are known to be gone.
     read: set[str] = field(default_factory=set)
+
+    def failures(self) -> str:
+        """The parts that couldn't be read, grouped by why: ``a, b: why; c: why else``."""
+        grouped: dict[str, list[str]] = {}
+        for part, error in sorted(self.failed.items()):
+            grouped.setdefault(error, []).append(part)
+        return "; ".join(f"{', '.join(parts)}: {error}" for error, parts in grouped.items())

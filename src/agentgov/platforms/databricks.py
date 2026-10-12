@@ -85,9 +85,7 @@ class DatabricksConnector:
                 inventory.found += found
                 inventory.read.add(part)
         if inventory.failed and not inventory.read:
-            raise PlatformError(
-                "; ".join(f"{part}: {error}" for part, error in sorted(inventory.failed.items()))
-            )
+            raise PlatformError(inventory.failures())
         return inventory
 
     # -- tokens -------------------------------------------------------------------

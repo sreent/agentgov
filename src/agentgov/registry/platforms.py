@@ -726,7 +726,7 @@ def record_inventory(
     counts["findings"] = len(present)
     if inventory.failed:
         counts["failed"] = len(inventory.failed)
-    message = "; ".join(f"{part}: {error}" for part, error in sorted(inventory.failed.items()))
+    message = inventory.failures()
     set_sync(session, source, ok=not inventory.failed, counts=counts, message=message, actor=actor)
     return counts
 

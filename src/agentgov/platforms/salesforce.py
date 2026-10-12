@@ -557,6 +557,9 @@ def agentforce_agent(
         )
         for t in topics
     )
+    kind = KINDS.get(str(agent.get("Type")), "Agentforce agent")
+    agent_type = _words(agent.get("AgentType"))
+    same_type = bool(agent_type) and str(agent_type).lower() == kind.lower()
     status = None
     if version:
         active = "active" if version.get("Status") == "Active" else "not active"
@@ -571,7 +574,7 @@ def agentforce_agent(
         f
         for f in (
             _fact("Org", host, code=True),
-            _fact("Kind", _words(agent.get("AgentType"))),
+            _fact("Agent type", None if same_type else agent_type),
             _fact("Template", agent.get("AgentTemplate")),
             _fact("Version", status),
             _fact(
@@ -602,7 +605,7 @@ def agentforce_agent(
     return Found(
         external_id=str(agent["Id"]),
         name=name,
-        kind=KINDS.get(str(agent.get("Type")), "Agentforce agent"),
+        kind=kind,
         part="",
         description=agent.get("Description"),
         details={

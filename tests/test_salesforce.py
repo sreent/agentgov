@@ -310,6 +310,7 @@ def test_agentforce_agents_are_read_into_the_registry(salesforce_client, org) ->
     [view] = care["platforms"]
     facts = {f["label"]: f["value"] for f in view["facts"]}
     assert facts["Runs as"] == "care-agent@contoso.com"
+    assert "Agent type" not in facts  # Agentforce Service Agent says no more than its kind
     assert facts["Its user may"] == "View all data"
     assert facts["Version"] == "Version 2, active"  # from the second page
     assert facts["Topics"] == "Order Inquiries"

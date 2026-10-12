@@ -351,6 +351,8 @@ def test_agents_on_google_cloud_are_read_into_the_registry(google_client, cloud)
     assert facts["Network"] == "Google's network and the internet"
     assert facts["Environment variables"] == "LOG_LEVEL, OPENAI_API_KEY"
     assert facts["From Secret Manager"] == "DB_PASSWORD"
+    key = next(f for f in trip["platforms"][0]["facts"] if f["label"] == "Encryption key")
+    assert key["value"] == "Google-managed" and "code" not in key
     found = _findings(google_client, "trip-planner")
     assert found["platform.no_authentication"]["severity"] == "high"
     assert "anyone on the internet" in found["platform.no_authentication"]["title"]
