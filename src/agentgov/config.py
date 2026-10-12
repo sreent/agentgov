@@ -47,6 +47,9 @@ GOOGLE_PROJECT = re.compile(r"^(?:[a-z0-9.-]+:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 GOOGLE_REGION = re.compile(r"^(?:[a-z]+-[a-z]+\d{1,2}|us|eu)$")
 # A Salesforce org's My Domain URL (https://contoso.my.salesforce.com), with nothing after it.
 SALESFORCE_URL = re.compile(r"^https://[A-Za-z0-9.-]+/?$")
+# A Databricks workspace's URL (https://dbc-1234.cloud.databricks.com), and what to read there.
+DATABRICKS_URL = SALESFORCE_URL
+DATABRICKS_KINDS = ("serving", "apps", "genie")
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
@@ -305,6 +308,18 @@ class Settings:
     # private key (PEM) of the certificate uploaded to the app.
     salesforce_username: str | None = None
     salesforce_private_key_file: str | None = None
+    # Databricks: the workspaces to read agents in, comma-separated URLs, such as
+    # https://dbc-1234.cloud.databricks.com (empty: Databricks isn't read).
+    databricks_hosts: str = ""
+    # The service principal AgentGov reads as (OAuth machine-to-machine): its application
+    # ID and an OAuth secret of its own.
+    databricks_client_id: str | None = None
+    databricks_client_secret: str | None = None
+    # Instead, a personal access token, valid in the workspaces named.
+    databricks_token: str | None = None
+    # What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent
+    # Bricks agents) and genie (Genie agents).
+    databricks_read: str = "serving,apps,genie"
 
     # --- Classifier, optional (docs/detection.md) ---------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
@@ -499,6 +514,23 @@ class Settings:
                     "AGENTGOV_SALESFORCE_CLIENT_ID needs AGENTGOV_SALESFORCE_CLIENT_SECRET, or "
                     "AGENTGOV_SALESFORCE_USERNAME and AGENTGOV_SALESFORCE_PRIVATE_KEY_FILE"
                 )
+        for host in self.databricks_host_list():
+            if not DATABRICKS_URL.match(host):
+                raise ValueError(
+                    f"AGENTGOV_DATABRICKS_HOSTS: {host!r} is not a workspace's URL, such as "
+                    "https://dbc-1234.cloud.databricks.com"
+                )
+        signs_in = bool(self.databricks_client_id and self.databricks_client_secret)
+        if self.databricks_host_list() and not (signs_in or self.databricks_token):
+            raise ValueError(
+                "AGENTGOV_DATABRICKS_HOSTS needs AGENTGOV_DATABRICKS_CLIENT_ID and "
+                "AGENTGOV_DATABRICKS_CLIENT_SECRET, or AGENTGOV_DATABRICKS_TOKEN"
+            )
+        for kind in self.databricks_kind_list():
+            if kind not in DATABRICKS_KINDS:
+                raise ValueError(
+                    f"AGENTGOV_DATABRICKS_READ: {kind!r} is not serving, apps or genie"
+                )
         if self.classifier_timeout_seconds <= 0 or self.classifier_concurrency < 1:
             raise ValueError(
                 "AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS must be positive and "
@@ -632,6 +664,12 @@ class Settings:
 
     def google_cloud_region_list(self) -> list[str]:
         return [r.strip() for r in self.google_cloud_regions.split(",") if r.strip()]
+
+    def databricks_host_list(self) -> list[str]:
+        return [h.strip().rstrip("/") for h in self.databricks_hosts.split(",") if h.strip()]
+
+    def databricks_kind_list(self) -> list[str]:
+        return [k.strip() for k in self.databricks_read.split(",") if k.strip()]
 
     def m365_types(self) -> set[str]:
         types = {t.strip().lower() for t in self.m365_package_types.split(",") if t.strip()}

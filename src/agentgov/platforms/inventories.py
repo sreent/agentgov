@@ -14,6 +14,7 @@ import httpx
 from agentgov.config import Settings
 from agentgov.platforms.aws import AwsConnector
 from agentgov.platforms.base import Inventory
+from agentgov.platforms.databricks import DatabricksConnector
 from agentgov.platforms.google import GoogleConnector
 from agentgov.platforms.salesforce import SalesforceConnector
 
@@ -33,4 +34,6 @@ def connectors(settings: Settings, *, http: httpx.Client | None = None) -> dict[
         found["google-cloud"] = GoogleConnector(settings, http=http)
     if settings.salesforce_url:
         found["salesforce"] = SalesforceConnector(settings, http=http)
+    if settings.databricks_host_list():
+        found["databricks"] = DatabricksConnector(settings, http=http)
     return found

@@ -15,12 +15,13 @@ keeps running: stop it in its platform's console as well.
 | AWS | Amazon Bedrock agents, AgentCore harnesses and AgentCore agent runtimes | [AWS](#aws) |
 | Google Cloud | Agent Runtime agents (formerly Vertex AI Agent Engine) | [Google Cloud](#google-cloud) |
 | Salesforce | Agentforce agents, with their topics and actions | [Salesforce](#salesforce) |
+| Databricks | Agents on Model Serving, Agent Bricks agents and Genie agents | [Databricks](#databricks) |
 
 Each platform is read where its settings are set, when the control plane starts and every
 hour after that (`AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS`; `0` reads only on demand). Admins
 can read one at any time with **Sync now** on the Platforms page or `agentgov platforms sync
-aws` (or `google-cloud`, `salesforce`). Each has a switch on the [Features](features.md) page
-(on by default) that stops it being read, even where it could be.
+<platform>` (`aws`, `google-cloud`, `salesforce` or `databricks`). Each has a switch on the
+[Features](features.md) page (on by default) that stops it being read, even where it could be.
 
 ## What AgentGov does with each agent
 
@@ -32,9 +33,9 @@ periodic attestation, like any other agent. AgentGov issues these agents no gate
 credentials and doesn't apply blueprints to them, because they never call the gateway.
 
 AgentGov reads each platform in parts (an AWS account's region, a Google Cloud project's
-region, a Salesforce org). Agents gone from a part
-it read in full stay in the registry, marked as gone, so their history is kept: delete them
-when you no longer need the record. A part that can't be read (its region refuses, say) is
+region, a Salesforce org, a Databricks workspace's agents on Model Serving). Agents gone from a
+part it read in full stay in the registry, marked as gone, so their history is kept: delete
+them when you no longer need the record. A part that can't be read (its region refuses, say) is
 named on the Platforms page; its agents are left as the last sync saw them, and their findings
 stay open, marked unverified, until it can be read again.
 
@@ -54,7 +55,7 @@ the score.
 | `platform.no_authentication` | 25 | anyone who can reach the agent can use it |
 | `platform.plain_secret` | 20 | its settings hold what looks like a secret in plain text, rather than a reference to a secret store |
 | `platform.weak_authentication` | 15 | it checks callers' tokens, but takes a token for any audience or client |
-| `platform.broad_identity` | 15 | it runs as a broad or default identity rather than one of its own |
+| `platform.broad_identity` | 15 | it runs as, or calls its platform with, an identity that may do far more than its job: a default or shared one, or one with broad permissions |
 | `platform.risky_tool` | 15 | its tools run code or work a computer, so a prompt injection acts too |
 | `platform.shared_with_everyone` | 10 | everyone in the organisation may use it |
 | `platform.no_guardrail` | 10 | nothing filters what it is asked or what it answers |
@@ -228,6 +229,50 @@ org's release doesn't have yet is left out, and the agent's card says what wasn'
    AGENTGOV_SALESFORCE_USERNAME=agentgov@contoso.com
    AGENTGOV_SALESFORCE_PRIVATE_KEY_FILE=/etc/agentgov/salesforce.key
    ```
+
+## Databricks
+
+AgentGov reads, in each workspace you name:
+
+* **Agents on Model Serving**: serving endpoints whose task is an agent's, with what they
+  serve, who may query them, whether their requests and answers are kept in inference tables,
+  and the names of their environment variables.
+* **Agent Bricks agents**: the Databricks Apps the Agent Bricks CLI deploys agents as (named
+  `agent-bricks-…`), with who may use them, the service principal they run as and the
+  resources it holds (their tools), and the scopes they act for their users with.
+* **Genie agents** (Genie spaces), with who may ask them questions, the tables they answer
+  from, and their instructions.
+
+Knowledge Assistant and Supervisor Agent agents, and MCP services in Unity Catalog, aren't read
+yet.
+
+| Check | Raised when |
+|---|---|
+| `platform.shared_with_everyone` | the workspace's `users` group, or the account's `account users`, may use the agent |
+| `platform.plain_secret` | an environment variable whose name says it holds a secret has its value in the agent's configuration, rather than from a secret scope (`{{secrets/scope/key}}`, or an app's `valueFrom`) |
+| `platform.broad_identity` | an agent on Model Serving calls Databricks with a fixed credential (`DATABRICKS_TOKEN` or `DATABRICKS_CLIENT_SECRET`), or an Agent Bricks agent's service principal may change, not only use, a resource (`CAN_MANAGE`, `IS_OWNER`, `MODIFY`, a secret scope's `WRITE` or `MANAGE`) |
+
+A Genie agent's instructions go through the instruction checks. An agent whose permissions
+AgentGov may not read is shown as such, and its findings about who may use it are left as
+they were.
+
+### Setting it up
+
+1. Make a service principal for AgentGov in your Databricks account, give it an OAuth secret,
+   and add it to each workspace to read. Databricks has no role that may read every endpoint,
+   app and Genie space without changing them, so make it a workspace admin; a service
+   principal that isn't sees only what it has been given.
+2. Name the workspaces, and give AgentGov the service principal's credentials:
+
+   ```bash
+   AGENTGOV_DATABRICKS_HOSTS=https://dbc-1234.cloud.databricks.com,https://adb-5678.azuredatabricks.net
+   AGENTGOV_DATABRICKS_CLIENT_ID=...       # the service principal's application ID
+   AGENTGOV_DATABRICKS_CLIENT_SECRET=...   # its OAuth secret
+   AGENTGOV_DATABRICKS_READ=serving,apps,genie   # leave out what you don't want read
+   ```
+
+   A personal access token (`AGENTGOV_DATABRICKS_TOKEN`) works too, for one workspace or
+   several where it is valid, but Databricks recommends OAuth.
 
 ## Doing it from the CLI or the API
 

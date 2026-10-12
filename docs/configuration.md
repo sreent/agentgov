@@ -265,6 +265,10 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into t
 | `AGENTGOV_SALESFORCE_URL` | — | Salesforce: the org to read Agentforce agents in, by its My Domain URL, such as `https://contoso.my.salesforce.com` (empty: Salesforce isn't read). |
 | `AGENTGOV_SALESFORCE_CLIENT_ID`<br>`AGENTGOV_SALESFORCE_CLIENT_SECRET` (secret) | —<br>— | The External Client App AgentGov signs in with: its consumer key, and its consumer secret, for the client credentials flow (as the app's Run As user). |
 | `AGENTGOV_SALESFORCE_USERNAME`<br>`AGENTGOV_SALESFORCE_PRIVATE_KEY_FILE` | —<br>— | Instead of the secret, the JWT bearer flow: the user AgentGov signs in as, and the private key (PEM) of the certificate uploaded to the app. |
+| `AGENTGOV_DATABRICKS_HOSTS` | empty | Databricks: the workspaces to read agents in, comma-separated URLs, such as `https://dbc-1234.cloud.databricks.com` (empty: Databricks isn't read). |
+| `AGENTGOV_DATABRICKS_CLIENT_ID`<br>`AGENTGOV_DATABRICKS_CLIENT_SECRET` (secret) | —<br>— | The service principal AgentGov reads as (OAuth machine-to-machine): its application ID and an OAuth secret of its own. |
+| `AGENTGOV_DATABRICKS_TOKEN` (secret) | — | Instead, a personal access token, valid in the workspaces named. |
+| `AGENTGOV_DATABRICKS_READ` | `serving,apps,genie` | What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent Bricks agents) and genie (Genie agents). |
 
 ### Classifier, optional
 

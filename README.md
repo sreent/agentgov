@@ -47,7 +47,7 @@ Whether AgentGov replaces Agent 365 depends on where your agents run:
 |---|---|
 | Built and run by you, with any framework or cloud, calling tools over MCP | The whole job: registry, an identity per agent, policy on every tool call and model call, data protection, approvals, a kill switch and an audit trail. For these agents it is an alternative to Agent 365, and the option for organisations that don't use Microsoft 365 |
 | Built in Microsoft 365 Copilot, Copilot Studio or Agent Builder | Works alongside Microsoft's admin centers. These agents don't pass through AgentGov's gateway, so Microsoft carries out the decisions about them. AgentGov lists them, checks their connectors and instructions, and keeps them in the same registry and audit trail as your other agents. With the Microsoft services you have, it also reads their Entra identities, who uses them and Defender's alerts about them; has Power Platform enforce its connector allowlist; decides Copilot Studio agents' tool calls with its own policies; and quarantines or blocks agents as the admin who signed in ([connections](docs/microsoft-connections.md)) |
-| Built on AWS (Amazon Bedrock agents and AgentCore), Google Cloud (Agent Runtime) or Salesforce (Agentforce) | Reads them into the same registry: each agent's model and tools where its platform reports them, how it checks callers and what it runs as, with risky settings (no guardrail, secrets in its environment, open to anyone, a broad identity) as findings and its instructions checked. AgentGov doesn't change them: stop an agent in its platform ([other platforms](docs/other-platforms.md)) |
+| Built on AWS (Amazon Bedrock agents and AgentCore), Google Cloud (Agent Runtime), Salesforce (Agentforce) or Databricks (Model Serving, Agent Bricks, Genie) | Reads them into the same registry: each agent's model and tools where its platform reports them, how it checks callers and what it runs as, with risky settings (no guardrail, secrets in its environment, open to anyone, a broad identity) as findings and its instructions checked. AgentGov doesn't change them: stop an agent in its platform ([other platforms](docs/other-platforms.md)) |
 
 Each Microsoft connection is optional: AgentGov uses the ones it can reach and works
 without the others. Agent 365 matters in three of them, because Microsoft offers them
@@ -384,8 +384,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
   as the signed-in admin
-* [Agents on other platforms](docs/other-platforms.md): agents built on AWS, Google Cloud
-  and Salesforce, read into the registry with their risky settings as findings
+* [Agents on other platforms](docs/other-platforms.md): agents built on AWS, Google Cloud,
+  Salesforce and Databricks, read into the registry with their risky settings as findings
 * [Connecting AgentGov to Microsoft's services](docs/microsoft-connections.md): Entra
   Agent ID, the Purview audit log, Defender alerts, Entra access packages, Power Platform
   connector policies and Copilot Studio threat detection, each optional

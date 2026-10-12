@@ -701,6 +701,21 @@ CATALOG: tuple[Feature, ...] = (
         needs="AGENTGOV_SALESFORCE_URL, and an External Client App allowed to read the org",
     ),
     Feature(
+        "databricks",
+        "Databricks agents",
+        "platforms",
+        "AgentGov reads the agents in your Databricks workspaces into the inventory (agents on "
+        "Model Serving, Agent Bricks agents and Genie agents), with their risky settings as "
+        "findings, on a schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has workspaces to read and a service principal there.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_DATABRICKS_HOSTS, and a service principal in those workspaces",
+    ),
+    Feature(
         "security-operations",
         "Hand-off to security operations",
         "secops",
