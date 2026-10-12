@@ -47,12 +47,13 @@ come second: they report, but they don't enforce.
 | 26 | Registry | **Knowledge Assistants and Supervisor Agents** (done, [other platforms](other-platforms.md#databricks)): the Databricks endpoints that serve them are shown as what they are, with their instructions checked and a supervisor's subagents and tools, its built-in code execution flagged as a code-running tool; read from Databricks' Beta APIs where a workspace offers them | Databricks Agent Bricks APIs |
 | 27 | Registry | **Google's Agent Registry** (done, [other platforms](other-platforms.md#google-cloud)): its agents and MCP servers read with Agent Runtime's, in each region and `global`: agents on Cloud Run and GKE, Gemini Enterprise's agents (which its own API lists only to their creators) and agents registered by hand, with where each runs, its identity (a default service account is a finding), protocol, endpoints, skills and an MCP server's tools; Google's own agents and Agent Runtime's duplicate entries left out, and projects without an API skipped | Agent Registry API |
 | 28 | Registry | **Amazon Quick's agents** (done, [other platforms](other-platforms.md#aws)): the chat agents people build in Amazon Quick read with AWS's other agents, with their instructions (checked), spaces, who they are shared with and their action connectors; an agent shared with a whole namespace, and connectors that act with one shared credential for everyone, as findings | Amazon Quick (QuickSight) API |
+| 29 | Registry | **AWS Agent Registry** (done, [other platforms](other-platforms.md#aws)): agents and MCP servers registered by hand read with AWS's other agents, with their protocol, endpoints, skills and tools; and the AgentCore runtimes and gateways an organisation's registry detects in accounts AgentGov doesn't read, so one account's registry shows the organisation's, a gateway without inbound authorization as a finding; what is read on AWS chosen with `AGENTGOV_AWS_READ` | AWS Agent Registry API |
 
 ## Later
 
 | Theme | Item | Building block |
 |---|---|---|
-| Registry | **More platform connectors**: read more of each platform the way [AWS, Google Cloud, Salesforce and Databricks](other-platforms.md) and [Microsoft 365 and Copilot Studio](platforms.md) are read: from AWS, its Agent Registry; from Salesforce, the channels its service agents are deployed on; and from Databricks, Unity Catalog's MCP services | Platform APIs |
+| Registry | **More platform connectors**: read more of each platform the way [AWS, Google Cloud, Salesforce and Databricks](other-platforms.md) and [Microsoft 365 and Copilot Studio](platforms.md) are read: from Salesforce, the channels its service agents are deployed on; and from Databricks, Unity Catalog's MCP services | Platform APIs |
 | Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
 
 ## Out of scope

@@ -86,15 +86,29 @@ AgentGov reads, in each region and account you name:
   spaces, who they are shared with, and their action connectors (their tools) with how each
   signs in to the system it acts on. An account that doesn't use Amazon Quick in a region is
   skipped there.
+* **AWS Agent Registry's agents and MCP servers**, in each registry of the account: those
+  registered by hand (an A2A agent card, an MCP server's definition), with their protocol,
+  endpoints (their hosts), skills, an MCP server's tools, how an agent card says callers sign
+  in, and the record's status in the registry; a record for each version of a name is shown
+  as its own agent. Skills and custom entries aren't agents, so they are left out.
 
-AWS's Agent Registry isn't read yet.
+An organisation's registry with auto-detection on lists the AgentCore runtimes and gateways of
+every account in the organisation, in its region, so reading the account that holds it (the
+delegated administrator's) shows them all. Those in accounts AgentGov reads itself are read
+from AgentCore, in full; the others come from the registry, with their protocol, how they check
+callers (a gateway without inbound authorization is a finding), their workload identity and
+endpoint. Each is known by its own ARN, so it stays the same agent when you add a role in its
+account and AgentGov reads it in full.
+
+`AGENTGOV_AWS_READ` chooses what is read: `bedrock-agents`, `agentcore` (harnesses and
+runtimes), `agentcore-gateways`, `quick` and `agent-registry`, all by default.
 
 | Check | Raised when |
 |---|---|
 | `platform.no_guardrail` | a Bedrock agent has no guardrail |
 | `platform.risky_tool` | an agent has computer use, a shell or a text editor (high), or a code interpreter or a browser (medium) |
 | `platform.weak_authentication` | a harness, runtime or gateway checks callers' tokens without allowed audiences or clients, so a token issued to another application gets in |
-| `platform.no_authentication` | a gateway has no inbound authorization (high: anyone who can reach it may call its tools), or a runtime or gateway that checks AWS credentials has a resource policy that lets any AWS principal in, with no condition |
+| `platform.no_authentication` | a gateway has no inbound authorization (high: anyone who can reach it may call its tools; for a gateway known from the registry too), or a runtime or gateway that checks AWS credentials has a resource policy that lets any AWS principal in, with no condition |
 | `platform.plain_secret` | an environment variable whose name says it holds a secret (a password, token or key) has a value that isn't a reference to Secrets Manager or Parameter Store |
 | `platform.shared_with_everyone` | an Amazon Quick agent is shared with a whole namespace, every user in it |
 | `platform.maker_credentials` | an Amazon Quick agent's action connectors sign in with one credential for everyone (an API key, a user name and password, an OAuth client or an IAM role), so its users act with that credential's access rather than their own |
@@ -120,7 +134,9 @@ AWS's Agent Registry isn't read yet.
            "bedrock-agentcore:ListGatewayTargets", "bedrock-agentcore:GetGatewayTarget",
            "bedrock-agentcore:GetResourcePolicy",
            "quicksight:ListAgents", "quicksight:DescribeAgent",
-           "quicksight:DescribeAgentPermissions", "quicksight:DescribeActionConnector"
+           "quicksight:DescribeAgentPermissions", "quicksight:DescribeActionConnector",
+           "agent-registry:ListRegistries", "agent-registry:ListRegistryRecords",
+           "agent-registry:GetRegistryRecord"
          ],
          "Resource": "*"
        }
@@ -131,8 +147,9 @@ AWS's Agent Registry isn't read yet.
    AWS's `ReadOnlyAccess` covers the Bedrock agent actions but AgentCore has no read-only
    managed policy, so use this one. An agent encrypted with a key of yours also needs
    `kms:Decrypt` on that key; without it, AgentGov records the agent from what the list
-   shows and says what it couldn't read. A policy without the gateway or Amazon Quick actions
-   leaves the other agents read, and the Platforms page says what couldn't be.
+   shows and says what it couldn't read. A policy without the gateway, Amazon Quick or Agent
+   Registry actions leaves the other agents read, and the Platforms page says what couldn't
+   be; or leave out of `AGENTGOV_AWS_READ` what you don't use.
 2. Give the control plane the credentials, from wherever AWS's SDKs find them:
    `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; on EKS, IAM roles for service accounts or
    Pod Identity on its service account ([AWS](deploy/aws.md)); or an EC2 instance's role.
@@ -147,8 +164,8 @@ AWS's Agent Registry isn't read yet.
    ```
 
 AgentGov signs its requests itself (Signature Version 4), without the AWS SDK. A region that
-doesn't offer Bedrock agents or AgentCore is skipped; one that refuses is named on the
-Platforms page.
+doesn't offer Bedrock agents, AgentCore or the Agent Registry is skipped; one that refuses is
+named on the Platforms page.
 
 ## Google Cloud
 
