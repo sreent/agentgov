@@ -35,7 +35,7 @@ from typing import Any
 import grpc
 from google.protobuf import json_format, struct_pb2
 
-from agentgov import ids
+from agentgov import authzen, ids
 from agentgov.config import Settings
 from agentgov.identity import chains, people
 from agentgov.opa.client import OpaClient, OpaError
@@ -171,19 +171,83 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         recorder: DecisionRecorder,
         presidio: PresidioClient | None = None,
         traffic_classifier: classifier.TrafficClassifier | None = None,
+        decision_point: authzen.AuthZenClient | None = None,
     ) -> None:
         self.settings = settings
         self.opa = opa
+        # The organisation's own AuthZEN decision point, asked beside AgentGov's policies.
+        self.authzen = decision_point or (
+            authzen.AuthZenClient(
+                settings.authzen_url,
+                token=settings.authzen_token,
+                timeout=settings.authzen_timeout_seconds,
+            )
+            if settings.authzen_url
+            else None
+        )
         self.cp = control_plane
         self.recorder = recorder
         self.presidio = presidio
         self.classifier = traffic_classifier
         self.features = FeatureModes(opa)
         # Signs and checks the delegations agents carry from agent to agent.
-        self.chain_key = chains.signing_key(settings.service_token)
+        self.chain_keys = chains.keys(settings.service_token)
         self._background: set[asyncio.Task[Any]] = set()
 
     # ------------------------------------------------------------------ helpers
+    async def decide(
+        self, path: str, opa_input: dict[str, Any], *, kind: str
+    ) -> tuple[dict[str, Any], str | None]:
+        """AgentGov's decision on a call (OPA's), with, as the external-decision-point
+        feature says, the organisation's own AuthZEN decision point's beside it
+        (agentgov.authzen): asked about calls AgentGov lets through, its denial stands
+        when it is enforced, and is recorded as monitored otherwise."""
+        decision, decision_id = await self.opa.evaluate(path, opa_input)
+        if (
+            self.authzen is None
+            or decision.get("effect") == "deny"
+            or opa_input.get("phase", "request") != "request"
+        ):
+            return decision, decision_id
+        mode = (await self.features.current()).get("external-decision-point", "off")
+        if mode == "off":
+            return decision, decision_id
+
+        def monitored(note: str) -> dict[str, Any]:
+            return {**decision, "monitored": [*(decision.get("monitored") or []), note]}
+
+        request = authzen.request_for(kind, opa_input, agent=decision.get("agent"))
+        try:
+            verdict = authzen.interpret(
+                await self.authzen.evaluate(request, request_id=decision_id)
+            )
+        except authzen.AuthZenError as exc:
+            log.warning("external decision point: %s", exc)
+            if mode == "enforce":
+                reasons = [
+                    f"Your decision point can't be asked ({exc}); the call was not forwarded"
+                ]
+                return {**decision, "effect": "deny", "reasons": reasons}, decision_id
+            return monitored(f"external-decision-point: couldn't be asked ({exc})"), decision_id
+        if verdict.effect == "allow":
+            if not verdict.redact:
+                return decision, decision_id
+            if mode == "enforce":
+                redact = sorted({*(decision.get("redact") or []), *verdict.redact})
+                return {**decision, "redact": redact}, decision_id
+            masked = ", ".join(sorted(verdict.redact))
+            return monitored(f"external-decision-point: would mask {masked}"), decision_id
+        said = "; ".join(verdict.reasons)
+        if mode != "enforce":
+            would = "deny" if verdict.effect == "deny" else "ask for approval"
+            return monitored(f"external-decision-point: would {would}: {said}"), decision_id
+        if verdict.effect == "deny":
+            reasons = [f"Your decision point denied it: {r}" for r in verdict.reasons]
+            return {**decision, "effect": "deny", "reasons": reasons}, decision_id
+        asked = list(decision.get("reasons") or []) if decision.get("effect") != "allow" else []
+        reasons = [*asked, f"Your decision point asks for approval: {said}"]
+        return {**decision, "effect": "require_approval", "reasons": reasons}, decision_id
+
     def _spawn(self, coro: Any) -> None:
         task = asyncio.create_task(coro)
         self._background.add(task)
@@ -260,7 +324,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         if not token:
             return None, None
         try:
-            chain = chains.verify(self.chain_key, token, holder=identity.get("agent_id"))
+            chain = chains.verify(self.chain_keys, token, holder=identity.get("agent_id"))
         except chains.ChainError as exc:
             return None, f"The call can't be accepted: {exc}"
         if not chains.same_person(person, chain.person):
@@ -383,7 +447,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         if chain is not None:
             opa_input["chain"] = chain.links
         try:
-            decision, decision_id = await self.opa.evaluate("agentgov/mcp/decision", opa_input)
+            decision, decision_id = await self.decide(
+                "agentgov/mcp/decision", opa_input, kind="tool"
+            )
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
             reasons = ["Policy engine unavailable; the call was not forwarded"]
@@ -676,7 +742,9 @@ async def serve(settings: Settings) -> None:
     # Mutual TLS with the other components (agentgov.tls), when it has a certificate: OPA
     # and the control plane are called with it, and agentgateway must show its own.
     identity = settings.tls()
-    http = httpx.AsyncClient(timeout=5.0, verify=identity.client_context() if identity else True)
+    http = httpx.AsyncClient(
+        timeout=5.0, transport=identity.async_transport() if identity else None
+    )
     opa = OpaClient(settings.opa_url or "http://localhost:8181", http=http)
     control_plane = ControlPlaneClient(
         settings.control_plane_url, settings.service_token, http=http
@@ -696,7 +764,9 @@ async def serve(settings: Settings) -> None:
         options=[
             ("grpc.max_receive_message_length", 64 * 1024 * 1024),
             ("grpc.max_send_message_length", 64 * 1024 * 1024),
-        ]
+        ],
+        # With AGENTGOV_TLS_PEERS, only those callers (agentgateway's certificate).
+        interceptors=identity.grpc_interceptors() if identity else None,
     )
     # IBM Granite Guardian's second opinion on traffic, where it is configured.
     traffic_classifier = classifier.TrafficClassifier(settings) if settings.guardian_url else None

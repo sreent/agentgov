@@ -1999,19 +1999,34 @@ async function agentForm(a) {
   ]);
   const editing = Boolean(a);
   const identity = a?.workload_identity;
-  // How it authenticates: offered once there's an issuer to choose.
-  const authentication = issuers.length || identity ? [
+  // Who gets its tokens: the agent itself, or people who sign in to it (a public client);
+  // and how the agent authenticates, offered once there's an issuer to choose.
+  const authentication = [
     { type: 'section', label: 'Authentication' },
     {
-      id: 'workload_issuer', label: 'Authenticates with', type: 'select', value: identity?.issuer || '',
+      id: 'client_type', label: 'Its tokens are for', type: 'select', value: a?.client_type || 'service',
       options: [
-        { value: '', label: 'A client secret' },
-        ...issuers.map((i) => ({ value: i.name, label: `Its own identity from ${i.name} (${issuerKind(i.kind)}${i.status === 'blocked' ? ', blocked' : ''})` })),
+        { value: 'service', label: 'The agent itself (a confidential client)' },
+        { value: 'public', label: "People who sign in to it on their machines, such as developers' MCP clients (a public client)" },
       ],
-      hint: 'An identity it already has, such as a Kubernetes service account, needs no secret to store or rotate.',
+      hint: 'A public client has no secret: people sign in to it, and it acts for them with their own token.',
     },
-    { id: 'workload_subject', label: 'Subject', mono: true, value: identity?.subject || '', hint: 'Its subject at the issuer: the sub claim of its tokens there.' },
-  ] : [];
+    {
+      id: 'redirect_uris', label: 'Sign-ins return to', mono: true, value: (a?.redirect_uris || []).join(', '), placeholder: 'http://127.0.0.1/*, http://localhost/*',
+      hint: 'Where its sign-in may return, separated by commas, with * only at the end. Empty: the machine itself, at any port, where MCP clients such as VS Code and Claude Code listen for it.',
+    },
+    ...(issuers.length || identity ? [
+      {
+        id: 'workload_issuer', label: 'Authenticates with', type: 'select', value: identity?.issuer || '',
+        options: [
+          { value: '', label: 'A client secret' },
+          ...issuers.map((i) => ({ value: i.name, label: `Its own identity from ${i.name} (${issuerKind(i.kind)}${i.status === 'blocked' ? ', blocked' : ''})` })),
+        ],
+        hint: 'An identity it already has, such as a Kubernetes service account, needs no secret to store or rotate.',
+      },
+      { id: 'workload_subject', label: 'Subject', mono: true, value: identity?.subject || '', hint: 'Its subject at the issuer: the sub claim of its tokens there.' },
+    ] : []),
+  ];
   const tiers = RISK_TIERS.map((t) => ({ value: t, label: humanize(t) }));
   const fields = [
     editing ? null : {
@@ -2056,7 +2071,16 @@ async function agentForm(a) {
     { type: 'section', label: 'Agent to agent' },
     {
       id: 'a2a_url', label: 'A2A endpoint', value: a?.a2a_url || '', placeholder: 'http://billing-agent:9600', mono: true,
-      hint: 'Where it serves A2A (its JSON-RPC endpoint), reachable only from the gateway. Other agents then call it at /a2a/<name> on the gateway, as their grants allow.',
+      hint: 'Where it serves A2A (its JSON-RPC endpoint). Other agents then call it at /a2a/<name> on the gateway, as their grants allow.',
+    },
+    {
+      id: 'a2a_protection', label: 'Calls around the gateway are stopped by', type: 'select', value: a?.a2a_protection || '',
+      options: [
+        { value: '', label: 'Nothing we know of' },
+        { value: 'network', label: 'The network: only the gateway can reach it' },
+        { value: 'delegation', label: "The agent: it refuses calls without the gateway's delegation" },
+      ],
+      hint: "AgentGov checks only the calls that come through its gateway. Say what stops calls straight to the A2A endpoint: AgentGov can test it, and tells the agent's owners when it doesn't.",
     },
     {
       id: 'agent_access', label: 'Extra agents it may call', value: (a?.agent_access || []).join(', '), placeholder: 'billing-agent, kb-*', mono: true,
@@ -2078,10 +2102,14 @@ async function agentForm(a) {
       : 'Approved agents get their own OAuth client in Keycloak and can call the tools they are granted.',
     iconName: editing ? 'edit' : 'agents', confirm: editing ? 'Save changes' : 'Register agent', fields,
     onReady: (controls) => {
-      if (!controls.workload_issuer) return;
       const subject = controls.workload_subject;
       const show = () => {
-        const issuer = issuers.find((i) => i.name === controls.workload_issuer.value);
+        // A public client has no identity of its own: people sign in to it.
+        const isPublic = controls.client_type.value === 'public';
+        controls.redirect_uris.closest('.field').hidden = !isPublic;
+        if (!controls.workload_issuer) return;
+        controls.workload_issuer.closest('.field').hidden = isPublic;
+        const issuer = isPublic ? null : issuers.find((i) => i.name === controls.workload_issuer.value);
         subject.closest('.field').hidden = !issuer;
         if (!issuer) return;
         subject.placeholder = ISSUER_KINDS[issuer.kind]?.[1] || '';
@@ -2090,11 +2118,13 @@ async function agentForm(a) {
         const entra = a?.external_ids?.entra_agent_id;
         if (isEntra(issuer) && entra && !subject.value) subject.value = entra;
       };
-      controls.workload_issuer.addEventListener('change', show);
+      controls.client_type.addEventListener('change', show);
+      controls.workload_issuer?.addEventListener('change', show);
       show();
     },
     submit: async (v) => {
-      if (v.workload_issuer && !v.workload_subject) throw new Error('Give its subject at the issuer, or choose a client secret.');
+      const isPublic = v.client_type === 'public';
+      if (!isPublic && v.workload_issuer && !v.workload_subject) throw new Error('Give its subject at the issuer, or choose a client secret.');
       const body = {
         description: v.description,
         owner: orNull(v.owner),
@@ -2107,13 +2137,16 @@ async function agentForm(a) {
         daily_token_budget: parseBudget(v.daily_token_budget),
         agent_access: parseList(v.agent_access),
         a2a_url: orNull(v.a2a_url),
+        a2a_protection: v.a2a_protection || null,
         framework: orNull(v.framework),
         platform: orNull(v.platform),
         models: parseList(v.models),
         labels: parseLabels(v.labels),
+        client_type: v.client_type,
+        redirect_uris: isPublic ? parseList(v.redirect_uris) : [],
       };
       if ('workload_issuer' in v) {
-        body.workload_identity = v.workload_issuer ? { issuer: v.workload_issuer, subject: v.workload_subject } : null;
+        body.workload_identity = v.workload_issuer && !isPublic ? { issuer: v.workload_issuer, subject: v.workload_subject } : null;
       }
       // Left unchanged, the tier follows the blueprint (as the API does).
       if (v.risk_tier && v.risk_tier !== a?.risk_tier) body.risk_tier = v.risk_tier;
@@ -2181,6 +2214,30 @@ async function agentSignIn(a) {
       ]),
       h('pre', { class: 'kv-pre', tabindex: '0' }, request),
     ],
+  });
+}
+
+/** Where people sign in to a public client, as their MCP clients find it. */
+async function publicSignIn(a) {
+  let creds;
+  try {
+    creds = await api(`v1/agents/${encodeURIComponent(a.id)}/credentials`, { method: 'POST', body: {} });
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+    return;
+  }
+  await ask({
+    title: `How people sign in to ${a.name}`,
+    text: "Their MCP client finds where to sign in from the gateway, once Developers sign in at the gateway is on, and asks them for this client ID if it can't register itself. They sign in in their browser, and the client acts for them with their own token, which the gateway takes for this agent and for them.",
+    iconName: 'key', confirm: 'Done', cancel: null, wide: true,
+    extra: facts([
+      ['Client ID', copyable(creds.client_id, 'client ID')],
+      ['Issuer', copyable(creds.issuer, 'issuer')],
+      ['Sign-ins return to', h('span', { class: 'mono' }, (creds.redirect_uris || []).join(', '))],
+      ['Authorization endpoint', copyable(creds.authorization_endpoint, 'authorization endpoint')],
+      ['Token endpoint', copyable(creds.token_endpoint, 'token endpoint')],
+      ['Gateway audience', copyable(creds.audience, 'gateway audience')],
+    ]),
   });
 }
 
@@ -2352,6 +2409,10 @@ function identityCard(a) {
   if (credentialActions && workload) {
     credentialActions = [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'show-sign-in', onclick: guarded(() => agentSignIn(a)) }, icon('key'), 'How it authenticates')];
   }
+  const isPublic = a.client_type === 'public';
+  if (credentialActions && isPublic) {
+    credentialActions = [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'show-sign-in', onclick: guarded(() => publicSignIn(a)) }, icon('key'), 'How people sign in')];
+  }
   const platform = platformOf(a);
   let noClient = a.status === 'discovered' ? 'Not issued (unmanaged)' : 'Not issued';
   if (platform) noClient = "Not needed: it doesn't use the gateway";
@@ -2364,9 +2425,12 @@ function identityCard(a) {
       facts([
         platform ? null : ['Provider', humanize(id.provider || 'none')],
         ['Client ID', id.client_id ? copyable(id.client_id, 'client ID') : h('span', { class: 'muted' }, noClient)],
-        platform ? null : ['Authenticates with', workload
-          ? ['Its own identity from ', h('a', { href: '#/access' }, workload.issuer)]
-          : 'A client secret'],
+        platform ? null : ['Authenticates with', isPublic
+          ? 'Nothing of its own: people sign in to it (a public client)'
+          : workload
+            ? ['Its own identity from ', h('a', { href: '#/access' }, workload.issuer)]
+            : 'A client secret'],
+        isPublic ? ['Sign-ins return to', h('span', { class: 'mono' }, (a.redirect_uris.length ? a.redirect_uris : ['http://127.0.0.1/*', 'http://localhost/*']).join(', '))] : null,
         workload ? ['Subject', copyable(workload.subject, 'subject')] : null,
         platform ? null : ['Synced', id.synced_at ? timeEl(id.synced_at) : h('span', { class: 'muted' }, 'Not synced yet')],
         ['Agent ID', copyable(a.id, 'agent ID')],
@@ -2385,6 +2449,30 @@ function identityCard(a) {
   });
 }
 
+// Calls around the gateway: what its owners say stops calls straight to its A2A endpoint,
+// and what AgentGov found when it last called it itself.
+const AROUND_SAYS = {
+  network: 'The network: only the gateway can reach it',
+  delegation: "The agent: it refuses calls without the gateway's delegation",
+};
+const AROUND_FOUND = {
+  refused: ['good', 'shield-check', 'It refused the test call'],
+  accepted: ['critical', 'alert-circle', 'It took the test call'],
+  unreachable: [null, 'info', "AgentGov couldn't reach it"],
+  inconclusive: ['warning', 'triangle', 'Inconclusive'],
+};
+function aroundGateway(around) {
+  const says = AROUND_SAYS[around.protection];
+  const test = around.test;
+  const [tone, iconName, label] = test ? (AROUND_FOUND[test.state] || [null, 'info', test.state]) : [];
+  return h('div', { class: 'stack', style: 'gap:4px' },
+    says ? h('span', {}, `Stopped by ${says.charAt(0).toLowerCase()}${says.slice(1)}`)
+      : h('span', { class: 'muted' }, "Its owners haven't said what stops calls straight to it"),
+    test
+      ? h('div', {}, plainChip(label, { tone, iconName }), ' ', h('span', { class: 'muted small' }, `${test.detail}, `), timeEl(test.checked_at))
+      : h('span', { class: 'muted small' }, around.mode === 'test' ? 'Not tested yet: the next posture scan tests it.' : `Not tested (calls-around-gateway is ${around.mode}).`));
+}
+
 // Agent to agent: where other agents call it, whom it may call, and who may call it.
 function agentA2ACard(a, view) {
   if (view instanceof Error) {
@@ -2401,11 +2489,12 @@ function agentA2ACard(a, view) {
     ['May call', names(view.may_call)],
     view.agent_access.length ? ['Its grants', h('span', { class: 'chip-row' }, view.agent_access.map((p) => plainChip(p, { mono: true })))] : null,
     view.serves ? ['Called by', names(view.called_by)] : null,
+    view.serves ? ['Around the gateway', aroundGateway(view.around_gateway)] : null,
   ];
   const idle = !view.serves && !view.may_call.length && !view.agent_access.length;
   return card({
     title: 'Agent to agent',
-    sub: 'Calls between agents go through the gateway (A2A), where policy checks each one; the agent called gets who handed the work down, with the person at its head.',
+    sub: 'Calls between agents through the gateway (A2A) are checked by policy, one by one; the agent called gets who handed the work down, with the person at its head. Calls straight to an agent skip the gateway.',
     body: idle
       ? emptyState("It doesn't serve or call other agents", can('admin') ? 'Give it an A2A endpoint, or agents it may call, with Edit.' : null)
       : facts(rows),
@@ -3187,7 +3276,7 @@ function toolserverForm(ts, draft = null) {
     iconName: editing ? 'edit' : 'toolservers', confirm: editing ? 'Save changes' : 'Register server',
     fields: [
       editing ? null : { id: 'name', label: 'Name', required: true, mono: true, value: ts?.name || '', placeholder: 'crm', hint: `${NAME_HINT} It becomes the gateway path /mcp/<name>.` },
-      { id: 'url', label: 'Upstream URL', mono: true, value: ts?.url || '', placeholder: 'http://crm-mcp:8000/mcp', hint: 'The streamable HTTP MCP endpoint, required on the gateway. Agents never call it directly, only through the gateway.' },
+      { id: 'url', label: 'Upstream URL', mono: true, value: ts?.url || '', placeholder: 'http://crm-mcp:8000/mcp', hint: 'The streamable HTTP MCP endpoint, required on the gateway: agents reach it through the gateway, never directly. For a server outside the gateway, where agents reach it.' },
       { id: 'description', label: 'Description', type: 'textarea', value: ts?.description || '' },
       { id: 'owner', label: 'Owner', value: ts?.owner || '', placeholder: 'Team or person' },
       { type: 'row', fields: [
@@ -3200,12 +3289,19 @@ function toolserverForm(ts, draft = null) {
       { id: 'developers', label: "Developers, in the MCP registry", type: 'checkbox', value: Boolean(ts?.developers), hint: 'Listed in the registry GitHub Copilot and VS Code read (Developer tools).' },
       { id: 'packages', label: 'Packages developers run', type: 'code', rows: 2, value: formatPackages(ts?.packages), placeholder: 'npm:@playwright/mcp@0.0.41', hint: 'For a server developers run on their machines: one per line, type:identifier@version (npm, pypi, oci, nuget, cargo, mcpb).' },
       { id: 'registry_name', label: 'Name in the registry', mono: true, value: ts?.registry_name || '', placeholder: 'com.contoso/crm', hint: 'By default <namespace>/<name>.' },
+      { type: 'section', label: 'Outside the gateway' },
+      {
+        id: 'authorization_server', label: 'Its authorization server', mono: true, value: ts?.authorization_server || '', placeholder: 'https://id.wiki.example.com/realms/wiki',
+        hint: "For a server outside the gateway that takes access tokens from an authorization server of its own: its issuer. Agents get identity assertions (ID-JAG) for it from AgentGov, as their grants allow, while Identity assertions is on, and trade them there for access tokens.",
+      },
+      { id: 'oauth_client_id', label: "AgentGov's agents' client there", mono: true, value: ts?.oauth_client_id || '', placeholder: 'agentgov-agents', hint: "The client ID agents have at that authorization server. Empty: each agent's own client ID." },
     ].filter(Boolean),
     submit: (v) => {
       const body = {
         url: v.url, description: v.description, owner: orNull(v.owner),
         trust_level: v.trust_level, data_classification: v.data_classification, labels: parseLabels(v.labels),
         gateway: v.gateway, developers: v.developers, packages: parsePackages(v.packages), registry_name: orNull(v.registry_name),
+        authorization_server: orNull(v.authorization_server), oauth_client_id: orNull(v.oauth_client_id),
       };
       if (editing) return api(`v1/toolservers/${encodeURIComponent(ts.name)}`, { method: 'PATCH', body, ifMatch: ts.version });
       return api('v1/toolservers', { method: 'POST', body: { name: v.name, ...body } });
@@ -3216,9 +3312,10 @@ function toolserverForm(ts, draft = null) {
 async function registerToolserver() {
   const created = await toolserverForm(null);
   if (!created) return;
-  toast(created.gateway
-    ? `Registered ${created.name}. Agents reach it at ${created.gateway_url || `/mcp/${created.name}`}.`
-    : `Registered ${created.name} for developers.`);
+  let said = `Registered ${created.name} for developers.`;
+  if (created.gateway) said = `Registered ${created.name}. Agents reach it at ${created.gateway_url || `/mcp/${created.name}`}.`;
+  else if (created.authorization_server) said = `Registered ${created.name}. Agents get identity assertions for it from AgentGov.`;
+  toast(said);
   await refresh();
 }
 
@@ -3286,7 +3383,8 @@ function serverCard(ts) {
         h('div', { class: 'server-title' },
           h('div', { class: 'title-row' }, h('h2', { id: headingId, class: 'tool-name' }, ts.name), chip('server', ts.status), trustChip,
             plainChip(humanize(ts.data_classification || 'unclassified'), { iconName: 'lock', title: 'Data classification' }),
-            ts.developers ? plainChip(ts.gateway ? 'Listed for developers' : 'Developers only', { iconName: 'developers', title: 'In the MCP registry developers\' MCP clients read' }) : null),
+            ts.developers ? plainChip(ts.gateway ? 'Listed for developers' : 'Developers only', { iconName: 'developers', title: 'In the MCP registry developers\' MCP clients read' }) : null,
+            ts.authorization_server ? plainChip('Identity assertions', { iconName: 'key', title: 'Agents reach it outside the gateway, with identity assertions (ID-JAG) AgentGov gives them' }) : null),
           ts.description ? h('p', { style: 'color:var(--ink-2)' }, ts.description) : null),
         h('div', { class: 'btn-row' }, actions)),
       poisoned.length ? callout('critical', 'octagon', h('span', {}, h('strong', {}, `${plural(poisoned.length, 'tool')} quarantined. `),
@@ -3294,7 +3392,9 @@ function serverCard(ts) {
       changed.length ? callout('warning', 'triangle', h('span', {}, h('strong', {}, `${plural(changed.length, 'tool')} changed since approval. `),
         'Calls are refused until an administrator approves the new definition.')) : null,
       facts([
-        ts.gateway ? ['Gateway URL', ts.gateway_url ? copyable(ts.gateway_url, 'gateway URL') : h('span', { class: 'muted' }, 'Gateway public URL not configured')] : ['Gateway', h('span', { class: 'muted' }, 'Not published: only for developers')],
+        ts.gateway ? ['Gateway URL', ts.gateway_url ? copyable(ts.gateway_url, 'gateway URL') : h('span', { class: 'muted' }, 'Gateway public URL not configured')] : ['Gateway', h('span', { class: 'muted' }, ts.authorization_server ? 'Not published: agents reach it directly' : 'Not published: only for developers')],
+        ts.authorization_server ? ['Authorization server', h('code', { class: 'break' }, ts.authorization_server)] : null,
+        ts.authorization_server ? ["Agents' client there", ts.oauth_client_id ? h('code', {}, ts.oauth_client_id) : h('span', { class: 'muted' }, "Each agent's own client ID")] : null,
         ['Upstream', ts.url ? h('code', { class: 'break' }, ts.url) : null],
         (ts.packages || []).length ? ['Packages', h('div', { class: 'chip-row' }, ts.packages.map((pk) => plainChip(formatPackages([pk]), { mono: true })))] : null,
         ['Owner', ts.owner],
@@ -5177,7 +5277,8 @@ function checkpointsCard(kept, points) {
     type: 'button', class: 'btn btn--sm', 'data-focus-key': 'make-checkpoint',
     onclick: guarded(async () => {
       const point = await api('v1/ledger/checkpoints', { method: 'POST' });
-      toast(point.timestamped ? `Checkpoint at entry #${fmt(point.seq)}, time-stamped.` : `Checkpoint at entry #${fmt(point.seq)}.`);
+      const done = [point.timestamped ? 'time-stamped' : null, point.log?.logged ? 'in the transparency log' : null].filter(Boolean);
+      toast(`Checkpoint at entry #${fmt(point.seq)}${done.length ? `, ${done.join(' and ')}` : ''}.`);
       await refresh();
     }),
   }, icon('plus'), 'Make a checkpoint') : null;
@@ -5192,15 +5293,31 @@ function checkpointsCard(kept, points) {
     if (c.timestamp_error) return plainChip('Not time-stamped', { tone: 'warning', iconName: 'triangle', title: c.timestamp_error });
     return h('span', { class: 'muted' }, kept.tsa_url ? 'Waiting for its time-stamp' : 'Not time-stamped');
   };
+  // Its entry in the transparency log: where, whether its proof was checked, and the
+  // Sigstore bundle that checks it offline.
+  const logged = (c) => {
+    const log = c.log || {};
+    if (log.logged) {
+      const [tone, label] = log.checked === false ? ['warning', 'Logged, proof failed']
+        : log.checked ? ['good', `In the log, #${fmt(log.index)}`] : [null, `In the log, #${fmt(log.index)} (unchecked)`];
+      return h('span', {}, plainChip(label, { tone, iconName: log.checked === false ? 'triangle' : 'shield-check', title: log.error || log.url }), ' ',
+        h('button', {
+          type: 'button', class: 'btn btn--sm btn--ghost', 'data-focus-key': `bundle-${c.seq}`,
+          onclick: guarded(async () => { await saveDownload(`v1/ledger/checkpoints/${c.seq}/log-entry`, `checkpoint-${c.seq}.sigstore.json`); }),
+        }, icon('download'), 'Log entry'));
+    }
+    if (log.error) return plainChip('Not in the log', { tone: 'warning', iconName: 'triangle', title: log.error });
+    return kept.rekor_url ? h('span', { class: 'muted' }, 'Waiting for the log') : null;
+  };
   const line = (c) => h('li', { class: 'access-row' },
     h('div', { class: 'access-main' },
       h('div', { class: 'cell-title' }, `Entry #${fmt(c.seq)} `, h('code', { class: 'hash', title: c.hash }, shortHash(c.hash))),
       h('div', { class: 'cell-sub break' }, 'Kept ', timeEl(c.created_at),
         c.archive ? [' · entries ', fmt(c.archived_from), '–', fmt(c.seq), ' archived to ', h('code', {}, c.archive)] : '')),
-    h('div', {}, stamp(c)));
+    h('div', { class: 'stack', style: 'gap:4px' }, stamp(c), logged(c)));
   return card({
     title: 'Checkpoints and retention',
-    sub: 'Points of the chain kept for good, time-stamped by an authority when one is set; what leaves the database is archived first.',
+    sub: 'Points of the chain kept for good, time-stamped by an authority and added to a transparency log when they are set; what leaves the database is archived first.',
     actions: make ? [make] : null,
     body: [
       facts([
@@ -5208,6 +5325,7 @@ function checkpointsCard(kept, points) {
         ['Chain in the database', kept.chain_from ? `From the checkpoint at entry #${fmt(kept.chain_from)}` : 'From the genesis entry'],
         ['Checkpoints', kept.checkpoint_hours ? `Every ${plural(kept.checkpoint_hours, 'hour')}` : 'On demand'],
         ['Time-stamping authority', kept.tsa_url ? h('code', {}, kept.tsa_url) : h('span', { class: 'muted' }, 'None')],
+        ['Transparency log', kept.rekor_url ? h('code', {}, kept.rekor_url) : h('span', { class: 'muted' }, 'None')],
         ['Operational records', kept.data_retention_days ? `${plural(kept.data_retention_days, 'day')}` : 'Kept'],
       ]),
       points.length ? h('ul', { class: 'access-list', role: 'list' }, points.map(line)) : emptyState('No checkpoints yet', 'The first is kept within the hour.'),
@@ -6543,17 +6661,42 @@ const SIGHTING_STATUS = {
 };
 
 async function renderDevelopers() {
-  const [registry, sightings, features] = await Promise.all([
-    api('v1/mcp/registry'), api('v1/mcp/sightings'), featureModes().catch(() => ({})),
+  const [registry, sightings, features, agentList] = await Promise.all([
+    api('v1/mcp/registry'), api('v1/mcp/sightings'), featureModes().catch(() => ({})), api('v1/agents').catch(() => []),
   ]);
   return h('div', { class: 'page' },
     pageHead({
       title: 'Developer tools',
-      sub: "Which MCP servers developers' MCP clients may use, served as an MCP registry for GitHub Copilot and VS Code, and which ones developers have set up on their machines.",
+      sub: "Which MCP servers developers' MCP clients may use, served as an MCP registry for GitHub Copilot and VS Code, how developers sign in to the ones on the gateway, and which ones developers have set up on their machines.",
       actions: [refreshButton()],
     }),
     registryCard(registry),
+    signInCard(agentList.filter((a) => a.client_type === 'public'), features),
     sightingsCard(sightings, features));
+}
+
+/** Developers' MCP clients on the gateway, with their own tokens: the public clients they sign in to. */
+function signInCard(clients, features) {
+  const on = features['developer-sign-in'] === 'on';
+  return card({
+    title: 'Signing in at the gateway',
+    sub: "Developers' MCP clients reach the tool servers on the gateway with the developer's own token: the gateway tells them where to sign in, and they sign in to an agent registered as a public client, which acts for them.",
+    flush: Boolean(clients.length),
+    body: [
+      on ? null : callout('info', 'power', h('span', {}, h('strong', {}, 'Off: '),
+        "the gateway doesn't tell MCP clients where to sign in. Turn on ", h('code', {}, 'developer-sign-in'), ' on the ', h('a', { href: '#/features' }, 'Features'), ' page.')),
+      clients.length
+        ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+          h('caption', { class: 'sr-only' }, 'Agents developers sign in to'),
+          h('thead', {}, h('tr', {}, ['Agent', 'Client ID', 'Sign-ins return to', 'Status'].map((c) => h('th', { scope: 'col' }, c)))),
+          h('tbody', {}, clients.map((a) => h('tr', {},
+            h('td', { 'data-label': 'Agent' }, h('a', { href: agentHref(a.id) }, a.name), a.blueprint ? h('div', { class: 'cell-sub' }, a.blueprint) : null),
+            h('td', { 'data-label': 'Client ID' }, copyable(a.identity.client_id, 'client ID')),
+            h('td', { 'data-label': 'Sign-ins return to' }, h('code', { class: 'break' }, (a.redirect_uris.length ? a.redirect_uris : ['http://127.0.0.1/*', 'http://localhost/*']).join(', '))),
+            h('td', { 'data-label': 'Status' }, humanize(a.status)))))))
+        : emptyState('No agent for developers to sign in to', "Register an agent whose tokens are for people who sign in to it (a public client), with a blueprint whose agents act for people."),
+    ],
+  });
 }
 
 function registryCard(registry) {

@@ -58,6 +58,20 @@ def test_a_delegated_token_names_the_agent_it_was_delegated_to() -> None:
     }
 
 
+def test_a_person_who_signed_in_to_the_agent_themselves() -> None:
+    # A public client's token, such as a developer's MCP client's, says so.
+    for said in (True, "true"):
+        person = people.person_of({**ALICE, "sign_in": said})
+        assert person is not None and person["via"] == "sign-in"
+    assert people.person_of({**ALICE, "sign_in": False})["via"] == "exchange"
+    # A delegation is still a delegation.
+    claims = {**ALICE, "sign_in": True, "act": {"sub": "sa-1"}}
+    assert people.person_of(claims)["via"] == "delegation"
+    # And a service account doesn't become a person.
+    service = {"subject": "sa-1", "username": "service-account-agent-x", "sign_in": True}
+    assert people.person_of(service) is None
+
+
 def test_only_names_count_as_groups_and_roles() -> None:
     person = people.person_of({**ALICE, "groups": ["/a", "", 3, None], "roles": "admin"})
     assert person is not None

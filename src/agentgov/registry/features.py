@@ -50,6 +50,7 @@ GROUPS = {
     "developers": "Developer tools",
     "identity": "Identity",
     "lifecycle": "Lifecycle",
+    "policy": "Policy",
     "microsoft": "Microsoft",
     "secops": "Security operations",
 }
@@ -104,8 +105,10 @@ CATALOG: tuple[Feature, ...] = (
         "gateway",
         "Agents that serve A2A (the Agent2Agent protocol) are published on agentgateway at "
         "/a2a/<agent>, where other agents call them with their AgentGov token. The controls "
-        "check every call, and the chain of agents, with the person they act for, goes "
-        "with it to every agent, tool and model further down.",
+        "check every call that comes through the gateway, and the chain of agents, with the "
+        "person they act for, goes with it to every agent, tool and model further down. A "
+        "call straight to an agent's own URL doesn't pass the gateway: AgentGov doesn't "
+        "see it (calls around the gateway, below, look for those).",
         SWITCH,
         ON,
         {
@@ -190,6 +193,25 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "Content isn't inspected.",
         },
         needs="Presidio, for personal data (credentials are found without it)",
+    ),
+    Feature(
+        "a2a-masking",
+        "Masking in calls between agents",
+        "controls",
+        "Personal data in the messages agents send each other through the gateway is masked, "
+        "unless the agent called may have it (its pii-access label). Data protection finds "
+        "it, and refuses credentials in messages whatever this says. A message sent straight "
+        "to an agent's own URL doesn't pass the gateway, so nothing is masked in it.",
+        CONTROL,
+        MONITOR,
+        {
+            ENFORCE: "Personal data is masked before the agent called gets the message, unless "
+            "that agent may have it.",
+            MONITOR: "Messages go as they are; each call's decision records what would have "
+            "been masked.",
+            OFF: "Messages go as they are; the personal data in them is recorded.",
+        },
+        needs="data protection on, to find personal data",
     ),
     Feature(
         "prompt-injection",
@@ -296,6 +318,42 @@ CATALOG: tuple[Feature, ...] = (
         },
     ),
     Feature(
+        "external-decision-point",
+        "Your own decision point",
+        "policy",
+        "The processor also asks an AuthZEN decision point of yours (Cedar, Cerbos, Topaz, "
+        "OpenFGA, Keycloak...) about each call to a tool, a model or another agent that "
+        "AgentGov's policies let through: who, the method, the tool, model or agent, and "
+        "what was found in the call, never its content.",
+        CONTROL,
+        OFF,
+        {
+            ENFORCE: "Calls it denies are refused, with its reasons; calls it says need "
+            "approval wait for one; what it asks to mask is masked. Unreachable, it refuses.",
+            MONITOR: "Calls go as AgentGov decides; each call's decision records what it "
+            "would have done.",
+            OFF: "It isn't asked.",
+        },
+        needs="AGENTGOV_AUTHZEN_URL where the processor runs",
+    ),
+    Feature(
+        "authzen-decision-point",
+        "AgentGov as an AuthZEN decision point",
+        "policy",
+        "AgentGov's policies answer AuthZEN evaluations (OpenID AuthZEN 1.0) at "
+        "/access/v1/evaluation on the control plane, so that enforcement points other than "
+        "AgentGov's gateway can ask whether an agent may call a tool, a model or another "
+        "agent.",
+        SWITCH,
+        OFF,
+        {
+            ON: "Evaluations are answered, for callers with a role that reads AgentGov, or "
+            "the service token.",
+            OFF: "The endpoints answer 404.",
+        },
+        needs="OPA (AGENTGOV_OPA_URL) where the control plane runs",
+    ),
+    Feature(
         "discovery",
         "Shadow-agent discovery",
         "detection",
@@ -307,6 +365,28 @@ CATALOG: tuple[Feature, ...] = (
             ON: "Unregistered agents appear as discovered.",
             OFF: "They aren't added; registered agents' activity is still recorded.",
         },
+    ),
+    Feature(
+        "calls-around-gateway",
+        "Calls around the gateway",
+        "detection",
+        "AgentGov checks the calls between agents that come through its gateway; it doesn't "
+        "own the network agents run on, so a call straight to an agent's own A2A URL skips "
+        "every control. AgentGov can't stop those (the network can, or the agent, by "
+        "refusing calls without the delegation the gateway gives with each one); it finds "
+        "them and tells the agents' owners.",
+        (OFF, "watch", "test"),
+        "watch",
+        {
+            "test": "As watch, and each posture scan also calls each agent's A2A URL itself, "
+            "without a delegation, as a call around the gateway would, and records what "
+            "happened: an agent that takes the call is an issue for its owners.",
+            "watch": "Telemetry that shows a call straight to an agent's A2A URL is recorded "
+            "and is an issue for both agents' owners, as is an agent whose owners haven't "
+            "said what stops such calls. AgentGov calls no agent itself.",
+            OFF: "Nothing is looked for. What agents' owners said is kept.",
+        },
+        needs="posture checks on, for the test",
     ),
     Feature(
         "posture-checks",
@@ -350,6 +430,26 @@ CATALOG: tuple[Feature, ...] = (
         needs="the control plane reachable from developers' machines",
     ),
     Feature(
+        "developer-sign-in",
+        "Developers sign in at the gateway",
+        "developers",
+        "Developers' MCP clients (VS Code, Claude Code, Cursor...) reach the tool servers on "
+        "the gateway with the developer's own token: each server's route tells them where "
+        "to sign in (OAuth protected resource metadata), and they sign in to an agent "
+        "registered as a public client, which acts for them. The controls check their calls "
+        "as they check agents', with the developer as the person the agent acts for.",
+        SWITCH,
+        OFF,
+        {
+            ON: "Each tool server's route serves its metadata at "
+            "/.well-known/oauth-protected-resource/mcp/<server>, and answers a call without "
+            "a token with a pointer to it (while unknown callers are refused).",
+            OFF: "The gateway takes the same tokens but doesn't say where to sign in.",
+        },
+        needs="Keycloak reachable from developers' machines, and an agent with client_type "
+        "public for their MCP clients",
+    ),
+    Feature(
         "mcp-discovery",
         "Developers' MCP servers",
         "developers",
@@ -379,6 +479,25 @@ CATALOG: tuple[Feature, ...] = (
         },
         needs="Keycloak 26.6 or later, whose service account for AgentGov may manage identity "
         "providers; SPIFFE issuers need Keycloak's spiffe preview feature",
+    ),
+    Feature(
+        "identity-assertions",
+        "Identity assertions for servers outside the gateway",
+        "identity",
+        "Agents get identity assertions (ID-JAG, MCP's enterprise-managed authorization) for "
+        "the MCP servers outside the gateway that take access tokens from an authorization "
+        "server of their own, as their grants and blueprints allow, and trade them there for "
+        "access tokens. AgentGov's token endpoint gives them, for the agent or the person it "
+        "acts for, and the ledger records each one.",
+        SWITCH,
+        OFF,
+        {
+            ON: "Agents get assertions at <control plane>/oauth2/token for the tool servers "
+            "registered with an authorization server.",
+            OFF: "No assertions are given. Those given before expire within five minutes.",
+        },
+        needs="the service token, Keycloak's issuer and keys, and OPA, where the control plane "
+        "runs; and the servers' authorization servers trusting AgentGov's",
     ),
     Feature(
         "registration-approval",
@@ -604,6 +723,38 @@ def unmet(key: str, mode: str, settings: Settings) -> str | None:
             )
         if mode == ENFORCE and not settings.opa_url:
             return "enforcing Copilot Studio threat detection needs AGENTGOV_OPA_URL"
+    if key == "external-decision-point" and mode != OFF and not settings.authzen_url:
+        return (
+            "your own decision point needs its URL: set AGENTGOV_AUTHZEN_URL where the "
+            "processor runs"
+        )
+    if key == "authzen-decision-point" and mode != OFF and not settings.opa_url:
+        return (
+            "AgentGov answers AuthZEN with OPA's decisions: set AGENTGOV_OPA_URL where the "
+            "control plane runs"
+        )
+    if (
+        key == "developer-sign-in"
+        and mode != OFF
+        and not (settings.keycloak_issuer and settings.keycloak_jwks_url)
+    ):
+        return (
+            "developers sign in to Keycloak, whose tokens the gateway checks: set "
+            "AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL"
+        )
+    if key == "identity-assertions" and mode != OFF:
+        if not settings.service_token:
+            return (
+                "AgentGov signs identity assertions with a key it derives from the service "
+                "token: set AGENTGOV_SERVICE_TOKEN where the control plane runs"
+            )
+        if not (settings.keycloak_issuer and settings.keycloak_jwks_url):
+            return (
+                "AgentGov checks the tokens agents bring with Keycloak's keys: set "
+                "AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL"
+            )
+        if not settings.opa_url:
+            return "AgentGov's policies decide which agents get them: set AGENTGOV_OPA_URL"
     if key == "traffic-classifier" and mode != OFF and not settings.guardian_url:
         return (
             "the classifier needs IBM Granite Guardian: set AGENTGOV_GUARDIAN_URL where the "

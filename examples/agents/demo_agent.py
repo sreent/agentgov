@@ -26,14 +26,21 @@ teams responsible for agents get their issues in their own channels
 (examples/secops/sink stands in for all of them). A management rule tells the agent's
 people before it would act. And the ledger gets a checkpoint, time-stamped by an
 authority (the sink stands in for one too) and checked with OpenSSL, next to a compliance
-report and the evidence pack for assessors. Last, a classifier gives a second opinion
-on a tool result the rules let through (examples/models/mock stands in for IBM Granite
-Guardian, where the stack is started with AGENTGOV_GUARDIAN_URL pointing at it).
+report and the evidence pack for assessors. A classifier gives a second opinion on a tool
+result the rules let through (examples/models/mock stands in for IBM Granite Guardian,
+where the stack is started with AGENTGOV_GUARDIAN_URL pointing at it). Developers' MCP
+clients sign in at the gateway: dana, a developer, signs in in a browser as an MCP client
+has them do, and calls a tool with their own token. dana's MCP client gets an identity
+assertion (ID-JAG) from AgentGov for a server outside the gateway, the wiki, which it
+would trade at the wiki's own authorization server for an access token. Last, alice signs
+out at Keycloak, and Keycloak tells AgentGov, which ends her session there too.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import html
 import io
 import json
@@ -49,6 +56,7 @@ import zipfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 import httpx2
@@ -89,6 +97,10 @@ A2A_ROUTE = f"/a2a/{BILLING}"
 # How soon a block must stop the agent's calls (it takes well under a second; this leaves
 # room for a busy machine).
 KILL_SWITCH_SECONDS = 5
+# The agent developers' MCP clients sign in to (agents.yaml), and where an MCP client on a
+# developer's machine listens for the sign-in to come back (VS Code's port).
+DEVELOPERS_AGENT = "coding-assistant"
+LOOPBACK = "http://127.0.0.1:33418/"
 
 BOLD, DIM, GREEN, RED, YELLOW, RESET = (
     "\033[1m",
@@ -556,6 +568,29 @@ async def agent_to_agent(name: str, creds: dict[str, str]) -> None:
             f"{BILLING}'s own call {(crm or {}).get('resource')} for "
             f"{(crm or {}).get('on_behalf_of')}: {' > '.join(chain_of(crm))}",
         )
+        # Masking in messages, enforced: each message goes through the gateway's external
+        # processing on its way too. billing-agent may have personal data (its blueprint's
+        # pii-access), so it gets the message whole.
+        admin("PUT", "/v1/features/a2a-masking", json={"mode": "enforce"})
+        print("  a2a-masking set to enforce")
+        try:
+            await asyncio.sleep(8)  # the gateway's configuration, and the processor, follow
+            _, reply = await ask_agent(
+                http, "What does customer c-002 owe? Copy ada@example.com in."
+            )
+            state, text = answer_of(reply)
+            asked = await asyncio.to_thread(
+                ledger_entry, {"agent": name, "type": "decision.a2a.request"}
+            )
+            redacted = ((asked or {}).get("details") or {}).get("redacted")
+            show(
+                "whole:",
+                state == "TASK_STATE_COMPLETED" and redacted == [],
+                f"{BILLING} may have personal data, so the email reached it as it was: {text}",
+            )
+        finally:
+            admin("PUT", "/v1/features/a2a-masking", json={"mode": "monitor"})
+            print("  a2a-masking set back to monitor")
         # A chain an agent makes up: AgentGov signs the delegations it gives.
         me = admin("GET", f"/v1/agents/{name}")["id"]
         forged = jwt.encode(
@@ -588,6 +623,74 @@ async def agent_to_agent(name: str, creds: dict[str, str]) -> None:
             report(status == 200, answer_of(reply)[1], expect_allowed=False)
         finally:
             admin("PATCH", blueprint, json={"agent_access": [BILLING]})
+    await asyncio.to_thread(around_the_gateway)
+
+
+def around_the_gateway() -> None:
+    """Calls straight to billing-agent's own URL don't pass the gateway, and AgentGov can't
+    stop them: billing-agent refuses them itself, checking the delegation the gateway gives
+    with each call. AgentGov looks for such calls, and tests whether an agent takes them."""
+    admin("PUT", "/v1/features/calls-around-gateway", json={"mode": "test"})
+    print("  calls-around-gateway set to test")
+    try:
+        admin("POST", "/v1/posture/scan")
+        around = admin("GET", f"/v1/agents/{BILLING}/a2a")["around_gateway"]
+        test = around.get("test") or {}
+        show(
+            "refused:",
+            test.get("state") == "refused" and around.get("protection") == "delegation",
+            f"AgentGov called {test.get('url')} itself, around the gateway: {test.get('detail')}",
+        )
+    finally:
+        admin("PUT", "/v1/features/calls-around-gateway", json={"mode": "watch"})
+        print("  calls-around-gateway set back to watch")
+    # Telemetry from a job that calls billing-agent at its own URL: recorded, and an issue
+    # for billing-agent's owners.
+    job = f"invoice-job-{secrets.token_hex(2)}"
+    span = {
+        "traceId": secrets.token_hex(16),
+        "spanId": secrets.token_hex(8),
+        "name": "POST",
+        "kind": 3,
+        "startTimeUnixNano": str(time.time_ns()),
+        "endTimeUnixNano": str(time.time_ns()),
+        "attributes": [
+            {"key": "http.request.method", "value": {"stringValue": "POST"}},
+            {"key": "url.full", "value": {"stringValue": "http://billing-agent:9600/"}},
+            {"key": "server.address", "value": {"stringValue": "billing-agent"}},
+            {"key": "server.port", "value": {"intValue": "9600"}},
+        ],
+    }
+    payload = {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [{"key": "service.name", "value": {"stringValue": job}}]
+                },
+                "scopeSpans": [
+                    {"scope": {"name": "opentelemetry.instrumentation.httpx"}, "spans": [span]}
+                ],
+            }
+        ]
+    }
+    httpx.post(f"{OTLP_HTTP}/v1/traces", json=payload, timeout=10).raise_for_status()
+    seen, _ = until(
+        lambda: [
+            f
+            for f in admin(
+                "GET",
+                "/v1/findings",
+                params={"type": "agent.a2a_called_around_gateway", "agent": BILLING},
+            )
+            if job in f["title"]
+        ],
+        timeout=30,
+    )
+    show(
+        "seen:" if seen else "not seen:",
+        bool(seen),
+        f"telemetry shows {job} calling {BILLING} at its own URL: an issue for its owners",
+    )
 
 
 async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
@@ -1084,7 +1187,7 @@ def management_rules(name: str) -> None:
 
 
 def evidence(name: str) -> None:
-    step("20. Evidence: a hash-chained ledger, time-stamped from outside, for assessors")
+    step("20. Evidence: a hash-chained ledger, time-stamped and logged outside, for assessors")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -1117,6 +1220,8 @@ def evidence(name: str) -> None:
                 capture_output=True, text=True, check=False,
             )  # fmt: skip
         show("OpenSSL:", "Verification: OK" in checked.stdout, checked.stdout.strip())
+    if admin("GET", "/v1/info").get("transparency_log"):
+        transparency_log(point)
     # What AgentGov does towards the EU AI Act, and the evidence pack for assessors.
     report = admin("GET", "/v1/evidence/report", params={"framework": "eu-ai-act", "days": 1})
     controls = {c["id"]: c for c in report["controls"]}
@@ -1146,6 +1251,56 @@ def evidence(name: str) -> None:
             f"{person:<9} {entry.get('decision') or '':<17} "
             f"{(entry.get('reason') or '')[:50]}{RESET}"
         )
+
+
+def transparency_log(point: dict[str, Any]) -> None:
+    """The checkpoint is in a transparency log too (the stack's own rekor-tiles), which
+    anyone can check offline: the log signed a tree that holds it."""
+    from cryptography.hazmat.primitives import serialization
+
+    from agentgov import transparency
+
+    log = point.get("log") or {}
+    show(
+        "logged:",
+        bool(log.get("logged")) and log.get("checked") is True,
+        f"entry {log.get('index')} of the transparency log at {log.get('url')}"
+        + (f": {log['error']}" if log.get("error") else ", its proof checked"),
+    )
+    if not log.get("logged"):
+        return
+    about = admin("GET", "/v1/ledger/transparency-log")
+    bundle = admin("GET", f"/v1/ledger/checkpoints/{point['seq']}/log-entry")
+    [entry] = bundle["verificationMaterial"]["tlogEntries"]
+    try:
+        checked = transparency.check(
+            entry,
+            point["statement"].encode(),
+            log_key=serialization.load_pem_public_key(about["log_key"].encode()),
+            origin=about["origin"],
+            signer=serialization.load_pem_public_key(about["signer_key"].encode()),
+        )
+        show(
+            "offline:",
+            True,
+            f"{about['origin']} signed a tree of {checked.tree_size} entries that holds it",
+        )
+    except transparency.TransparencyError as exc:
+        show("offline:", False, str(exc))
+    if shutil.which("cosign"):
+        with tempfile.TemporaryDirectory() as work:
+            files = Path(work)
+            (files / "statement.txt").write_text(point["statement"])
+            (files / "bundle.json").write_text(json.dumps(bundle))
+            (files / "root.json").write_text(json.dumps(about["trusted_root"]))
+            (files / "agentgov.pub").write_text(about["signer_key"])
+            checked = subprocess.run(
+                ["cosign", "verify-blob", "--key", files / "agentgov.pub",
+                 "--bundle", files / "bundle.json", "--trusted-root", files / "root.json",
+                 files / "statement.txt"],
+                capture_output=True, text=True, check=False,
+            )  # fmt: skip
+        show("cosign:", checked.returncode == 0, (checked.stderr or checked.stdout).strip())
 
 
 async def deeper_detection() -> None:
@@ -1210,6 +1365,266 @@ async def deeper_detection() -> None:
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
 
 
+def authzen_decision_point() -> None:
+    step("22. AuthZEN: another enforcement point asks AgentGov's policies, in a standard way")
+    admin("PUT", "/v1/features/authzen-decision-point", json={"mode": "on"})
+    try:
+        where = httpx.get(f"{CONTROL_PLANE}/.well-known/authzen-configuration", timeout=10)
+        show(
+            "discovered:",
+            where.status_code == 200,
+            f"evaluations at {where.json().get('access_evaluation_endpoint')}",
+        )
+
+        def may(tool: str) -> dict[str, Any]:
+            return admin(
+                "POST",
+                "/access/v1/evaluation",
+                json={
+                    "subject": {"type": "agent", "id": f"agent-{BILLING}"},
+                    "action": {"name": "tools/call"},
+                    "resource": {"type": "tool", "id": tool},
+                    "context": {"detections": {"categories": []}},
+                },
+            )
+
+        allowed, denied = may("crm/get_customer"), may("crm/delete_customer")
+        show(
+            "AuthZEN:",
+            allowed["decision"] is True and denied["decision"] is False,
+            f"{BILLING} may call crm/get_customer ({allowed['context']['reason']}); "
+            f"crm/delete_customer: {'; '.join(denied['context']['reasons'])}",
+        )
+    finally:
+        admin("PUT", "/v1/features/authzen-decision-point", json={"mode": "off"})
+
+
+def told_where_to_sign_in(timeout: float = 60) -> str | None:
+    """What an MCP client gets for a call without a token, once the gateway has its new
+    configuration: 401, and where the server's metadata says to sign in."""
+    hello = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "an MCP client", "version": "1.0.0"},
+        },
+    }
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        resp = httpx.post(
+            f"{GATEWAY}/mcp/crm",
+            json=hello,
+            headers={"Accept": "application/json, text/event-stream"},
+            timeout=10,
+        )
+        found = re.search(r'resource_metadata="([^"]+)"', resp.headers.get("www-authenticate", ""))
+        if resp.status_code == 401 and found:
+            return found.group(1)
+        time.sleep(1)
+    return None
+
+
+def browser_sign_in(person: str, creds: dict[str, Any], resource: str) -> str:
+    """The person signs in to a public client in their browser, as an MCP client has them
+    do: the authorization code flow with PKCE, for the server it wants (its resource), back
+    to the client on their machine, which then gets their token."""
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+    browser = httpx.Client(timeout=30)
+    try:
+        page = browser.get(
+            creds["authorization_endpoint"],
+            params={
+                "response_type": "code",
+                "client_id": creds["client_id"],
+                "redirect_uri": LOOPBACK,
+                "code_challenge": challenge.rstrip(b"=").decode(),
+                "code_challenge_method": "S256",
+                "state": secrets.token_urlsafe(8),
+                "resource": resource,
+            },
+        )
+        # Keycloak marks its cookies Secure, which browsers send to http://localhost anyway.
+        for cookie in browser.cookies.jar:
+            cookie.secure = False
+        form = re.search(r'<form[^>]*action="([^"]+)"', page.text)
+        if form is None:
+            raise SystemExit(f"no sign-in form at {creds['authorization_endpoint']}")
+        back = browser.post(
+            html.unescape(form.group(1)), data={"username": person, "password": DEMO_PASSWORD}
+        )
+    finally:
+        browser.close()
+    code = parse_qs(urlsplit(back.headers.get("location", "")).query).get("code")
+    if not code:
+        raise SystemExit(f"{person} could not sign in to {creds['client_id']} ({back.status_code})")
+    token = httpx.post(
+        creds["token_endpoint"],
+        data={
+            "grant_type": "authorization_code",
+            "code": code[0],
+            "redirect_uri": LOOPBACK,
+            "client_id": creds["client_id"],
+            "code_verifier": verifier,
+            "resource": resource,
+        },
+        timeout=30,
+    )
+    token.raise_for_status()
+    return str(token.json()["access_token"])
+
+
+async def developer_sign_in() -> None:
+    step("23. Developers sign in at the gateway: their MCP clients, with their own tokens")
+    admin("PUT", "/v1/features/developer-sign-in", json={"mode": "on"})
+    try:
+        where = told_where_to_sign_in()
+        show("told:", where is not None, f"a call without a token gets 401, and {where}")
+        if where is None:
+            return
+        metadata = httpx.get(where, timeout=10).json()
+        servers = metadata.get("authorization_servers") or []
+        show(
+            "metadata:",
+            bool(servers) and str(metadata.get("resource", "")).endswith("/mcp/crm"),
+            f"{metadata.get('resource')}: sign in at {', '.join(servers)}",
+        )
+        creds = admin("POST", f"/v1/agents/{DEVELOPERS_AGENT}/credentials", json={})
+        # dana is a developer; sam isn't, and the blueprint's agents act only for developers.
+        for person, developer in (("dana", True), ("sam", False)):
+            token = browser_sign_in(person, creds, metadata["resource"])
+            print(f"  {person} signed in to {creds['client_id']}; the MCP client has their token")
+            headers = {"Authorization": f"Bearer {token}"}
+            timeout = httpx2.Timeout(30.0, read=60.0)
+            async with (
+                httpx2.AsyncClient(headers=headers, timeout=timeout) as http,
+                Client(
+                    streamable_http_client(f"{GATEWAY}/mcp/crm", http_client=http),
+                    client_info=Implementation(name="vscode", version="1.0.0"),
+                ) as client,
+            ):
+                allowed, payload = await call(client, "get_customer", {"customer_id": "c-001"})
+                report(allowed, payload, expect_allowed=developer)
+            entry = ledger_entry({"agent": DEVELOPERS_AGENT, "user": person})
+            user = ((entry or {}).get("details") or {}).get("user") or {}
+            show(
+                "recorded:" if entry else "not recorded",
+                entry is not None and user.get("via") == "sign-in",
+                f"{entry['type']} {entry['resource']} for {entry['on_behalf_of']}, who signed "
+                f"in to {DEVELOPERS_AGENT} (via {user.get('via')})"
+                if entry
+                else "",
+            )
+    finally:
+        admin("PUT", "/v1/features/developer-sign-in", json={"mode": "off"})
+
+
+def identity_assertions() -> None:
+    step("24. A server outside the gateway: an identity assertion (ID-JAG) for it, from AgentGov")
+    admin("PUT", "/v1/features/identity-assertions", json={"mode": "on"})
+    try:
+        meta = httpx.get(f"{CONTROL_PLANE}/.well-known/oauth-authorization-server", timeout=10)
+        meta.raise_for_status()
+        issuer = meta.json()
+        wiki = admin("GET", "/v1/toolservers/wiki")
+        creds = admin("POST", f"/v1/agents/{DEVELOPERS_AGENT}/credentials", json={})
+        keys = httpx.get(issuer["jwks_uri"], timeout=10).json()["keys"]
+
+        def assertion_for(person: str) -> httpx.Response:
+            # The person's MCP client, signed in, asks AgentGov for one (RFC 8693).
+            token = browser_sign_in(person, creds, wiki["url"])
+            return httpx.post(
+                issuer["token_endpoint"],
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                    "requested_token_type": "urn:ietf:params:oauth:token-type:id-jag",
+                    "subject_token": token,
+                    "subject_token_type": ACCESS_TOKEN,
+                    "audience": wiki["authorization_server"],
+                    "resource": wiki["url"],
+                },
+                timeout=30,
+            )
+
+        given = assertion_for("dana")
+        claims: dict[str, Any] = {}
+        if given.status_code == 200:
+            token = given.json()["access_token"]
+            header = jwt.get_unverified_header(token)
+            key = next((k for k in keys if k["kid"] == header.get("kid")), None)
+            if key is not None:
+                claims = jwt.decode(
+                    token,
+                    jwt.PyJWK.from_dict(key).key,
+                    algorithms=["ES256"],
+                    audience=wiki["authorization_server"],
+                )
+            show(
+                "given:",
+                header.get("typ") == "oauth-id-jag+jwt" and claims.get("resource") == wiki["url"],
+                f"for {claims.get('sub')} at {claims.get('aud')}, as client "
+                f"{claims.get('client_id')}, by {claims.get('act', {}).get('sub')}, for "
+                f"{given.json().get('expires_in')}s; checked with AgentGov's published key",
+            )
+        else:
+            show("given:", False, f"{given.status_code} {given.text[:200]}")
+        entry = ledger_entry({"type": "decision.assertion", "user": "dana"})
+        show(
+            "recorded:" if entry else "not recorded",
+            entry is not None and entry["decision"] == "allow",
+            f"{entry['type']} {entry['resource']} for {entry['on_behalf_of']}" if entry else "",
+        )
+        refused = assertion_for("sam")
+        answer = (
+            refused.json()
+            if refused.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
+        show(
+            "refused:",
+            refused.status_code == 400 and answer.get("error") == "invalid_target",
+            f"sam: {answer.get('error_description')}",
+        )
+    finally:
+        admin("PUT", "/v1/features/identity-assertions", json={"mode": "off"})
+
+
+def back_channel_logout() -> None:
+    step("25. Signing out everywhere: alice signs out at Keycloak, and AgentGov signs her out")
+    alice = agentgov_session("alice")
+    signed_in = alice.get(f"{CONTROL_PLANE}/auth/session").json().get("signed_in") is True
+    show("alice signed in to AgentGov", signed_in, "through Keycloak, as her browser does")
+    # She signs out at Keycloak itself, as she would from any app that signs her in there.
+    where = httpx.get(f"{CONTROL_PLANE}/auth/login", follow_redirects=False).headers["location"]
+    page = alice.get(where.split("?", 1)[0].rsplit("/", 1)[0] + "/logout")
+    form = re.search(r'<form[^>]*action="([^"]+)"[^>]*>(.*?)</form>', page.text, re.S)
+    if form is None:
+        raise SystemExit(f"no sign-out form at {page.url}")
+    fields = dict(re.findall(r'name="([^"]+)"\s+value="([^"]*)"', form.group(2)))
+    for cookie in alice.cookies.jar:
+        cookie.secure = False
+    alice.post(
+        urljoin(str(page.url), html.unescape(form.group(1))),
+        data={**fields, "confirmLogout": "Logout"},
+    )
+    ended, waited = until(
+        lambda: alice.get(f"{CONTROL_PLANE}/auth/session").json().get("signed_in") is False,
+        timeout=20,
+    )
+    show(
+        "alice's AgentGov session ended",
+        ended,
+        f"{waited:.1f}s after she signed out at Keycloak, which told the control plane "
+        "(back-channel logout), rather than when the session would have expired",
+    )
+    entry = ledger_entry({"type": "admin.logout"})
+    reason = (entry or {}).get("reason") or ""
+    show("recorded:", "identity provider" in reason, f"admin.logout for alice: {reason}")
+
+
 def main() -> None:
     wait_for_gateway("/mcp/crm", MODEL_ROUTE, A2A_ROUTE)
     step("1. Registration: a new agent is requested, approved and given an identity")
@@ -1225,6 +1640,10 @@ def main() -> None:
         management_rules(name)
         evidence(name)
         asyncio.run(deeper_detection())
+        authzen_decision_point()
+        asyncio.run(developer_sign_in())
+        identity_assertions()
+        back_channel_logout()
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")
         print(f"{DIM}Open {CONTROL_PLANE}/ui for the admin view.{RESET}")

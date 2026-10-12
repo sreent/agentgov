@@ -268,3 +268,45 @@ test_what_a_call_is_checked_for_doesnt_hold_up_its_answer if {
 		with data.registry as reg
 	"Agent frontdesk is blocked" in blocked.reasons
 }
+
+# ---------------------------------------------------------------------------
+# Masking in messages (a2a-masking).
+# ---------------------------------------------------------------------------
+
+message(client, target, categories) := object.union(call(client, target), {"detections": {"categories": categories}})
+
+test_personal_data_in_a_message_is_masked_for_an_agent_that_may_not_have_it if {
+	d := decide(message("agent-frontdesk", "billing-agent", ["pii"]))
+	d.effect == "allow"
+	d.redact == ["pii"]
+
+	# An agent called that may have it gets it as it is.
+	reg := object.union(registry, {"agents": {"agt_billing": {"labels": {"pii-access": "true"}}}})
+	entitled := a2a.decision with input as message("agent-frontdesk", "billing-agent", ["pii"])
+		with data.registry as reg
+	entitled.redact == []
+}
+
+test_masking_in_messages_can_be_monitored_or_off if {
+	monitored := a2a.decision with input as message("agent-frontdesk", "billing-agent", ["pii"])
+		with data.registry as object.union(registry, {"features": {"a2a-masking": "monitor"}})
+	monitored.redact == []
+	"a2a-masking: would mask pii" in monitored.monitored
+
+	off := a2a.decision with input as message("agent-frontdesk", "billing-agent", ["pii"])
+		with data.registry as object.union(registry, {"features": {"a2a-masking": "off"}})
+	off.redact == []
+	off.monitored == []
+}
+
+test_credentials_in_a_message_are_refused_not_masked if {
+	d := decide(message("agent-frontdesk", "billing-agent", ["secret", "pii"]))
+	d.effect == "deny"
+}
+
+test_answers_follow_data_protection_not_message_masking if {
+	reg := object.union(registry, {"features": {"a2a-masking": "off"}})
+	d := a2a.decision with input as answer("agent-frontdesk", "billing-agent", {"categories": ["pii"]})
+		with data.registry as reg
+	d.redact == ["pii"]
+}

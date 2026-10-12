@@ -63,10 +63,10 @@ them needs the AI administrator or Power Platform administrator role
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
 | **Registry** | Inventory with owners, sponsors and teams; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings, sent as issues to each agent's owner, sponsors and team until someone takes them on; management rules that act on inactive, ownerless or long-blocked agents after telling their people; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
-| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second, whichever control-plane replica takes it; single sign-on and roles for the people who govern agents | Keycloak, OPA |
+| **Access control** | A separate OAuth client per agent with 5-minute tokens, and developers' MCP clients signed in at the gateway with the developer's own token; identity assertions (ID-JAG) for MCP servers outside the gateway, as agents' grants allow; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second, whichever control-plane replica takes it; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tool servers and other agents), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; calls between agents (A2A 1.0) through the gateway, with who may call whom, and the chain of agents that handed work down, from the person at its head, in policy and the ledger; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
-| **Security** | PII redaction in tool results, prompts and agents' answers to other agents, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, with a classifier's second opinion on the traffic, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger with checkpoints time-stamped by an authority (RFC 3161), retention with archives that verify offline, and compliance reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them; mutual TLS between AgentGov's components, and policy bundles OPA verifies before it uses them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), OCSF, OpenTelemetry |
+| **Security** | PII redaction in tool results, prompts, and the messages and answers agents send each other, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, with a classifier's second opinion on the traffic, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger with checkpoints time-stamped by an authority (RFC 3161) and published in a transparency log (Sigstore Rekor), retention with archives that verify offline, and compliance reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them; mutual TLS between AgentGov's components, with certificates from its own authority, cert-manager or SPIRE that they take as they are renewed, and policy bundles OPA verifies before it uses them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), Sigstore Rekor (optional), SPIRE (optional), OCSF, OpenTelemetry |
 
 Use only the parts you need. Every [feature](docs/features.md) but the gateway's handling of
 unknown callers can be turned off, and most controls at the gateway can run in monitor mode
@@ -168,7 +168,11 @@ the gateway. It shows each control in turn:
     billing-agent` into policy and the ledger. A made-up delegation is refused, and so
     is the call once the blueprint no longer grants it. The billing agent may read
     customers' contact details, and the agent that asked may not: the gateway masks them
-    in the answer.
+    in the answer. With masking in messages enforced, an email in what the agent asks
+    reaches the billing agent whole, as it may have personal data. A call straight to the
+    billing agent's own URL, around the gateway, is refused by the billing agent itself:
+    it checks the delegation the gateway gives with each call, and AgentGov's test shows
+    it.
 13. **Kill switch**: blocking the agent takes effect everywhere within a second (with the
     chart's two control-plane replicas, whichever one took the block).
 14. **Own identities**: an agent with no client secret at all authenticates with its
@@ -191,12 +195,28 @@ the gateway. It shows each control in turn:
     the date; alice accepts the risk until a later one, and the rule leaves the agent be.
 20. **Evidence**: every decision is in a ledger whose hash chain verifies. An
     administrator keeps a checkpoint of it, which a time-stamping authority signs (the
-    sink stands in for one) and OpenSSL verifies; then the EU AI Act report and the
-    evidence pack.
+    sink stands in for one) and OpenSSL verifies, and which goes into a transparency log
+    (the stack's own Rekor), whose proof is checked offline; then the EU AI Act report and
+    the evidence pack.
 21. **Deeper detection**: a customer's notes ask the agent, in plain words, to wire money.
     The rules see data and let the result through; a classifier (the mock model stands in
     for IBM Granite Guardian) flags it in the background, and once the classifier is
     enforced, the same result is withheld ([detection](docs/detection.md)).
+22. **AuthZEN**: another enforcement point asks AgentGov's policies, in the standard way,
+    whether the billing agent may call two tools: one it was granted, and one it wasn't
+    ([AuthZEN](docs/policies.md#authzen)).
+23. **Developers sign in at the gateway**: an MCP client that calls a tool server on the
+    gateway without a token is told where to sign in. dana, a developer, signs in to the
+    coding-assistant agent in a browser, as an MCP client has developers do, and calls the
+    CRM with dana's own token: the ledger names dana and the agent. sam, who isn't a
+    developer, is refused ([developer tools](docs/developer-tools.md#signing-in-at-the-gateway)).
+24. **Servers outside the gateway**: dana's MCP client gets an identity assertion (ID-JAG)
+    from AgentGov for the wiki, a server with an authorization server of its own, which it
+    would trade there for an access token; sam's is refused, and both are in the ledger
+    ([acting for people](docs/acting-for-people.md#mcp-servers-outside-the-gateway)).
+25. **Signing out everywhere**: alice signs in to AgentGov, then signs out at Keycloak
+    itself; Keycloak tells AgentGov, and her AgentGov session ends at once
+    ([administration](docs/administration.md#signing-out-everywhere)).
 
 Then look around:
 
@@ -267,7 +287,9 @@ deny contains msg if {
 ```
 
 See [Policies](docs/policies.md) for the decision model, the input document, testing and
-what-if evaluation.
+what-if evaluation. AgentGov's decisions are also an AuthZEN decision point for other
+enforcement points, and the processor can ask a decision point of yours beside them
+([AuthZEN](docs/policies.md#authzen)).
 
 ## Connecting your agents
 
@@ -287,7 +309,8 @@ what-if evaluation.
   ([acting for people](docs/acting-for-people.md)).
 * **Other agents**: an agent that serves A2A is called at `http://<gateway>/a2a/<agent>`
   with the caller's token. It passes the `X-AgentGov-Delegation` header it was given on
-  to the calls it makes for that work ([agent to agent](docs/agent-to-agent.md)).
+  to the calls it makes for that work, and can refuse calls without one, which didn't come
+  through the gateway ([agent to agent](docs/agent-to-agent.md#calls-around-the-gateway)).
 * **Developers' coding assistants**: GitHub Copilot reads the approved MCP servers from
   the MCP registry at `http://<control plane>/registry`, and `agentgov mcp scan --report`
   reports the ones developers set up ([developer tools](docs/developer-tools.md)).
@@ -314,6 +337,7 @@ what-if evaluation.
 | [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (optional) | — | MIT | In-process enforcement in agent frameworks |
 | [IBM Granite Guardian](https://huggingface.co/ibm-granite/granite-guardian-4.1-8b) (optional) | 4.1 8B | Apache-2.0 | Classifier for harmful or malicious agent instructions, and a second opinion on prompt injection and jailbreaks in the traffic |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) server (optional) | b11541 | MIT | Serves Granite Guardian on a CPU |
+| [rekor-tiles](https://github.com/sigstore/rekor-tiles) (optional) | 2.3.0 | Apache-2.0 | A transparency log of your own for the ledger's checkpoints (or Sigstore's public Rekor) |
 | AgentGov control plane and processor | this repository | Apache-2.0 | Registry, lifecycle, reconcilers, governance processor, ledger, UI, CLI |
 
 [Landscape](docs/landscape.md) explains why each project was chosen over the
@@ -336,22 +360,25 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Model calls](docs/models.md): model providers, which agents may call which models,
   usage, cost and token budgets
 * [Developer tools](docs/developer-tools.md): an MCP registry for GitHub Copilot and VS
-  Code, and the MCP servers developers set up on their machines
+  Code, developers' MCP clients signing in at the gateway, and the MCP servers developers
+  set up on their machines
 * [Acting for people](docs/acting-for-people.md): agents that act for a person, whom each
-  may act for, the person in policy and the ledger, and approvals sent to the person
+  may act for, the person in policy and the ledger, approvals sent to the person, and
+  identity assertions for MCP servers outside the gateway
 * [Agents' own identities](docs/agent-identity.md): agents that authenticate with a
   Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID instead of a
   client secret
 * [Agent to agent](docs/agent-to-agent.md): calls between agents over A2A through the
-  gateway, who may call whom, and the chain of delegation in policy and the ledger
+  gateway, who may call whom, the chain of delegation in policy and the ledger, and calls
+  that go around the gateway
 * [Access packages](docs/access-packages.md): tools, models and agents an agent holds for a
   while once approved, with reminders, renewals and reviews
 * [Issues](docs/issues.md): findings sent to each agent's owner, sponsors and team, by email
   and in their chats, until someone takes them on
 * [Management rules](docs/management-rules.md): what to do about agents that meet some
   conditions for long enough, such as blocking agents nobody uses, after telling their people
-* [Evidence](docs/evidence.md): checkpoints time-stamped by an authority, retention with
-  archives, and compliance reports and an evidence pack for the EU AI Act, ISO/IEC 42001
+* [Evidence](docs/evidence.md): checkpoints time-stamped by an authority and published in a
+  transparency log, retention with archives, and compliance reports and an evidence pack for the EU AI Act, ISO/IEC 42001
   and the NIST AI RMF
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents
@@ -366,8 +393,9 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Security operations](docs/secops.md): the ledger to SIEMs as OCSF events,
   alerts in Teams and Slack, and how much the security team's tools may do
 * [Running in production](docs/production.md): several control-plane replicas, people
-  working at once, mutual TLS between the components, and signed policy bundles
-* [Policies](docs/policies.md)
+  working at once, mutual TLS between the components, with certificates from SPIRE if you
+  like, and signed policy bundles
+* [Policies](docs/policies.md), and AuthZEN both ways
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)
 * [Roadmap](docs/roadmap.md)

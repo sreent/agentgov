@@ -24,6 +24,11 @@ answers that aren't compressed; one compressed anyway can't be read, and, like o
 long to hold, is withheld while a control that looks at answers is enforced, and passes
 on unchecked otherwise. Answers in which something was found, masked or withheld are in
 the ledger (decision.a2a.response), linked to their call by its trace.
+
+While a2a-masking is enforced, the gateway sends the messages agents send each other (the
+requests) here too, once the call was decided (agentgov.processor.a2a_guard, which records
+what is masked): each is held until its end, and the personal data in it that the agent
+called may not have is masked before it goes on.
 """
 
 from __future__ import annotations
@@ -97,6 +102,21 @@ def _event_data(event: bytes) -> tuple[list[bytes], bytes]:
     return other, b"\n".join(data)
 
 
+def _person(meta: dict[str, str]) -> dict[str, Any] | None:
+    """The person the caller acts for, from the claims of its token."""
+    return people.person_of(
+        {
+            "subject": meta.get("subject"),
+            "username": meta.get("username"),
+            "email": meta.get("email"),
+            "groups": _json(meta.get("groups")),
+            "roles": _json(meta.get("roles")),
+            "act": _json(meta.get("act")),
+            "sign_in": _json(meta.get("sign_in")),
+        }
+    )
+
+
 def _withheld(rpc_id: Any, reasons: list[str]) -> dict[str, Any]:
     data = {"@type": "agentgov.dev/Decision", "effect": "deny", "reasons": reasons}
     error = {"code": REFUSED, "message": "AgentGov: " + "; ".join(reasons), "data": [data]}
@@ -110,8 +130,15 @@ def _streamed(data: bytes, end: bool) -> pb.BodyResponse:
     return out
 
 
+def _headers(headers: pb.HttpHeaders) -> dict[str, str]:
+    return {
+        h.key.lower(): h.value or h.raw_value.decode("latin-1") for h in headers.headers.headers
+    }
+
+
 class AnswerChecks(pb_grpc.ExternalProcessorServicer):
-    """agentgateway's external processing on the A2A routes: answers, as they come."""
+    """agentgateway's external processing on the A2A routes: answers, as they come; and
+    while a2a-masking is enforced, the messages sent (requests), to mask them."""
 
     def __init__(self, processor: GovernanceProcessor) -> None:
         self.p = processor
@@ -119,15 +146,18 @@ class AnswerChecks(pb_grpc.ExternalProcessorServicer):
     async def Process(
         self, requests: AsyncIterator[pb.ProcessingRequest], context: Any
     ) -> AsyncIterator[pb.ProcessingResponse]:
+        message: Message | None = None
         answer: Answer | None = None
         async for req in requests:
             kind = req.WhichOneof("request")
-            if kind == "response_headers":
-                headers = {
-                    h.key.lower(): h.value or h.raw_value.decode("latin-1")
-                    for h in req.response_headers.headers.headers
-                }
-                answer = Answer(self.p, _metadata(req), headers)
+            if kind == "request_headers":
+                message = Message(self.p, _metadata(req), _headers(req.request_headers))
+                reply = pb.HeadersResponse()
+                if message.checked:
+                    reply.response.header_mutation.remove_headers.append("content-length")
+                yield pb.ProcessingResponse(request_headers=reply)
+            elif kind == "response_headers":
+                answer = Answer(self.p, _metadata(req), _headers(req.response_headers))
                 reply = pb.HeadersResponse()
                 reply.response.header_mutation.remove_headers.extend(await answer.start())
                 yield pb.ProcessingResponse(response_headers=reply)
@@ -136,16 +166,100 @@ class AnswerChecks(pb_grpc.ExternalProcessorServicer):
                 data = body.body
                 if kind == "response_body" and answer is not None:
                     data = await answer.feed(body.body, body.end_of_stream)
+                elif kind == "request_body" and message is not None:
+                    data = await message.feed(body.body, body.end_of_stream)
                 yield pb.ProcessingResponse(**{kind: _streamed(data, body.end_of_stream)})
             elif kind in ("response_trailers", "request_trailers"):
-                if kind == "response_trailers" and answer is not None and not answer.ended:
-                    # The body ended with its trailers: what is held of it goes first.
-                    rest = await answer.feed(b"", True)
+                # A body that ended with its trailers: what is held of it goes first.
+                held = answer if kind == "response_trailers" else message
+                if held is not None and not held.ended:
+                    rest = await held.feed(b"", True)
                     if rest:
-                        yield pb.ProcessingResponse(response_body=_streamed(rest, False))
+                        body_kind = kind.replace("trailers", "body")
+                        yield pb.ProcessingResponse(**{body_kind: _streamed(rest, False)})
                 yield pb.ProcessingResponse(**{kind: pb.TrailersResponse()})
-            elif kind == "request_headers":
-                yield pb.ProcessingResponse(request_headers=pb.HeadersResponse())
+
+
+def _message_of(value: Any) -> dict[str, Any] | None:
+    """The message a request sends: a JSON-RPC call's (SendMessage,
+    SendStreamingMessage), or the REST binding's."""
+    if not isinstance(value, dict):
+        return None
+    params = value.get("params") if "method" in value else value
+    message = params.get("message") if isinstance(params, dict) else None
+    return message if isinstance(message, dict) else None
+
+
+class Message:
+    """A message one agent sends another (a request), held until its end and masked as
+    the decision says. The gateway sends requests here only while a2a-masking is enforced;
+    the call itself was decided already (agentgov.processor.a2a_guard), which recorded what
+    is masked."""
+
+    def __init__(
+        self, processor: GovernanceProcessor, meta: dict[str, str], headers: dict[str, str]
+    ) -> None:
+        self.p = processor
+        # Compressed, it can't be read: neither can the call's check, which saw no personal
+        # data in it to mask.
+        encoding = headers.get("content-encoding", "").strip().lower()
+        self.checked = encoding in ("", "identity")
+        self.held = b""
+        self.ended = False
+        self.target = meta.get("agent") or "unknown"
+        self.identity = {k: meta[k] for k in ("agent_id", "client_id") if meta.get(k)}
+        self.person = _person(meta)
+
+    async def feed(self, data: bytes, end: bool) -> bytes:
+        """What passes on of the message, given its next piece."""
+        self.ended = self.ended or end
+        if not self.checked:
+            return data
+        self.held += data
+        if len(self.held) > MAX_HELD:
+            # The gateway refuses messages this long before they are checked (A2A_MAX_BODY).
+            held, self.held = self.held, b""
+            self.checked = False
+            return held
+        if not end:
+            return b""
+        body, self.held = self.held, b""
+        try:
+            return await self._mask(body)
+        except Exception:
+            # Enforced masking that can't be done: the call fails rather than go unmasked.
+            log.exception("masking a message to agent %s failed", self.target)
+            raise
+
+    async def _mask(self, body: bytes) -> bytes:
+        value = _json(body.decode("utf-8", "replace"))
+        message = _message_of(value)
+        parts = message.get("parts") if message is not None else None
+        if not isinstance(parts, list) or not parts:
+            return body
+        modes = await self.p.features.current()
+        if modes["a2a-masking"] != "enforce" or modes["data-protection"] == "off":
+            return body
+        inspection = await self.p._inspect(parts, protect=True, check_injection=False)
+        if not inspection.scan.categories():
+            return body
+        opa_input: dict[str, Any] = {
+            "kind": "a2a",
+            "phase": "request",
+            "method": str(value.get("method") or "SendMessage"),
+            "agent": self.identity,
+            "target": self.target,
+            "detections": inspection.summary,
+        }
+        if self.person:
+            opa_input["user"] = self.person
+        decision, _ = await self.p.opa.evaluate("agentgov/a2a/decision", opa_input)
+        redact = set(decision.get("redact") or []) & inspection.scan.categories()
+        if not redact:
+            return body
+        assert message is not None
+        message["parts"] = detectors.redact(parts, inspection.scan.spans, redact)
+        return json.dumps(value).encode()
 
 
 class Answer:
@@ -175,16 +289,7 @@ class Answer:
         self.closed = False
         self.target = meta.get("agent") or "unknown"
         self.identity = {k: meta[k] for k in ("agent_id", "client_id") if meta.get(k)}
-        self.person = people.person_of(
-            {
-                "subject": meta.get("subject"),
-                "username": meta.get("username"),
-                "email": meta.get("email"),
-                "groups": _json(meta.get("groups")),
-                "roles": _json(meta.get("roles")),
-                "act": _json(meta.get("act")),
-            }
-        )
+        self.person = _person(meta)
         self.trace_id = trace_id_from([meta.get("traceparent") or ""])
 
     async def start(self) -> list[str]:

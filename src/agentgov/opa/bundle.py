@@ -24,7 +24,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -46,7 +46,10 @@ from agentgov.registry import agents as agents_svc
 log = logging.getLogger(__name__)
 
 BUNDLE_CONTENT_TYPE = "application/vnd.openpolicyagent.bundles"
-ROOTS = ["agentgov", "agentos", "registry", "system"]
+# What the bundle owns: OPA erases the policies under these as it activates one. system.log
+# and not all of system, where OPA can have an authorization policy of its own, from a file
+# (system.authz: the chart's, with SPIRE).
+ROOTS = ["agentgov", "agentos", "registry", "system/log"]
 # How long a bundle built is served without being built again, even with no change heard
 # of: a change a replica didn't hear about (it lost the database for a while) reaches the
 # OPA instances it serves within this.
@@ -71,6 +74,8 @@ drop if startswith(input.path, "agentgov/mcp")
 drop if startswith(input.path, "agentgov/models")
 
 drop if startswith(input.path, "agentgov/a2a")
+
+drop if startswith(input.path, "agentgov/idjag")
 
 drop if startswith(input.path, "registry")
 """
@@ -136,11 +141,14 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
         if agent.client_id:
             clients[agent.client_id] = agent.id
     servers: dict[str, Any] = {}
-    # Servers only for developers never reach the gateway, so OPA never decides on them.
-    for ts in session.scalars(select(ToolServer).where(ToolServer.gateway.is_(True))):
+    # Servers only for developers never reach the gateway, so OPA never decides on them;
+    # it does on those agents get identity assertions for (agentgov.idjag).
+    reached = or_(ToolServer.gateway.is_(True), ToolServer.authorization_server.is_not(None))
+    for ts in session.scalars(select(ToolServer).where(reached)):
         servers[ts.name] = {
             "name": ts.name,
             "status": ts.status,
+            "gateway": bool(ts.gateway),
             "trust_level": ts.trust_level,
             "data_classification": ts.data_classification,
             "labels": ts.labels or {},

@@ -94,6 +94,20 @@ controlPlane:
     # Several replicas need ReadWriteMany (a file share such as Azure Files, Filestore or
     # EFS): any of them may archive.
     accessMode: ReadWriteOnce
+  # Put the ledger's checkpoints in a transparency log too (docs/evidence.md): Sigstore's
+  # public Rekor, such as https://log2025-1.rekor.sigstore.dev, or a rekor-tiles of yours.
+  # AgentGov signs each checkpoint with its key, from a Secret (key.pem, ECDSA P-256:
+  # `agentgov transparency-key DIR` makes one), and checks the log's answers with the
+  # log's public key. Empty url: no log.
+  transparencyLog:
+    url: ""
+    # The Secret holding AgentGov's key, as key.pem.
+    signingKeySecret: ""
+    # The log's public key (PEM, Ed25519), for example with --set-file. Empty, the log's
+    # answers are kept unchecked.
+    logKey: ""
+    # The log's name in its checkpoints; empty: the URL's host name.
+    origin: ""
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}
@@ -310,11 +324,11 @@ externalKeycloak:
   issuer: ""
 
 internalTLS:
-  # Mutual TLS between AgentGov's components (docs/architecture.md): each has a
+  # Mutual TLS between AgentGov's components (docs/production.md): each has a
   # certificate from AgentGov's own authority, serves TLS on its internal ports and asks
   # callers for a certificate from the same authority; the control plane gives the
   # service role only on its internal port (8443). The chart makes the authority and the
-  # certificates on install and keeps them; or let cert-manager issue them.
+  # certificates on install and keeps them; or let cert-manager or SPIRE issue them.
   enabled: true
   certManager:
     # Certificates from cert-manager instead. The control plane and OPA take any
@@ -329,11 +343,39 @@ internalTLS:
       name: ""
       kind: Issuer
       group: cert-manager.io
-    # How long the components' certificates last. The control plane, the processor, the
-    # gateway and the collector read theirs when they start (OPA every minute), so a
-    # renewed certificate takes effect as they restart: keep it long, or restart the pods
-    # after each renewal (with Reloader, for example).
+    # How long the components' certificates last. Each component takes a renewed one
+    # without a restart (reloadSeconds below; OPA every minute).
     duration: 87600h
+  # Seconds between each component's looks at its certificate files: a renewed
+  # certificate (cert-manager's, or SPIRE's) serves the next connections, with no restart.
+  # 0 reads them at start only.
+  reloadSeconds: 60
+  spire:
+    # Certificates from SPIFFE / SPIRE instead (X.509-SVIDs, docs/production.md): each
+    # component's pod gets its SVID from the SPIRE agent through the SPIFFE CSI driver, and
+    # spiffe-helper keeps it in the files the component reads, as SPIRE renews it. SPIRE
+    # gives every workload an SVID, so each component takes only the callers among
+    # AgentGov's components that call it, by their SPIFFE IDs
+    # (spiffe://<trustDomain>/ns/<namespace>/agentgov/<component's name>). Needs SPIRE
+    # with its CSI driver and controller manager (the spire-crds and spire charts). A pod
+    # with a component's labels in the release's namespace gets its identity: keep the
+    # namespace to AgentGov.
+    enabled: false
+    # SPIRE's trust domain.
+    trustDomain: example.org
+    # The class of SPIRE's controller manager, which is <SPIRE's namespace>-<SPIRE's
+    # release> unless SPIRE's chart sets another: spire-mgmt-spire for SPIRE's production
+    # install, spire-server-spire for its quick install.
+    className: spire-mgmt-spire
+    # The SPIFFE CSI driver.
+    csiDriver: csi.spiffe.io
+    # How long the SVIDs last, such as 4h (empty: SPIRE's default).
+    ttl: ""
+    helper:
+      image: ghcr.io/spiffe/spiffe-helper:0.12.2
+      resources:
+        requests: {cpu: 5m, memory: 16Mi}
+        limits: {memory: 64Mi}
 
 guardian:
   # IBM Granite Guardian, for a second opinion on agents' instructions and on their

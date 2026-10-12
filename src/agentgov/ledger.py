@@ -20,14 +20,18 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import event, select, update
+from sqlalchemy.orm import Session, SessionTransaction
 
-from agentgov import ids
+from agentgov import db, ids
 from agentgov.db import mark_changed
 from agentgov.models import Agent, LedgerCheckpoint, LedgerEntry, LedgerHead
 
 GENESIS = "0" * 64
+# A transaction's entries, until it commits; and how many there were when each of its
+# savepoints began.
+_PENDING = "agentgov.ledger.pending"
+_SAVEPOINTS = "agentgov.ledger.savepoints"
 
 
 def ensure_head(session: Session) -> None:
@@ -93,21 +97,18 @@ def append(
     on_behalf_of: str | None = None,
     ts: datetime | None = None,
 ) -> LedgerEntry:
-    """Append an entry inside the caller's transaction.
+    """Append an entry with the caller's transaction.
 
-    Updating the head row first takes a write lock that is held until the
-    caller commits, so concurrent appenders extend the chain one at a time.
+    The entry is written as the transaction commits, after everything else it changed:
+    appenders lock the chain's head to extend it one at a time, and the head is then the
+    last row a transaction locks, so two transactions that lock the same rows can't
+    deadlock over it. An entry rolled back with its transaction, or with a savepoint it was
+    appended in, isn't written. Until the commit it has no seq or hash, and the
+    transaction's own queries don't see it.
     """
-    ensure_head(session)
-    session.execute(
-        update(LedgerHead).where(LedgerHead.id == 1).values(last_seq=LedgerHead.last_seq)
-    )
-    head = session.get(LedgerHead, 1, populate_existing=True)
-    assert head is not None
     entry = LedgerEntry(
-        seq=head.last_seq + 1,
         id=ids.new_id(ids.EVENT),
-        ts=ts or ids.utcnow(),
+        ts=ts,
         type=type,
         severity=severity,
         actor=actor,
@@ -120,16 +121,63 @@ def append(
         details=details or {},
         trace_id=trace_id,
         on_behalf_of=on_behalf_of,
-        prev_hash=head.last_hash,
     )
-    entry.hash = compute_hash(head.last_hash, entry)
-    head.last_seq = entry.seq
-    head.last_hash = entry.hash
-    session.add(entry)
-    session.flush()
+    session.info.setdefault(_PENDING, []).append(entry)
     # For what sends the ledger on (agentgov.secops.delivery), once this commits.
     mark_changed(session, "ledger")
     return entry
+
+
+def _write_pending(session: Session) -> None:
+    """Write the transaction's entries, in the order they were appended. Updating the head
+    row first takes a write lock held until the commit: appenders take turns."""
+    pending: list[LedgerEntry] | None = session.info.pop(_PENDING, None)
+    if not pending:
+        return
+    ensure_head(session)
+    session.execute(
+        update(LedgerHead).where(LedgerHead.id == 1).values(last_seq=LedgerHead.last_seq)
+    )
+    head = session.get(LedgerHead, 1, populate_existing=True)
+    assert head is not None
+    for entry in pending:
+        entry.seq = head.last_seq + 1
+        # When it was written, unless the caller said when it happened: in the chain's order.
+        entry.ts = entry.ts or ids.utcnow()
+        entry.prev_hash = head.last_hash
+        entry.hash = compute_hash(head.last_hash, entry)
+        head.last_seq, head.last_hash = entry.seq, entry.hash
+        session.add(entry)
+    session.flush()
+
+
+db.WRITE_LAST.append(_write_pending)
+
+
+@event.listens_for(Session, "after_transaction_create")
+def _savepoint_begins(session: Session, transaction: SessionTransaction) -> None:
+    if transaction.nested:
+        marks = session.info.setdefault(_SAVEPOINTS, {})
+        marks[transaction] = len(session.info.get(_PENDING) or ())
+
+
+@event.listens_for(Session, "after_soft_rollback")
+def _rolled_back(session: Session, previous: SessionTransaction) -> None:
+    """Entries appended since a savepoint that rolled back, or in a transaction that did,
+    go with them."""
+    if previous.nested:
+        start = (session.info.get(_SAVEPOINTS) or {}).get(previous)
+        pending = session.info.get(_PENDING)
+        if start is not None and pending is not None:
+            del pending[start:]
+    elif previous.parent is None:
+        session.info.pop(_PENDING, None)
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _transaction_ends(session: Session, transaction: SessionTransaction) -> None:
+    if transaction.parent is None:
+        session.info.pop(_SAVEPOINTS, None)
 
 
 def iter_entries(
@@ -273,6 +321,15 @@ def checkpoint_dict(point: LedgerCheckpoint) -> dict[str, Any]:
         "timestamped": point.timestamp is not None,
         "timestamped_at": ids.isoformat(point.timestamped_at),
         "timestamp_error": point.timestamp_error,
+        # Its entry in the transparency log, if it has one.
+        "log": {
+            "url": point.tlog_url,
+            "logged": point.tlog_entry is not None,
+            "index": point.tlog_index,
+            "logged_at": ids.isoformat(point.tlog_logged_at),
+            "checked": point.tlog_checked,
+            "error": point.tlog_error,
+        },
         "archive": point.archive,
         "archive_sha256": point.archive_sha256,
         "archived_from": point.archived_from,

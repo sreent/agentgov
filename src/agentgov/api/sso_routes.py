@@ -11,10 +11,11 @@ from __future__ import annotations
 import dataclasses
 import logging
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from agentgov import ids
@@ -236,3 +237,45 @@ def logout(request: Request) -> JSONResponse:
     resp = JSONResponse(body)
     resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp
+
+
+@router.post("/backchannel-logout")
+async def backchannel_logout(request: Request) -> Response:
+    """The identity provider ended a person's session: end the AgentGov sessions that came
+    from it (OpenID Connect Back-Channel Logout 1.0). The provider posts a logout token it
+    signed for AgentGov's client, which names the session or the person."""
+    client = _client(request)
+    try:
+        fields = parse_qs((await request.body()).decode())
+    except UnicodeDecodeError:
+        fields = {}
+    tokens = fields.get("logout_token") or []
+    if len(tokens) != 1:
+        return _logout_refused("send one logout_token, as a form field")
+    try:
+        ended = await run_in_threadpool(_end_provider_sessions, request, client, tokens[0])
+    except sso.SSOError as exc:
+        log.warning("refused a logout token: %s", exc)
+        return _logout_refused(str(exc))
+    if ended:
+        log.info("the identity provider ended %d session(s)", len(ended))
+    return Response(status_code=200, headers={"Cache-Control": "no-store"})
+
+
+def _logout_refused(why: str) -> JSONResponse:
+    return JSONResponse(
+        {"error": "invalid_request", "error_description": why},
+        status_code=400,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _end_provider_sessions(request: Request, client: sso.OIDCClient, token: str) -> list[str]:
+    claims = client.validate_logout(token)  # may fetch the provider's keys
+    rt = request.app.state.rt
+    with rt.db.session() as s:
+        ended = sso.end_provider_sessions(s, claims)
+    if rt.delegations is not None:
+        for session_id in ended:
+            rt.delegations.forget(session_id)
+    return ended

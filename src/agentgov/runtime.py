@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from agentgov import ids, ledger, migrations, retention, timestamping
+from agentgov import ids, ledger, migrations, retention, timestamping, transparency
 from agentgov.config import Settings
 from agentgov.coordination import Coordinator
 from agentgov.db import Database
@@ -41,6 +41,7 @@ from agentgov.registry import (
     microsoft_signals,
     platforms,
     posture,
+    reachability,
     rules,
 )
 from agentgov.registry import agents as agents_svc
@@ -118,6 +119,7 @@ class Runtime:
         copilot_studio_http: httpx.Client | None = None,
         destinations_http: httpx.Client | None = None,
         tsa_http: httpx.Client | None = None,
+        tlog_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
         # This component's certificate, for mutual TLS with the others (agentgov.tls).
@@ -212,6 +214,7 @@ class Runtime:
         # checkpoints, their time-stamps and its archives; old operational records go.
         self._retention_worker = _Worker("retention", self.run_retention, 3600, leading=leading)
         self._tsa_http = tsa_http
+        self._tlog_http = tlog_http
         self._m365_worker = (
             _Worker(
                 "microsoft-sync",
@@ -261,6 +264,7 @@ class Runtime:
         self.coordination.start()
         if self.identity is not None:
             self.identity.start(
+                full_every=self.settings.identity_full_sync_seconds,
                 leading=lambda: self.coordination.leading,
                 exclusive=lambda: self.coordination.job("identity"),
             )
@@ -355,11 +359,13 @@ class Runtime:
         as it takes, as the scheduled runs do)."""
         with self.coordination.job("posture-scan", wait=wait):
             with self.db.session() as session:
-                scanned = (
-                    posture.scan(session, self.settings)
-                    if features.is_on(session, "posture-checks")
-                    else None
-                )
+                scanning = features.is_on(session, "posture-checks")
+                urls = reachability.targets(session) if scanning else None
+            # Calls around the gateway, when the feature says "test": over the network, so
+            # outside any transaction (None: not tested this time).
+            tested = reachability.call_all(urls) if urls is not None else None
+            with self.db.session() as session:
+                scanned = posture.scan(session, self.settings, tested=tested) if scanning else None
             ruled = self.run_rules(wait=wait)
         return None if scanned is None else {**scanned, "rules": ruled}
 
@@ -378,6 +384,7 @@ class Runtime:
                 point = retention.checkpoint_if_due(session, self.settings)
                 out["checkpoint"] = point.seq if point is not None else None
             out["timestamped"] = self.stamp_checkpoints()
+            out["logged"] = self.log_checkpoints()
             with self.db.session() as session:
                 out["archived"] = retention.archive(session, self.settings)
             with self.db.session() as session:
@@ -394,6 +401,7 @@ class Runtime:
                     return None
                 seq = point.seq
             self.stamp_checkpoints()
+            self.log_checkpoints()
             with self.db.session() as session:
                 return ledger.checkpoint_dict(session.get(LedgerCheckpoint, seq))
 
@@ -416,6 +424,63 @@ class Runtime:
                     continue
                 with self.db.session() as session:
                     retention.save_stamp(session, seq, url, response=got.response, time=got.time)
+                done += 1
+            return done
+
+    def log_checkpoints(self) -> int:
+        """Add the checkpoints the transparency log doesn't hold yet; returns how many it
+        took. Each answer's proof is checked with the log's key, when it is set, before it
+        is kept; failures are kept on the checkpoints, and tried again."""
+        url = self.settings.ledger_rekor_url
+        if not url:
+            return 0
+        with self.coordination.job("retention"):
+            with self.db.session() as session:
+                todo = retention.unlogged(session)
+            if not todo:
+                return 0
+            try:
+                key = transparency.load_signing_key(
+                    self.settings.ledger_rekor_signing_key_file or ""
+                )
+                log_key = (
+                    transparency.load_log_key(self.settings.ledger_rekor_log_key_file)
+                    if self.settings.ledger_rekor_log_key_file
+                    else None
+                )
+            except transparency.TransparencyError as exc:
+                with self.db.session() as session:
+                    for seq, _ in todo:
+                        retention.save_log_entry(session, seq, url, error=str(exc))
+                return 0
+            origin = self.settings.ledger_rekor_origin or transparency.origin_of(url)
+            done = 0
+            for seq, hash_ in todo:  # the network calls happen outside any transaction
+                statement = ledger.statement(seq, hash_)
+                try:
+                    entry = transparency.add(url, statement, key, http=self._tlog_http)
+                except transparency.TransparencyError as exc:
+                    with self.db.session() as session:
+                        retention.save_log_entry(session, seq, url, error=str(exc))
+                    continue
+                checked, error = None, None
+                if log_key is not None:
+                    try:
+                        transparency.check(
+                            entry,
+                            statement,
+                            log_key=log_key,
+                            origin=origin,
+                            signer=key.public_key(),
+                        )
+                        checked = True
+                    except transparency.TransparencyError as exc:
+                        # The log has the entry: kept, with why its proof doesn't hold.
+                        checked, error = False, f"the log's proof doesn't check out: {exc}"
+                with self.db.session() as session:
+                    retention.save_log_entry(
+                        session, seq, url, entry=entry, checked=checked, error=error
+                    )
                 done += 1
             return done
 

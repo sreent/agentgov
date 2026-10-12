@@ -64,7 +64,10 @@ EDITABLE = (
     "daily_token_budget",
     "agent_card",
     "a2a_url",
+    "a2a_protection",
     "agent_access",
+    "client_type",
+    "redirect_uris",
     "external_ids",
     "blueprint",
 )
@@ -175,6 +178,14 @@ def a2a_view(session: Session, settings: Settings, agent: Agent) -> dict[str, An
         "agent_access": effective_agent_access(agent),
         "may_call": [a.name for a in others if may_call(agent, a)],
         "called_by": [a.name for a in others if may_call(a, agent)],
+        # Calls around the gateway (registry/reachability): whether they're looked for,
+        # what its owners say stops them, and what AgentGov found when it last called the
+        # agent's A2A URL itself.
+        "around_gateway": {
+            "mode": features.mode(session, "calls-around-gateway"),
+            "protection": agent.a2a_protection,
+            "test": agent.a2a_probe,
+        },
     }
 
 
@@ -207,6 +218,12 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
             value = validation.agent_access(value)
         elif key == "a2a_url":
             value = validation.a2a_url(value)
+        elif key == "a2a_protection":
+            value = validation.a2a_protection(value)
+        elif key == "client_type":
+            value = validation.client_type(value)
+        elif key == "redirect_uris":
+            value = validation.redirect_uris(value)
         elif key == "daily_token_budget":
             value = validation.token_budget(value)
         elif key == "risk_tier":
@@ -230,17 +247,46 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
         if (agent.workload_issuer, agent.workload_subject) != (issuer, subject):
             agent.workload_issuer, agent.workload_subject = issuer, subject
             changed.append("workload_identity")
+    if {"client_type", "redirect_uris", "workload_identity", "blueprint"} & set(changed):
+        _check_client(agent)
     if (
         {"workload_identity", "blueprint"} & set(changed)
         and agent.status == ACTIVE
         and _requires_workload_identity(agent)
         and not agent.workload_issuer
+        and agent.client_type != validation.PUBLIC
     ):
         raise Conflict(
             f"blueprint {agent.blueprint.name if agent.blueprint else ''} requires a workload "
             "identity: its agents have no client secret"
         )
     return changed
+
+
+def _check_client(agent: Agent) -> None:
+    """A public client is one people sign in to: no secret, nor any identity of its own."""
+    if agent.client_type != validation.PUBLIC:
+        if agent.redirect_uris:
+            raise ValidationError(
+                "redirect_uris are for public clients, which people sign in to (client_type public)"
+            )
+        return
+    if agent.workload_issuer:
+        raise ValidationError(
+            "a public client has no identity of its own, and so no workload identity: people "
+            "sign in to it"
+        )
+    bp = agent.blueprint
+    if bp and bp.require_workload_identity:
+        raise ValidationError(
+            f"blueprint {bp.name} requires a workload identity, which a public client can't "
+            "have: people sign in to it"
+        )
+    if bp and bp.acts_for == "itself":
+        raise ValidationError(
+            f"a public client acts for the people who sign in to it, and blueprint {bp.name}'s "
+            "agents act only for themselves"
+        )
 
 
 def _requires_workload_identity(agent: Agent) -> bool:
@@ -279,6 +325,8 @@ def register(
         model_access=[],
         agent_access=[],
         external_ids={},
+        client_type=validation.SERVICE,
+        redirect_uris=[],
     )
     _apply(session, agent, data)
     session.add(agent)
@@ -333,7 +381,9 @@ def _check_activation(agent: Agent) -> None:
             "an agent needs at least one sponsor before it can be activated "
             "(sponsors are accountable humans, as in Entra Agent ID)"
         )
-    if _requires_workload_identity(agent) and not agent.workload_issuer:
+    if agent.client_type == validation.PUBLIC:
+        _check_client(agent)
+    elif _requires_workload_identity(agent) and not agent.workload_issuer:
         raise Conflict(
             f"blueprint {agent.blueprint.name if agent.blueprint else ''} requires a workload "
             "identity: give the agent one (an identity issuer and its subject there) first"
@@ -432,7 +482,9 @@ def purge_expired(session: Session, settings: Settings) -> list[str]:
         return []
     cutoff = ids.utcnow() - timedelta(days=days)
     expired = session.scalars(
-        select(Agent).where(Agent.status == DELETED, Agent.deleted_at < cutoff)
+        select(Agent)
+        .where(Agent.status == DELETED, Agent.deleted_at < cutoff)
+        .order_by(Agent.id)  # in the posture scan's order (registry/posture)
     ).unique()
     names = []
     for agent in list(expired):
@@ -505,6 +557,12 @@ def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.Ris
     return result
 
 
+def identity_method(agent: Agent) -> str:
+    if agent.client_type == validation.PUBLIC:
+        return "sign-in"
+    return "workload-identity" if agent.workload_issuer else "client-secret"
+
+
 def to_dict(agent: Agent) -> dict[str, Any]:
     return {
         "id": agent.id,
@@ -542,16 +600,21 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         # Agent to agent: where it serves A2A, its route on the gateway, and whom it calls.
         "a2a_url": agent.a2a_url,
         "a2a_route": a2a_route(agent),
+        "a2a_protection": agent.a2a_protection,
+        "a2a_test": agent.a2a_probe,
         "agent_access": agent.agent_access or [],
         "effective_agent_access": effective_agent_access(agent),
         "external_ids": agent.external_ids or {},
         "source": agent.source,
         "workload_identity": workload_identity(agent),
+        "client_type": agent.client_type or validation.SERVICE,
+        "redirect_uris": agent.redirect_uris or [],
         "identity": {
             "provider": "keycloak",
             "client_id": agent.client_id,
-            # How it authenticates to Keycloak: its workload identity, or a client secret.
-            "method": "workload-identity" if agent.workload_issuer else "client-secret",
+            # How it gets its tokens: people sign in to it (a public client), or it
+            # authenticates to Keycloak with its workload identity or a client secret.
+            "method": identity_method(agent),
             "synced_at": ids.isoformat(agent.identity_synced_at),
             "error": agent.identity_error,
         },

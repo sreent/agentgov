@@ -9,6 +9,8 @@
 #   scripts/ci.sh --e2e-only  only the end-to-end run
 #   scripts/ci.sh --kind      also install the Helm chart on a kind cluster and run the demo
 #   scripts/ci.sh --kind-only only that (e2e.yml)
+#   scripts/ci.sh --spire     --kind, with SPIRE on the cluster issuing the components'
+#                             certificates (e2e.yml, with --kind-only)
 #   scripts/ci.sh --quick     lint, Rego checks and tests; no Docker
 #   scripts/ci.sh --matrix    also run the tests on each Python 3.11-3.13 found
 #   scripts/ci.sh --postgres  also run the tests on PostgreSQL (a throwaway container)
@@ -34,17 +36,25 @@ CRDS_CATALOG='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Gr
 KUBECTL_VERSION=1.34.1
 CHART=deploy/helm/agentgov
 AGENTGATEWAY_IMAGE=ghcr.io/agentgateway/agentgateway:v1.6.0
+# Keycloak, as the authorization server of a server outside the gateway, takes AgentGov's
+# identity assertions in a test (tests/test_assertions.py).
+KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.0
 POSTGRES_IMAGE=postgres:17-alpine
+# SPIRE 1.15.3 for the kind run with --spire, from the SPIFFE project's charts.
+SPIRE_CHARTS=https://spiffe.github.io/helm-charts-hardened/
+SPIRE_CRDS_CHART_VERSION=0.6.1
+SPIRE_CHART_VERSION=0.30.3
 COMPOSE=(docker compose -p agentgov-ci -f deploy/compose/docker-compose.yml)
 E2E_PORTS=(8000 8080 8180 8181 4317 4318 9200 9300)
 
-lint=1 tests=1 chart=1 image=1 e2e=0 kind=0 matrix=0 postgres=0 keep=0 setup_only=0
+lint=1 tests=1 chart=1 image=1 e2e=0 kind=0 spire=0 matrix=0 postgres=0 keep=0 setup_only=0
 for arg in "$@"; do
   case "$arg" in
     --e2e) e2e=1 postgres=1 ;;
     --e2e-only) lint=0 tests=0 chart=0 image=0 e2e=1 ;;
     --kind) kind=1 ;;
     --kind-only) lint=0 tests=0 chart=0 image=0 kind=1 ;;
+    --spire) kind=1 spire=1 ;;
     --quick) chart=0 image=0 ;;
     --matrix) matrix=1 ;;
     --postgres) postgres=1 ;;
@@ -267,9 +277,12 @@ lint_rego() {
 # run_tests <venv>: pytest as CI runs it; with Docker, generated agentgateway
 # configs are also validated by the real binary.
 run_tests() {
-  if docker_ready && ! docker image inspect "$AGENTGATEWAY_IMAGE" >/dev/null 2>&1; then
-    docker pull --quiet "$AGENTGATEWAY_IMAGE" >/dev/null ||
-      echo "${yellow}could not pull $AGENTGATEWAY_IMAGE; its validation test will be skipped${reset}"
+  local image
+  if docker_ready; then
+    for image in "$AGENTGATEWAY_IMAGE" "$KEYCLOAK_IMAGE"; do
+      docker image inspect "$image" >/dev/null 2>&1 || docker pull --quiet "$image" >/dev/null ||
+        echo "${yellow}could not pull $image; the tests that run it will be skipped${reset}"
+    done
   fi
   "$1/bin/pytest" -rs
 }
@@ -324,7 +337,10 @@ lint_chart() {
       --set secrets.existingSecret=agentgov --set networkPolicy.enabled=true \
       --set controlPlane.ingress.enabled=true --set gateway.ingress.enabled=true \
       --set urls.controlPlane=https://agentgov.example.com \
-      --set urls.gateway=https://mcp.example.com >"$out/production.yaml" &&
+      --set urls.gateway=https://mcp.example.com \
+      --set controlPlane.transparencyLog.url=https://log2025-1.rekor.sigstore.dev \
+      --set controlPlane.transparencyLog.signingKeySecret=agentgov-rekor \
+      --set controlPlane.transparencyLog.logKey=placeholder >"$out/production.yaml" &&
     helm template agentgov "$CHART" --set postgresql.enabled=false \
       --set externalDatabase.existingSecret=agentgov-db \
       --set keycloak.externalDatabase.url=jdbc:postgresql://db.example.com:5432/keycloak \
@@ -340,6 +356,14 @@ lint_chart() {
     >"$out/cert-manager.yaml" &&
     kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
       -schema-location default -schema-location "$CRDS_CATALOG" "$out/cert-manager.yaml" || rc=1
+  # SPIRE issuing them (ClusterSPIFFEIDs), against the schema in deploy/helm/schemas: the
+  # catalog has none for SPIRE's resources.
+  helm lint --strict "$CHART" --set internalTLS.spire.enabled=true >/dev/null &&
+    helm template agentgov "$CHART" --set internalTLS.spire.enabled=true >"$out/spire.yaml" &&
+    kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
+      -schema-location default \
+      -schema-location 'deploy/helm/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+      "$out/spire.yaml" || rc=1
   # The cloud guides' values (docs/deploy), and the manifests they apply beside the chart,
   # against the Kubernetes schemas and, for their custom resources, the CRDs catalog.
   local cloud
@@ -356,6 +380,10 @@ lint_chart() {
         -skip SecretStore,ClusterSecretStore "$cloud"manifests/*.yaml || rc=1
     fi
   done
+  # Examples applied beside AgentGov, such as the NetworkPolicy that lets only the gateway
+  # reach an agent (docs/agent-to-agent.md).
+  kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
+    examples/kubernetes/*.yaml || rc=1
   rm -rf "$out"
   return "$rc"
 }
@@ -399,6 +427,53 @@ DEMO_DESTINATION_SECRETS=(
   --set destinationSecrets.values.governance-teams=http://demo-sink:9300/teams/workflows/governance
 )
 
+# Each component's certificate renewed, as cert-manager or SPIRE would: the components take
+# their new ones without a restart (AGENTGOV_TLS_RELOAD_SECONDS, OPA's
+# --tls-cert-refresh-period), and the gateway's rewrites agentgateway's configuration.
+renewed_certificates() {
+  local before after i
+  before=$("${COMPOSE[@]}" exec -T gateway-config tail -n 1 /gateway/config.yaml) || return 1
+  "${COMPOSE[@]}" run --rm --no-deps -T --entrypoint sh certs -c \
+    "agentgov internal-certs /certs --renew >/dev/null && chmod a+r /certs/*/tls.key" || return 1
+  echo "certificates renewed; waiting for the components to take them"
+  for i in $(seq 30); do
+    sleep 5
+    after=$("${COMPOSE[@]}" exec -T gateway-config tail -n 1 /gateway/config.yaml) || continue
+    [ "$after" != "$before" ] || continue
+    # Which certificate each one serves (shown a certificate each takes, the gateway's).
+    "${COMPOSE[@]}" run --rm --no-deps -T --entrypoint python certs - $((i * 5)) <<'EOF' && return 0
+import socket
+import ssl
+import sys
+from pathlib import Path
+
+from cryptography import x509
+
+stale = []
+for host, port, alpn in [("control-plane", 8443, []), ("processor", 50051, ["h2"]),
+                         ("processor", 8091, []), ("opa", 8181, [])]:
+    context = ssl.create_default_context(cafile="/certs/ca/ca.crt")
+    context.load_cert_chain("/certs/gateway/tls.crt", "/certs/gateway/tls.key")
+    context.set_alpn_protocols(alpn or ["http/1.1"])
+    try:
+        with socket.create_connection((host, port), timeout=5) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as conn:
+                served = x509.load_der_x509_certificate(conn.getpeercert(binary_form=True))
+    except OSError as exc:
+        stale.append(f"{host}:{port} ({exc})")
+        continue
+    held = x509.load_pem_x509_certificate(Path(f"/certs/{host}/tls.crt").read_bytes())
+    if served.serial_number != held.serial_number:
+        stale.append(f"{host}:{port}")
+print(f"not yet renewed: {', '.join(stale)}" if stale else
+      f"each serves its renewed certificate, within {sys.argv[1]} seconds")
+sys.exit(1 if stale else 0)
+EOF
+  done
+  echo "the components didn't take their renewed certificates"
+  return 1
+}
+
 end_to_end() {
   local port busy=() rc=0
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -419,7 +494,9 @@ end_to_end() {
     return 1
   fi
   export AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=dev-admin-token
+  # The demo runs on renewed certificates.
   agentgov apply -f examples/manifests &&
+    renewed_certificates &&
     python examples/agents/demo_agent.py &&
     agentgov ledger verify || rc=1
   [ "$rc" = 0 ] || e2e_logs
@@ -477,16 +554,71 @@ chart_on_docker() {
 # Compose run.
 KIND_CLUSTER=agentgov-ci
 KIND_NAMESPACE=agentgov
+# With --spire: SPIRE's quick install, as its chart's readme has it, whose controller
+# manager's class is <namespace>-<release>.
+SPIRE_NAMESPACE="spire-server"
 
 kind_logs() {
+  local namespace pod namespaces=("$KIND_NAMESPACE") stats=.status.stats
+  [ "$spire" = 0 ] || namespaces+=("$SPIRE_NAMESPACE")
   echo "${yellow}--- pods and their last 60 log lines ---${reset}"
-  kubectl -n "$KIND_NAMESPACE" get pods -o wide || true
-  kubectl -n "$KIND_NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
-  local pod
-  for pod in $(kubectl -n "$KIND_NAMESPACE" get pods -o name 2>/dev/null); do
-    echo "--- $pod"
-    kubectl -n "$KIND_NAMESPACE" logs "$pod" --all-containers --tail 60 || true
+  for namespace in "${namespaces[@]}"; do
+    kubectl -n "$namespace" get pods -o wide || true
+    kubectl -n "$namespace" get events --sort-by=.lastTimestamp | tail -30 || true
+    for pod in $(kubectl -n "$namespace" get pods -o name 2>/dev/null); do
+      echo "--- $namespace/$pod"
+      kubectl -n "$namespace" logs "$pod" --all-containers --tail 60 || true
+    done
   done
+  # What SPIRE's controller manager made of each ClusterSPIFFEID.
+  [ "$spire" = 0 ] || kubectl get clusterspiffeids -o custom-columns="NAME:.metadata.name,\
+PODS:$stats.podsSelected,ENTRIES:$stats.entriesToSet,FAILED:$stats.entryFailures" || true
+}
+
+# With --spire, after the demo: the control plane serves an X.509-SVID from SPIRE with its
+# SPIFFE ID, and one SPIRE issued after the control plane started, so renewed in place. The
+# run's SVIDs last minutes, so SPIRE renews them as the demo runs. The processor connects,
+# with its own SVID: the control plane takes it.
+spire_renewed() {
+  local started probe out='' i
+  local want="spiffe://example.org/ns/$KIND_NAMESPACE/agentgov/agentgov-control-plane"
+  probe=$(
+    cat <<'EOF'
+import socket
+import ssl
+import sys
+from datetime import datetime
+
+from cryptography import x509
+
+want, started = sys.argv[1], datetime.fromisoformat(sys.argv[2])
+context = ssl.create_default_context(cafile="/tls/ca.crt")
+context.load_cert_chain("/tls/tls.crt", "/tls/tls.key")
+with socket.create_connection(("agentgov-control-plane", 8443), timeout=5) as raw:
+    with context.wrap_socket(raw, server_hostname="agentgov-control-plane") as conn:
+        served = x509.load_der_x509_certificate(conn.getpeercert(binary_form=True))
+names = served.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+ids = names.get_values_for_type(x509.UniformResourceIdentifier)
+if ids != [want]:
+    print(f"the control plane's certificate names {ids}, not {want}")
+    sys.exit(2)
+if served.not_valid_before_utc <= started:
+    sys.exit(f"the control plane serves the SVID it started with, from {served.not_valid_before_utc}")
+print(f"the control plane serves {want}, an SVID from SPIRE renewed in place")
+EOF
+  )
+  started=$(kubectl -n "$KIND_NAMESPACE" get pods \
+    -l app.kubernetes.io/instance=agentgov,app.kubernetes.io/component=control-plane \
+    -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="control-plane")].state.running.startedAt}')
+  [ -n "$started" ] || { echo "the control plane isn't running" >&2; return 1; }
+  for i in $(seq 72); do
+    out=$(kubectl -n "$KIND_NAMESPACE" exec deploy/agentgov-processor -c processor -- \
+      python -c "$probe" "$want" "$started" 2>&1) && { echo "$out"; return 0; }
+    [ $? = 1 ] || break
+    sleep 5
+  done
+  echo "$out" >&2
+  return 1
 }
 
 # wait_port <port>: until something accepts connections on localhost:<port>.
@@ -509,6 +641,11 @@ kind_end_to_end() {
     --set guardian.url="$DEMO_GUARDIAN_URL"
     "${DEMO_DESTINATION_SECRETS[@]}"
   )
+  if [ "$spire" = 1 ]; then
+    # SVIDs that last minutes: SPIRE renews them as the demo runs.
+    values+=(--set internalTLS.spire.enabled=true --set internalTLS.spire.ttl=6m
+      --set internalTLS.spire.className="$SPIRE_NAMESPACE-spire")
+  fi
   setup_chart_tools && setup_kind_tools || return 1
   kind delete cluster --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
   build_demo_images || return 1
@@ -523,6 +660,14 @@ kind_end_to_end() {
       break
     fi
   done
+  if [ "$rc" = 0 ] && [ "$spire" = 1 ]; then
+    echo "installing SPIRE"
+    helm install spire-crds spire-crds --repo "$SPIRE_CHARTS" --version "$SPIRE_CRDS_CHART_VERSION" \
+      -n "$SPIRE_NAMESPACE" --create-namespace --wait &&
+      helm install spire spire --repo "$SPIRE_CHARTS" --version "$SPIRE_CHART_VERSION" \
+        -n "$SPIRE_NAMESPACE" --set spiffe-oidc-discovery-provider.enabled=false \
+        --wait --timeout 10m || rc=1
+  fi
   if [ "$rc" = 0 ]; then
     kubectl create namespace "$KIND_NAMESPACE" >/dev/null &&
       kubectl -n "$KIND_NAMESPACE" apply -f - >/dev/null <<'EOF' || rc=1
@@ -628,6 +773,7 @@ spec:
             - {name: TOKEN_URL, value: "http://agentgov-keycloak:8080/realms/agentgov/protocol/openid-connect/token"}
             - {name: ASSERTION_AUDIENCE, value: "http://localhost:8180/realms/agentgov"}
             - {name: WORKLOAD_ISSUER, value: "http://workload-issuer:9200"}
+            - {name: DELEGATION_JWKS_URL, value: "http://agentgov-control-plane:8000/v1/delegations/jwks"}
 ---
 apiVersion: v1
 kind: Service
@@ -661,6 +807,9 @@ EOF
       python examples/agents/demo_agent.py &&
       agentgov ledger verify &&
       helm test agentgov -n "$KIND_NAMESPACE" || rc=1
+  fi
+  if [ "$rc" = 0 ] && [ "$spire" = 1 ]; then
+    spire_renewed || rc=1
   fi
   [ "$rc" = 0 ] || kind_logs
   [ ${#pids[@]} -eq 0 ] || kill "${pids[@]}" 2>/dev/null || true
@@ -726,9 +875,8 @@ if [ "$e2e" = 1 ]; then
 fi
 
 if [ "$kind" = 1 ]; then
-  if docker_ready; then run "Kubernetes (Helm chart on kind + demo + ledger)" kind_end_to_end; else
-    skip "Kubernetes (Helm chart on kind + demo + ledger)" "no Docker daemon"
-  fi
+  name="Kubernetes (Helm chart on kind$([ "$spire" = 0 ] || echo " with SPIRE") + demo + ledger)"
+  if docker_ready; then run "$name" kind_end_to_end; else skip "$name" "no Docker daemon"; fi
 fi
 
 heading "Summary"

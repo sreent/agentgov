@@ -29,3 +29,21 @@ spec:
       identifier: "@playwright/mcp"
       version: 0.0.41
   status: approved
+---
+# Outside the gateway: a server with an authorization server of its own. Agents reach it
+# directly, with an access token they get there for an identity assertion (ID-JAG) AgentGov
+# gives them, as their grants allow, while the identity-assertions feature is on
+# (docs/acting-for-people.md#mcp-servers-outside-the-gateway).
+apiVersion: agentgov/v1alpha1
+kind: ToolServer
+metadata:
+  name: wiki
+spec:
+  url: https://wiki.example.com/mcp
+  description: The company wiki's MCP server, which its own team runs.
+  owner: knowledge-team
+  gateway: false
+  authorization_server: https://id.wiki.example.com/realms/wiki
+  # The client AgentGov's agents are at that authorization server.
+  oauth_client_id: agentgov-agents
+  status: approved

@@ -17,7 +17,15 @@ from agentgov import ids
 from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, ToolServer
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import destinations, findings, identity_issuers, platforms, validation
+from agentgov.registry import (
+    destinations,
+    features,
+    findings,
+    identity_issuers,
+    platforms,
+    reachability,
+    validation,
+)
 
 # Failed deliveries in a row before a destination is a finding.
 FAILING = 3
@@ -37,9 +45,14 @@ POSTURE_TYPES = {
 }
 
 
-def scan(session: Session, settings: Settings) -> dict[str, Any]:
+def scan(
+    session: Session, settings: Settings, *, tested: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """``tested``: what calling each agent's A2A URL around the gateway found, by agent ID,
+    when the scan's test ran (registry/reachability); None when it didn't."""
     now = ids.utcnow()
     present: set[str] = set()
+    modes = features.modes(session)
 
     def flag(type_: str, subject: str, severity: str, title: str, **kw: Any) -> None:
         findings.raise_finding(
@@ -49,7 +62,13 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
 
     # Copilot Studio checks (connector allowlist, sharing) first: they count towards risk.
     platform_findings = platforms.evaluate(session)
-    agents = session.scalars(select(Agent).where(Agent.status != DELETED)).unique().all()
+    # In one order, as the other jobs that update many agents at once take them: none of
+    # them waits for a row another holds while holding one the other wants.
+    agents = (
+        session.scalars(select(Agent).where(Agent.status != DELETED).order_by(Agent.id))
+        .unique()
+        .all()
+    )
     for agent in agents:
         managed = agent.status in (ACTIVE, PENDING, BLOCKED)
         # Agents run by another platform (Microsoft 365, Copilot Studio) never call
@@ -142,6 +161,11 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
                 remediation="Give it a workload identity: an identity issuer and its subject "
                 "there.",
             )
+        if reachability.checked(agent, modes):
+            # Calls around the gateway: what its owners say stops them, and the test.
+            reachability.scan(
+                session, agent, flag, tested=tested.get(agent.id) if tested is not None else None
+            )
         agents_svc.refresh_risk(session, settings, agent)
 
     for issuer in identity_issuers.list_all(session):
@@ -189,7 +213,17 @@ def scan(session: Session, settings: Settings) -> dict[str, Any]:
                 f"Tool server {ts.name} is waiting for review",
             )
 
-    resolved = findings.resolve_absent(session, types=POSTURE_TYPES, present_keys=present)
+    # What this scan looked for resolves when it's gone; what it didn't look for (the
+    # feature off, or no test this time) stays open, unverified, until it looks again.
+    checked = set(POSTURE_TYPES)
+    unchecked = set()
+    for type_, looked in (
+        (reachability.UNDECLARED, reachability.on(modes)),
+        (reachability.REACHABLE, tested is not None),
+    ):
+        (checked if looked else unchecked).add(type_)
+    resolved = findings.resolve_absent(session, types=checked, present_keys=present)
+    findings.mark_unverified(session, types=unchecked)
     return {
         "checked_agents": len(agents),
         "open_posture_findings": len(present),

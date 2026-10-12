@@ -7,12 +7,17 @@ built them. AgentGov puts those calls through the gateway, as it does tool and m
 calls, and:
 
 * decides each call with policy: who may call whom, and the controls that apply to tool
-  calls (least privilege, data protection, acting for people, risk, approvals);
+  calls (least privilege, data protection, acting for people, risk, approvals), and masks
+  the personal data in the message as you choose;
 * tells the agent called who handed it the work, and carries that on: the calls it makes
   for the work, to tools, models and other agents, carry the chain of agents that handed
   it down, with the person at its head, to policy and to the ledger;
 * checks the answer as it streams back, as it checks tool results: credentials and
-  personal data are masked, and instructions aimed at the agent that asked are withheld.
+  personal data are masked, and instructions aimed at the agent that asked are withheld;
+* looks for calls that go around the gateway, straight to an agent's own URL, which it
+  doesn't see and can't stop, and tells the agents' owners: agents can refuse those, with
+  the delegation the gateway gives with each call ([calls around the
+  gateway](#calls-around-the-gateway)).
 
 ```mermaid
 sequenceDiagram
@@ -42,7 +47,8 @@ sequenceDiagram
 ## Agents that serve A2A
 
 An agent that serves A2A has an `a2a_url` in the registry: its A2A endpoint (the JSON-RPC
-binding), which only the gateway should reach. With the `a2a-gateway`
+binding), which only the gateway should reach ([calls around the
+gateway](#calls-around-the-gateway)). With the `a2a-gateway`
 [feature](features.md) on (the default), AgentGov publishes it on agentgateway at
 `/a2a/<agent>`:
 
@@ -134,11 +140,32 @@ The gateway also tells the agent called, in plain headers:
 | `X-AgentGov-Chain` | The chain so far, such as `sam > support-bot` |
 
 AgentGov sets all four on every call it passes on, over any a caller sent, so an agent
-called through the gateway can rely on them. Agents carry the delegation without reading
-it: it is a JWT that only AgentGov's processors sign and check, with a key derived from
-`AGENTGOV_SERVICE_TOKEN`, as OAuth
+called through the gateway can rely on them. Agents can carry the delegation without
+reading it, as OAuth
 [transaction tokens](https://datatracker.ietf.org/doc/draft-ietf-oauth-transaction-tokens/)
-carry the context of a request between workloads.
+carry the context of a request between workloads: it is a JWT that AgentGov's processors
+sign (ES256) with a key derived from `AGENTGOV_SERVICE_TOKEN`. The control plane publishes
+the key's public half, so an agent can check it too, and refuse calls that didn't come
+through the gateway ([below](#agents-that-refuse-calls-around-the-gateway)).
+
+## Messages
+
+What one agent sends another goes through the processor before the agent called gets it:
+the call's check, above, sees the message as it was sent. Credentials in a message stop the
+call (`data-protection`). Personal data in it is found and recorded, and masked as the
+`a2a-masking` [feature](features.md) says:
+
+| `a2a-masking` | Personal data in a message |
+|---|---|
+| enforce | Masked before the agent called gets it, unless that agent may have it (its `pii-access` label, or its blueprint's) |
+| monitor (the default) | Goes as it is; the call's decision records what would have been masked (`a2a-masking: would mask pii`) |
+| off | Goes as it is; recorded |
+
+It starts monitored because an agent often needs what it is sent: see on real traffic what
+would be masked, label the agents that need personal data `pii-access`, then enforce it.
+Enforced, the gateway also sends each message through external processing, after the
+call's check, which masks it on its way; the call's decision says what was masked
+(`redacted` in `decision.a2a.request`).
 
 ## Answers
 
@@ -170,6 +197,90 @@ its answer reaches the support agent with them masked.
   compressed. One compressed anyway can't be read, and counts as one too long.
 * What was found in an answer is a finding about the agent that answered, and adds to its
   risk score: `agent.prompt_injection_in_answers`, `agent.credentials_in_answers`.
+
+## Calls around the gateway
+
+AgentGov checks the calls that come through its gateway. It doesn't own the network your
+agents run on: an agent, or anything else, that can reach another agent's own A2A URL can
+call it there, and nothing above applies to that call. AgentGov can't stop such calls.
+What can:
+
+* **the network**: let only the gateway reach agents' A2A endpoints. In Kubernetes, a
+  NetworkPolicy in the agent's namespace
+  ([example](../examples/kubernetes/agent-network-policy.yaml)); elsewhere, a firewall
+  rule, or a listener only the gateway can reach;
+* **the agent**: refuse calls without a delegation from AgentGov. The gateway gives one
+  with each call it lets through; a call around it has none.
+
+What AgentGov does is find out, and tell the agents' owners.
+
+### Agents that refuse calls around the gateway
+
+A delegation is a JWT that AgentGov signs (ES256) moments before the gateway passes the
+call on, for the agent called, by its name and its AgentGov ID. The control plane publishes
+the public key, which is no secret, at `GET /v1/delegations/jwks` (a JSON Web Key Set;
+`GET /v1/info` names it as `delegation_jwks`). A Python agent that serves A2A over ASGI
+(Starlette, FastAPI) needs one line, with
+[agentgov.a2a_auth](../src/agentgov/a2a_auth.py), which needs only PyJWT (copy the file into
+an agent that doesn't install AgentGov):
+
+```python
+from agentgov.a2a_auth import RequireDelegation
+
+app = RequireDelegation(
+    app, agent="billing-agent", jwks_url="https://agentgov.example.com/v1/delegations/jwks"
+)
+```
+
+A call without a valid delegation gets HTTP 401 and a JSON-RPC error. The agent's card stays
+open, and so do the paths you name (`open_paths`, such as its health checks). A call with
+one has the delegation's claims in `request.scope["state"]["agentgov_delegation"]`. Any JWT
+library does the same, as the demo's billing-agent does with PyJWT
+([server.py](../examples/agents/billing/server.py)):
+
+| Check | |
+|---|---|
+| Signature | ES256, with the key in AgentGov's key set that the token's `kid` names. Keep the set for a few minutes, and read it again for a `kid` you don't know (the service token changed), but not for every such call |
+| `iss` | `agentgov` |
+| `aud` | The agent's name, or its AgentGov ID: the token holds both |
+| `exp` | Not passed. A delegation lasts an hour, for the calls the agent makes for the work |
+| `iat` | Within the last two minutes or so: the gateway gives one with each call, so an older one came another way |
+
+Read the key set over HTTPS, at the control plane's public address: whoever can change it
+on its way can make delegations the agent accepts.
+
+### Telling AgentGov, and finding out
+
+Each agent's owners say what stops calls around the gateway to it (`a2a_protection`): the
+`network`, or the agent, checking the `delegation`.
+
+| | How |
+|---|---|
+| Admin UI | Agent → **Edit** → *Agent to agent* → *Calls around the gateway are stopped by*. Its page shows what its owners said, and what AgentGov's test found |
+| CLI | `agentgov agents update billing-agent --a2a-protection delegation` (`--no-a2a-protection` for neither); `agentgov agents a2a billing-agent` |
+| API | `a2a_protection` in `POST /v1/agents` and `PATCH /v1/agents/{name}`; `around_gateway` in `GET /v1/agents/{name}/a2a` |
+| Manifests | `a2a_protection` in an `Agent`'s spec ([example](../examples/manifests/agents.yaml)) |
+
+The `calls-around-gateway` [feature](features.md) says how AgentGov looks for such calls,
+to the agents published on the gateway. Its findings go to the agents' owners as
+[issues](issues.md):
+
+| Mode | |
+|---|---|
+| `watch` (the default) | Telemetry that shows a call straight to an agent's A2A URL is recorded in the ledger (`telemetry.a2a_around_gateway`), and raises a finding for the owners of the agent called (`agent.a2a_called_around_gateway`) and, when a registered agent made the call, for its owners (`agent.a2a_calls_around_gateway`). An agent whose owners haven't said what stops such calls raises a low one (`agent.a2a_protection_undeclared`). AgentGov calls no agent itself |
+| `test` | As `watch`, and each posture scan also calls each agent's A2A URL itself, without a delegation, as a call around the gateway would: a `GetTask` for a task that doesn't exist, which changes nothing, with the header `X-AgentGov-Check: calls-around-gateway`. An agent that takes the call raises `agent.a2a_reachable_around_gateway`: medium, or high if its owners said something stops such calls. The agent's page shows what the last test found, and the ledger records each change (`agent.a2a_tested`). It needs `posture-checks` on |
+| `off` | Nothing is looked for. What owners said is kept; findings already raised stay open, marked unverified |
+
+Telemetry shows a call around the gateway as a client span whose `server.address` and
+`server.port`, or `url.full`, name an agent's A2A URL (a Kubernetes service by its short or
+its long name). The test finds:
+
+| Found | |
+|---|---|
+| `refused` | The agent refused a call without credentials (HTTP 401 or 403). It checks AgentGov's delegation, or credentials of its own; only the delegation shows that a call came through the gateway |
+| `accepted` | It answered (HTTP 2xx): whoever can reach it can call it around the gateway |
+| `unreachable` | AgentGov couldn't reach it, as the network should keep out every caller but the gateway. The test runs from the control plane: it shows what the control plane can reach, not what every agent can |
+| `inconclusive` | It answered something else (it may not serve JSON-RPC there), or its certificate couldn't be verified |
 
 ## In policy
 
@@ -245,23 +356,32 @@ demo cluster) that looks customers up in the CRM through the gateway. The
 1. the demo agent, acting for sam, reads billing-agent's card through the gateway, and
    asks it what a customer owes, claiming to act for someone else;
 2. billing-agent answers, and says who asked and for whom: the demo agent, for sam; the
-   customer's contact details it read reach the demo agent masked;
+   customer's contact details it read reach the demo agent masked; and with `a2a-masking`
+   enforced, an email in what the demo agent asks reaches billing-agent whole, as it may
+   have personal data;
 3. the ledger holds the call between the agents, and billing-agent's own call to the CRM,
    each with the chain `sam > demo-agent-… > billing-agent`;
 4. a delegation the demo agent made up is refused;
-5. without its blueprint's grant, the demo agent's call is refused.
+5. without its blueprint's grant, the demo agent's call is refused;
+6. with `calls-around-gateway` on `test`, AgentGov calls billing-agent at its own URL, and
+   billing-agent refuses the call: it carries no delegation; and telemetry from a job that
+   called billing-agent there raises an issue for billing-agent's owners.
 
 ## Limits
 
-* Personal data in a message an agent sends is found and recorded, not masked: the
-  gateway passes the request on as it is. Credentials are refused. In answers, both are
-  masked.
+* Personal data in a message an agent sends is masked only while `a2a-masking` is
+  enforced. A compressed message can't be read: nothing in it is found or masked.
 * The processor reads each request whole, up to 256 KiB: agentgateway refuses larger ones
   (HTTP 413) before they reach policy.
-* The headers are only as trustworthy as the network between the gateway and the agent:
-  let only the gateway reach agents' A2A endpoints (in Kubernetes, a NetworkPolicy).
-  Calls that skip the gateway aren't governed.
+* Calls that go around the gateway aren't governed, and AgentGov can't stop them: the
+  network or the agent must ([calls around the gateway](#calls-around-the-gateway)). The
+  plain headers are only as trustworthy as that.
+* A delegation is a bearer token: whoever holds one can present it until it expires. The
+  agent it was given to holds it, and sends it with its calls through the gateway; the
+  `iat` check above keeps an agent from taking it as proof for a later call.
 * The gateway routes the JSON-RPC binding. Push notifications, the agent calling a
   caller's webhook back, don't go through it.
 * Delegations are signed with a key derived from the service token: changing
-  `AGENTGOV_SERVICE_TOKEN` ends the delegations in flight, which last an hour at most.
+  `AGENTGOV_SERVICE_TOKEN` ends the delegations in flight, which last an hour at most, and
+  changes the published key (its `kid`). Delegations signed before agents could check
+  them (HS256) are still accepted by AgentGov until they expire.

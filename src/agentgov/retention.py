@@ -3,11 +3,13 @@
 The ledger is evidence: nothing leaves it unarchived. Every
 ``AGENTGOV_LEDGER_CHECKPOINT_HOURS`` its head is kept as a checkpoint, which a
 time-stamping authority signs when ``AGENTGOV_LEDGER_TSA_URL`` is set
-(agentgov.timestamping). With ``AGENTGOV_LEDGER_RETENTION_DAYS``, entries older than
-that are written to an archive in ``AGENTGOV_LEDGER_ARCHIVE_DIR`` (gzipped JSON Lines,
-checked link by link as they are written), a checkpoint records the archive and its
-SHA-256, and only then do the entries leave the database: the chain there goes on from
-that checkpoint, and the archive verifies offline (``agentgov ledger verify --file``).
+(agentgov.timestamping), and which goes into a transparency log when
+``AGENTGOV_LEDGER_REKOR_URL`` is (agentgov.transparency). With
+``AGENTGOV_LEDGER_RETENTION_DAYS``, entries older than that are written to an archive in
+``AGENTGOV_LEDGER_ARCHIVE_DIR`` (gzipped JSON Lines, checked link by link as they are
+written), a checkpoint records the archive and its SHA-256, and only then do the entries
+leave the database: the chain there goes on from that checkpoint, and the archive
+verifies offline (``agentgov ledger verify --file``).
 Entries an active destination hasn't been sent yet stay, while security operations are on.
 
 The operational records whose history is in the ledger (daily activity and model usage,
@@ -116,6 +118,39 @@ def save_stamp(
         point.timestamped_at, point.timestamp_error = time, None
     else:
         point.timestamp_error = error
+
+
+def unlogged(session: Session) -> list[tuple[int, str]]:
+    """Checkpoints still to be added to the transparency log, newest first (one that the
+    log took, and whose proof didn't check out, isn't added again)."""
+    rows = session.scalars(
+        select(LedgerCheckpoint)
+        .where(LedgerCheckpoint.tlog_entry.is_(None))
+        .order_by(LedgerCheckpoint.seq.desc())
+        .limit(STAMP_BATCH)
+    )
+    return [(c.seq, c.hash) for c in rows]
+
+
+def save_log_entry(
+    session: Session,
+    seq: int,
+    url: str,
+    *,
+    entry: dict[str, Any] | None = None,
+    checked: bool | None = None,
+    error: str | None = None,
+) -> None:
+    point = session.get(LedgerCheckpoint, seq)
+    if point is None:
+        return
+    point.tlog_url = url
+    if entry is not None:
+        point.tlog_entry = entry
+        point.tlog_index = int(entry["logIndex"])
+        point.tlog_logged_at = ids.utcnow()
+        point.tlog_checked = checked
+    point.tlog_error = error
 
 
 # --------------------------------------------------------------------- archives

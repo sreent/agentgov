@@ -48,7 +48,7 @@ def listed(client) -> None:
 class TestToolServers:
     def test_how_a_server_is_used_is_checked(self, rt) -> None:
         with rt.db.session() as s:
-            with pytest.raises(ValidationError, match=r"gateway, listed for developers, or both"):
+            with pytest.raises(ValidationError, match=r"gateway, listed for developers, reached"):
                 toolservers.create(
                     s, {"name": "x", "url": "http://x/mcp", "gateway": False}, actor="a",
                     approve=True,

@@ -151,8 +151,9 @@ def agent_credentials(
     body: dict[str, Any] = Body(default={}),
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
-    """Return the agent's OAuth client credentials (``rotate: true`` issues a new secret), or,
-    for an agent with a workload identity, what token authenticates it instead."""
+    """Return the agent's OAuth client credentials (``rotate: true`` issues a new secret);
+    for an agent with a workload identity, what token authenticates it instead; and for a
+    public client, where people sign in to it."""
     rt = _rt(request)
     if rt.identity is None:
         raise HTTPException(409, "identity provider integration is not configured")
@@ -164,6 +165,8 @@ def agent_credentials(
             raise Conflict(
                 "the agent has no secret to rotate: it authenticates with its workload identity"
             )
+        if agents.identity_method(agent) == "sign-in" and body.get("rotate"):
+            raise Conflict("a public client has no secret to rotate: people sign in to it")
         try:
             creds = rt.identity.credentials(agent, rotate=bool(body.get("rotate")))
         except KeycloakError as exc:
@@ -173,6 +176,13 @@ def agent_credentials(
                 rt.settings.keycloak_issuer.rstrip("/") + "/protocol/openid-connect/token"
             )
         creds["audience"] = rt.settings.gateway_audience
+        if creds.get("method") == "sign-in":
+            # Where people sign in to it: nothing here is secret, so reading it isn't
+            # recorded.
+            creds["authorization_endpoint"] = (
+                str(creds["issuer"]).rstrip("/") + "/protocol/openid-connect/auth"
+            )
+            return creds
         if creds.get("method") == "workload-identity":
             # What its issuer's token must look like to authenticate it. Nothing here is
             # secret, so reading it isn't recorded.

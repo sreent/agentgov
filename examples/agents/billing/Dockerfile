@@ -4,7 +4,7 @@ FROM ${PYTHON_IMAGE}
 WORKDIR /app
 RUN --mount=type=secret,id=extra_ca,required=false \
     if [ -f /run/secrets/extra_ca ]; then export PIP_CERT=/run/secrets/extra_ca; fi; \
-    pip install --no-cache-dir "mcp==2.3.0" \
+    pip install --no-cache-dir "mcp==2.3.0" "pyjwt[crypto]==2.15.1" \
     && useradd --uid 10001 billing
 COPY server.py .
 USER billing

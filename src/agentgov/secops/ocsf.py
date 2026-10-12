@@ -130,9 +130,14 @@ _ACTIVITY_CAPTIONS = {
 POSTURE_FINDINGS = "posture"
 
 
+# Calls seen in agents' own telemetry that went around the gateway: a tool used without a
+# grant, and a call straight to another agent's A2A URL.
+AROUND_THE_GATEWAY = {"telemetry.ungranted_tool_use", "telemetry.a2a_around_gateway"}
+
+
 def _class(entry: LedgerEntry) -> int:
     prefix = entry.type.split(".", 1)[0]
-    if prefix in ("decision", "approval") or entry.type == "telemetry.ungranted_tool_use":
+    if prefix in ("decision", "approval") or entry.type in AROUND_THE_GATEWAY:
         return API_ACTIVITY
     if prefix == "admin":
         return AUTHENTICATION
@@ -236,14 +241,21 @@ def _api_activity(entry: LedgerEntry, agent: Agent | None) -> dict[str, Any]:
     details = entry.details or {}
     kind = entry.type.split(".", 1)[0]
     model_call = entry.type.startswith("decision.model.")
-    agent_call = entry.type.startswith("decision.a2a.")
+    agent_call = (
+        entry.type.startswith("decision.a2a.") or entry.type == "telemetry.a2a_around_gateway"
+    )
+    # An identity assertion AgentGov gave, or refused, for an MCP server outside the gateway.
+    assertion = entry.type == "decision.assertion"
     method = entry.action or ("chat" if model_call else "tools/call")
-    # server/tool, or provider/model; a tool alone for in-process agents; the called agent.
+    # server/tool, or provider/model; a tool alone for in-process agents; the called agent;
+    # the server an assertion is for.
     resource = entry.resource or ""
     service, target = resource.split("/", 1) if "/" in resource else ("", resource)
-    if agent_call:
+    if agent_call or assertion:
         service = target
-    if kind == "approval":
+    if assertion:
+        activity_id, activity = 99, "Identity assertion"
+    elif kind == "approval":
         verb = entry.type.split(".", 1)[1]
         activity_id, activity = 99, f"Approval {verb}"
     elif method.endswith(("/list", "/read")) or (agent_call and method.startswith(("Get", "List"))):
@@ -289,14 +301,15 @@ def _api_activity(entry: LedgerEntry, agent: Agent | None) -> dict[str, Any]:
                 "service": service_entry,
             }
     elif target:
-        event["resources"] = [{"name": target, "type": "AI Model" if model_call else "Tool"}]
+        kind_of = "AI Model" if model_call else "MCP Server" if assertion else "Tool"
+        event["resources"] = [{"name": target, "type": kind_of}]
     if model_call and target:
         event["ai_model"] = {"name": target, "ai_provider": service}
     _delegation(event, entry, details)
     monitored = bool(details.get("monitored"))
     decision = entry.decision
-    if entry.type == "telemetry.ungranted_tool_use":
-        # Seen in the agent's own telemetry: it called the tool without the gateway.
+    if entry.type in AROUND_THE_GATEWAY:
+        # Seen in telemetry: a call that didn't go through the gateway.
         _control(event, ALLOWED, 15, alert=True)
         event["severity_id"] = MEDIUM
     elif kind == "approval":

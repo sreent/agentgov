@@ -678,11 +678,17 @@ def internal_certs(
         help="NAME, or NAME=HOST,HOST: a component and the names others reach it by "
         f"(default: {', '.join(COMPONENTS)}, each by its name).",
     ),
+    renew: bool = typer.Option(
+        False,
+        "--renew",
+        help="Give each component a new key and certificate from the same authority; they "
+        "take it without a restart (AGENTGOV_TLS_RELOAD_SECONDS).",
+    ),
 ) -> None:
     """Make AgentGov's own certificate authority, and a certificate for each component, for
     mutual TLS between them (AGENTGOV_TLS_DIR=<directory>/<name>). Each component's
     directory holds tls.crt, tls.key and ca.crt, as cert-manager writes them. What is
-    there already is kept."""
+    there already is kept, unless --renew."""
     from agentgov import tls
 
     authority = tls.make_authority(directory / "ca")
@@ -690,7 +696,11 @@ def internal_certs(
         name, _, hosts = spec.partition("=")
         names = [h for h in hosts.split(",") if h] or [name]
         folder = tls.issue(
-            authority, directory / name, f"agentgov-{name}", [*names, "localhost", "127.0.0.1"]
+            authority,
+            directory / name,
+            f"agentgov-{name}",
+            [*names, "localhost", "127.0.0.1"],
+            renew=renew,
         )
         typer.echo(f"{name}: {folder}")
 
@@ -705,6 +715,27 @@ def bundle_signing_key(
 
     key, cert = generate(directory)
     typer.echo(f"key: {key}\ncertificate: {cert}")
+
+
+@app.command("transparency-key")
+def transparency_key(
+    directory: Path = typer.Argument(..., help="Where the key and its public half go."),
+    log: bool = typer.Option(
+        False, "--log", help="A key for a log of your own (rekor-tiles) instead."
+    ),
+) -> None:
+    """Make the key AgentGov signs the ledger's checkpoints with for a transparency log
+    (key.pem, for AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE: ECDSA P-256) and its public half
+    (public.pem, for those who check the entries); with --log, the key a log of your own
+    signs its checkpoints with (log.pem, for rekor-tiles' --signer-filepath: Ed25519) and
+    its public half (log.pub, for AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE). A key already there
+    is kept."""
+    from agentgov import transparency
+
+    key, public = (
+        transparency.generate_log_key(directory) if log else transparency.generate(directory)
+    )
+    typer.echo(f"key: {key}\npublic key: {public}")
 
 
 @app.command("gateway-config")
@@ -741,7 +772,7 @@ def gateway_config(
         base_url=settings.control_plane_url,
         headers={"Authorization": f"Bearer {settings.service_token}"},
         timeout=10,
-        verify=identity.client_context() if identity else True,
+        transport=identity.transport() if identity else None,
     ) as client:
         keep_current(
             client,
@@ -749,6 +780,9 @@ def gateway_config(
             interval=interval,
             once=once,
             heartbeat=str(heartbeat) if heartbeat else None,
+            # The gateway's certificate (the same files as its own): a renewed one rewrites
+            # the file, so that agentgateway reads it again.
+            certificates=identity,
         )
 
 
@@ -927,6 +961,13 @@ AGENT_ACCESS = typer.Option(
     help="Agents it may call over A2A, by name or pattern such as billing-* (repeatable or "
     "comma-separated).",
 )
+A2A_PROTECTION = typer.Option(
+    None,
+    "--a2a-protection",
+    help="What stops calls to it that don't come through the gateway: network (only the "
+    "gateway can reach it) or delegation (it refuses calls without the delegation the "
+    "gateway gives with each one).",
+)
 
 
 def _a2a_fields(
@@ -935,16 +976,50 @@ def _a2a_fields(
     *,
     no_a2a: bool = False,
     no_agent_access: bool = False,
+    a2a_protection: str | None = None,
+    no_a2a_protection: bool = False,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {}
     if no_a2a:
         body["a2a_url"] = None
     elif a2a_url is not None:
         body["a2a_url"] = a2a_url
+    if no_a2a_protection:
+        body["a2a_protection"] = None
+    elif a2a_protection is not None:
+        body["a2a_protection"] = a2a_protection
     if no_agent_access:
         body["agent_access"] = []
     elif agent_access is not None:
         body["agent_access"] = _split(agent_access)
+    return body
+
+
+CLIENT_TYPE = typer.Option(
+    None,
+    "--client-type",
+    help="service (the default): it gets tokens for itself, with a secret or its workload "
+    "identity; or public: people sign in to it on their own machines, such as developers' "
+    "MCP clients, and it acts for them.",
+)
+REDIRECT_URI = typer.Option(
+    None,
+    "--redirect-uri",
+    help="Where a sign-in to a public client may return (repeatable; * only at the end). By "
+    "default, the machine itself at any port: http://127.0.0.1/* and http://localhost/*.",
+)
+
+
+def _client_fields(
+    client_type: str | None, redirect_uris: list[str] | None, *, default_redirects: bool = False
+) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if client_type is not None:
+        body["client_type"] = client_type
+    if default_redirects:
+        body["redirect_uris"] = []
+    elif redirect_uris is not None:
+        body["redirect_uris"] = _split(redirect_uris)
     return body
 
 
@@ -982,6 +1057,9 @@ def agents_create(
     workload_identity: str | None = WORKLOAD_IDENTITY,
     a2a_url: str | None = A2A_URL,
     agent_access: list[str] | None = AGENT_ACCESS,
+    a2a_protection: str | None = A2A_PROTECTION,
+    client_type: str | None = CLIENT_TYPE,
+    redirect_uri: list[str] | None = REDIRECT_URI,
     approve: bool = typer.Option(False, "--approve", help="Activate it now (admins only)."),
 ) -> None:
     """Register an agent. It waits in pending review unless --approve is given."""
@@ -989,7 +1067,8 @@ def agents_create(
         _model_fields(model_access, token_budget, False)
         | _team_field(team)
         | _workload_identity(workload_identity)
-        | _a2a_fields(a2a_url, agent_access)
+        | _client_fields(client_type, redirect_uri)
+        | _a2a_fields(a2a_url, agent_access, a2a_protection=a2a_protection)
         | _agent_fields(
             description=description,
             blueprint=blueprint,
@@ -1047,6 +1126,21 @@ def agents_update(
     no_agent_access: bool = typer.Option(
         False, "--no-agent-access", help="Only the agents its blueprint may call."
     ),
+    a2a_protection: str | None = A2A_PROTECTION,
+    no_a2a_protection: bool = typer.Option(
+        False,
+        "--no-a2a-protection",
+        help="Nothing is known to stop calls to it that don't come through the gateway.",
+    ),
+    client_type: str | None = CLIENT_TYPE,
+    redirect_uri: list[str] | None = typer.Option(
+        None, "--redirect-uri", help="Where a sign-in to it may return (replace them)."
+    ),
+    default_redirect_uris: bool = typer.Option(
+        False,
+        "--default-redirect-uris",
+        help="Back to the machine itself, at any port.",
+    ),
     if_version: int | None = IF_VERSION,
 ) -> None:
     """Change an agent's details. Only the options you pass are changed."""
@@ -1054,7 +1148,15 @@ def agents_update(
         _model_fields(model_access, token_budget, no_token_budget)
         | _team_field(team)
         | _workload_identity(workload_identity, clear=no_workload_identity)
-        | _a2a_fields(a2a_url, agent_access, no_a2a=no_a2a, no_agent_access=no_agent_access)
+        | _client_fields(client_type, redirect_uri, default_redirects=default_redirect_uris)
+        | _a2a_fields(
+            a2a_url,
+            agent_access,
+            no_a2a=no_a2a,
+            no_agent_access=no_agent_access,
+            a2a_protection=a2a_protection,
+            no_a2a_protection=no_a2a_protection,
+        )
         | _agent_fields(
             description=description,
             blueprint=blueprint,
@@ -1090,6 +1192,25 @@ def agents_a2a(ref: str) -> None:
     if view["agent_access"]:
         typer.echo(f"  (grants: {', '.join(view['agent_access'])})")
     typer.echo(f"called by: {', '.join(view['called_by']) or 'no agent'}")
+    if view["serves"]:
+        around = view["around_gateway"]
+        says = AROUND_THE_GATEWAY.get(around["protection"] or "")
+        typer.echo(
+            f"calls around the gateway: stopped by {says}"
+            if says
+            else "calls around the gateway: its owners haven't said what stops them"
+        )
+        test = around["test"]
+        if test:
+            typer.echo(f"  tested {test['checked_at']}: {test['state']}, {test['detail']}")
+        elif around["mode"] != "test":
+            typer.echo(f"  not tested (calls-around-gateway is {around['mode']})")
+
+
+AROUND_THE_GATEWAY = {
+    "network": "the network (only the gateway can reach it)",
+    "delegation": "the agent (it refuses calls without the gateway's delegation)",
+}
 
 
 def _lifecycle(ref: str, action: str, reason: str | None) -> None:
@@ -1196,8 +1317,9 @@ def agents_attest(
 
 @agents_app.command("credentials")
 def agents_credentials(ref: str, rotate: bool = False) -> None:
-    """Print the agent's OAuth client credentials (--rotate issues a new secret), or, for an
-    agent with a workload identity, how it authenticates without a secret."""
+    """Print the agent's OAuth client credentials (--rotate issues a new secret); for an
+    agent with a workload identity, how it authenticates without a secret; and for a public
+    client, where people sign in to it."""
     _print(_call("POST", f"/v1/agents/{ref}/credentials", json={"rotate": rotate}))
 
 
@@ -1534,6 +1656,8 @@ def _toolserver_fields(
     developers: bool | None = None,
     package: list[str] | None = None,
     registry_name: str | None = None,
+    authorization_server: str | None = None,
+    oauth_client_id: str | None = None,
 ) -> dict[str, Any]:
     body = _given(
         url=url,
@@ -1551,6 +1675,10 @@ def _toolserver_fields(
         body["packages"] = _packages(package)
     if registry_name is not None:
         body["registry_name"] = registry_name or None
+    if authorization_server is not None:
+        body["authorization_server"] = authorization_server or None
+    if oauth_client_id is not None:
+        body["oauth_client_id"] = oauth_client_id or None
     return body
 
 
@@ -1570,6 +1698,19 @@ PACKAGE = typer.Option(
 REGISTRY_NAME = typer.Option(
     None, help="Its name in the MCP registry (default <namespace>/<name>)."
 )
+AUTHORIZATION_SERVER = typer.Option(
+    None,
+    "--authorization-server",
+    help="For a server outside the gateway: the issuer of the authorization server it takes "
+    "access tokens from. Agents get identity assertions (ID-JAG) for it from AgentGov ('' "
+    "to remove it).",
+)
+OAUTH_CLIENT_ID = typer.Option(
+    None,
+    "--oauth-client-id",
+    help="The client AgentGov's agents are at that authorization server (default: each "
+    "agent's own client ID; '' to go back to it).",
+)
 
 
 @toolservers_app.command("create")
@@ -1587,16 +1728,21 @@ def toolservers_create(
     developers: bool | None = DEVELOPERS,
     package: list[str] | None = PACKAGE,
     registry_name: str | None = REGISTRY_NAME,
+    authorization_server: str | None = AUTHORIZATION_SERVER,
+    oauth_client_id: str | None = OAUTH_CLIENT_ID,
 ) -> None:
     """Register a tool server (admins: approved at once; registrars: pending review)."""
     body = _toolserver_fields(
         url, description, owner, trust, classification, label,
         gateway=gateway, developers=developers, package=package, registry_name=registry_name,
+        authorization_server=authorization_server, oauth_client_id=oauth_client_id,
     )  # fmt: skip
     ts = _call("POST", "/v1/toolservers", json={"name": name, **body})
     where = [f"published at {ts['gateway_url']}"] if ts["gateway_url"] else []
     if ts["developers"]:
         where.append("listed for developers")
+    if ts.get("authorization_server"):
+        where.append(f"reached with assertions for {ts['authorization_server']}")
     _done("toolserver", ts["name"], ", ".join([ts["status"], *where]))
 
 
@@ -1613,12 +1759,15 @@ def toolservers_update(
     developers: bool | None = DEVELOPERS,
     package: list[str] | None = PACKAGE,
     registry_name: str | None = REGISTRY_NAME,
+    authorization_server: str | None = AUTHORIZATION_SERVER,
+    oauth_client_id: str | None = OAUTH_CLIENT_ID,
     if_version: int | None = IF_VERSION,
 ) -> None:
     """Change a tool server's details."""
     body = _toolserver_fields(
         url, description, owner, trust, classification, label,
         gateway=gateway, developers=developers, package=package, registry_name=registry_name,
+        authorization_server=authorization_server, oauth_client_id=oauth_client_id,
     )  # fmt: skip
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
@@ -2064,7 +2213,13 @@ def ledger_checkpoints(limit: int = 20) -> None:
         row["archived"] = (
             f"{row['archived_from']}-{row['seq']} {row['archive']}" if row["archive"] else ""
         )
-    _table(rows, ["seq", "entry_ts", "stamped", "archived", "hash"])
+        log = row.get("log") or {}
+        row["logged"] = (
+            f"#{log['index']}" + ("" if log["checked"] else " (unchecked)")
+            if log.get("logged")
+            else (f"failed: {log['error']}" if log.get("error") else "")
+        )
+    _table(rows, ["seq", "entry_ts", "stamped", "logged", "archived", "hash"])
 
 
 @ledger_app.command("checkpoint")
@@ -2080,21 +2235,94 @@ def ledger_proof(
     seq: int,
     out: Path = typer.Option(Path("."), "--out", "-o", help="The directory to write to."),
 ) -> None:
-    """Write a checkpoint's statement and its time-stamp, to verify with OpenSSL."""
+    """Write a checkpoint's statement, its time-stamp, to verify with OpenSSL, and its
+    entry in the transparency log, to verify with cosign or agentgov ledger
+    verify-log-entry."""
     points = _call("GET", "/v1/ledger/checkpoints", params={"limit": 1000})
     point = next((p for p in points if p["seq"] == seq), None)
     if point is None:
         _fail(f"no checkpoint at entry {seq}: see agentgov ledger checkpoints")
+    out.mkdir(parents=True, exist_ok=True)
+    statement = out / f"checkpoint-{seq}.txt"
+    statement.write_text(point["statement"])
+    typer.echo(f"wrote {statement}")
+    wrote = False
     with _client() as client:
         resp = client.get(f"/v1/ledger/checkpoints/{seq}/timestamp")
-    if resp.status_code >= 400:
-        _fail(resp.json().get("detail", resp.text))
-    out.mkdir(parents=True, exist_ok=True)
-    statement, token = out / f"checkpoint-{seq}.txt", out / f"checkpoint-{seq}.tsr"
-    statement.write_text(point["statement"])
-    token.write_bytes(resp.content)
-    typer.echo(f"wrote {statement} and {token}; check them with:")
-    typer.echo(f"  openssl ts -verify -data {statement} -in {token} -CAfile TSA-CA.pem")
+        if resp.status_code < 400:
+            token = out / f"checkpoint-{seq}.tsr"
+            token.write_bytes(resp.content)
+            wrote = True
+            typer.echo(f"wrote {token}; check it with:")
+            typer.echo(f"  openssl ts -verify -data {statement} -in {token} -CAfile TSA-CA.pem")
+        if (point.get("log") or {}).get("logged"):
+            entry = client.get(f"/v1/ledger/checkpoints/{seq}/log-entry")
+            log = client.get("/v1/ledger/transparency-log")
+            if entry.status_code < 400 and log.status_code < 400:
+                bundle = out / f"checkpoint-{seq}.sigstore.json"
+                bundle.write_bytes(entry.content)
+                wrote = True
+                about = log.json()
+                key = out / "agentgov-rekor.pub"
+                if about.get("signer_key"):
+                    key.write_text(about["signer_key"])
+                typer.echo(f"wrote {bundle}; check it offline with:")
+                if about.get("trusted_root"):
+                    root = out / "rekor-trusted-root.json"
+                    root.write_text(json.dumps(about["trusted_root"], indent=2))
+                    (out / "rekor.pub").write_text(about["log_key"])
+                    typer.echo(
+                        f"  cosign verify-blob --key {key} --bundle {bundle} "
+                        f"--trusted-root {root} {statement}"
+                    )
+                typer.echo(
+                    f"  agentgov ledger verify-log-entry {statement} {bundle} "
+                    f"--log-key {out / 'rekor.pub'} --origin {about.get('origin')} --key {key}"
+                )
+    if not wrote:
+        _fail(f"checkpoint {seq} isn't time-stamped nor in a transparency log yet")
+
+
+@ledger_app.command("verify-log-entry")
+def ledger_verify_log_entry(
+    statement: Path = typer.Argument(..., help="The checkpoint's statement (checkpoint-N.txt)."),
+    bundle: Path = typer.Argument(..., help="Its entry, as a Sigstore bundle (.sigstore.json)."),
+    log_key: Path = typer.Option(..., "--log-key", help="The log's public key (PEM, Ed25519)."),
+    origin: str = typer.Option(..., "--origin", help="The log's name in its checkpoints."),
+    key: Path | None = typer.Option(
+        None, "--key", help="AgentGov's public key (PEM): the entry must be signed with it."
+    ),
+) -> None:
+    """Check, offline, that a transparency log holds a checkpoint: the log signed the
+    checkpoint the entry's proof leads to, and the entry is the statement, signed."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from agentgov import transparency
+
+    try:
+        found = json.loads(bundle.read_text())
+        [entry] = found["verificationMaterial"]["tlogEntries"]
+        signer = None
+        if key is not None:
+            signer = serialization.load_pem_public_key(key.read_bytes())
+            if not isinstance(signer, ec.EllipticCurvePublicKey):
+                _fail(f"{key} isn't an ECDSA public key")
+        checked = transparency.check(
+            entry,
+            statement.read_bytes(),
+            log_key=transparency.load_log_key(log_key),
+            origin=origin,
+            signer=signer,
+        )
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        _fail(f"can't read them: {exc}")
+    except transparency.TransparencyError as exc:
+        _fail(f"not verified: {exc}")
+    typer.echo(
+        f"verified: entry {checked.index} of {checked.origin}, in its tree of "
+        f"{checked.tree_size} (root {checked.root_hash})"
+    )
 
 
 @ledger_app.command("retention")

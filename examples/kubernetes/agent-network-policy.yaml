@@ -1,0 +1,40 @@
+# Calls around the gateway (docs/agent-to-agent.md#calls-around-the-gateway): a
+# NetworkPolicy that lets only AgentGov's gateway reach an agent's A2A port, so that other
+# agents can call it only through the gateway, where AgentGov checks each call.
+#
+# Apply it in the agent's namespace, with the agent's labels and port, AgentGov's namespace
+# and its Helm release's name. The cluster's network plugin must enforce NetworkPolicy
+# (Calico, Cilium, AKS's Azure Network Policy, EKS's VPC CNI with its network policy agent,
+# GKE Dataplane V2). Then tell AgentGov what stops calls around the gateway:
+#
+#   agentgov agents update billing-agent --a2a-protection network
+#
+# AgentGov's own test of the agent (calls-around-gateway on "test") comes from its control
+# plane, which this policy keeps out too: the test finds the agent unreachable, as any call
+# around the gateway would be.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: billing-agent-only-through-agentgov
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels:
+      app: billing-agent
+  policyTypes: ["Ingress"]
+  ingress:
+    # Its A2A port, from AgentGov's gateway pods only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agentgov
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentgov
+              app.kubernetes.io/instance: agentgov
+              app.kubernetes.io/component: gateway
+      ports:
+        - port: 9600
+    # Anything else that must reach the agent needs a rule of its own here, such as a
+    # metrics scraper on another port. The kubelet's health checks come from the node,
+    # which most network plugins let through: check yours.

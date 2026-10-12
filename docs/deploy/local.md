@@ -59,7 +59,9 @@ through the gateway. AgentGov's components talk to each other over mutual TLS
 ([production](../production.md#mutual-tls-between-components)): on its first start, the
 `certs` service makes the stack's own authority, a certificate for each component and the
 key that signs OPA's bundles, on the `certs` volume, and each component mounts only its
-own. To ask OPA yourself, use OPA's certificate for instance:
+own; `docker compose run --rm --entrypoint sh certs -c "agentgov internal-certs /certs
+--renew && chmod a+r /certs/*/tls.key"` renews them, and the components take theirs within
+a minute. To ask OPA yourself, use OPA's certificate for instance:
 `docker compose cp opa:/tls ./opa-tls`, then `curl --cacert opa-tls/ca.crt --cert
 opa-tls/tls.crt --key opa-tls/tls.key https://localhost:8181/v1/data`. The billing agent ([examples/agents/billing](../../examples/agents/billing/server.py))
 is the agent other agents call in the demo ([agent to agent](../agent-to-agent.md)). The
@@ -78,6 +80,7 @@ comes with five demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (default
 | `sofia` | `agentgov-secops` | The security team: see everything, and triage, contain or decide as far as the hand-off to [security operations](../secops.md) allows |
 | `audrey` | `agentgov-auditor` | See everything, change nothing |
 | `sam` | none (group `support`) | A person agents act for: signs in to the demo app `agentgov-demo-chat`, and to AgentGov to decide the approval requests sent to them, while `approvals-by-person` is on ([acting for people](../acting-for-people.md)) |
+| `dana` | none (group `developers`) | A developer: signs in from an MCP client to the `coding-assistant` agent, which acts for them at the gateway ([developer tools](../developer-tools.md#signing-in-at-the-gateway)) |
 
 People without an `agentgov-*` role are turned away, unless the `approvals-by-person`
 feature is on: then they see only the approval requests sent to them. Sign-ins, sign-outs
@@ -289,7 +292,10 @@ scripts/ci.sh --kind-only --keep
 ```
 
 It needs Docker on a host with cgroup v2, and fetches kind, kubectl and Helm into `.venv`.
-Afterwards, forward the ports to reach AgentGov in the cluster:
+With `--spire`, it installs SPIRE on the cluster first, from the SPIFFE project's charts,
+and SPIRE issues the components' certificates
+([production](../production.md#workload-identities-from-spire)). Afterwards, forward the
+ports to reach AgentGov in the cluster:
 
 ```bash
 export PATH="$PWD/.venv/bin:$PATH"

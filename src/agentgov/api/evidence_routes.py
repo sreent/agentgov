@@ -7,10 +7,10 @@ import base64
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import select
 
-from agentgov import compliance, ids, ledger, retention, timestamping
+from agentgov import compliance, ids, ledger, retention, timestamping, transparency
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.models import LedgerCheckpoint
 from agentgov.runtime import JOB_WAIT_SECONDS
@@ -66,6 +66,52 @@ def checkpoint_timestamp(request: Request, seq: int, _: Principal = Depends(read
         )
 
 
+@router.get("/ledger/checkpoints/{seq}/log-entry")
+def checkpoint_log_entry(request: Request, seq: int, _: Principal = Depends(read)) -> Response:
+    """A checkpoint's entry in the transparency log, as a Sigstore bundle, for
+    ``cosign verify-blob --key agentgov.pub --bundle ... --trusted-root ... statement.txt``
+    or ``agentgov ledger verify-log-entry``."""
+    with _rt(request).db.session() as s:
+        point = s.get(LedgerCheckpoint, seq)
+        if point is None:
+            raise HTTPException(404, f"no checkpoint at entry {seq}")
+        if point.tlog_entry is None:
+            raise HTTPException(404, f"checkpoint {seq} isn't in a transparency log")
+        try:
+            found = transparency.bundle(point.tlog_entry, ledger.statement(point.seq, point.hash))
+        except transparency.TransparencyError as exc:
+            raise HTTPException(409, f"checkpoint {seq}'s log entry can't be read: {exc}") from None
+        return JSONResponse(
+            found,
+            headers={
+                "Content-Disposition": f'attachment; filename="checkpoint-{seq}.sigstore.json"'
+            },
+        )
+
+
+@router.get("/ledger/transparency-log")
+def transparency_log(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+    """The transparency log checkpoints go into, and what checks their entries offline:
+    AgentGov's public key, the log's, and a trusted root with the log for cosign."""
+    settings = _rt(request).settings
+    url = settings.ledger_rekor_url
+    if not url:
+        return {"url": None}
+    origin = settings.ledger_rekor_origin or transparency.origin_of(url)
+    out: dict[str, Any] = {"url": url, "origin": origin, "signer_key": None, "log_key": None}
+    out["trusted_root"] = None
+    try:
+        key = transparency.load_signing_key(settings.ledger_rekor_signing_key_file or "")
+        out["signer_key"] = transparency.public_pem(key).decode()
+        if settings.ledger_rekor_log_key_file:
+            log_key = transparency.load_log_key(settings.ledger_rekor_log_key_file)
+            out["log_key"] = transparency.public_pem(log_key).decode()
+            out["trusted_root"] = transparency.trusted_root(url, origin, log_key)
+    except transparency.TransparencyError as exc:
+        out["error"] = str(exc)
+    return out
+
+
 @router.get("/ledger/retention")
 def retention_view(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
     """How long the ledger and the operational records are kept, and where the chain in
@@ -86,6 +132,7 @@ def retention_view(request: Request, _: Principal = Depends(read)) -> dict[str, 
             "archive_dir": bool(settings.ledger_archive_dir),
             "checkpoint_hours": settings.ledger_checkpoint_hours,
             "tsa_url": settings.ledger_tsa_url,
+            "rekor_url": settings.ledger_rekor_url,
             "data_retention_days": settings.data_retention_days,
             "chain_from": floor,
             "chain_from_hash": floor_hash if floor else None,

@@ -116,6 +116,7 @@ class A2AGuard:
             called: dict[str, Any] | None = None,
             approval_id: str | None = None,
             decision_id: str | None = None,
+            redacted: list[str] | None = None,
         ) -> None:
             self.p._record(
                 kind="a2a",
@@ -129,7 +130,7 @@ class A2AGuard:
                 user=person,
                 effect=effect,
                 reasons=reasons,
-                redacted=[],
+                redacted=redacted or [],
                 detections=inspection.summary,
                 approval_id=approval_id,
                 monitored=monitored,
@@ -167,7 +168,9 @@ class A2AGuard:
         if person:
             opa_input["user"] = person
         try:
-            decision, decision_id = await self.p.opa.evaluate("agentgov/a2a/decision", opa_input)
+            decision, decision_id = await self.p.decide(
+                "agentgov/a2a/decision", opa_input, kind="agent"
+            )
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
             reasons = ["Policy engine unavailable; the call was not passed on"]
@@ -239,6 +242,9 @@ class A2AGuard:
             )
             return refuse(rpc_id, "deny", reasons, approval_id)
         response = self._pass_on(agent, called, handed_down, chain, person, issued)
+        # What the gateway masks in the message on its way (a2a-masking enforced;
+        # agentgov.processor.a2a_answers does it).
+        redacted = set(decision.get("redact") or []) & inspection.scan.categories()
         finish(
             "allow",
             reasons,
@@ -246,6 +252,7 @@ class A2AGuard:
             called=called,
             approval_id=approval_id,
             decision_id=decision_id,
+            redacted=sorted(redacted),
         )
         return response
 
@@ -264,11 +271,12 @@ class A2AGuard:
         if agent is not None:
             links.append(chains.link("agent", agent.get("id"), agent.get("name")))
         token = ""
-        if agent is not None and called is not None and self.p.chain_key is not None:
+        if agent is not None and called is not None and self.p.chain_keys is not None:
+            # For the agent called, by its ID and its name: an agent checking it knows one.
             token, new = chains.issue(
-                self.p.chain_key,
+                self.p.chain_keys,
                 links=links,
-                audience=str(called["id"]),
+                audience=[str(called["id"]), str(called["name"])],
                 person=person,
                 parent=chain.uid if chain else None,
             )

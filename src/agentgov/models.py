@@ -27,7 +27,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agentgov.db import Base, UTCDateTime
@@ -155,6 +155,11 @@ class Agent(Base):
     # gateway at /a2a/<name>; and the agents it may call, in addition to the blueprint's.
     a2a_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    # Calls around the gateway (registry/reachability): what stops calls that don't come
+    # through the gateway, as its owners say ("network" or "delegation"); and what AgentGov
+    # found when it last called its A2A URL itself, without a delegation.
+    a2a_protection: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    a2a_probe: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # Identifiers in other systems (OTel agent id, platform ids, fingerprints).
     external_ids: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source: Mapped[str] = mapped_column(String(64), default="registered")
@@ -164,11 +169,23 @@ class Agent(Base):
     workload_issuer: Mapped[str | None] = mapped_column(String(64), nullable=True)
     workload_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
+    # Its client in the identity provider: "service", a confidential client that gets
+    # tokens for itself (and exchanges people's); or "public", one people sign in to on
+    # their own machines, such as a developer's MCP client, which acts for them only. A
+    # public client's redirect URIs are where the sign-in may return (none: the loopback
+    # addresses, at any port).
+    client_type: Mapped[str] = mapped_column(
+        String(16), default="service", server_default="service"
+    )
+    redirect_uris: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
     # Identity provider binding (Keycloak clientId and internal id).
     client_id: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
     idp_client_uuid: Mapped[str | None] = mapped_column(String(64), nullable=True)
     identity_synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     identity_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What its Keycloak client and client scope were last synced to be, in short: a pass
+    # that isn't full syncs only the agents whose digest has changed since.
+    identity_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     attested_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     attested_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -214,6 +231,12 @@ class ToolServer(Base):
     packages: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
     # Bumped when what the registry lists changes, so developers' clients see a new version.
     revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # A server outside the gateway that takes access tokens from an authorization server of
+    # its own (its issuer), for which AgentGov gives agents identity assertions (ID-JAG,
+    # agentgov.identity.assertions); and the client AgentGov's agents are there (none: each
+    # agent's own client ID).
+    authorization_server: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oauth_client_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Catalog observed through the gateway: [{name, description, annotations,
     # fingerprint, first_seen, changed_at}]. Fingerprints detect definition drift.
     tools: Mapped[list[Any]] = mapped_column(JSON, default=list)
@@ -398,7 +421,8 @@ class AdminSession(Base):
     """An administrator signed in through single sign-on.
 
     The browser holds a random token in an HttpOnly cookie; only its hash is
-    stored. The provider's ID token is kept for RP-initiated logout.
+    stored. The provider's ID token is kept for RP-initiated logout, and the
+    provider's session it came from for back-channel logout.
     """
 
     __tablename__ = "admin_sessions"
@@ -409,6 +433,8 @@ class AdminSession(Base):
     name: Mapped[str] = mapped_column(String(255))
     roles: Mapped[list[Any]] = mapped_column(JSON, default=list)
     id_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The ID token's sid: the provider's logout tokens name the session they end by it.
+    provider_session: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     created_at: Mapped[datetime] = _created()
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
 
@@ -851,6 +877,15 @@ class LedgerCheckpoint(Base):
     timestamp: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamped_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     timestamp_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Its entry in a transparency log (agentgov.transparency): the log's answer as it came
+    # (the entry, its index and the proof that the log holds it), whether that proof was
+    # checked with the log's key, and why there is none, if adding it failed.
+    tlog_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tlog_entry: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    tlog_index: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tlog_logged_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    tlog_checked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    tlog_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The archive of the entries since the previous archive, up to this one, and its
     # SHA-256; and when the entries left the database.
     archive: Mapped[str | None] = mapped_column(Text, nullable=True)

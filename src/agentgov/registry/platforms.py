@@ -612,7 +612,9 @@ def evaluate(session: Session) -> int:
 def refresh_risk(session: Session, settings: Settings) -> None:
     """Recompute platform agents' risk now rather than at the next posture scan."""
     for agent in session.scalars(
-        select(Agent).where(Agent.source.like("platform:%"), Agent.status != DELETED)
+        select(Agent)
+        .where(Agent.source.like("platform:%"), Agent.status != DELETED)
+        .order_by(Agent.id)  # in the posture scan's order (registry/posture)
     ).unique():
         agents_svc.refresh_risk(session, settings, agent)
 

@@ -35,6 +35,26 @@ To sign in on a machine you reach over SSH, forward a port and fix the CLI to it
 machine, and open the link it prints in your local browser. For scripts and CI
 pipelines, use an API key instead.
 
+### Signing out everywhere
+
+When your session at the identity provider ends (you sign out there or in another app
+that signs you in there, or its administrators end it or disable your account), the
+provider can tell AgentGov, and your AgentGov sessions from it end too, in the UI and the
+CLI, rather than when they would have expired. This is OpenID Connect Back-Channel
+Logout: the provider posts a logout token it signed to
+`<control plane>/auth/backchannel-logout`, and AgentGov checks that it comes from the
+provider, for its client, and names your provider session or you. Each session it ends is
+an `admin.logout` entry in the ledger, from the identity provider.
+
+The Keycloak that comes with Compose and the chart is set up for it
+(`AGENTGOV_BACKCHANNEL_LOGOUT_URL` on Keycloak, read as it first imports the realm). For
+a realm made before, or another provider, set the client's back-channel logout URL to the
+address above, as the provider reaches the control plane, and ask for the session ID in
+logout tokens (Keycloak: the `agentgov-admin` client's **Backchannel logout URL** and
+**Backchannel logout session required**). A provider that can't do this leaves sessions
+to end at expiry (`AGENTGOV_SESSION_HOURS`), or when you sign them out on the **Access**
+page.
+
 ## Roles
 
 | Role | Can |
@@ -71,6 +91,9 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Approve, edit, block, delete identity issuers ([agents' own identities](agent-identity.md)) | Access → *Agent identity issuers* → **Add issuer**, **Edit**, **Block**/**Unblock**, **Delete** | `agentgov issuers create\|update\|block\|unblock\|delete` | `POST /v1/identity-issuers`, `PATCH`/`DELETE /v1/identity-issuers/{name}`, `POST /v1/identity-issuers/{name}/block\|unblock` |
 | Give an agent its own identity instead of a client secret | Agent → **Edit** → *Authentication* | `agentgov agents update REF --workload-identity ISSUER:SUBJECT` (`--no-workload-identity` to go back) | `workload_identity` in `PATCH /v1/agents/{ref}` |
 | See how an agent with its own identity authenticates | Agent → Identity → **How it authenticates** | `agentgov agents credentials REF` | `POST /v1/agents/{ref}/credentials` |
+| Make an agent one people sign in to, such as developers' MCP clients (a public client) | Agent → **Edit** → *Authentication*, *Its tokens are for* | `agentgov agents update REF --client-type public [--redirect-uri URI]` | `client_type`, `redirect_uris` in `PATCH /v1/agents/{ref}` |
+| See where people sign in to a public client | Agent → Identity → **How people sign in**; **Developer tools** | `agentgov agents credentials REF` | `POST /v1/agents/{ref}/credentials` |
+| Have agents reach a server outside the gateway with identity assertions | Tool servers → **Edit** → *Outside the gateway* | `agentgov toolservers update S --no-gateway --authorization-server URL [--oauth-client-id ID]` | `authorization_server`, `oauth_client_id` in `PATCH /v1/toolservers/{name}`; agents ask `POST /oauth2/token` |
 | See or recompute risk | Agent → Risk → **Recalculate** | `agentgov agents risk REF [--refresh]` | `GET /v1/agents/{ref}/risk`, `POST /v1/agents/{ref}/risk/refresh` |
 | Create, edit, delete blueprints | Policies → **New blueprint**, **Edit**, **Delete** | `agentgov blueprints create\|update\|delete` | `POST /v1/blueprints`, `PATCH`/`DELETE /v1/blueprints/{name}` |
 | Register, edit, delete tool servers | Tool servers → **Register tool server**, **Edit**, **Delete** | `agentgov toolservers create\|update\|delete` | `POST /v1/toolservers`, `PATCH`/`DELETE /v1/toolservers/{name}` |
@@ -88,6 +111,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Add, edit, enable, disable, delete policies | Policies → **Add policy**, **Edit**, **Disable**/**Enable**, **Delete** | `agentgov policies create\|update\|enable\|disable\|delete` | `POST /v1/policies`, `PUT`/`DELETE /v1/policies/{name}` |
 | Say whom a blueprint's agents act for, and who decides their approvals for a person ([acting for people](acting-for-people.md)) | Blueprint → **Edit** → People | `agentgov blueprints update B --acts-for people --people-groups support --approvals-by person` | `acts_for`, `people_groups`, `approvals_by` in `PATCH /v1/blueprints/{name}` |
 | Publish an agent that serves A2A on the gateway ([agent to agent](agent-to-agent.md)) | Agent → **Edit** → *Agent to agent* → *A2A endpoint* | `agentgov agents update REF --a2a-url URL` (`--no-a2a` to stop) | `a2a_url` in `PATCH /v1/agents/{ref}` |
+| Say what stops calls to it that go around the gateway ([calls around the gateway](agent-to-agent.md#calls-around-the-gateway)) | Agent → **Edit** → *Agent to agent* → *Calls around the gateway are stopped by* | `agentgov agents update REF --a2a-protection network` or `delegation` (`--no-a2a-protection` for neither) | `a2a_protection` in `PATCH /v1/agents/{ref}` |
 | Say which agents a blueprint's agents, or one agent, may call | Blueprint → **Edit** → *Agent to agent*; agent → **Edit** → *Extra agents it may call* | `agentgov blueprints update B --agent-access billing-agent` (agents: the same option; `--no-agent-access` to clear) | `agent_access` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |
 | See where agents call an agent, whom it may call and who may call it | Agent → *Agent to agent*; **Agent map** | `agentgov agents a2a REF` | `GET /v1/agents/{ref}/a2a`, `GET /v1/graph` |
 | Require a blueprint's agents to authenticate with their own identity, never a client secret | Blueprint → **Edit** → *Require a workload identity* | `agentgov blueprints update B --require-workload-identity` (`--allow-secrets` to stop) | `require_workload_identity` in `PATCH /v1/blueprints/{name}` |

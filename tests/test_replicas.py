@@ -13,12 +13,14 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
+from agentgov import ledger
 from agentgov.api import evidence_routes
 from agentgov.config import Settings
-from agentgov.coordination import Coordinator, JobBusy, lock_key
+from agentgov.coordination import LOCK_SPACE, Coordinator, JobBusy, JobLost, lock_key
 from agentgov.db import Database, mark_changed
+from agentgov.models import LedgerEntry
 from agentgov.registry import agents
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN, POSTGRES
@@ -280,6 +282,35 @@ def test_a_job_runs_on_one_replica_at_a_time(pair: tuple[Runtime, Runtime]) -> N
     holder.join(5)
     with b.coordination.job("retention", wait=2):
         pass
+
+
+@postgres
+def test_a_job_that_lost_its_lock_stops(pair: tuple[Runtime, Runtime]) -> None:
+    """The database drops the connection that holds a running job's lock (as when it
+    restarts): another replica may run the job now, and this run writes nothing more."""
+    a, b = pair
+    with a.coordination.job("retention"):
+        with a.db.session() as s:
+            ledger.append(s, type="test.before", actor="test")
+        with b.db.session() as s:
+            s.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' "
+                    "AND classid = :space AND objid = :key AND objsubid = 2"
+                ),
+                {"space": LOCK_SPACE, "key": lock_key("retention") & 0xFFFFFFFF},
+            )
+        # The other replica runs it.
+        with b.coordination.job("retention", wait=5), b.db.session() as s:
+            ledger.append(s, type="test.elsewhere", actor="test")
+        with pytest.raises(JobLost, match="retention lost its lock"), a.db.session() as s:
+            ledger.append(s, type="test.after", actor="test")
+    with a.db.session() as s:
+        types = set(s.scalars(select(LedgerEntry.type).where(LedgerEntry.type.like("test.%"))))
+    assert types == {"test.before", "test.elsewhere"}
+    # The next run takes the lock again, and writes as usual.
+    with a.coordination.job("retention", wait=5), a.db.session() as s:
+        ledger.append(s, type="test.again", actor="test")
 
 
 @postgres

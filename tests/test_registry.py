@@ -53,6 +53,69 @@ class TestValidation:
             blueprints.create(s, {"name": "bp", "risk_tier": "extreme"}, actor="t")
 
 
+class TestPublicClients:
+    """Agents people sign in to on their own machines, such as developers' MCP clients."""
+
+    def test_by_default_they_return_to_the_machine_itself(self, rt, settings) -> None:
+        with rt.db.session() as s:
+            _blueprint(s)
+            agent = _agent(s, settings, client_type="public")
+            view = agents.to_dict(agent)
+            assert view["client_type"] == "public" and view["redirect_uris"] == []
+            assert view["identity"]["method"] == "sign-in"
+            plain = agents.to_dict(_agent(s, settings, name="plain"))
+            assert plain["client_type"] == "service"
+            assert plain["identity"]["method"] == "client-secret"
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "http://dev.example.com/callback",  # plain http to another machine
+            "http://127.0.0.1/*/callback",  # * only at the end
+            "https://vscode.dev/redirect#x",
+            "no-scheme",
+            "https:///path",
+        ],
+    )
+    def test_redirect_uris_are_checked(self, rt, settings, uri) -> None:
+        with rt.db.session() as s:
+            _blueprint(s)
+            with pytest.raises(ValidationError, match="redirect_uris"):
+                _agent(s, settings, client_type="public", redirect_uris=[uri])
+
+    def test_redirect_uris_they_take(self, rt, settings) -> None:
+        uris = [
+            "http://127.0.0.1/*",
+            "http://[::1]:33418/",
+            "https://vscode.dev/redirect",
+            "cursor://anysphere.cursor-retrieval/oauth/callback",
+        ]
+        with rt.db.session() as s:
+            _blueprint(s)
+            agent = _agent(s, settings, client_type="public", redirect_uris=uris)
+            assert agent.redirect_uris == uris
+
+    def test_only_public_clients_have_redirect_uris(self, rt, settings) -> None:
+        with rt.db.session() as s:
+            _blueprint(s)
+            with pytest.raises(ValidationError, match="for public clients"):
+                _agent(s, settings, redirect_uris=["http://127.0.0.1/*"])
+            with pytest.raises(ValidationError, match="client_type is one of"):
+                _agent(s, settings, name="other", client_type="confidential")
+
+    def test_they_act_for_people_only(self, rt, settings) -> None:
+        with rt.db.session() as s:
+            _blueprint(s, acts_for="itself")
+            with pytest.raises(ValidationError, match="act only for themselves"):
+                _agent(s, settings, client_type="public")
+
+    def test_they_have_no_workload_identity(self, rt, settings) -> None:
+        with rt.db.session() as s:
+            _blueprint(s, require_workload_identity=True)
+            with pytest.raises(ValidationError, match="requires a workload identity"):
+                _agent(s, settings, client_type="public")
+
+
 class TestLifecycle:
     def test_registration_starts_pending(self, rt, settings) -> None:
         with rt.db.session() as s:

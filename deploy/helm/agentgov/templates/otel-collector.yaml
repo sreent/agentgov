@@ -41,7 +41,12 @@ spec:
         {{- include "agentgov.podSecurity" . | nindent 8 }}
         runAsUser: 10001
         runAsGroup: 10001
+      {{- if and .Values.internalTLS.enabled .Values.internalTLS.spire.enabled }}
+      initContainers:
+        {{- include "agentgov.spireContainer" (list . false) | nindent 8 }}
+      {{- end }}
       containers:
+        {{- include "agentgov.spireContainer" (list . true) | nindent 8 }}
         - name: otel-collector
           image: "{{ $v.image.repository }}:{{ $v.image.tag }}"
           imagePullPolicy: {{ $v.image.pullPolicy }}
@@ -116,6 +121,8 @@ exporters:
       ca_file: /tls/ca.crt
       cert_file: /tls/tls.crt
       key_file: /tls/tls.key
+      # A renewed certificate is read again (the authority's isn't).
+      reload_interval: 1m
     {{- end }}
 extensions:
   health_check:

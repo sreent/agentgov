@@ -393,6 +393,7 @@ def up(rendered: str, demo: bool) -> None:
            "-e", "TOKEN_URL=http://agentgov-keycloak:8080/realms/agentgov/protocol/openid-connect/token",
            "-e", "ASSERTION_AUDIENCE=http://localhost:8180/realms/agentgov",
            "-e", "WORKLOAD_ISSUER=http://workload-issuer:9200",
+           "-e", "DELEGATION_JWKS_URL=http://agentgov-control-plane:8000/v1/delegations/jwks",
            "agentgov-demo-billing:local")  # fmt: skip
 
 

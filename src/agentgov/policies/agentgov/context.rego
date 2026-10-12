@@ -153,8 +153,9 @@ label(name) := value if {
 
 # The person the agent acts for, when it acts for one, from the token it got for them
 # (agentgov.identity.people): {"id", "username", "email", "groups", "roles", "via"},
-# where via is "delegation" (the person delegated to the agent) or "exchange". Undefined
-# while the agent acts on its own.
+# where via is "delegation" (the person delegated to the agent), "exchange", or "sign-in"
+# (the person signed in to the agent themselves: a public client, such as a developer's
+# MCP client). Undefined while the agent acts on its own.
 user := input.user if input.user.id
 
 user_name := object.get(user, "username", object.get(user, "email", user.id))

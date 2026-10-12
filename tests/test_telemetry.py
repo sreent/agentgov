@@ -101,6 +101,7 @@ def test_registered_agent_activity_and_ungranted_tools(rt, settings) -> None:
         "discovered": 0,
         "ungranted": 1,
         "instructions": 0,
+        "around_the_gateway": 0,
     }
     with rt.db.session() as s:
         activity = s.scalars(select(AgentActivity)).one()

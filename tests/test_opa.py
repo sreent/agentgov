@@ -54,7 +54,7 @@ def test_bundle_layout(rt, settings) -> None:
     bundle = rt.bundles.current()
     files = _files(bundle.body)
     manifest = json.loads(files[".manifest"])
-    assert manifest["roots"] == ["agentgov", "agentos", "registry", "system"]
+    assert manifest["roots"] == ["agentgov", "agentos", "registry", "system/log"]
     assert manifest["revision"] == bundle.revision
     assert {
         "agentgov/mcp.rego",
@@ -292,3 +292,73 @@ def test_policies_need_the_opa_binary(rt, monkeypatch) -> None:
     monkeypatch.setattr(rego, "opa_binary", lambda: None)
     with rt.db.session() as s, pytest.raises(ValidationError, match="opa binary"):
         policies.create(s, {"name": "x", "rego": "package agentgov.custom.x\n"}, actor="t")
+
+
+@requires_opa
+def test_opa_keeps_an_authorization_policy_of_its_own(rt, settings, tmp_path: Path) -> None:
+    """OPA can have an authorization policy of its own, from a file (system.authz: the
+    chart's, with SPIRE, takes only the processor and the control plane). OPA erases the
+    policies under a bundle's roots as it activates the bundle, so AgentGov's leave it
+    be."""
+    import socket
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import httpx
+
+    _seed(rt, settings)
+    body = rt.bundles.current().body
+
+    class ControlPlane(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    web = ThreadingHTTPServer(("127.0.0.1", 0), ControlPlane)
+    threading.Thread(target=web.serve_forever, daemon=True).start()
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"services:\n  agentgov:\n    url: http://127.0.0.1:{web.server_address[1]}\n"
+        "bundles:\n  agentgov:\n    service: agentgov\n    resource: bundles/agentgov.tar.gz\n"
+    )
+    authz = tmp_path / "authz.rego"
+    authz.write_text(
+        "package system.authz\n\nimport rego.v1\n\ndefault allow := false\n\n"
+        'allow if input.path[0] == "v1"\n'
+    )
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    opa = subprocess.Popen(
+        [rego.opa_binary(), "run", "--server", f"--addr=127.0.0.1:{port}",
+         "--authorization=basic", f"--config-file={config}", str(authz)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )  # fmt: skip
+    try:
+        clients = f"http://127.0.0.1:{port}/v1/data/registry/clients"
+        answer = None
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                answer = httpx.get(clients)
+            except httpx.HTTPError:
+                time.sleep(0.1)
+                continue
+            if answer.status_code != 200 or answer.json().get("result"):
+                break  # the bundle is active, or OPA lost its authorization policy
+            time.sleep(0.1)
+        assert answer is not None and answer.status_code == 200, answer and answer.text
+        assert list(answer.json()["result"]) == ["agent-bot"]
+        # And its policy still decides: it takes nothing but the v1 API.
+        assert httpx.post(f"http://127.0.0.1:{port}/v0/data/registry", json={}).status_code == 401
+    finally:
+        opa.terminate()
+        opa.wait(10)
+        web.shutdown()

@@ -476,8 +476,12 @@ def _usage(session: Session, now: datetime) -> tuple[datetime, datetime] | None:
 
 
 def _context(session: Session, now: datetime, feature: str) -> _Context:
+    # In the posture scan's order (registry/posture), as the rules act on them.
     agents = {
-        a.id: a for a in session.scalars(select(Agent).where(Agent.status != DELETED)).unique()
+        a.id: a
+        for a in session.scalars(
+            select(Agent).where(Agent.status != DELETED).order_by(Agent.id)
+        ).unique()
     }
     open_findings: dict[str, list[Finding]] = defaultdict(list)
     for finding in session.scalars(

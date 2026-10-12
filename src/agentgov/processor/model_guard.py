@@ -62,6 +62,7 @@ EMAIL = "x-agentgov-email"
 GROUPS = "x-agentgov-groups"
 ROLES = "x-agentgov-roles"
 ACT = "x-agentgov-act"
+SIGN_IN = "x-agentgov-sign-in"
 
 PASS: dict[str, Any] = {"action": {}}
 # The HTTP methods agentgateway checks A2A requests with (their own).
@@ -166,6 +167,7 @@ class ModelGuard:
                 "groups": people.header_json(headers.get(GROUPS)),
                 "roles": people.header_json(headers.get(ROLES)),
                 "act": people.header_json(headers.get(ACT)),
+                "sign_in": people.header_json(headers.get(SIGN_IN)),
             }
         )
 
@@ -271,7 +273,9 @@ class ModelGuard:
         if chain is not None:
             opa_input["chain"] = chain.links
         try:
-            decision, decision_id = await self.p.opa.evaluate("agentgov/models/decision", opa_input)
+            decision, decision_id = await self.p.decide(
+                "agentgov/models/decision", opa_input, kind="model"
+            )
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
             reasons = ["Policy engine unavailable; the prompt was not sent"]

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
+from collections import Counter
 from typing import Any
 
 import httpx
@@ -26,6 +28,10 @@ class FakeKeycloak:
         self.discovery: dict[str, dict[str, Any]] = {}  # OpenID Connect issuers' documents
         self.tokens = 0
         self.create_conflict_once = False
+        # Another control-plane replica makes the next client scope, or adds the next
+        # optional scope, between our lookup and ours.
+        self.scope_conflict_once = False
+        self.link_conflict_once = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -61,6 +67,9 @@ class FakeKeycloak:
         if path == scopes and request.method == "POST":
             sid = str(uuid.uuid4())
             self.scopes[sid] = {**json.loads(request.content), "id": sid}
+            if self.scope_conflict_once:
+                self.scope_conflict_once = False
+                return httpx.Response(409, json={"errorMessage": "exists"})
             return httpx.Response(201, headers={"Location": f"http://kc{scopes}/{sid}"})
         if path.startswith(scopes + "/") and request.method == "DELETE":
             sid = path.rsplit("/", 1)[-1]
@@ -74,12 +83,22 @@ class FakeKeycloak:
             assigned = self.optional.setdefault(uid, set())
             if request.method == "PUT":
                 assigned.add(path.rsplit("/", 1)[-1])
+                if self.link_conflict_once:
+                    self.link_conflict_once = False
+                    return httpx.Response(409, json={"errorMessage": "exists"})
                 return httpx.Response(204)
             return httpx.Response(200, json=[self.scopes[sid] for sid in assigned])
         if path.endswith("/protocol-mappers/models") and request.method == "POST":
             uid = path.removeprefix(base + "/").split("/")[0]
-            self.clients[uid].setdefault("protocolMappers", []).append(json.loads(request.content))
+            mapper = {**json.loads(request.content), "id": str(uuid.uuid4())}
+            self.clients[uid].setdefault("protocolMappers", []).append(mapper)
             return httpx.Response(201)
+        if "/protocol-mappers/models/" in path and request.method == "DELETE":
+            uid = path.removeprefix(base + "/").split("/")[0]
+            mid = path.rsplit("/", 1)[-1]
+            mappers = self.clients[uid].get("protocolMappers") or []
+            self.clients[uid]["protocolMappers"] = [m for m in mappers if m.get("id") != mid]
+            return httpx.Response(204)
         if path == base and request.method == "GET":
             wanted = request.url.params.get("clientId")
             return httpx.Response(
@@ -109,7 +128,8 @@ class FakeKeycloak:
 
     def _store(self, rep: dict[str, Any]) -> str:
         uid = str(uuid.uuid4())
-        self.clients[uid] = {**rep, "id": uid}
+        mappers = [{**m, "id": str(uuid.uuid4())} for m in rep.get("protocolMappers") or []]
+        self.clients[uid] = {**rep, "id": uid, "protocolMappers": mappers}
         self.secrets[uid] = uuid.uuid4().hex
         return uid
 
@@ -277,6 +297,16 @@ def test_clients_from_earlier_versions_get_the_new_mappers(rt, settings, keycloa
     assert client["attributes"]["standard.token.exchange.enabled"] == "true"
 
 
+def test_another_replica_making_the_scope_meanwhile_is_tolerated(rt, settings, keycloak) -> None:
+    keycloak._store({"clientId": "chat"})
+    keycloak.scope_conflict_once = keycloak.link_conflict_once = True
+    reconciler = _people_reconciler(rt, settings, keycloak)
+    _agent(rt, settings)
+    assert reconciler.reconcile_all() == {"synced": 1, "failed": 0}
+    assert [s["name"] for s in keycloak.scopes.values()] == ["agent-bot"]
+    assert keycloak.optional_names("chat") == {"agent-bot"}
+
+
 def test_a_scope_agentgov_did_not_make_is_left_alone(rt, settings, keycloak) -> None:
     keycloak.scopes["s1"] = {"id": "s1", "name": "agent-bot", "attributes": {}}
     reconciler = _people_reconciler(rt, settings, keycloak, apps="")
@@ -294,6 +324,78 @@ def test_deleting_an_agent_removes_its_scope(rt, settings, keycloak) -> None:
     with rt.db.session() as s:
         reconciler.delete(agents.get(s, "bot"))
     assert keycloak.clients == {} and keycloak.scopes == {}
+
+
+# ---------------------------------------------------------------- public clients
+
+
+def _public(rt, settings, **data):
+    with rt.db.session() as s:
+        blueprints.create(
+            s, {"name": "assistants", "require_sponsor": False, "acts_for": "people"}, actor="t"
+        )
+        spec = {"name": "vscode", "blueprint": "assistants", "client_type": "public", **data}
+        return agents.register(s, settings, spec, actor="t", approve=True).id
+
+
+def test_people_sign_in_to_a_public_client(rt, settings, keycloak) -> None:
+    keycloak._store({"clientId": "chat"})
+    reconciler = _people_reconciler(rt, settings, keycloak)
+    agent_id = _public(rt, settings)
+    assert reconciler.reconcile_all() == {"synced": 1, "failed": 0}
+    client = keycloak.by_client_id("agent-vscode")
+    assert client["publicClient"] is True
+    assert client["standardFlowEnabled"] is True
+    assert client["serviceAccountsEnabled"] is False
+    assert client["directAccessGrantsEnabled"] is False
+    # Back to the machine itself, at any port, and with PKCE.
+    assert client["redirectUris"] == ["http://127.0.0.1/*", "http://localhost/*"]
+    assert client["attributes"]["pkce.code.challenge.method"] == "S256"
+    # The person's own token: nothing to exchange, so no scope for people's apps.
+    assert client["attributes"]["standard.token.exchange.enabled"] == "false"
+    assert keycloak.scope("agent-vscode") is None
+    mappers = {m["name"]: m["config"] for m in client["protocolMappers"]}
+    assert mappers["agentgov-agent-id"]["claim.value"] == agent_id
+    assert mappers["agentgov-gateway-audience"]["included.custom.audience"] == "agentgov-gateway"
+    assert mappers["agentgov-sign-in"]["claim.name"] == "agentgov_sign_in"
+    assert mappers["agentgov-sign-in"]["jsonType.label"] == "boolean"
+    with rt.db.session() as s:
+        creds = reconciler.credentials(agents.get(s, "vscode"))
+        assert creds["method"] == "sign-in" and "client_secret" not in creds
+        assert creds["redirect_uris"] == ["http://127.0.0.1/*", "http://localhost/*"]
+        with pytest.raises(KeycloakError, match="no secret to rotate"):
+            reconciler.credentials(agents.get(s, "vscode"), rotate=True)
+
+
+def test_a_client_turns_public_and_back(rt, settings, keycloak) -> None:
+    keycloak._store({"clientId": "chat"})
+    reconciler = _people_reconciler(rt, settings, keycloak)
+    _agent(rt, settings)
+    reconciler.reconcile_all()
+    assert keycloak.scope("agent-bot") is not None
+    uris = ["http://127.0.0.1/callback", "https://vscode.dev/redirect"]
+    with rt.db.session() as s:
+        changes = {"client_type": "public", "redirect_uris": uris}
+        agents.update(s, agents.get(s, "bot"), changes, actor="t")
+    reconciler.reconcile_all()
+    client = keycloak.by_client_id("agent-bot")
+    assert client["publicClient"] is True and client["serviceAccountsEnabled"] is False
+    assert client["redirectUris"] == uris
+    assert "agentgov-sign-in" in {m["name"] for m in client["protocolMappers"]}
+    assert keycloak.scope("agent-bot") is None
+    reconciler.reconcile_all()  # converged
+    before = keycloak.secrets[client["id"]]
+    with rt.db.session() as s:
+        changes = {"client_type": "service", "redirect_uris": []}
+        agents.update(s, agents.get(s, "bot"), changes, actor="t")
+    reconciler.reconcile_all()
+    client = keycloak.by_client_id("agent-bot")
+    assert client["publicClient"] is False and client["serviceAccountsEnabled"] is True
+    assert client["standardFlowEnabled"] is False and client["redirectUris"] == []
+    # Its tokens are its own again, with a new secret, and don't say anyone signed in.
+    assert keycloak.secrets[client["id"]] != before
+    assert "agentgov-sign-in" not in {m["name"] for m in client["protocolMappers"]}
+    assert keycloak.scope("agent-bot") is not None
 
 
 # ------------------------------------------------------------- workload identity
@@ -501,4 +603,126 @@ def test_the_api_says_what_token_authenticates_an_agent(settings, keycloak) -> N
         assert "assertion_type" not in plain
         rotate = client.post("/v1/agents/pod/credentials", json={"rotate": True}, headers=ADMIN)
         assert rotate.status_code == 409 and "no secret to rotate" in rotate.json()["detail"]
+        # A public client: where people sign in to it. Nothing secret, nothing recorded.
+        with rt.db.session() as s:
+            data = {"name": "vscode", "blueprint": "bp", "client_type": "public"}
+            agents.register(s, settings, data, actor="t", approve=True)
+        before = client.get("/v1/ledger", params={"type": "agent.credentials_read"}, headers=ADMIN)
+        vscode = creds("vscode")
+        assert vscode["method"] == "sign-in" and "client_secret" not in vscode
+        assert vscode["issuer"] == "https://id.example.com/realms/agentgov"
+        assert vscode["authorization_endpoint"] == (
+            "https://id.example.com/realms/agentgov/protocol/openid-connect/auth"
+        )
+        assert vscode["token_endpoint"] == token_endpoint
+        assert vscode["audience"] == "agentgov-gateway"
+        after = client.get("/v1/ledger", params={"type": "agent.credentials_read"}, headers=ADMIN)
+        assert len(after.json()) == len(before.json())
+        rotate = client.post("/v1/agents/vscode/credentials", json={"rotate": True}, headers=ADMIN)
+        assert rotate.status_code == 409 and "public client" in rotate.json()["detail"]
     rt.db.dispose()
+
+
+# ------------------------------------------------------ passes that sync what changed
+
+
+def _counted(keycloak: FakeKeycloak) -> tuple[KeycloakAdmin, Counter[str]]:
+    """An admin client to ``keycloak`` that counts the clients it looks up."""
+    looked_up: Counter[str] = Counter()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        client_id = request.url.params.get("clientId")
+        if request.method == "GET" and client_id:
+            looked_up[client_id] += 1
+        return keycloak.handler(request)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    admin = KeycloakAdmin("http://kc", "agentgov", "agentgov-control-plane", "secret", http=http)
+    return admin, looked_up
+
+
+def test_a_pass_syncs_only_the_agents_whose_clients_should_change(rt, settings, keycloak) -> None:
+    admin, looked_up = _counted(keycloak)
+    reconciler = IdentityReconciler(rt.db, settings.with_overrides(people_app_clients=""), admin)
+    with rt.db.session() as s:
+        blueprints.create(s, {"name": "bp", "require_sponsor": False}, actor="t")
+        for name in ("one", "two"):
+            agents.register(s, settings, {"name": name, "blueprint": "bp"}, actor="t", approve=True)
+    assert reconciler.reconcile_all(full=False) == {"synced": 2, "failed": 0}  # new ones
+    looked_up.clear()
+    assert reconciler.reconcile_all(full=False) == {"synced": 0, "failed": 0}
+    assert not looked_up  # Keycloak isn't asked about either
+    with rt.db.session() as s:
+        agents.update(s, agents.get(s, "one"), {"description": "Answers tickets"}, actor="t")
+    assert reconciler.reconcile_all(full=False) == {"synced": 1, "failed": 0}
+    assert set(looked_up) == {"agent-one"}
+    assert keycloak.by_client_id("agent-one")["description"] == "Answers tickets"
+    # A change to their blueprint changes both clients: they may act for people no more.
+    with rt.db.session() as s:
+        blueprints.update(s, blueprints.get(s, "bp"), {"acts_for": "itself"}, actor="t")
+    assert reconciler.reconcile_all(full=False) == {"synced": 2, "failed": 0}
+    attributes = keycloak.by_client_id("agent-two")["attributes"]
+    assert attributes["standard.token.exchange.enabled"] == "false"
+
+
+def test_a_full_pass_repairs_what_was_changed_in_keycloak(
+    rt, settings, keycloak, reconciler
+) -> None:
+    _agent(rt, settings)
+    reconciler.reconcile_all(full=False)
+    keycloak.clients.clear()  # someone deleted the client in Keycloak itself
+    assert reconciler.reconcile_all(full=False) == {"synced": 0, "failed": 0}
+    assert keycloak.clients == {}
+    assert reconciler.reconcile_all(full=True) == {"synced": 1, "failed": 0}
+    assert keycloak.by_client_id("agent-bot")["enabled"] is True
+
+
+def test_a_sync_that_failed_is_tried_again(rt, settings, keycloak) -> None:
+    down = {"now": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if down["now"]:
+            raise httpx.ConnectError("connection refused")
+        return keycloak.handler(request)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    reconciler = IdentityReconciler(
+        rt.db, settings, KeycloakAdmin("http://kc", "agentgov", "cp", "s", http=http)
+    )
+    _agent(rt, settings)
+    assert reconciler.reconcile_all(full=False) == {"synced": 0, "failed": 1}
+    down["now"] = False
+    assert reconciler.reconcile_all(full=False) == {"synced": 1, "failed": 0}
+    with rt.db.session() as s:
+        assert agents.get(s, "bot").identity_error is None
+
+
+def test_the_worker_syncs_every_agent_first_then_what_changed(
+    settings, reconciler, monkeypatch
+) -> None:
+    passes: list[bool] = []
+
+    def reconcile_all(*, full: bool = True) -> dict[str, int]:
+        passes.append(full)
+        return {"synced": 0, "failed": 0}
+
+    def until(check: Any) -> bool:
+        deadline = time.monotonic() + 10
+        while not check() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return bool(check())
+
+    monkeypatch.setattr(reconciler, "reconcile_all", reconcile_all)
+    leading = {"now": True}
+    reconciler.start(interval=0.01, full_every=3600, leading=lambda: leading["now"])
+    try:
+        assert until(lambda: len(passes) >= 3)
+        leading["now"] = False
+        time.sleep(0.1)
+        before = len(passes)
+        leading["now"] = True
+        assert until(lambda: len(passes) > before)
+    finally:
+        reconciler.stop()
+    assert passes[:3] == [True, False, False]
+    assert passes[before] is True  # leading again, it starts with every agent

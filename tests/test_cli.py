@@ -76,6 +76,29 @@ class TestAgents:
         ok(agentgov("agents", "purge", "triage-bot", "--yes"))
         assert client.get("/v1/agents/triage-bot", headers=ADMIN).status_code == 404
 
+    def test_a_public_client_for_developers(self, client, agentgov) -> None:
+        seed(client)
+        ok(
+            agentgov(
+                "agents", "create", "vscode", "--blueprint", "support",
+                "--sponsor", "alice@example.com", "--client-type", "public",
+            )
+        )  # fmt: skip
+        agent = client.get("/v1/agents/vscode", headers=ADMIN).json()
+        assert (agent["client_type"], agent["identity"]["method"]) == ("public", "sign-in")
+        ok(
+            agentgov(
+                "agents", "update", "vscode",
+                "--redirect-uri", "http://127.0.0.1/*", "--redirect-uri", "https://vscode.dev/redirect",
+            )
+        )  # fmt: skip
+        agent = client.get("/v1/agents/vscode", headers=ADMIN).json()
+        assert agent["redirect_uris"] == ["http://127.0.0.1/*", "https://vscode.dev/redirect"]
+        ok(agentgov("agents", "update", "vscode", "--default-redirect-uris"))
+        assert client.get("/v1/agents/vscode", headers=ADMIN).json()["redirect_uris"] == []
+        result = agentgov("agents", "update", "vscode", "--redirect-uri", "http://dev.example.com/")
+        assert result.exit_code == 1 and "plain http to another machine" in result.output
+
     def test_list_shows_the_inventory(self, client, agentgov) -> None:
         seed(client)
         out = ok(agentgov("agents", "list"))
@@ -144,6 +167,24 @@ class TestRegistry:
         assert "wiki" in ok(agentgov("toolservers", "list"))
         ok(agentgov("toolservers", "delete", "wiki", "--yes"))
         assert client.get("/v1/toolservers/wiki", headers=ADMIN).status_code == 404
+
+    def test_a_server_outside_the_gateway(self, client, agentgov) -> None:
+        out = ok(
+            agentgov(
+                "toolservers", "create", "docs", "--url", "https://docs.example.com/mcp",
+                "--no-gateway", "--authorization-server", "https://id.docs.example.com",
+                "--oauth-client-id", "agentgov-agents",
+            )
+        )  # fmt: skip
+        assert "reached with assertions for https://id.docs.example.com" in out
+        ok(agentgov("toolservers", "update", "docs", "--oauth-client-id", ""))
+        ts = client.get("/v1/toolservers/docs", headers=ADMIN).json()
+        assert (ts["authorization_server"], ts["oauth_client_id"]) == (
+            "https://id.docs.example.com",
+            None,
+        )
+        on_the_gateway = agentgov("toolservers", "update", "docs", "--gateway")
+        assert on_the_gateway.exit_code == 1 and "outside the gateway" in on_the_gateway.output
 
     @requires_opa
     def test_policies(self, client, agentgov, tmp_path: Path) -> None:

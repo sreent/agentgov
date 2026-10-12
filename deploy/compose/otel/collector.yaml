@@ -30,6 +30,8 @@ exporters:
       ca_file: /tls/ca.crt
       cert_file: /tls/tls.crt
       key_file: /tls/tls.key
+      # A renewed certificate is read again (the authority's isn't).
+      reload_interval: 1m
   # Add to the pipeline's exporters to print spans while troubleshooting.
   debug:
     verbosity: basic

@@ -14,7 +14,10 @@ database, and they coordinate through it.
   goes, the lock goes with it and another replica takes over within seconds.
 * **Jobs** that an administrator can start as well (a posture scan, the management rules,
   retention, the Microsoft sync) run on one replica at a time, under an advisory lock of
-  their own. A request that finds its job running waits a little, then gets a 409.
+  their own. A request that finds its job running waits a little, then gets a 409. A job
+  whose lock went (the database restarted, or dropped its connection) may be running on
+  another replica already: each transaction it commits checks first that it still holds
+  the lock, and it stops when it doesn't (JobLost), with nothing more written.
 
 On SQLite (development: one process) the same calls stay in the process: it leads, and
 its jobs take locks of its own.
@@ -68,6 +71,10 @@ class JobBusy(Conflict):
     """The job is running already, on this replica or another."""
 
 
+class JobLost(Conflict):
+    """The job's lock went while it ran: another replica may be running it now."""
+
+
 def lock_key(name: str) -> int:
     """The second key of a job's advisory lock (a signed 32-bit integer)."""
     value = zlib.crc32(f"agentgov:{name}".encode())
@@ -107,6 +114,7 @@ class Coordinator:
         self._held = threading.local()
         if self.shared:
             db.before_commit = self.publish
+            db.commit_checks.append(self._fence)
 
     # -- state -------------------------------------------------------------------------
     @property
@@ -247,6 +255,34 @@ class Coordinator:
             held = self._held.names = set()
         return held
 
+    def _lockers(self) -> dict[str, int]:
+        """The jobs this thread holds on PostgreSQL, and the server process holding each
+        one's lock."""
+        lockers: dict[str, int] | None = getattr(self._held, "lockers", None)
+        if lockers is None:
+            lockers = self._held.lockers = {}
+        return lockers
+
+    def _fence(self, session: Session) -> None:
+        """Before a transaction of a job's commits: the job still holds its lock, held by
+        the server process that took it. Once the lock went, another replica may run the
+        job: this run's transaction rolls back, and the job stops."""
+        for name, pid in list(self._lockers().items()):
+            held = session.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+                    "AND granted AND classid = :space AND objid = :key AND objsubid = 2 "
+                    "AND pid = :pid)"
+                ),
+                {"space": LOCK_SPACE, "key": lock_key(name) & 0xFFFFFFFF, "pid": pid},
+            ).scalar()
+            if not held:
+                raise JobLost(
+                    f"{name} lost its lock (the database restarted, or dropped the "
+                    "connection holding it), and may be running on another replica now: "
+                    "this run stopped"
+                )
+
     @contextmanager
     def job(self, name: str, *, wait: float | None = None) -> Iterator[None]:
         """Run ``name`` on one replica at a time (and in one thread of each). ``wait``: how
@@ -283,18 +319,22 @@ class Coordinator:
         connection = self.db.engine.connect()
         try:
             while True:
-                got = connection.execute(
-                    text("SELECT pg_try_advisory_lock(:space, :key)"), params
-                ).scalar()
+                # The server process that holds the lock, to tell later that it still does.
+                got, pid = connection.execute(
+                    text("SELECT pg_try_advisory_lock(:space, :key), pg_backend_pid()"), params
+                ).one()
                 connection.commit()
                 if got:
                     break
                 if self._stop.is_set() or (deadline is not None and time.monotonic() >= deadline):
                     raise self._busy(name)
                 time.sleep(JOB_POLL_SECONDS)
+            lockers = self._lockers()
+            lockers[name] = pid
             try:
                 yield
             finally:
+                lockers.pop(name, None)
                 try:
                     connection.execute(text("SELECT pg_advisory_unlock(:space, :key)"), params)
                     connection.commit()

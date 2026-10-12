@@ -60,6 +60,31 @@ def test_truncating_the_tail_is_detected(rt) -> None:
     assert "head" in result["problem"]
 
 
+def test_entries_are_written_as_the_transaction_commits(rt) -> None:
+    with rt.db.session() as s:
+        first = ledger.append(s, type="test.event", actor="tester")
+        second = ledger.append(s, type="test.event", actor="tester")
+        assert first.seq is None  # not before the commit
+    assert (first.seq, second.seq) == (1, 2) and second.prev_hash == first.hash
+    assert first.ts <= second.ts
+
+
+def test_entries_go_with_a_savepoint_that_rolls_back(rt) -> None:
+    with rt.db.session() as s:
+        ledger.append(s, type="test.kept", actor="tester")
+        try:
+            with s.begin_nested():
+                ledger.append(s, type="test.undone", actor="tester")
+                raise RuntimeError("undo the savepoint")
+        except RuntimeError:
+            pass
+        with s.begin_nested():
+            ledger.append(s, type="test.saved", actor="tester")
+    with rt.db.session() as s:
+        assert [e.type for e in ledger.iter_entries(s)] == ["test.kept", "test.saved"]
+        assert ledger.verify(s)["valid"] is True
+
+
 def test_rolled_back_appends_leave_no_gap(rt) -> None:
     _append(rt, 1)
     try:

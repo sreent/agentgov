@@ -190,6 +190,10 @@ never in a values file you share.
 | `AGENTGOV_LEDGER_ARCHIVE_DIR` | — | Where the ledger's archives go, as gzipped JSON Lines files (a mounted volume, or a bucket mounted as one). Needed with `AGENTGOV_LEDGER_RETENTION_DAYS`. |
 | `AGENTGOV_LEDGER_CHECKPOINT_HOURS` | `24` | Hours between ledger checkpoints: the chain's head, kept, and time-stamped when a time-stamping authority is set. 0 makes them only on demand. |
 | `AGENTGOV_LEDGER_TSA_URL` | — | An RFC 3161 time-stamping authority, such as `https://freetsa.org/tsr`. It signs each checkpoint with its own time, which proves the chain existed then, unchanged since. |
+| `AGENTGOV_LEDGER_REKOR_URL` | — | A transparency log, Sigstore's Rekor v2: its public shard (such as `https://log2025-1.rekor.sigstore.dev`) or a rekor-tiles of your own. Each checkpoint is signed with `AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE` and added to it, where anyone can see that it was published: AgentGov can't later show another checkpoint for the same entry without the log holding both. What the log publishes, for good, is the statement's SHA-256, the signature and AgentGov's public key. |
+| `AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE` | — | AgentGov's key for the log: an ECDSA P-256 private key (PEM). `agentgov transparency-key DIR` makes one. |
+| `AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE` | — | The log's public key (PEM, Ed25519), to check each answer's proof that the log holds the entry. Unset, entries are kept unchecked. |
+| `AGENTGOV_LEDGER_REKOR_ORIGIN` | — | The log's name in its checkpoints (its origin). Unset: the URL's host name. |
 | `AGENTGOV_DATA_RETENTION_DAYS` | `0` | Days AgentGov keeps the operational records whose history the ledger has: daily activity and model usage, risk signals, notifications sent, decided approvals, resolved findings, ended access assignments, and developers' MCP servers not reported since. 0 keeps them; otherwise at least 30. |
 
 ### Keycloak (agent identity)
@@ -202,8 +206,10 @@ never in a values file you share.
 | `AGENTGOV_KEYCLOAK_CLIENT_SECRET` (secret) | — | Its secret. Provisioning in Keycloak is on when this and `AGENTGOV_KEYCLOAK_URL` are set. |
 | `AGENTGOV_KEYCLOAK_ISSUER` | — | Issuer that appears in agent tokens (Keycloak's frontend URL + realm). |
 | `AGENTGOV_KEYCLOAK_JWKS_URL` | — | JWKS URL the gateway uses to validate agent tokens. |
+| `AGENTGOV_IDENTITY_FULL_SYNC_SECONDS` | `900` | Seconds between passes that sync every agent with Keycloak, which also repair what was changed in Keycloak itself. The passes between, every minute and after each change, sync only the agents whose clients should change. 0: every pass is full. |
 | `AGENTGOV_GATEWAY_AUDIENCE` | `agentgov-gateway` | Audience every agent token carries; the gateway requires it. |
 | `AGENTGOV_PEOPLE_APP_CLIENTS` | empty | Keycloak clients of the apps people sign in to and use agents from (comma-separated client IDs). Each agent that acts for people has a client scope named after its client ID, which these apps may request: the person's token is then one the agent can exchange for a token of its own, on the person's behalf. |
+| `AGENTGOV_ASSERTION_LIFETIME_SECONDS` | `300` | Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers outside the gateway last, at most 300: the agent trades one for an access token at once ([acting-for-people](acting-for-people.md)#mcp-servers-outside-the-gateway). |
 
 ### Administrator single sign-on (OIDC)
 
@@ -260,6 +266,9 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_OPA_URL` | — | Where the processor asks OPA for decisions, and the control plane for What if, such as `http://opa:8181`. |
+| `AGENTGOV_AUTHZEN_URL` | — | An AuthZEN decision point of your own (OpenID AuthZEN Authorization API 1.0), which the processor also asks about the calls AgentGov's policies let through, as the external-decision-point feature says: its base URL, such as `https://pdp.example.com` ([policies](policies.md)#authzen). |
+| `AGENTGOV_AUTHZEN_TOKEN` (secret) | — | The bearer token it asks for, if it asks for one. |
+| `AGENTGOV_AUTHZEN_TIMEOUT_SECONDS` | `2.0` | Seconds to wait for its answer. |
 | `AGENTGOV_BUNDLE_LONG_POLL_SECONDS` | `30` | Longest a bundle long-poll request is held open. |
 | `AGENTGOV_BUNDLE_SIGNING_KEY_FILE` | — | A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles with; OPA verifies each with the matching certificate or public key, and refuses one that doesn't verify ([production](production.md)). `agentgov bundle-signing-key DIR` makes a pair. Unset, bundles go unsigned. |
 | `AGENTGOV_BUNDLE_SIGNING_KEY_ID` | `agentgov` | The key's name: OPA's configuration names the same one (bundles.&lt;name&gt;.signing.keyid). |
@@ -283,6 +292,8 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_TLS_DIR` | — | Where this component finds its certificate (tls.crt), its key (tls.key) and the certificate of the authority that issued every component's (ca.crt), as cert-manager writes them. Set, AgentGov's components talk over mutual TLS: each serves TLS on its internal ports and asks callers for a certificate from the same authority, and the control plane gives the service role only on its internal port. `agentgov internal-certs DIR` makes an authority and the certificates. |
+| `AGENTGOV_TLS_RELOAD_SECONDS` | `60.0` | Seconds between looks at those files for a renewed certificate (cert-manager's, or an X.509-SVID spiffe-helper writes from SPIRE): a new one serves the next connections, with no restart. 0 reads them once, at start. |
+| `AGENTGOV_TLS_PEERS` | empty | The callers this component's TLS listeners take, comma-separated: their SPIFFE IDs (the chart's: spiffe://example.org/ns/agentgov/agentgov/agentgov-gateway) or DNS names, exact or with a trailing * for a prefix. Empty: any certificate from the authority, which then must issue AgentGov's components' only; with SPIRE, which gives every workload one, list them. |
 | `AGENTGOV_INTERNAL_PORT` | `8443` | The control plane's port for AgentGov's other components, over mutual TLS. |
 | `AGENTGOV_GATEWAY_TLS_DIR` | `/tls` | Where agentgateway finds its tls.crt, tls.key and ca.crt, to call the processor over mutual TLS (the control plane writes it into the gateway's configuration). |
 

@@ -17,6 +17,9 @@ from sqlalchemy.types import TypeDecorator
 log = logging.getLogger(__name__)
 
 _CHANGED = "agentgov.changed"
+# What a transaction writes last, just before it commits, after every other change it made
+# (agentgov.ledger's entries: the chain's head is the last row a transaction locks).
+WRITE_LAST: list[Callable[[Session], None]] = []
 
 
 def lock(session: Session, instance: Any) -> None:
@@ -136,6 +139,9 @@ class Database:
         # Called with a transaction's topics just before it commits, inside it: how the
         # other replicas hear about them (agentgov.coordination).
         self.before_commit: Callable[[Session, set[str]], None] | None = None
+        # What a transaction must pass to commit, checked inside it first: a job's still
+        # holding its lock (agentgov.coordination).
+        self.commit_checks: list[Callable[[Session], None]] = []
         kwargs: dict[str, Any] = {}
         is_sqlite = url.startswith("sqlite")
         in_memory = is_sqlite and (":memory:" in url or url.rstrip("/") == "sqlite:")
@@ -159,6 +165,10 @@ class Database:
         event.listen(self._sessionmaker, "after_rollback", self._after_rollback)
 
     def _before_commit(self, session: Session) -> None:
+        for check in self.commit_checks:
+            check(session)
+        for write in WRITE_LAST:
+            write(session)
         topics = session.info.get(_CHANGED)
         if topics and self.before_commit is not None:
             self.before_commit(session, set(topics))

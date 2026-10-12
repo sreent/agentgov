@@ -4,7 +4,13 @@ Every registered MCP server becomes a route ``/mcp/<server>`` (while the
 mcp-gateway feature is on) with three policies, all enforced by agentgateway:
 
 * ``jwtAuth``       - the caller must present a Keycloak-issued agent token
-                      for the gateway audience.
+                      for the gateway audience. With the developer-sign-in feature,
+                      ``mcpAuthentication`` instead, which checks the token the same way
+                      and tells MCP clients where to sign in: the route also serves its
+                      OAuth protected resource metadata (RFC 9728) at
+                      ``/.well-known/oauth-protected-resource/mcp/<server>``, which names
+                      Keycloak, and a call without a token is answered 401 with a pointer
+                      to it, so that developers' MCP clients sign in to a public client.
 * ``mcpGuardrails`` - every tool call, tool result and tools/list response is
                       sent to the governance processor (agentgateway's ExtMcp
                       gRPC protocol), which consults OPA and Presidio. Failure
@@ -42,7 +48,9 @@ token:
 * ``extProc``       - every answer goes to the processor as it streams back
                       (``agentgov.processor.a2a_answers``), which masks credentials and
                       personal data in it or withholds it, as it does tool results; while
-                      data protection or prompt-injection defence is on. The agent is
+                      data protection or prompt-injection defence is on. While
+                      a2a-masking is enforced, every message goes there too, after
+                      ``extAuthz``, to mask the personal data in it. The agent is
                       asked for answers that aren't compressed (``requestHeaderModifier``),
                       which the processor couldn't read.
 
@@ -104,6 +112,9 @@ GUARDED_METHODS = {
 # When the agent acts for a person, the token's subject is the person: their name,
 # email address, groups and realm roles come with it, and "act" names the agent if
 # the person delegated to it (agentgov.identity.people).
+# Where a protected resource's OAuth metadata is (RFC 9728), before the resource's path.
+RESOURCE_METADATA = "/.well-known/oauth-protected-resource"
+
 IDENTITY_METADATA = {
     "client_id": "jwt.azp",
     "agent_id": "jwt.agent_id",
@@ -114,6 +125,7 @@ IDENTITY_METADATA = {
     "groups": "jwt.groups",
     "roles": "jwt.realm_access.roles",
     "act": "jwt.act",
+    "sign_in": "jwt.agentgov_sign_in",
     "request": "mcpGuardrails",
 }
 
@@ -126,6 +138,7 @@ PERSON_HEADERS = {
     "x-agentgov-groups": "toJson(jwt.groups)",
     "x-agentgov-roles": "toJson(jwt.realm_access.roles)",
     "x-agentgov-act": "toJson(jwt.act)",
+    "x-agentgov-sign-in": "toJson(jwt.agentgov_sign_in)",
 }
 
 
@@ -173,12 +186,23 @@ def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict
             ]
         },
     }
+    matches = [{"path": {"exact": f"/mcp/{ts.name}"}}]
     auth = _jwt_auth(settings, modes)
-    if auth:
+    if auth and modes["developer-sign-in"] == features.ON:
+        # The same check, and where to sign in for MCP clients that have no token: the
+        # metadata, at the route's well-known path (served only where the route matches
+        # it), names Keycloak; its resource is the server's address on the gateway.
+        metadata: dict[str, Any] = {"bearerMethodsSupported": ["header"]}
+        if settings.gateway_public_url:
+            metadata["resource"] = f"{settings.gateway_public_url.rstrip('/')}/mcp/{ts.name}"
+        policies["mcpAuthentication"] = {**auth, "resourceMetadata": metadata}
+        policies["cors"]["exposeHeaders"].append("WWW-Authenticate")
+        matches.append({"path": {"exact": f"{RESOURCE_METADATA}/mcp/{ts.name}"}})
+    elif auth:
         policies["jwtAuth"] = auth
     return {
         "name": f"mcp-{ts.name}",
-        "matches": [{"path": {"exact": f"/mcp/{ts.name}"}}],
+        "matches": matches,
         "policies": policies,
         "backends": [{"mcp": {"targets": [{"name": ts.name, "mcp": {"host": ts.url}}]}}],
     }
@@ -291,10 +315,12 @@ A2A_MAX_BODY = 256 * 1024
 # than not found.
 
 
-def _answer_checks(agent: Agent, settings: Settings) -> dict[str, Any]:
+def _answer_checks(agent: Agent, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
     """agentgateway's external processing of the agent's answers, by the processor
     (agentgov.processor.a2a_answers): each answer as it streams, with whom it answers in
-    metadata. Guarded expressions give "" where a claim or a header is missing."""
+    metadata; and while a2a-masking is enforced, each message sent to it, to mask it.
+    Guarded expressions give "" where a claim or a header is missing."""
+    masking = modes["a2a-masking"] == features.ENFORCE and modes["data-protection"] != features.OFF
 
     def claim(path: str, *, as_json: bool = False) -> str:
         parts = path.split(".")
@@ -317,18 +343,20 @@ def _answer_checks(agent: Agent, settings: Settings) -> dict[str, Any]:
                 "groups": claim("groups", as_json=True),
                 "roles": claim("realm_access.roles", as_json=True),
                 "act": claim("act", as_json=True),
+                "sign_in": claim("agentgov_sign_in", as_json=True),
                 "traceparent": (
                     '"traceparent" in request.headers ? request.headers["traceparent"] : ""'
                 ),
             }
         },
-        # Only the answers: the call itself went to the processor already (extAuthz).
-        # Streamed, so that a streamed answer reaches the caller as it comes. With a
-        # streamed body agentgateway sends trailers whatever these say (and warns when
-        # they say skip); the processor passes them on.
+        # The answers; and the messages only to mask them, as the call itself went to the
+        # processor already (extAuthz, which sees the message as it was sent). Streamed, so
+        # that a streamed answer reaches the caller as it comes. With a streamed body
+        # agentgateway sends trailers whatever these say (and warns when they say skip);
+        # the processor passes them on.
         "processingOptions": {
-            "requestHeaderMode": "skip",
-            "requestBodyMode": "none",
+            "requestHeaderMode": "send" if masking else "skip",
+            "requestBodyMode": "fullDuplexStreamed" if masking else "none",
             "requestTrailerMode": "send",
             "responseHeaderMode": "send",
             "responseBodyMode": "fullDuplexStreamed",
@@ -371,7 +399,7 @@ def a2a_route_for(agent: Agent, settings: Settings, modes: dict[str, str]) -> di
         },
     }
     if modes["data-protection"] != features.OFF or modes["prompt-injection"] != features.OFF:
-        policies["extProc"] = _answer_checks(agent, settings)
+        policies["extProc"] = _answer_checks(agent, settings, modes)
         # Answers the processor can read: not compressed, whatever the caller accepts.
         policies["requestHeaderModifier"] = {"set": {"accept-encoding": "identity"}}
     if url.scheme == "https":
@@ -536,10 +564,17 @@ class Fetched:
         self.config: dict[str, Any] | None = None
 
 
-def sync_from_control_plane(client: httpx.Client, path: str, fetched: Fetched) -> bool:
+def sync_from_control_plane(
+    client: httpx.Client, path: str, fetched: Fetched, *, certificates: Any = None
+) -> bool:
     """Fetch the configuration from the control plane and write it to ``path``, with the
     key check, if that changes the file; returns whether the file was rewritten. The key
-    check runs on every call: a key file can appear without the configuration changing."""
+    check runs on every call: a key file can appear without the configuration changing.
+
+    With ``certificates`` (the gateway's agentgov.tls.Identity), the file also says which
+    certificate the gateway holds: agentgateway reads the files it calls the processor
+    with only as it loads its configuration, so a renewed certificate rewrites the file,
+    and agentgateway loads it, and them, again."""
     headers = {"If-None-Match": fetched.etag} if fetched.etag else {}
     resp = client.get("/v1/gateway/config", headers=headers)
     if resp.status_code != 304:
@@ -547,11 +582,20 @@ def sync_from_control_plane(client: httpx.Client, path: str, fetched: Fetched) -
         fetched.etag, fetched.config = resp.headers.get("ETag"), yaml.safe_load(resp.text)
     if fetched.config is None:
         return False
-    return write_if_changed(path, to_yaml(with_available_keys(fetched.config)))
+    text = to_yaml(with_available_keys(fetched.config))
+    if certificates is not None:
+        text += f"# The gateway's certificate: {certificates.fingerprint()[:16]}\n"
+    return write_if_changed(path, text)
 
 
 def keep_current(
-    client: httpx.Client, path: str, *, interval: float, once: bool, heartbeat: str | None = None
+    client: httpx.Client,
+    path: str,
+    *,
+    interval: float,
+    once: bool,
+    heartbeat: str | None = None,
+    certificates: Any = None,
 ) -> None:
     """Keep ``path`` current until stopped; with ``once``, return after the first write.
     Errors (the control plane starting, a network blip) are retried. Every round touches
@@ -562,7 +606,7 @@ def keep_current(
             with open(heartbeat, "a"):
                 os.utime(heartbeat)
         try:
-            changed = sync_from_control_plane(client, path, fetched)
+            changed = sync_from_control_plane(client, path, fetched, certificates=certificates)
         except httpx.HTTPError as exc:
             log.warning("could not fetch the gateway configuration: %s", exc)
         else:

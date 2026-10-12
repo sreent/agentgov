@@ -28,7 +28,10 @@ is in the database, and they coordinate through it.
   before it sends to it.
 * **A job runs once at a time** across replicas, however it started: a scan, a round of
   rules, retention or a Microsoft sync an administrator asks for waits for a run already
-  going (15 seconds at most), then answers 409.
+  going (15 seconds at most), then answers 409. A job's lock is held by its connection to
+  the database: when the database restarts mid-run, or drops that connection, another
+  replica may start the job, and the run that lost its lock stops at its next commit,
+  with nothing more written.
 * **Nothing lives in one replica's memory.** Administrators' Microsoft sign-ins are kept
   in the database, sealed with a key derived from the client secret, so any replica acts
   as them ([platforms](platforms.md#how-agentgov-holds-the-sign-in)); sign-in attempts and
@@ -58,7 +61,9 @@ other is told the request was already decided, rather than overwriting it. The s
 for access package requests (deciding, revoking, reviewing), findings (acknowledging,
 accepting the risk, resolving, dismissing), agents' lifecycle (approving, blocking,
 deleting, attesting), the status of tool servers, model providers, identity issuers and
-destinations, and an approval being used: two identical calls at once use it once.
+destinations, and an approval being used: two identical calls at once use it once. Each
+transaction writes its ledger entries last, as it commits, so decisions that lock the same
+rows in another order wait for each other rather than deadlock.
 
 **Edits made from an older copy are refused.** Agents, blueprints, tool servers, model
 providers, identity issuers, destinations, policies, teams, access packages and management
@@ -94,23 +99,94 @@ no use from outside. People and automation use the public port as before.
 | Setting | Default | What it does |
 |---|---|---|
 | `AGENTGOV_TLS_DIR` | none | The component's certificate, key and the authority's certificate (`tls.crt`, `tls.key`, `ca.crt`, as cert-manager writes them). Set, mutual TLS is on |
+| `AGENTGOV_TLS_RELOAD_SECONDS` | 60 | How often it looks at those files for a renewed certificate. 0 reads them once, at start |
+| `AGENTGOV_TLS_PEERS` | none | The callers its listeners take, by their SPIFFE IDs or DNS names (a trailing `*` for a prefix). None: any certificate from the authority |
 | `AGENTGOV_INTERNAL_PORT` | 8443 | The control plane's port for the other components |
 | `AGENTGOV_GATEWAY_TLS_DIR` | `/tls` | Where agentgateway finds its own, for the processor |
 
-The chart makes the authority and a certificate for each component on install, and keeps
-them on upgrades (`internalTLS`); or cert-manager issues them (`internalTLS.certManager`).
-Whatever issues them, the authority must issue AgentGov's certificates only, because the
+### Where the certificates come from
+
+The chart gives the components their certificates one of three ways (`internalTLS`):
+
+| | Issued by | Renewed |
+|---|---|---|
+| The chart (the default) | An authority the chart makes on install, and keeps on upgrades | Not: they last ten years |
+| cert-manager (`internalTLS.certManager`) | An authority cert-manager makes for the release, or your Issuer | When cert-manager renews them (`duration`, ten years by default) |
+| SPIRE (`internalTLS.spire`) | Your SPIRE server: each pod's X.509-SVID, by its SPIFFE ID | Half way through their life (an hour, by default) |
+
+The authority of the first two must issue AgentGov's certificates only, because the
 control plane and OPA take any certificate from it as one of AgentGov's components. So
 cert-manager makes an authority for the release alone unless you name an issuer: an
 Issuer in the release's namespace whose CA issues nothing else (the chart refuses a
-ClusterIssuer, which issues to any namespace that asks). The components read their
-certificates when they start, and OPA every minute: cert-manager's certificates last ten
-years unless you set `internalTLS.certManager.duration`, and with a shorter life, restart
-the pods after each renewal (with Reloader, for example). `agentgov internal-certs DIR`
-makes the certificates where neither is there, as the Compose stack does on its first
-start. Presidio and Keycloak are outside it:
-Presidio's analyzer doesn't serve TLS (keep it to the processor with the
+ClusterIssuer, which issues to any namespace that asks). SPIRE is different: it gives
+every workload a certificate, so there the components name the callers they take
+([below](#workload-identities-from-spire)). `agentgov internal-certs DIR` makes the
+certificates where none of these is there, as the Compose stack does on its first start,
+and `agentgov internal-certs DIR --renew` renews them. Presidio and Keycloak are outside
+it: Presidio's analyzer doesn't serve TLS (keep it to the processor with the
 [network policy](deploy/kubernetes.md)), and Keycloak has TLS settings of its own.
+
+### Renewed certificates
+
+A renewed certificate takes effect without a restart, within a minute or so:
+
+| Component | How it takes a renewed certificate |
+|---|---|
+| Control plane, processor, the gateway's config sidecar | They read their files every `AGENTGOV_TLS_RELOAD_SECONDS`. Once the certificate and its key fit together (a writer may have written one, not yet the other), the next connections get the new one: the servers present it from the next handshake (gRPC too), and new connections to other components present it |
+| OPA | `--tls-cert-refresh-period=1m` for the certificate it serves; the one it shows the control plane, to fetch its bundles, is read for each new connection |
+| OpenTelemetry Collector | `reload_interval: 1m` on its exporter's certificate |
+| agentgateway | It reads the certificate it shows the processor only as it loads its configuration: the config sidecar adds the certificate's fingerprint to the configuration, so a renewed one rewrites it, and agentgateway loads it, and the certificate, again |
+
+Connections already open keep their certificate until they close. A new authority (a new
+`ca.crt`, not a renewed certificate from the same one) is a change to plan: the
+components above take it as they take a certificate, except the two that check the
+control plane's with it, OPA as it fetches its bundles and the Collector as it exports,
+which read it only at start. Restart them after it.
+
+### Workload identities from SPIRE
+
+With `internalTLS.spire.enabled`, SPIRE issues the components' certificates. Each
+component's pod gets its X.509-SVID through the SPIFFE CSI driver, and spiffe-helper, run
+before the component and then beside it, writes it into `/tls` as `tls.crt`, `tls.key` and
+`ca.crt`; as SPIRE renews it, the component takes each new one (above). It needs SPIRE
+installed with its CSI driver and controller manager, as the SPIFFE project's
+[Helm charts](https://github.com/spiffe/helm-charts-hardened) install them: the chart
+registers each component with a `ClusterSPIFFEID`, which the controller manager turns into
+SPIRE's registration entries.
+
+| Value | Default | What it does |
+|---|---|---|
+| `internalTLS.spire.enabled` | off | SPIRE issues the components' certificates |
+| `internalTLS.spire.trustDomain` | `example.org` | Your SPIRE's trust domain |
+| `internalTLS.spire.className` | `spire-mgmt-spire` | The controller manager's class, so that it takes the chart's `ClusterSPIFFEID`s: `<namespace>-<release>` of SPIRE's chart, `spire-mgmt-spire` as SPIRE's production install has it, `spire-server-spire` for its quick install |
+| `internalTLS.spire.csiDriver` | `csi.spiffe.io` | The SPIFFE CSI driver |
+| `internalTLS.spire.ttl` | SPIRE's | How long the components' SVIDs last |
+| `internalTLS.spire.helper.image`, `.resources` | `ghcr.io/spiffe/spiffe-helper:0.12.2` | spiffe-helper |
+
+Each component's SPIFFE ID is `spiffe://<trust domain>/ns/<namespace>/agentgov/<name>`,
+such as `spiffe://example.org/ns/agentgov/agentgov/agentgov-processor`, and its SVID also
+carries its Services' DNS names, which callers check. SPIRE gives every workload in the
+trust domain a certificate, so a certificate from it doesn't make its holder one of
+AgentGov's components. The components name the callers they take instead: the control
+plane's internal port takes the processor, the gateway, OPA and the Collector, and the
+processor takes the gateway (`AGENTGOV_TLS_PEERS`, which the chart sets), and OPA takes the
+processor and the control plane, by their SPIFFE IDs (a `system.authz` policy, with
+`--authorization=basic`). A caller from the trust domain that isn't one of them is turned
+away: as its connection opens at the control plane and the processor's webhook, and at
+each call to the processor's gRPC services and to OPA. SPIRE gives a component's identity
+to the pods with its labels in the release's namespace, so, as with certificates in
+Secrets, whoever may run pods there may get one: keep the namespace to AgentGov.
+
+SPIRE signs SVIDs with an authority of its own, or under an upstream authority of yours
+(its `UpstreamAuthority` plugins), and spiffe-helper writes that root as `ca.crt`. An
+authority `agentgov internal-certs` makes can be SPIRE's upstream (SPIRE's `disk` plugin):
+it leaves room below it for SPIRE's intermediate.
+
+CI checks this on a real cluster: `scripts/ci.sh --kind --spire` installs SPIRE with its
+chart's quick install (namespace `spire-server`, so `className` `spire-server-spire`),
+then AgentGov with SVIDs that last six minutes, and runs the demo while SPIRE renews them;
+afterwards the control plane must be serving an SVID with its SPIFFE ID that SPIRE issued
+after it started ([kind](deploy/local.md#kubernetes-with-kind)).
 
 ## Signed bundles
 
@@ -148,4 +224,7 @@ The demo's stacks run all of it: mutual TLS between the components and signed bu
 both the Compose stack and the Helm chart's pods, and two control-plane replicas from the
 chart, behind a stand-in for a Kubernetes Service that hands each connection to the next
 replica. Step 13 of `python examples/agents/demo_agent.py` blocks the agent through one
-replica or the other and fails unless its calls stop within seconds.
+replica or the other and fails unless its calls stop within seconds. In the Compose stack,
+the control plane and the processor name their callers (`AGENTGOV_TLS_PEERS`), and
+`scripts/ci.sh --e2e` renews every component's certificate before the demo, waits until
+each serves its new one and agentgateway has loaded its own, and runs the demo on them.

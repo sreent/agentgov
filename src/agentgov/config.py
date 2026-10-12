@@ -9,6 +9,7 @@ development free of external dependencies.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import os
 import re
 from dataclasses import dataclass
@@ -133,6 +134,21 @@ class Settings:
     # An RFC 3161 time-stamping authority, such as https://freetsa.org/tsr. It signs each
     # checkpoint with its own time, which proves the chain existed then, unchanged since.
     ledger_tsa_url: str | None = None
+    # A transparency log, Sigstore's Rekor v2: its public shard (such as
+    # https://log2025-1.rekor.sigstore.dev) or a rekor-tiles of your own. Each checkpoint is
+    # signed with AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE and added to it, where anyone can
+    # see that it was published: AgentGov can't later show another checkpoint for the same
+    # entry without the log holding both. What the log publishes, for good, is the
+    # statement's SHA-256, the signature and AgentGov's public key.
+    ledger_rekor_url: str | None = None
+    # AgentGov's key for the log: an ECDSA P-256 private key (PEM). `agentgov
+    # transparency-key DIR` makes one.
+    ledger_rekor_signing_key_file: str | None = None
+    # The log's public key (PEM, Ed25519), to check each answer's proof that the log holds
+    # the entry. Unset, entries are kept unchecked.
+    ledger_rekor_log_key_file: str | None = None
+    # The log's name in its checkpoints (its origin). Unset: the URL's host name.
+    ledger_rekor_origin: str | None = None
     # Days AgentGov keeps the operational records whose history the ledger has: daily
     # activity and model usage, risk signals, notifications sent, decided approvals,
     # resolved findings, ended access assignments, and developers' MCP servers not
@@ -152,6 +168,10 @@ class Settings:
     keycloak_issuer: str | None = None
     # JWKS URL the gateway uses to validate agent tokens.
     keycloak_jwks_url: str | None = None
+    # Seconds between passes that sync every agent with Keycloak, which also repair what
+    # was changed in Keycloak itself. The passes between, every minute and after each
+    # change, sync only the agents whose clients should change. 0: every pass is full.
+    identity_full_sync_seconds: int = 900
     # Audience every agent token carries; the gateway requires it.
     gateway_audience: str = "agentgov-gateway"
     # Keycloak clients of the apps people sign in to and use agents from (comma-separated
@@ -159,6 +179,10 @@ class Settings:
     # client ID, which these apps may request: the person's token is then one the agent
     # can exchange for a token of its own, on the person's behalf.
     people_app_clients: str = ""
+    # Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers
+    # outside the gateway last, at most 300: the agent trades one for an access token
+    # at once (docs/acting-for-people.md#mcp-servers-outside-the-gateway).
+    assertion_lifetime_seconds: int = 300
 
     # --- Administrator single sign-on (OIDC) -------------------------------------
     # The control plane signs administrators in with an OIDC provider (Keycloak by
@@ -263,6 +287,15 @@ class Settings:
     # Where the processor asks OPA for decisions, and the control plane for What if, such
     # as http://opa:8181.
     opa_url: str | None = None
+    # An AuthZEN decision point of your own (OpenID AuthZEN Authorization API 1.0), which
+    # the processor also asks about the calls AgentGov's policies let through, as the
+    # external-decision-point feature says: its base URL, such as https://pdp.example.com
+    # (docs/policies.md#authzen).
+    authzen_url: str | None = None
+    # The bearer token it asks for, if it asks for one.
+    authzen_token: str | None = None
+    # Seconds to wait for its answer.
+    authzen_timeout_seconds: float = 2.0
     # Longest a bundle long-poll request is held open.
     bundle_long_poll_seconds: int = 30
     # A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles
@@ -304,6 +337,16 @@ class Settings:
     # authority, and the control plane gives the service role only on its internal port.
     # `agentgov internal-certs DIR` makes an authority and the certificates.
     tls_dir: str | None = None
+    # Seconds between looks at those files for a renewed certificate (cert-manager's, or an
+    # X.509-SVID spiffe-helper writes from SPIRE): a new one serves the next connections,
+    # with no restart. 0 reads them once, at start.
+    tls_reload_seconds: float = 60.0
+    # The callers this component's TLS listeners take, comma-separated: their SPIFFE IDs
+    # (the chart's: spiffe://example.org/ns/agentgov/agentgov/agentgov-gateway) or DNS
+    # names, exact or with a trailing * for a prefix. Empty: any certificate from the
+    # authority, which then must issue AgentGov's components' only; with SPIRE, which gives
+    # every workload one, list them.
+    tls_peers: str = ""
     # The control plane's port for AgentGov's other components, over mutual TLS.
     internal_port: int = 8443
     # Where agentgateway finds its tls.crt, tls.key and ca.crt, to call the processor
@@ -402,8 +445,26 @@ class Settings:
             )
         if self.ledger_checkpoint_hours < 0:
             raise ValueError("AGENTGOV_LEDGER_CHECKPOINT_HOURS must be 0 (on demand) or more")
+        if self.authzen_url and not self.authzen_url.startswith(("https://", "http://")):
+            raise ValueError("AGENTGOV_AUTHZEN_URL is the decision point's http(s) URL")
+        if self.identity_full_sync_seconds < 0:
+            raise ValueError("AGENTGOV_IDENTITY_FULL_SYNC_SECONDS is 0 (every pass) or more")
+        if self.tls_reload_seconds < 0:
+            raise ValueError("AGENTGOV_TLS_RELOAD_SECONDS is 0 (read once) or more")
+        if self.authzen_timeout_seconds <= 0:
+            raise ValueError("AGENTGOV_AUTHZEN_TIMEOUT_SECONDS must be more than 0")
+        if not 30 <= self.assertion_lifetime_seconds <= 300:
+            raise ValueError("AGENTGOV_ASSERTION_LIFETIME_SECONDS is between 30 and 300")
         if self.ledger_tsa_url and not self.ledger_tsa_url.startswith(("https://", "http://")):
             raise ValueError("AGENTGOV_LEDGER_TSA_URL is the authority's http(s) URL")
+        if self.ledger_rekor_url:
+            if not self.ledger_rekor_url.startswith(("https://", "http://")):
+                raise ValueError("AGENTGOV_LEDGER_REKOR_URL is the log's http(s) URL")
+            if not self.ledger_rekor_signing_key_file:
+                raise ValueError(
+                    "AGENTGOV_LEDGER_REKOR_URL needs AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE: the "
+                    "key AgentGov signs checkpoints with for the log (agentgov transparency-key)"
+                )
         if self.data_retention_days < 0 or 0 < self.data_retention_days < DATA_MIN_DAYS:
             raise ValueError(
                 f"AGENTGOV_DATA_RETENTION_DAYS is 0 (keep everything) or at least {DATA_MIN_DAYS}"
@@ -433,10 +494,11 @@ class Settings:
         self.pii_thresholds()  # raises on malformed entries
 
     def tls(self) -> Any:
-        """This component's certificate for mutual TLS (agentgov.tls), or None without."""
-        from agentgov.tls import Identity
-
-        return Identity.from_dir(self.tls_dir) if self.tls_dir else None
+        """This component's certificate for mutual TLS (agentgov.tls), or None without: one
+        for each directory, which looks after its renewals."""
+        if not self.tls_dir:
+            return None
+        return _tls_identity(self.tls_dir, self.tls_peers, self.tls_reload_seconds)
 
     def feature_pins(self) -> dict[str, str]:
         from agentgov.registry.features import parse_pins, unmet
@@ -574,3 +636,10 @@ class Settings:
 
     def with_overrides(self, **overrides: Any) -> Settings:
         return dataclasses.replace(self, **overrides)
+
+
+@functools.lru_cache(maxsize=8)
+def _tls_identity(directory: str, peers: str, reload_seconds: float) -> Any:
+    from agentgov.tls import Identity, Peers
+
+    return Identity.from_dir(directory, peers=Peers.parse(peers), reload_seconds=reload_seconds)

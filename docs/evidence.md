@@ -1,4 +1,4 @@
-# Evidence: retention, time-stamps and compliance reports
+# Evidence: retention, time-stamps, a transparency log and compliance reports
 
 Everything AgentGov decides or is told to do goes into its ledger, a hash chain that
 anyone can verify ([architecture](architecture.md#evidence-ledger)). This page is about
@@ -7,7 +7,9 @@ handing it to the people who assess compliance:
 
 * **Checkpoints** keep the chain's head every day, and a **time-stamping authority** signs
   each one with its own time (RFC 3161), so that nobody, AgentGov's administrators
-  included, can rewrite the history before it unnoticed.
+  included, can rewrite the history before it unnoticed. A **transparency log** (Sigstore's
+  Rekor) can publish each one too, so that AgentGov can't show different checkpoints to
+  different people.
 * **Retention**: the ledger keeps every entry, or keeps them for a period and then
   archives them, checked link by link, before they leave the database. Operational records
   whose history is in the ledger go after a period of their own.
@@ -47,6 +49,45 @@ Your organisation's own authority works too. A refused or failed request is kept
 checkpoint and tried again each hour; until then, the checkpoint vouches only for itself.
 The control plane needs to reach the authority over the network
 ([requirements](requirements.md)).
+
+## A transparency log
+
+A time-stamp proves that a checkpoint existed at a time; it doesn't stop AgentGov's
+administrators from keeping two ledgers and showing each assessor the one that suits.
+A transparency log does: it publishes what is added to it, in a Merkle tree that only
+grows, signed by the log and watched by others (Sigstore's public log has witnesses that
+co-sign it). With `AGENTGOV_LEDGER_REKOR_URL` set, each checkpoint's statement, the one the
+authority stamps, is signed with AgentGov's own key and added to the log. A second
+checkpoint for the same entry would be in the log too, for anyone to see.
+
+| Setting | |
+|---|---|
+| `AGENTGOV_LEDGER_REKOR_URL` | The log: Sigstore's public Rekor v2, such as `https://log2025-1.rekor.sigstore.dev` (it changes shard every so often: use the current one), or a [rekor-tiles](https://github.com/sigstore/rekor-tiles) of your own |
+| `AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE` | AgentGov's key for it, ECDSA P-256: `agentgov transparency-key DIR` makes `key.pem`, and `public.pem` for those who check |
+| `AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE` | The log's public key (Ed25519). For Sigstore's public log, it is in Sigstore's `trusted_root.json`; for your own, `agentgov transparency-key --log DIR` makes the log's key (`log.pem`, for rekor-tiles' `--signer-filepath`) and `log.pub` |
+| `AGENTGOV_LEDGER_REKOR_ORIGIN` | The log's name in its checkpoints, when it isn't the URL's host name |
+
+The log answers with the entry, its index, and a proof that the entry is in the tree its
+signed checkpoint describes. AgentGov checks the proof with the log's key before it keeps
+the answer, keeps it whole, and gives it out as a Sigstore bundle, which verifies offline,
+with cosign or with AgentGov:
+
+```bash
+agentgov ledger proof 1042 -o proof/
+cosign verify-blob --key proof/agentgov-rekor.pub --bundle proof/checkpoint-1042.sigstore.json \
+  --trusted-root proof/rekor-trusted-root.json proof/checkpoint-1042.txt
+agentgov ledger verify-log-entry proof/checkpoint-1042.txt proof/checkpoint-1042.sigstore.json \
+  --log-key proof/rekor.pub --origin log2025-1.rekor.sigstore.dev --key proof/agentgov-rekor.pub
+```
+
+What a public log publishes, for good: the statement's SHA-256, which says nothing about
+the ledger, the signature, and AgentGov's public key. The key ties the entries together:
+who watches the log can count them, one a checkpoint. Sigstore asks for summaries rather
+than every action, which a checkpoint a day is; a log of your own keeps all of it inside.
+A failure is kept on the checkpoint and tried again each hour. A proof that doesn't check
+out (the log answered with a tree its key didn't sign, say) is kept, with why: the log
+holds the entry, so AgentGov doesn't add it again. Rekor v2 gives no time of its own:
+the authority's time-stamp says when.
 
 ## Retention
 
@@ -142,6 +183,7 @@ A zip for the last N days:
 | `reports/*.json`, `report.md` | The three frameworks' reports, as data and as a document |
 | `ledger.jsonl` | The ledger's entries in the period, as AgentGov wrote them: `agentgov ledger verify --file ledger.jsonl` checks them |
 | `checkpoints.json`, `checkpoints/*.txt`, `*.tsr` | The checkpoints, their archives, and each time-stamp with its statement, for `openssl ts -verify` |
+| `checkpoints/*.sigstore.json`, `transparency-log/` | Each checkpoint's entry in the transparency log, as a Sigstore bundle, with AgentGov's key, the log's, and a trusted root with the log, for `cosign verify-blob` or `agentgov ledger verify-log-entry` |
 | `inventory.json` | The agents, with their owners, sponsors, teams, status, risk and attestations |
 | `manifests.yaml` | The registry as code: blueprints, tool servers, policies, rules, packages, features |
 | `features.json` | Which features are on, and how strictly |
@@ -150,10 +192,10 @@ A zip for the last N days:
 
 | Where | How |
 |---|---|
-| Admin UI | **Ledger** → *Entries*: **Verify chain**, *Checkpoints and retention* (**Make a checkpoint**, each time-stamp to download); **Ledger** → *Compliance*: a framework and a period, and **Evidence pack** |
-| CLI | `agentgov ledger checkpoints`, `checkpoint`, `proof SEQ`, `retention [--run]`, `verify [--file F ...]`; `agentgov evidence report [--framework F] [--days N] [--json]`, `agentgov evidence pack [--days N] [-o FILE]` |
-| API | `GET`/`POST /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp`, `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run`; `GET /v1/evidence/frameworks`, `GET /v1/evidence/report?framework=&days=`, `GET /v1/evidence/pack?days=` |
-| Helm chart | `controlPlane.ledgerArchive` (a volume for the archives, and the retention), `controlPlane.env.AGENTGOV_LEDGER_TSA_URL` ([Kubernetes](deploy/kubernetes.md)) |
+| Admin UI | **Ledger** → *Entries*: **Verify chain**, *Checkpoints and retention* (**Make a checkpoint**, each time-stamp and log entry to download); **Ledger** → *Compliance*: a framework and a period, and **Evidence pack** |
+| CLI | `agentgov ledger checkpoints`, `checkpoint`, `proof SEQ`, `verify-log-entry`, `retention [--run]`, `verify [--file F ...]`; `agentgov transparency-key [--log] DIR`; `agentgov evidence report [--framework F] [--days N] [--json]`, `agentgov evidence pack [--days N] [-o FILE]` |
+| API | `GET`/`POST /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp`, `GET /v1/ledger/checkpoints/{seq}/log-entry`, `GET /v1/ledger/transparency-log`, `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run`; `GET /v1/evidence/frameworks`, `GET /v1/evidence/report?framework=&days=`, `GET /v1/evidence/pack?days=` |
+| Helm chart | `controlPlane.ledgerArchive` (a volume for the archives, and the retention), `controlPlane.env.AGENTGOV_LEDGER_TSA_URL`, `controlPlane.transparencyLog` (the log, a Secret with AgentGov's key, the log's key) ([Kubernetes](deploy/kubernetes.md)) |
 
 Everyone who reads AgentGov (administrators, approvers, the security team, auditors) sees
 the reports and downloads the pack; administrators make checkpoints and run retention.
@@ -165,14 +207,18 @@ Audit (Premium), and up to ten years with an add-on licence. Compliance Manager 
 assessment templates for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF, and Agent 365
 includes agents in them ([baseline](baseline-agent365.md)). AgentGov keeps its own
 evidence for as long as you choose, in archives you hold, time-stamped by an authority
-outside it, and reports on it for the same three frameworks.
+outside it and published in a transparency log if you choose, and reports on it for the
+same three frameworks.
 
 ## In the demo
 
 The demo's control plane has the sink as its time-stamping authority
-(`examples/secops/sink`, with OpenSSL). In step 20 of `python examples/agents/demo_agent.py`,
-an administrator makes a checkpoint, the authority time-stamps it, and OpenSSL verifies
-the time-stamp; then the EU AI Act report and the evidence pack for the day.
+(`examples/secops/sink`, with OpenSSL), and a rekor-tiles of the stack's own as its
+transparency log (`rekor`, its key made on the first start). In step 20 of
+`python examples/agents/demo_agent.py`, an administrator makes a checkpoint, the authority
+time-stamps it, and OpenSSL verifies the time-stamp; the log takes it, and its proof is
+checked offline (with cosign too, when it is installed); then the EU AI Act report and the
+evidence pack for the day.
 
 ## In the ledger
 
