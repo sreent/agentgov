@@ -271,7 +271,9 @@ class ModelGuard:
         if chain is not None:
             opa_input["chain"] = chain.links
         try:
-            decision, decision_id = await self.p.opa.evaluate("agentgov/models/decision", opa_input)
+            decision, decision_id = await self.p.decide(
+                "agentgov/models/decision", opa_input, kind="model"
+            )
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
             reasons = ["Policy engine unavailable; the prompt was not sent"]

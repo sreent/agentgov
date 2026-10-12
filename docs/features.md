@@ -71,6 +71,13 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 | `posture-checks` | off, **on** | Scans regularly and raises findings: agents without owners or sponsors, attestations that are due, stale agents, broad grants and tool servers awaiting review. Off, nothing is scanned, and findings already raised stay until resolved |
 | `instruction-checks` | off, **on** | Checks agents' instructions (their system prompts) for unsafe content, with AgentGov's rules and with IBM Granite Guardian where it is configured. Off, instructions are kept but not checked; they are checked as soon as checks are on again |
 
+### Policy
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `external-decision-point` | **off**, monitor, enforce | Has the processor also ask an AuthZEN decision point of yours (Cedar, Cerbos, Topaz, OpenFGA, Keycloak...) about each call to a tool, a model or another agent that AgentGov's policies let through: who, the method, the tool, model or agent, and what was found in the call, never its content ([AuthZEN](policies.md#your-own-decision-point-beside-agentgovs)). Enforced, calls it denies are refused and calls it says need approval wait for one; if it can't be asked, calls are refused. Monitored, each call's decision records what it would have done. Needs `AGENTGOV_AUTHZEN_URL` where the processor runs |
+| `authzen-decision-point` | **off**, on | Answers AuthZEN evaluations with AgentGov's policies at `/access/v1/evaluation` on the control plane, for enforcement points other than AgentGov's gateway ([AuthZEN](policies.md#agentgov-as-a-decision-point)). Off, the endpoints answer 404. Needs OPA where the control plane runs |
+
 ### Developer tools
 
 | Feature | Modes | What it does |

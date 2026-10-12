@@ -202,6 +202,9 @@ the gateway. It shows each control in turn:
     The rules see data and let the result through; a classifier (the mock model stands in
     for IBM Granite Guardian) flags it in the background, and once the classifier is
     enforced, the same result is withheld ([detection](docs/detection.md)).
+22. **AuthZEN**: another enforcement point asks AgentGov's policies, in the standard way,
+    whether the billing agent may call two tools: one it was granted, and one it wasn't
+    ([AuthZEN](docs/policies.md#authzen)).
 
 Then look around:
 
@@ -272,7 +275,9 @@ deny contains msg if {
 ```
 
 See [Policies](docs/policies.md) for the decision model, the input document, testing and
-what-if evaluation.
+what-if evaluation. AgentGov's decisions are also an AuthZEN decision point for other
+enforcement points, and the processor can ask a decision point of yours beside them
+([AuthZEN](docs/policies.md#authzen)).
 
 ## Connecting your agents
 
@@ -375,7 +380,7 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   alerts in Teams and Slack, and how much the security team's tools may do
 * [Running in production](docs/production.md): several control-plane replicas, people
   working at once, mutual TLS between the components, and signed policy bundles
-* [Policies](docs/policies.md)
+* [Policies](docs/policies.md), and AuthZEN both ways
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)
 * [Roadmap](docs/roadmap.md)

@@ -168,7 +168,9 @@ class A2AGuard:
         if person:
             opa_input["user"] = person
         try:
-            decision, decision_id = await self.p.opa.evaluate("agentgov/a2a/decision", opa_input)
+            decision, decision_id = await self.p.decide(
+                "agentgov/a2a/decision", opa_input, kind="agent"
+            )
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
             reasons = ["Policy engine unavailable; the call was not passed on"]

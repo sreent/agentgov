@@ -278,6 +278,15 @@ class Settings:
     # Where the processor asks OPA for decisions, and the control plane for What if, such
     # as http://opa:8181.
     opa_url: str | None = None
+    # An AuthZEN decision point of your own (OpenID AuthZEN Authorization API 1.0), which
+    # the processor also asks about the calls AgentGov's policies let through, as the
+    # external-decision-point feature says: its base URL, such as https://pdp.example.com
+    # (docs/policies.md#authzen).
+    authzen_url: str | None = None
+    # The bearer token it asks for, if it asks for one.
+    authzen_token: str | None = None
+    # Seconds to wait for its answer.
+    authzen_timeout_seconds: float = 2.0
     # Longest a bundle long-poll request is held open.
     bundle_long_poll_seconds: int = 30
     # A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles
@@ -417,6 +426,10 @@ class Settings:
             )
         if self.ledger_checkpoint_hours < 0:
             raise ValueError("AGENTGOV_LEDGER_CHECKPOINT_HOURS must be 0 (on demand) or more")
+        if self.authzen_url and not self.authzen_url.startswith(("https://", "http://")):
+            raise ValueError("AGENTGOV_AUTHZEN_URL is the decision point's http(s) URL")
+        if self.authzen_timeout_seconds <= 0:
+            raise ValueError("AGENTGOV_AUTHZEN_TIMEOUT_SECONDS must be more than 0")
         if self.ledger_tsa_url and not self.ledger_tsa_url.startswith(("https://", "http://")):
             raise ValueError("AGENTGOV_LEDGER_TSA_URL is the authority's http(s) URL")
         if self.ledger_rekor_url:

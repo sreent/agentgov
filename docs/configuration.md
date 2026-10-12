@@ -264,6 +264,9 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_OPA_URL` | — | Where the processor asks OPA for decisions, and the control plane for What if, such as `http://opa:8181`. |
+| `AGENTGOV_AUTHZEN_URL` | — | An AuthZEN decision point of your own (OpenID AuthZEN Authorization API 1.0), which the processor also asks about the calls AgentGov's policies let through, as the external-decision-point feature says: its base URL, such as `https://pdp.example.com` ([policies](policies.md)#authzen). |
+| `AGENTGOV_AUTHZEN_TOKEN` (secret) | — | The bearer token it asks for, if it asks for one. |
+| `AGENTGOV_AUTHZEN_TIMEOUT_SECONDS` | `2.0` | Seconds to wait for its answer. |
 | `AGENTGOV_BUNDLE_LONG_POLL_SECONDS` | `30` | Longest a bundle long-poll request is held open. |
 | `AGENTGOV_BUNDLE_SIGNING_KEY_FILE` | — | A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles with; OPA verifies each with the matching certificate or public key, and refuses one that doesn't verify ([production](production.md)). `agentgov bundle-signing-key DIR` makes a pair. Unset, bundles go unsigned. |
 | `AGENTGOV_BUNDLE_SIGNING_KEY_ID` | `agentgov` | The key's name: OPA's configuration names the same one (bundles.&lt;name&gt;.signing.keyid). |

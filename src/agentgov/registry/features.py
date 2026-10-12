@@ -50,6 +50,7 @@ GROUPS = {
     "developers": "Developer tools",
     "identity": "Identity",
     "lifecycle": "Lifecycle",
+    "policy": "Policy",
     "microsoft": "Microsoft",
     "secops": "Security operations",
 }
@@ -315,6 +316,42 @@ CATALOG: tuple[Feature, ...] = (
             MONITOR: "They are let through and recorded, and with discovery on, added to the "
             "inventory as discovered agents.",
         },
+    ),
+    Feature(
+        "external-decision-point",
+        "Your own decision point",
+        "policy",
+        "The processor also asks an AuthZEN decision point of yours (Cedar, Cerbos, Topaz, "
+        "OpenFGA, Keycloak...) about each call to a tool, a model or another agent that "
+        "AgentGov's policies let through: who, the method, the tool, model or agent, and "
+        "what was found in the call, never its content.",
+        CONTROL,
+        OFF,
+        {
+            ENFORCE: "Calls it denies are refused, with its reasons; calls it says need "
+            "approval wait for one; what it asks to mask is masked. Unreachable, it refuses.",
+            MONITOR: "Calls go as AgentGov decides; each call's decision records what it "
+            "would have done.",
+            OFF: "It isn't asked.",
+        },
+        needs="AGENTGOV_AUTHZEN_URL where the processor runs",
+    ),
+    Feature(
+        "authzen-decision-point",
+        "AgentGov as an AuthZEN decision point",
+        "policy",
+        "AgentGov's policies answer AuthZEN evaluations (OpenID AuthZEN 1.0) at "
+        "/access/v1/evaluation on the control plane, so that enforcement points other than "
+        "AgentGov's gateway can ask whether an agent may call a tool, a model or another "
+        "agent.",
+        SWITCH,
+        OFF,
+        {
+            ON: "Evaluations are answered, for callers with a role that reads AgentGov, or "
+            "the service token.",
+            OFF: "The endpoints answer 404.",
+        },
+        needs="OPA (AGENTGOV_OPA_URL) where the control plane runs",
     ),
     Feature(
         "discovery",
@@ -647,6 +684,16 @@ def unmet(key: str, mode: str, settings: Settings) -> str | None:
             )
         if mode == ENFORCE and not settings.opa_url:
             return "enforcing Copilot Studio threat detection needs AGENTGOV_OPA_URL"
+    if key == "external-decision-point" and mode != OFF and not settings.authzen_url:
+        return (
+            "your own decision point needs its URL: set AGENTGOV_AUTHZEN_URL where the "
+            "processor runs"
+        )
+    if key == "authzen-decision-point" and mode != OFF and not settings.opa_url:
+        return (
+            "AgentGov answers AuthZEN with OPA's decisions: set AGENTGOV_OPA_URL where the "
+            "control plane runs"
+        )
     if key == "traffic-classifier" and mode != OFF and not settings.guardian_url:
         return (
             "the classifier needs IBM Granite Guardian: set AGENTGOV_GUARDIAN_URL where the "

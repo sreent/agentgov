@@ -125,6 +125,7 @@ def run(
     response=None,
     metadata=(),
     traffic_classifier=None,
+    decision_point=None,
 ):
     """Start a real gRPC server, send one message, return (reply, control_plane)."""
     cp = cp or FakeControlPlane()
@@ -138,6 +139,7 @@ def run(
             recorder=recorder,
             presidio=presidio,
             traffic_classifier=traffic_classifier,
+            decision_point=decision_point,
         )
         server = grpc.aio.server()
         pb_grpc.add_ExtMcpServicer_to_server(processor, server)

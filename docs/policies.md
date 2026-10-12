@@ -292,6 +292,88 @@ the ledger records what the policies would have decided.
                 "arguments": {"customer_id": "c-003"}, "detections": {"categories": []}}}'
   ```
 
+## AuthZEN
+
+[AuthZEN](https://openid.net/specs/authorization-api-1_0.html) (the OpenID Foundation's
+Authorization API, 1.0) is a standard way for an enforcement point to ask a decision
+point whether a subject may do an action on a resource. AgentGov speaks it both ways, so
+that the decision point and the enforcement points can each be swapped without the other.
+
+### AgentGov as a decision point
+
+With the `authzen-decision-point` [feature](features.md) on (it is off by default), the
+control plane answers AuthZEN evaluations with AgentGov's policies, for enforcement points
+other than AgentGov's gateway: another gateway, an API, an agent framework's own checks.
+
+| | |
+|---|---|
+| `GET /.well-known/authzen-configuration` | Its metadata: where to ask |
+| `POST /access/v1/evaluation` | One evaluation |
+| `POST /access/v1/evaluations` | Several: the batch's `subject`, `action`, `resource` and `context` fill in what each leaves out, run as `options.evaluations_semantic` says (`execute_all`, `deny_on_first_deny`, `permit_on_first_permit`) |
+
+Callers authenticate as for AgentGov's API, with a role that reads it, or the service
+token. A call, in AuthZEN's terms (as the COAZ binding for MCP has it, with the tool's
+server in its ID, since one gateway fronts many servers):
+
+```json
+{
+  "subject": {"type": "agent", "id": "agent-support-bot"},
+  "action": {"name": "tools/call"},
+  "resource": {"type": "tool", "id": "crm/get_customer"},
+  "context": {"detections": {"categories": ["pii"]}}
+}
+```
+
+The subject is an agent (its AgentGov ID or client ID), or a person
+(`{"type": "user", "id": ..., "properties": {"username", "email", "groups", "roles"}}`)
+with the agent acting for them in `context.agent`. The resource is a tool
+(`<server>/<tool>`), a model (`<provider>/<model>`, action `chat`) or another agent (its
+name, action `SendMessage`). `context.chain` is who handed the work down, and
+`context.agentgov` more of AgentGov's own input ([what a policy sees](#what-a-policy-sees)).
+The answer is AgentGov's decision, `data.agentgov.authzen.evaluation`:
+
+```json
+{
+  "decision": false,
+  "context": {
+    "reason": "denied",
+    "reasons": ["crm/export_all is not granted to agent support-bot"],
+    "monitored": [],
+    "obligations": [],
+    "agentgov": {"effect": "deny", "agent": {"id": "agt_…", "name": "support-bot"}}
+  }
+}
+```
+
+`reason` is `allowed`, `denied` or `approval_required` (as the AuthZEN profile for access
+requests has it). An allowed call that must have personal data masked carries an
+obligation to do it (`{"type": "custom", "properties": {"vendor": "agentgov", "action":
+"redact", "categories": ["pii"]}}`): an enforcement point that can't must deny the call.
+AgentGov doesn't record these evaluations: the enforcement point that asks records what
+it does.
+
+### Your own decision point beside AgentGov's
+
+With the `external-decision-point` feature and `AGENTGOV_AUTHZEN_URL` where the processor
+runs, the processor also asks an AuthZEN decision point of yours (Cedar, through a service
+such as Amazon Verified Permissions' AuthZEN sample; Cerbos; Topaz; OpenFGA; Keycloak;
+another AgentGov) about each call to a tool, a model or another agent that AgentGov's
+policies let through, in the shape above, with a bearer token if it needs one
+(`AGENTGOV_AUTHZEN_TOKEN`) and the call's decision ID as its `X-Request-ID`. What the call
+carries (arguments, prompts, messages) never goes: only who, what and on what, and the
+categories of what was found in it.
+
+| Mode | |
+|---|---|
+| `enforce` | Calls it denies are refused, with its reasons. A call it says needs approval waits for one, through AgentGov's approvals. What its `agentgov` obligation lists is masked; any other obligation on a permit denies the call. If it can't be asked within `AGENTGOV_AUTHZEN_TIMEOUT_SECONDS`, the call is refused |
+| `monitor` | Calls go as AgentGov decides; each decision records what it would have done (`external-decision-point: would deny: ...`) |
+| `off` (the default) | It isn't asked |
+
+In the Helm chart, set `processor.env.AGENTGOV_AUTHZEN_URL`, and the token from a Secret
+through `processor.envFrom`. AgentGov's own controls keep deciding beside it, each as its
+feature says; turn those off that your decision point takes over. It isn't asked about what AgentGov already refuses,
+nor about the answers that come back, which are AgentGov's to check.
+
 ## In-process enforcement with the Agent Governance Toolkit
 
 Agents built with Microsoft's [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)

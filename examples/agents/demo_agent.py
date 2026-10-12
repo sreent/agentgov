@@ -1353,6 +1353,40 @@ async def deeper_detection() -> None:
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
 
 
+def authzen_decision_point() -> None:
+    step("22. AuthZEN: another enforcement point asks AgentGov's policies, in a standard way")
+    admin("PUT", "/v1/features/authzen-decision-point", json={"mode": "on"})
+    try:
+        where = httpx.get(f"{CONTROL_PLANE}/.well-known/authzen-configuration", timeout=10)
+        show(
+            "discovered:",
+            where.status_code == 200,
+            f"evaluations at {where.json().get('access_evaluation_endpoint')}",
+        )
+
+        def may(tool: str) -> dict[str, Any]:
+            return admin(
+                "POST",
+                "/access/v1/evaluation",
+                json={
+                    "subject": {"type": "agent", "id": f"agent-{BILLING}"},
+                    "action": {"name": "tools/call"},
+                    "resource": {"type": "tool", "id": tool},
+                    "context": {"detections": {"categories": []}},
+                },
+            )
+
+        allowed, denied = may("crm/get_customer"), may("crm/delete_customer")
+        show(
+            "AuthZEN:",
+            allowed["decision"] is True and denied["decision"] is False,
+            f"{BILLING} may call crm/get_customer ({allowed['context']['reason']}); "
+            f"crm/delete_customer: {'; '.join(denied['context']['reasons'])}",
+        )
+    finally:
+        admin("PUT", "/v1/features/authzen-decision-point", json={"mode": "off"})
+
+
 def main() -> None:
     wait_for_gateway("/mcp/crm", MODEL_ROUTE, A2A_ROUTE)
     step("1. Registration: a new agent is requested, approved and given an identity")
@@ -1368,6 +1402,7 @@ def main() -> None:
         management_rules(name)
         evidence(name)
         asyncio.run(deeper_detection())
+        authzen_decision_point()
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")
         print(f"{DIM}Open {CONTROL_PLANE}/ui for the admin view.{RESET}")
