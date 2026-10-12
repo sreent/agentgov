@@ -21,6 +21,9 @@ and doesn't apply blueprints to them, because they never call the gateway. When 
 one source reports the same agent (a Copilot Studio agent published to Microsoft 365, and
 its Entra agent identity), AgentGov matches them by Entra agent ID.
 
+Agents built on AWS, Google Cloud, Salesforce and Databricks are read the same way, by
+connectors of AgentGov's own ([other platforms](other-platforms.md)).
+
 Microsoft's other services can tell AgentGov more, or let it act: the Purview audit log
 (who uses each agent, and attacks on them), Defender's alerts, Power Platform's connector
 policies and Copilot Studio's threat detection. Each one is optional, and AgentGov works

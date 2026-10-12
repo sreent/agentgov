@@ -858,7 +858,9 @@ def replicas() -> None:
 def agents_list(
     status: str | None = None,
     source: str | None = typer.Option(
-        None, help="registered, discovered:<how>, or platform:microsoft-365|copilot-studio."
+        None,
+        help="registered, discovered:<how>, or platform:<platform> (microsoft-365, "
+        "copilot-studio, aws, google-cloud, salesforce, databricks).",
     ),
 ) -> None:
     """List agents (all but deleted ones, unless --status is given)."""
@@ -2468,9 +2470,14 @@ def platforms_status() -> None:
     rows = []
     for src in view["sources"]:
         last = src["last_sync"] or {}
-        state = "not configured" if not src["configured"] else "never"
-        if last:
+        if not src["configured"]:
+            state = "not configured"
+        elif src.get("turned_on") is False:
+            state = "turned off in features"
+        elif last:
             state = "ok" if last["ok"] else f"failed: {last['message']}"
+        else:
+            state = "never"
         rows.append({**src, "last_sync": last.get("at"), "state": state})
     _table(rows, ["source", "mode", "agents", "last_sync", "state"])
     typer.echo()
@@ -2496,6 +2503,8 @@ def platforms_status() -> None:
 
 
 SYNC_SOURCES = ("microsoft-365", "copilot-studio", "entra-agent-id", "purview-audit", "defender")
+# Platforms read by a connector of AgentGov's own (docs/other-platforms.md).
+OTHER_PLATFORMS = ("aws", "google-cloud", "salesforce", "databricks")
 
 
 def _sync_summary(source: str, c: dict[str, Any]) -> str:
@@ -2508,7 +2517,12 @@ def _sync_summary(source: str, c: dict[str, Any]) -> str:
         )
     if source == "defender":
         return f"{c['alerts']} agent alerts, {c['matched']} matched, {c['resolved']} resolved"
-    return f"{c['created']} new, {c['updated']} updated, {c['skipped']} skipped"
+    summary = f"{c['created']} new, {c['updated']} updated, {c['skipped']} skipped"
+    if source in OTHER_PLATFORMS:
+        summary += f", {c['findings']} open findings"
+        if c.get("failed"):
+            summary += f"; {c['failed']} parts couldn't be read (see `agentgov platforms status`)"
+    return summary
 
 
 @platforms_app.command("sync")
@@ -2516,11 +2530,11 @@ def platforms_sync(
     source: str = typer.Argument(
         "all",
         help="all (every connection AgentGov's app may use), microsoft-365, entra-agent-id, "
-        "purview-audit, defender, or copilot-studio (as you, after `agentgov login` through "
-        "Microsoft Entra ID).",
+        "purview-audit, defender, copilot-studio (as you, after `agentgov login` through "
+        "Microsoft Entra ID), or another platform: aws, google-cloud, salesforce, databricks.",
     ),
 ) -> None:
-    """Sync now (AgentGov's app connections also sync on a schedule)."""
+    """Sync now (AgentGov's app connections and other platforms also sync on a schedule)."""
     if source == "all":
         results = _call("POST", "/v1/platforms/sync", timeout=LONG_TIMEOUT)
         failed = False
@@ -2535,8 +2549,8 @@ def platforms_sync(
         if failed:
             raise typer.Exit(1)
         return
-    if source not in SYNC_SOURCES:
-        _fail(f"the source is all or one of {', '.join(SYNC_SOURCES)}")
+    if source not in SYNC_SOURCES + OTHER_PLATFORMS:
+        _fail(f"the source is all or one of {', '.join(SYNC_SOURCES + OTHER_PLATFORMS)}")
     counts = _call("POST", f"/v1/platforms/{source}/sync", timeout=LONG_TIMEOUT)
     if source in ("microsoft-365", "copilot-studio"):
         _synced(source, "synced", counts)

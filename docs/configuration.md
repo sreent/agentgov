@@ -250,6 +250,26 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | `AGENTGOV_COPILOT_STUDIO_TENANT_ID` | — | The tenant ID (a GUID) whose apps may call. By default the tenant of `AGENTGOV_M365_TENANT_ID` or of sign-in through Entra ID, when that is a GUID. |
 | `AGENTGOV_COPILOT_STUDIO_ON_ERROR` | `block` | The answer when AgentGov cannot decide in time (enforce mode): `block` or `allow`. |
 
+### Agents on other platforms
+
+AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into the inventory, each where its settings below are set ([other-platforms](other-platforms.md)).
+
+| Variable | Default | What it does |
+|---|---|---|
+| `AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS` | `3600` | Seconds between reads of each platform; 0 reads them only on demand. |
+| `AGENTGOV_AWS_REGIONS` | empty | AWS: the regions to read Amazon Bedrock agents and AgentCore's harnesses and agent runtimes in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS isn't read). AgentGov signs its requests with AWS credentials from the usual places: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, IAM roles for service accounts or Pod Identity on EKS, or the instance's role. |
+| `AGENTGOV_AWS_ROLE_ARNS` | empty | Roles to assume, comma-separated ARNs, to read other AWS accounts too (in the same regions), with the credentials above. |
+| `AGENTGOV_AWS_EXTERNAL_ID` | — | The external ID those roles' trust policies ask for, if any. |
+| `AGENTGOV_GOOGLE_CLOUD_PROJECTS` | empty | Google Cloud: the projects to read Agent Runtime (formerly Vertex AI Agent Engine) agents in, comma-separated project IDs (empty: Google Cloud isn't read). AgentGov gets its tokens where Google's libraries do: the file GOOGLE_APPLICATION_CREDENTIALS names (a workload identity federation configuration, or a service account key), gcloud's application default credentials, or the metadata server (Workload Identity on GKE). |
+| `AGENTGOV_GOOGLE_CLOUD_REGIONS` | `us-central1` | The regions to read them in, comma-separated (us and eu for the multi-regions). |
+| `AGENTGOV_SALESFORCE_URL` | — | Salesforce: the org to read Agentforce agents in, by its My Domain URL, such as `https://contoso.my.salesforce.com` (empty: Salesforce isn't read). |
+| `AGENTGOV_SALESFORCE_CLIENT_ID`<br>`AGENTGOV_SALESFORCE_CLIENT_SECRET` (secret) | —<br>— | The External Client App AgentGov signs in with: its consumer key, and its consumer secret, for the client credentials flow (as the app's Run As user). |
+| `AGENTGOV_SALESFORCE_USERNAME`<br>`AGENTGOV_SALESFORCE_PRIVATE_KEY_FILE` | —<br>— | Instead of the secret, the JWT bearer flow: the user AgentGov signs in as, and the private key (PEM) of the certificate uploaded to the app. |
+| `AGENTGOV_DATABRICKS_HOSTS` | empty | Databricks: the workspaces to read agents in, comma-separated URLs, such as `https://dbc-1234.cloud.databricks.com` (empty: Databricks isn't read). |
+| `AGENTGOV_DATABRICKS_CLIENT_ID`<br>`AGENTGOV_DATABRICKS_CLIENT_SECRET` (secret) | —<br>— | The service principal AgentGov reads as (OAuth machine-to-machine): its application ID and an OAuth secret of its own. |
+| `AGENTGOV_DATABRICKS_TOKEN` (secret) | — | Instead, a personal access token, valid in the workspaces named. |
+| `AGENTGOV_DATABRICKS_READ` | `serving,apps,genie` | What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent Bricks agents) and genie (Genie agents). |
+
 ### Classifier, optional
 
 | Variable | Default | What it does |

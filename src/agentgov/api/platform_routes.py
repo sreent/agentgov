@@ -45,7 +45,9 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
     """Each source of platform agents, how many it reported and how its last sync went."""
     rt = request.app.state.rt
     with rt.db.session() as s:
-        view = platforms.overview(s, m365_configured=rt.m365 is not None)
+        view = platforms.overview(
+            s, m365_configured=rt.m365 is not None, connected=set(rt.platforms)
+        )
         detection = threat_detection.summary(s, features.mode(s, threat_detection.FEATURE))
         links = connections.state(s, rt.settings, threat_detection=detection)
     return {
@@ -137,10 +139,24 @@ def sync_copilot_studio(request: Request, principal: Principal = Depends(admin))
 def sync_source(
     request: Request, source: str, principal: Principal = Depends(admin)
 ) -> dict[str, Any]:
-    """Run one of the app's connections now: entra-agent-id, purview-audit or defender."""
+    """Run one of the app's connections now (entra-agent-id, purview-audit or defender), or
+    read another platform's agents (aws, google-cloud, salesforce or databricks)."""
+    rt = request.app.state.rt
+    if source in platforms.INVENTORY_SOURCES:
+        if source not in rt.platforms:
+            raise HTTPException(
+                409, f"{platforms.SOURCES[source]} is not configured (docs/other-platforms.md)"
+            )
+        with rt.db.session() as s:
+            if not features.is_on(s, source):
+                raise HTTPException(409, f"{source} is turned off: turn it on in Features first")
+        try:
+            return rt.sync_platform(source, actor=principal.actor, wait=JOB_WAIT_SECONDS)
+        except PlatformError as exc:
+            raise HTTPException(502, str(exc)) from exc
     if source not in connections.APP_CONNECTIONS:
         raise HTTPException(404, f"no connection {source!r} to sync")
-    return _app_sync(request.app.state.rt, source, principal.actor)
+    return _app_sync(rt, source, principal.actor)
 
 
 @router.get("/connectors")

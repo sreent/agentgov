@@ -121,7 +121,14 @@ VERBS = {
     DELETE: ("delete", "deleted"),
     REVOKE: ("revoke the access packages of", "revoked the access packages of"),
 }
-PLATFORMS = {"microsoft-365": "Microsoft 365", "copilot-studio": "Copilot Studio"}
+PLATFORMS = {
+    "microsoft-365": "Microsoft 365",
+    "copilot-studio": "Copilot Studio",
+    "aws": "AWS",
+    "google-cloud": "Google Cloud",
+    "salesforce": "Salesforce",
+    "databricks": "Databricks",
+}
 # Entries listed per preview, at most.
 PREVIEW_LIMIT = 200
 

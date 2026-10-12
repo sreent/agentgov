@@ -306,6 +306,33 @@ kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
 Google rotates the keys without notice; Keycloak fetches new keys when a token names one it
 hasn't seen.
 
+## Agents built on Google Cloud
+
+AgentGov can read the Agent Runtime agents in your projects into its inventory ([other
+platforms](../other-platforms.md#google-cloud)). Give it a service account that may read them,
+which its Kubernetes service account acts as through Workload Identity, then name the projects
+and regions to read:
+
+```bash
+gcloud iam roles create agentgovAgentReader --project=$PROJECT \
+  --title="AgentGov agent reader" \
+  --permissions=aiplatform.reasoningEngines.list,aiplatform.reasoningEngines.getIamPolicy,resourcemanager.projects.get
+gcloud iam service-accounts create agentgov-reader
+READER=agentgov-reader@$PROJECT.iam.gserviceaccount.com
+gcloud projects add-iam-policy-binding $PROJECT \
+  --role=projects/$PROJECT/roles/agentgovAgentReader --member=serviceAccount:$READER
+gcloud iam service-accounts add-iam-policy-binding $READER \
+  --role=roles/iam.workloadIdentityUser --member="serviceAccount:$PROJECT.svc.id.goog[agentgov/agentgov]"
+helm upgrade agentgov deploy/helm/agentgov -n agentgov --reuse-values \
+  --set "serviceAccount.annotations.iam\.gke\.io/gcp-service-account=$READER" \
+  --set controlPlane.env.AGENTGOV_GOOGLE_CLOUD_PROJECTS=$PROJECT \
+  --set controlPlane.env.AGENTGOV_GOOGLE_CLOUD_REGIONS=$REGION
+```
+
+To read other projects too, create the role in each (or once in your organisation) and grant it
+to the same service account there. AgentGov's pods share the Kubernetes service account, so
+each of them may read the agents; only the control plane does.
+
 ## Upgrading and removing it
 
 ```bash

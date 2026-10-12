@@ -52,6 +52,7 @@ GROUPS = {
     "lifecycle": "Lifecycle",
     "policy": "Policy",
     "microsoft": "Microsoft",
+    "platforms": "Other platforms",
     "secops": "Security operations",
 }
 
@@ -653,6 +654,66 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "AgentGov refuses Copilot Studio's calls.",
         },
         needs="AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS and the tenant ID (and OPA to enforce)",
+    ),
+    Feature(
+        "aws",
+        "AWS agents",
+        "platforms",
+        "AgentGov reads the agents on AWS into the inventory (Amazon Bedrock agents, and "
+        "AgentCore agent runtimes and gateways), with their risky settings as findings, on a "
+        "schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has AWS credentials and regions to read.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_AWS_REGIONS, and AWS credentials allowed to read them",
+    ),
+    Feature(
+        "google-cloud",
+        "Google Cloud agents",
+        "platforms",
+        "AgentGov reads the agents on Google Cloud into the inventory (Agent Runtime agents, "
+        "formerly Vertex AI Agent Engine), with their risky settings as findings, on a "
+        "schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has Google credentials and projects to read.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_GOOGLE_CLOUD_PROJECTS, and Google credentials allowed to read them",
+    ),
+    Feature(
+        "salesforce",
+        "Salesforce agents",
+        "platforms",
+        "AgentGov reads the Agentforce agents in your Salesforce org into the inventory, with "
+        "their risky settings as findings and their topics' instructions checked, on a "
+        "schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has the org's URL and an app to sign in with.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_SALESFORCE_URL, and an External Client App allowed to read the org",
+    ),
+    Feature(
+        "databricks",
+        "Databricks agents",
+        "platforms",
+        "AgentGov reads the agents in your Databricks workspaces into the inventory (agents on "
+        "Model Serving, Agent Bricks agents and Genie agents), with their risky settings as "
+        "findings, on a schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has workspaces to read and a service principal there.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_DATABRICKS_HOSTS, and a service principal in those workspaces",
     ),
     Feature(
         "security-operations",

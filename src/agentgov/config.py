@@ -38,6 +38,18 @@ REPLACED = {
 # as AGENTGOV_GATEWAY_PORT=tcp://10.96.0.12:8080 for a Service named agentgov-gateway: never
 # one of these settings.
 _SERVICE_LINK = re.compile(r"^(?:tcp|udp|sctp)://[^/\s]+:\d+$")
+# An AWS region (us-east-1, us-gov-west-1) and an IAM role's ARN.
+AWS_REGION = re.compile(r"^[a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\d{1,2}$")
+AWS_ROLE = re.compile(r"^arn:aws(?:-[a-z]+)*:iam::\d{12}:role/[\w+=,.@/-]{1,512}$")
+# A Google Cloud project ID (6-30 characters; a domain-scoped one has a prefix), and a region
+# (us-central1) or multi-region (us, eu).
+GOOGLE_PROJECT = re.compile(r"^(?:[a-z0-9.-]+:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+GOOGLE_REGION = re.compile(r"^(?:[a-z]+-[a-z]+\d{1,2}|us|eu)$")
+# A Salesforce org's My Domain URL (https://contoso.my.salesforce.com), with nothing after it.
+SALESFORCE_URL = re.compile(r"^https://[A-Za-z0-9.-]+/?$")
+# A Databricks workspace's URL (https://dbc-1234.cloud.databricks.com), and what to read there.
+DATABRICKS_URL = SALESFORCE_URL
+DATABRICKS_KINDS = ("serving", "apps", "genie")
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
@@ -260,6 +272,55 @@ class Settings:
     # The answer when AgentGov cannot decide in time (enforce mode): "block" or "allow".
     copilot_studio_on_error: str = "block"
 
+    # --- Agents on other platforms --------------------------------------------------
+    # AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into the
+    # inventory, each where its settings below are set (docs/other-platforms.md).
+
+    # Seconds between reads of each platform; 0 reads them only on demand.
+    platform_sync_interval_seconds: int = 3600
+    # AWS: the regions to read Amazon Bedrock agents and AgentCore's harnesses and agent
+    # runtimes in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS isn't read).
+    # AgentGov signs its requests with AWS credentials from the usual places:
+    # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, IAM roles for service accounts or Pod
+    # Identity on EKS, or the instance's role.
+    aws_regions: str = ""
+    # Roles to assume, comma-separated ARNs, to read other AWS accounts too (in the same
+    # regions), with the credentials above.
+    aws_role_arns: str = ""
+    # The external ID those roles' trust policies ask for, if any.
+    aws_external_id: str | None = None
+    # Google Cloud: the projects to read Agent Runtime (formerly Vertex AI Agent Engine)
+    # agents in, comma-separated project IDs (empty: Google Cloud isn't read). AgentGov gets
+    # its tokens where Google's libraries do: the file GOOGLE_APPLICATION_CREDENTIALS names (a
+    # workload identity federation configuration, or a service account key), gcloud's
+    # application default credentials, or the metadata server (Workload Identity on GKE).
+    google_cloud_projects: str = ""
+    # The regions to read them in, comma-separated (us and eu for the multi-regions).
+    google_cloud_regions: str = "us-central1"
+    # Salesforce: the org to read Agentforce agents in, by its My Domain URL, such as
+    # https://contoso.my.salesforce.com (empty: Salesforce isn't read).
+    salesforce_url: str | None = None
+    # The External Client App AgentGov signs in with: its consumer key, and its consumer
+    # secret, for the client credentials flow (as the app's Run As user).
+    salesforce_client_id: str | None = None
+    salesforce_client_secret: str | None = None
+    # Instead of the secret, the JWT bearer flow: the user AgentGov signs in as, and the
+    # private key (PEM) of the certificate uploaded to the app.
+    salesforce_username: str | None = None
+    salesforce_private_key_file: str | None = None
+    # Databricks: the workspaces to read agents in, comma-separated URLs, such as
+    # https://dbc-1234.cloud.databricks.com (empty: Databricks isn't read).
+    databricks_hosts: str = ""
+    # The service principal AgentGov reads as (OAuth machine-to-machine): its application
+    # ID and an OAuth secret of its own.
+    databricks_client_id: str | None = None
+    databricks_client_secret: str | None = None
+    # Instead, a personal access token, valid in the workspaces named.
+    databricks_token: str | None = None
+    # What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent
+    # Bricks agents) and genie (Genie agents).
+    databricks_read: str = "serving,apps,genie"
+
     # --- Classifier, optional (docs/detection.md) ---------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
     # Ollama), e.g. http://guardian:8000/v1. The control plane asks it about agent
@@ -418,6 +479,58 @@ class Settings:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
         if self.issues_interval_seconds < 0:
             raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
+        if self.platform_sync_interval_seconds < 0:
+            raise ValueError(
+                "AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS must be 0 (on demand only) or more"
+            )
+        for region in self.aws_region_list():
+            if not AWS_REGION.match(region):
+                raise ValueError(f"AGENTGOV_AWS_REGIONS: {region!r} is not an AWS region")
+        for arn in self.aws_role_arn_list():
+            if not AWS_ROLE.match(arn):
+                raise ValueError(f"AGENTGOV_AWS_ROLE_ARNS: {arn!r} is not an IAM role's ARN")
+        if self.aws_role_arn_list() and not self.aws_region_list():
+            raise ValueError("AGENTGOV_AWS_ROLE_ARNS needs AGENTGOV_AWS_REGIONS")
+        for project in self.google_cloud_project_list():
+            if not GOOGLE_PROJECT.match(project):
+                raise ValueError(f"AGENTGOV_GOOGLE_CLOUD_PROJECTS: {project!r} is not a project ID")
+        for region in self.google_cloud_region_list():
+            if not GOOGLE_REGION.match(region):
+                raise ValueError(
+                    f"AGENTGOV_GOOGLE_CLOUD_REGIONS: {region!r} is not a Google Cloud region"
+                )
+        if self.salesforce_url:
+            if not SALESFORCE_URL.match(self.salesforce_url):
+                raise ValueError(
+                    "AGENTGOV_SALESFORCE_URL must be the org's My Domain URL, such as "
+                    "https://contoso.my.salesforce.com"
+                )
+            if not self.salesforce_client_id:
+                raise ValueError("AGENTGOV_SALESFORCE_URL needs AGENTGOV_SALESFORCE_CLIENT_ID")
+            if not self.salesforce_client_secret and not (
+                self.salesforce_username and self.salesforce_private_key_file
+            ):
+                raise ValueError(
+                    "AGENTGOV_SALESFORCE_CLIENT_ID needs AGENTGOV_SALESFORCE_CLIENT_SECRET, or "
+                    "AGENTGOV_SALESFORCE_USERNAME and AGENTGOV_SALESFORCE_PRIVATE_KEY_FILE"
+                )
+        for host in self.databricks_host_list():
+            if not DATABRICKS_URL.match(host):
+                raise ValueError(
+                    f"AGENTGOV_DATABRICKS_HOSTS: {host!r} is not a workspace's URL, such as "
+                    "https://dbc-1234.cloud.databricks.com"
+                )
+        signs_in = bool(self.databricks_client_id and self.databricks_client_secret)
+        if self.databricks_host_list() and not (signs_in or self.databricks_token):
+            raise ValueError(
+                "AGENTGOV_DATABRICKS_HOSTS needs AGENTGOV_DATABRICKS_CLIENT_ID and "
+                "AGENTGOV_DATABRICKS_CLIENT_SECRET, or AGENTGOV_DATABRICKS_TOKEN"
+            )
+        for kind in self.databricks_kind_list():
+            if kind not in DATABRICKS_KINDS:
+                raise ValueError(
+                    f"AGENTGOV_DATABRICKS_READ: {kind!r} is not serving, apps or genie"
+                )
         if self.classifier_timeout_seconds <= 0 or self.classifier_concurrency < 1:
             raise ValueError(
                 "AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS must be positive and "
@@ -539,6 +652,24 @@ class Settings:
             return configured
         scheme, _, rest = self.public_url.partition("://")
         return [f"{scheme}://{rest.split('/', 1)[0]}"]
+
+    def aws_region_list(self) -> list[str]:
+        return [r.strip() for r in self.aws_regions.split(",") if r.strip()]
+
+    def aws_role_arn_list(self) -> list[str]:
+        return [r.strip() for r in self.aws_role_arns.split(",") if r.strip()]
+
+    def google_cloud_project_list(self) -> list[str]:
+        return [p.strip() for p in self.google_cloud_projects.split(",") if p.strip()]
+
+    def google_cloud_region_list(self) -> list[str]:
+        return [r.strip() for r in self.google_cloud_regions.split(",") if r.strip()]
+
+    def databricks_host_list(self) -> list[str]:
+        return [h.strip().rstrip("/") for h in self.databricks_hosts.split(",") if h.strip()]
+
+    def databricks_kind_list(self) -> list[str]:
+        return [k.strip() for k in self.databricks_read.split(",") if k.strip()]
 
     def m365_types(self) -> set[str]:
         types = {t.strip().lower() for t in self.m365_package_types.split(",") if t.strip()}

@@ -37,6 +37,10 @@ SOURCES = {
     "registered": "Registered",
     "telemetry": "Telemetry",
     "microsoft-365": "Microsoft 365",
+    "aws": "AWS",
+    "google-cloud": "Google Cloud",
+    "salesforce": "Salesforce",
+    "databricks": "Databricks",
 }
 FINDING = "agent.unsafe_instructions"
 SYSTEM_ACTOR = "system:instructions"

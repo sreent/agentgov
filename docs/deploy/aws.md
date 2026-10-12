@@ -303,6 +303,30 @@ keys AWS publishes on the internet, so Keycloak reads them there
 kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
 ```
 
+## Agents built on AWS
+
+AgentGov can read the Amazon Bedrock agents and AgentCore agents in your accounts into its
+inventory ([other platforms](../other-platforms.md#aws)). Give its service account a role
+that may read them, with Pod Identity, where `read-agents.json` holds the policy from that
+page, then name the regions to read:
+
+```bash
+aws iam create-role --role-name agentgov-agent-reader --assume-role-policy-document '{
+  "Version": "2012-10-17",
+  "Statement": [{"Effect": "Allow", "Principal": {"Service": "pods.eks.amazonaws.com"},
+                 "Action": ["sts:AssumeRole", "sts:TagSession"]}]}'
+aws iam put-role-policy --role-name agentgov-agent-reader --policy-name read-agents \
+  --policy-document file://read-agents.json
+aws eks create-pod-identity-association --cluster-name agentgov \
+  --namespace agentgov --service-account agentgov \
+  --role-arn arn:aws:iam::$ACCOUNT:role/agentgov-agent-reader
+helm upgrade agentgov deploy/helm/agentgov -n agentgov --reuse-values \
+  --set controlPlane.env.AGENTGOV_AWS_REGIONS=$AWS_REGION
+```
+
+AgentGov's pods share that service account, so each of them may read the agents; only the
+control plane does.
+
 ## Upgrading and removing it
 
 ```bash

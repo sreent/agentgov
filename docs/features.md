@@ -116,6 +116,18 @@ describes. Turning one off stops it even where it is configured.
 | `entra-access-packages` | off, **inform**, manage | Reads the access packages Microsoft Entra ID Governance assigns agents' Entra identities, and raises an [issue](issues.md) before one expires. Managed, administrators also assign and remove them from AgentGov; informed, nothing is written into Entra ([Entra access packages](microsoft-connections.md#microsoft-entra-access-packages)) |
 | `copilot-studio-threat-detection` | **off**, monitor, enforce | Answers Copilot Studio before each tool call its agents make. Monitor tells Copilot Studio to go ahead and records what would have been blocked. Off, AgentGov's endpoint refuses Copilot Studio's calls. Needs `AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS` and the tenant ID, and OPA to enforce |
 
+### Other platforms
+
+Each of these also needs the settings [other platforms](other-platforms.md) describes.
+Turning one off stops it even where it is configured.
+
+| Feature | Modes | What it does |
+|---|---|---|
+| `aws` | off, **on** | Reads the agents on AWS into the inventory: Amazon Bedrock agents and AgentCore's harnesses and agent runtimes, with their risky settings as findings |
+| `google-cloud` | off, **on** | Reads the agents on Google Cloud into the inventory: Agent Runtime agents (formerly Vertex AI Agent Engine), with their risky settings as findings |
+| `salesforce` | off, **on** | Reads the Agentforce agents in your Salesforce org into the inventory, with their risky settings as findings and their topics' instructions checked |
+| `databricks` | off, **on** | Reads the agents in your Databricks workspaces into the inventory: agents on Model Serving, Agent Bricks agents and Genie agents, with their risky settings as findings |
+
 ### Security operations
 
 | Feature | Modes | What it does |

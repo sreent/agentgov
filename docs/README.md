@@ -57,6 +57,8 @@
 
 * [Agents on Microsoft 365 and Copilot Studio](platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and acting as the signed-in admin
+* [Agents on other platforms](other-platforms.md): agents built on AWS, Google Cloud,
+  Salesforce and Databricks, read into the registry with their risky settings as findings
 * [Connecting AgentGov to Microsoft's services](microsoft-connections.md): Entra Agent ID,
   the Purview audit log, Defender alerts, Entra access packages, connector policies and
   Copilot Studio threat detection
