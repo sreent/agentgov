@@ -33,6 +33,10 @@ app.kubernetes.io/component: {{ index . 1 }}
 {{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
 {{- end -}}
 
+{{- define "agentgov.bundleSigningSecret" -}}
+{{- .Values.bundleSigning.existingSecret | default (printf "%s-bundle-signing" (include "agentgov.fullname" .)) -}}
+{{- end -}}
+
 {{- define "agentgov.secretName" -}}
 {{- .Values.secrets.existingSecret | default (include "agentgov.fullname" .) -}}
 {{- end -}}
@@ -54,6 +58,35 @@ app.kubernetes.io/component: {{ index . 1 }}
 
 {{- define "agentgov.controlPlaneUrl" -}}
 http://{{ include "agentgov.name" (list . "control-plane") }}:{{ .Values.controlPlane.service.port }}
+{{- end -}}
+
+{{- /* Where AgentGov's other components reach the control plane: its internal port,
+  over mutual TLS, while internalTLS is on. */}}
+{{- define "agentgov.internalControlPlaneUrl" -}}
+{{- if .Values.internalTLS.enabled -}}
+https://{{ include "agentgov.name" (list . "control-plane") }}:8443
+{{- else -}}
+{{ include "agentgov.controlPlaneUrl" . }}
+{{- end -}}
+{{- end -}}
+
+{{- /* A component's certificate for mutual TLS (tls.crt, tls.key, ca.crt). */}}
+{{- define "agentgov.tlsSecret" -}}
+{{- printf "%s-tls-%s" (include "agentgov.fullname" (index . 0)) (index . 1) -}}
+{{- end -}}
+
+{{- define "agentgov.tlsVolume" -}}
+{{- if (index . 0).Values.internalTLS.enabled }}
+- name: tls
+  secret:
+    secretName: {{ include "agentgov.tlsSecret" . }}
+{{- end }}
+{{- end -}}
+
+{{- define "agentgov.tlsMount" -}}
+{{- if .Values.internalTLS.enabled }}
+- {name: tls, mountPath: /tls, readOnly: true}
+{{- end }}
 {{- end -}}
 
 {{- define "agentgov.keycloakUrl" -}}
@@ -99,7 +132,11 @@ capabilities:
       name: {{ include "agentgov.secretName" . }}
       key: service-token
 - name: AGENTGOV_OPA_URL
-  value: http://{{ include "agentgov.name" (list . "opa") }}:8181
+  value: {{ if .Values.internalTLS.enabled }}https{{ else }}http{{ end }}://{{ include "agentgov.name" (list . "opa") }}:8181
+{{- if .Values.internalTLS.enabled }}
+- name: AGENTGOV_TLS_DIR
+  value: /tls
+{{- end }}
 {{- end -}}
 
 {{- define "agentgov.scheduling" -}}
@@ -138,4 +175,19 @@ off or on as a boolean: take it as the mode it was meant to be. */}}
 {{/* The Secret holding model providers' API keys. */}}
 {{- define "agentgov.modelKeysSecret" -}}
 {{- .Values.modelKeys.existingSecret | default (printf "%s-model-keys" (include "agentgov.fullname" .)) -}}
+{{- end -}}
+
+{{- /* IBM Granite Guardian, for the control plane and the processor (guardian.*). */}}
+{{- define "agentgov.guardianEnv" -}}
+{{- if .Values.guardian.url }}
+- name: AGENTGOV_GUARDIAN_URL
+  value: {{ .Values.guardian.url | quote }}
+- name: AGENTGOV_GUARDIAN_MODEL
+  value: {{ .Values.guardian.model | quote }}
+{{- if .Values.guardian.existingSecret }}
+- name: AGENTGOV_GUARDIAN_API_KEY
+  valueFrom:
+    secretKeyRef: {name: {{ .Values.guardian.existingSecret }}, key: api-key}
+{{- end }}
+{{- end }}
 {{- end -}}

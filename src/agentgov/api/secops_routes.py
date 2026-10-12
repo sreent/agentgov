@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy import select
 
 from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.versions import if_match
 from agentgov.models import LedgerEntry
 from agentgov.registry import destinations
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -122,7 +123,7 @@ def update_destination(
     rt = _rt(request)
     with rt.db.session() as s:
         destination = destinations.get(s, ref)
-        destinations.update(s, destination, body, actor=principal.actor)
+        destinations.update(s, destination, body, actor=principal.actor, version=if_match(request))
         return destinations.to_dict(destination, rt.settings, destinations.head(s))
 
 

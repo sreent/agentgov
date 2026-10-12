@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.config import Settings
+from agentgov.db import lock
 from agentgov.models import Agent, Destination, Finding, LedgerEntry, Notification, ToolServer
 from agentgov.registry import findings, teams
 from agentgov.registry.errors import InvalidTransition, ValidationError
@@ -265,6 +266,7 @@ def reopen_accepted(session: Session, now: datetime | None = None) -> int:
 
 def acknowledge(session: Session, finding: Finding, *, actor: str) -> Finding:
     """Someone it reached takes it on: it stops going further up its chain."""
+    lock(session, finding)
     if finding.status != "open":
         raise InvalidTransition(f"finding is {finding.status}: only open findings are acknowledged")
     if finding.acknowledged_at is None:
@@ -299,6 +301,7 @@ def parse_until(value: Any, now: datetime | None = None) -> datetime:
 def accept(session: Session, finding: Finding, *, reason: Any, until: Any, actor: str) -> Finding:
     """Accept the risk until a date, for a reason: the finding stops going to anyone until
     then, and opens again at that date if it still holds."""
+    lock(session, finding)
     if finding.status not in ("open", "accepted"):
         raise InvalidTransition(f"finding is {finding.status}: only open findings are accepted")
     reason = str(reason or "").strip()

@@ -58,6 +58,7 @@ def check(
     presidio: Any = None,
     settings: Settings | None = None,
     headers: dict[str, str] | None = None,
+    traffic_classifier: Any = None,
 ) -> tuple[dict[str, Any], FakeControlPlane]:
     """Run one check through ModelGuard over HTTP, as agentgateway calls it."""
     cp = FakeControlPlane()
@@ -65,7 +66,12 @@ def check(
     async def go() -> dict[str, Any]:
         recorder = DecisionRecorder(cp)
         processor = GovernanceProcessor(
-            settings or Settings(), opa=opa, control_plane=cp, recorder=recorder, presidio=presidio
+            settings or Settings(),
+            opa=opa,
+            control_plane=cp,
+            recorder=recorder,
+            presidio=presidio,
+            traffic_classifier=traffic_classifier,
         )
         app = ModelGuard(processor).app()
         async with httpx.AsyncClient(
@@ -75,6 +81,8 @@ def check(
                 f"/{phase}", json=payload, headers=HEADERS if headers is None else headers
             )
         await asyncio.gather(*processor._background)
+        if traffic_classifier is not None:
+            await traffic_classifier.settle()
         await recorder.flush()
         assert resp.status_code == 200
         return resp.json()

@@ -178,7 +178,10 @@ class ThreatDetection:
             login_url=settings.entra_login_url,
             http=keys_http,
         )
-        self._opa = opa_http or httpx.Client(timeout=OPA_TIMEOUT_SECONDS)
+        identity = settings.tls()
+        self._opa = opa_http or httpx.Client(
+            timeout=OPA_TIMEOUT_SECONDS, verify=identity.client_context() if identity else True
+        )
         self.agents = AgentLookup()
 
     @staticmethod

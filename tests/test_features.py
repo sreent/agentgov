@@ -341,8 +341,10 @@ class TestCli:
 
 def test_seeded_registry_still_works_with_every_control_monitored(client) -> None:
     seed(client)
+    settings = client.app.state.rt.settings  # type: ignore[attr-defined]
     for f in features.CATALOG:
-        if features.MONITOR in f.modes and f.key != "copilot-studio-threat-detection":
+        # What needs more than AgentGov (Copilot Studio, the classifier) can't be on here.
+        if features.MONITOR in f.modes and not features.unmet(f.key, features.MONITOR, settings):
             resp = client.put(f"/v1/features/{f.key}", json={"mode": "monitor"}, headers=ADMIN)
             assert resp.status_code == 200, resp.text
     assert client.get("/v1/agents/support-bot", headers=ADMIN).json()["status"] == "active"
@@ -351,3 +353,16 @@ def test_seeded_registry_still_works_with_every_control_monitored(client) -> Non
 def test_settings_validate_pins() -> None:
     with pytest.raises(ValueError, match="CALLER_APP_IDS"):
         Settings(features="copilot-studio-threat-detection=monitor").validate()
+
+
+def test_the_classifier_needs_granite_guardian(client) -> None:
+    view = client.get("/v1/features/traffic-classifier", headers=ADMIN).json()
+    assert view["mode"] == "monitor" and "Granite Guardian" in view["needs"]
+    # Monitored by default, but there is nothing to ask yet, and the feature says so.
+    assert view["effect"].startswith("The classifier needs IBM Granite Guardian")
+    assert "AGENTGOV_GUARDIAN_URL" in view["unavailable"]["enforce"]
+    refused = client.put("/v1/features/traffic-classifier", json={"mode": "enforce"}, headers=ADMIN)
+    assert refused.status_code == 422
+    assert client.get("/v1/info").json()["classifier"] == {"enabled": False, "model": None}
+    configured = Settings(guardian_url="http://guardian:8000/v1")
+    assert features.unmet("traffic-classifier", "enforce", configured) is None

@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
+from agentgov.api.versions import if_match
 from agentgov.models import AccessAssignment, Agent
 from agentgov.registry import access_packages, agents
 from agentgov.registry.errors import NotFound, ValidationError
@@ -65,7 +66,7 @@ def update_package(
     """Change a package: every agent that holds it gets the change."""
     with _rt(request).db.session() as s:
         package = access_packages.get(s, ref)
-        access_packages.update(s, package, body, actor=principal.actor)
+        access_packages.update(s, package, body, actor=principal.actor, version=if_match(request))
         return access_packages.to_dict(s, package)
 
 

@@ -1,6 +1,7 @@
 # Optional: IBM Granite Guardian (Apache-2.0) checks agent instructions for
-# harmful and malicious content, next to AgentGov's own rules
-# (see docs/instructions.md).
+# harmful and malicious content, next to AgentGov's own rules (see
+# docs/instructions.md), and gives a second opinion on tool results, agents' answers
+# and people's prompts (docs/detection.md).
 #
 #   docker compose -f docker-compose.yml -f docker-compose.guardian.yml up -d
 #
@@ -33,6 +34,14 @@ services:
       retries: 360 # the first start downloads the model
 
   control-plane:
+    environment:
+      AGENTGOV_GUARDIAN_URL: http://guardian:8080/v1
+      AGENTGOV_GUARDIAN_MODEL: ibm-granite/granite-guardian-4.1-8b
+
+  # The second opinion on traffic (docs/detection.md). On the CPU each verdict takes
+  # seconds: the traffic-classifier feature's monitor mode (its default) asks in the
+  # background; enforce it with a GPU.
+  processor:
     environment:
       AGENTGOV_GUARDIAN_URL: http://guardian:8080/v1
       AGENTGOV_GUARDIAN_MODEL: ibm-granite/granite-guardian-4.1-8b

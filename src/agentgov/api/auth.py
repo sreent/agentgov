@@ -18,6 +18,7 @@ from fastapi import HTTPException, Request
 from agentgov.identity import sso
 from agentgov.registry import apikeys, features
 from agentgov.secops import handoff
+from agentgov.tls import INTERNAL
 
 READ_ROLES = ("admin", "approver", "secops", "auditor")
 SESSION_COOKIE = "agentgov_session"
@@ -90,9 +91,31 @@ def bearer_token(request: Request) -> str | None:
 
 
 def authenticate(request: Request) -> Principal | None:
+    principal = _principal(request)
+    settings = request.app.state.rt.settings
+    # With mutual TLS the service role is the internal port's alone, however a caller
+    # came by it (the service token or an API key with the role).
+    service = principal is not None and principal.role == "service"
+    if service and settings.tls_dir and not _internal(request):
+        raise HTTPException(
+            403,
+            "with mutual TLS, components call the control plane on its internal "
+            f"port ({settings.internal_port}), with their certificate",
+        )
+    return principal
+
+
+def _internal(request: Request) -> bool:
+    """Whether the request came in on the internal listener, where every caller showed a
+    certificate from AgentGov's authority (mutual TLS, agentgov.tls)."""
+    return bool((request.scope.get("state") or {}).get(INTERNAL))
+
+
+def _principal(request: Request) -> Principal | None:
     rt = request.app.state.rt
     settings = rt.settings
     token = bearer_token(request)
+    internal = _internal(request)
     if token:
         if settings.admin_token and hmac.compare_digest(token, settings.admin_token):
             return Principal("bootstrap", "admin")
@@ -105,6 +128,9 @@ def authenticate(request: Request) -> Principal | None:
         # A session token from `agentgov login`. Browsers never send these by
         # themselves, so they need no CSRF header.
         return _signed_in(rt, token)
+    if internal:
+        # A component that shows its certificate needs no token (OPA can't send both).
+        return Principal("internal", "service")
     if not request.cookies.get(SESSION_COOKIE) or not settings.sso_enabled:
         return None
     if request.method not in SAFE_METHODS and request.headers.get(CSRF_HEADER) != "1":
@@ -139,7 +165,7 @@ def _signed_in(rt: Any, token: str | None) -> Principal | None:
             frozenset(roles),
             via="session",
             session_id=record.id,
-            microsoft=delegations is not None and delegations.has(record.id),
+            microsoft=delegations is not None and delegations.has(record.id, session=session),
             subject=record.subject,
         )
 

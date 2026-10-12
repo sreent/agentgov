@@ -23,10 +23,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
-from agentgov.db import mark_changed
+from agentgov.db import lock, mark_changed
 from agentgov.models import BLOCKED, PENDING, ToolServer
 from agentgov.registry import findings, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
+from agentgov.registry.versions import edited, start_edit
 
 APPROVED = "approved"
 FIELDS = (
@@ -208,10 +209,19 @@ def create(session: Session, data: dict[str, Any], *, actor: str, approve: bool)
     return ts
 
 
-def update(session: Session, ts: ToolServer, data: dict[str, Any], *, actor: str) -> list[str]:
+def update(
+    session: Session,
+    ts: ToolServer,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
+) -> list[str]:
+    start_edit(session, ts, version, f"tool server {ts.name}")
     changed = _apply(ts, data)
     _unique_registry_name(session, ts)
     if changed:
+        edited(ts)
         ledger.append(
             session,
             type="toolserver.updated",
@@ -227,6 +237,7 @@ def set_status(session: Session, ts: ToolServer, action: str, *, actor: str) -> 
     targets = {"approve": APPROVED, "block": BLOCKED, "unblock": APPROVED}
     if action not in targets:
         raise ValidationError(f"unknown action {action!r}")
+    lock(session, ts)
     if action == "unblock" and ts.status != BLOCKED:
         raise InvalidTransition("tool server is not blocked")
     if action == "approve" and ts.status != PENDING:
@@ -383,6 +394,7 @@ def to_dict(ts: ToolServer, gateway_url: str | None = None) -> dict[str, Any]:
     return {
         "id": ts.id,
         "name": ts.name,
+        "version": ts.version,
         "url": ts.url or None,
         "gateway_url": (
             f"{gateway_url.rstrip('/')}/mcp/{ts.name}" if gateway_url and ts.gateway else None

@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
+from agentgov.db import lock
 from agentgov.models import SEVERITIES, Agent, Finding
 from agentgov.registry.errors import NotFound, ValidationError
 
@@ -201,6 +202,7 @@ def set_status(session: Session, finding_id: str, status: str, actor: str) -> Fi
     if status not in ("open", "resolved", "dismissed"):
         raise ValidationError("status must be open, resolved or dismissed")
     finding = get(session, finding_id)
+    lock(session, finding)
     if finding.status == status:
         return finding
     previous, finding.status = finding.status, status

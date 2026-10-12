@@ -69,15 +69,16 @@ Each component's `resources` value changes them ([Kubernetes](deploy/kubernetes.
 Autopilot and AKS Automatic raise requests below their minimums, so AgentGov reserves a
 little more there. The
 decision path scales out together: more gateway, processor and OPA replicas, each about
-260m CPU and 320 MiB more. The control plane stays at one replica
-([scaling notes](architecture.md#scaling-notes)).
+260m CPU and 320 MiB more. For high availability, run two control-plane replicas or more
+on PostgreSQL, connected directly or through a pooler in session mode: they use
+`LISTEN`/`NOTIFY` and advisory locks ([production](production.md#several-replicas)).
 
 Optional additions:
 
 | | Plan on |
 |---|---|
 | Langfuse, to explore traces (Compose override) | About 3 GB more memory |
-| Granite Guardian on a CPU, to classify agents' instructions | About 8 GB more memory, and a 5 GB model download; a GPU with vLLM for faster checks |
+| Granite Guardian on a CPU, to classify agents' instructions and, in the background, their traffic | About 8 GB more memory, and a 5 GB model download; a GPU with vLLM for faster checks, and for calls to wait for its verdicts ([detection](detection.md)) |
 
 ## Network
 
@@ -106,6 +107,7 @@ Going out, as you use them:
 |---|---|
 | Gateway | Your MCP servers, model providers' APIs, the A2A endpoints of agents it publishes, and Keycloak's keys, to check agents' tokens |
 | Control plane | Keycloak's admin API; Microsoft Entra ID (`login.microsoftonline.com`), Microsoft Graph and the Power Platform API; your SIEM, Splunk, Teams and Slack; the Granite Guardian server; your mail server; a time-stamping authority, for the ledger's checkpoints ([evidence](evidence.md)) |
+| Governance processor | The Granite Guardian server, for the classifier's second opinion on traffic ([detection](detection.md)) |
 | Keycloak | The keys of the identity issuers agents authenticate with, and the identity providers people sign in through |
 
 ## Accounts and permissions

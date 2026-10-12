@@ -81,12 +81,14 @@ pull requests that change code or the deployment.
 | `src/agentgov/platforms` | Microsoft's services (Graph, the Power Platform API) and Copilot Studio threat detection |
 | `src/agentgov/scanners` | Checks on agents' instructions: rules and the Granite Guardian client |
 | `src/agentgov/identity` | Keycloak's admin client and the reconciler, single sign-on, the people agents act for, and the delegations agents pass on |
-| `src/agentgov/opa` | Building and long-poll serving of bundles, Rego validation, the OPA client |
+| `src/agentgov/opa` | Building, signing and long-poll serving of bundles, Rego validation, the OPA client |
 | `src/agentgov/policies` | The Rego library and its tests |
-| `src/agentgov/processor` | The governance processor: the ExtMcp gRPC server, the guardrail webhook for model calls, external authorization for calls between agents, detectors, the Presidio client |
+| `src/agentgov/processor` | The governance processor: the ExtMcp gRPC server, the guardrail webhook for model calls, external authorization for calls between agents and external processing for their answers, detectors, the Presidio client, the classifier's second opinion on traffic |
 | `src/agentgov/gateway.py` | agentgateway's configuration, and the sidecar that keeps it current |
 | `src/agentgov/telemetry.py` | OTLP ingestion: discovery, activity, detective controls, model usage |
-| `src/agentgov/ledger.py` | The hash-chained evidence ledger |
+| `src/agentgov/ledger.py`, `src/agentgov/retention.py`, `src/agentgov/compliance.py` | The hash-chained evidence ledger, its checkpoints, retention and archives, and the compliance reports |
+| `src/agentgov/coordination.py` | Several control-plane replicas: changes to every replica, the leader, jobs one at a time |
+| `src/agentgov/tls.py` | Mutual TLS between the components, and making their certificates |
 | `src/agentgov/mcp_scan.py` | The MCP servers set up on a developer's machine (`agentgov mcp scan`) |
 | `src/agentgov/models.py`, `src/agentgov/migrations` | The database schema and its migrations (Alembic) |
 | `src/agentgov/config.py`, `src/agentgov/cli.py` | The settings, and the `agentgov` command |
@@ -98,8 +100,9 @@ pull requests that change code or the deployment.
 | `scripts` | `ci.sh`, the docs checks, `chart-on-docker.py`, `new-migration.sh` and `gen-protos.sh` |
 | `tests` | Unit and integration tests |
 
-If you change the ExtMcp protocol definition, regenerate the stubs with
-`scripts/gen-protos.sh`.
+If you change a protocol definition in `src/agentgov/processor/proto` (agentgateway's
+ExtMcp, or the part of Envoy's external processing the processor serves), regenerate the
+stubs with `scripts/gen-protos.sh`.
 
 ## Adding a feature
 

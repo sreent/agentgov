@@ -115,46 +115,62 @@ def verdict(content: str) -> str:
     raise GuardianError(f"no yes/no verdict in the classifier's answer: {content[:80]!r}")
 
 
+def endpoint(settings: Settings) -> tuple[str, dict[str, str]]:
+    """Where to ask the classifier, and the headers to ask with."""
+    url = f"{(settings.guardian_url or '').rstrip('/')}/chat/completions"
+    headers = (
+        {"Authorization": f"Bearer {settings.guardian_api_key}"}
+        if settings.guardian_api_key
+        else {}
+    )
+    return url, headers
+
+
+def judge_request(model: str, text: str, criterion: str) -> dict[str, Any]:
+    """The chat completion that asks whether ``text`` meets ``criterion`` (its text)."""
+    return {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": text[:MAX_TEXT_CHARS]},
+            {
+                "role": "user",
+                "content": f"{JUDGE}\n\n### Criteria: {criterion}\n\n### Scoring Schema: {SCHEMA}",
+            },
+        ],
+        "temperature": 0,
+        "max_tokens": 64,
+    }
+
+
+def read_answer(resp: httpx.Response) -> str:
+    """'yes' or 'no' from the classifier's response, or GuardianError (GuardianUnavailable
+    while it can't answer at all)."""
+    if resp.status_code in (502, 503, 504):
+        raise GuardianUnavailable(f"the classifier is not ready ({resp.status_code})")
+    if resp.status_code != 200:
+        raise GuardianError(f"the classifier answered {resp.status_code}: {resp.text[:200]}")
+    try:
+        content = resp.json()["choices"][0]["message"]["content"] or ""
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise GuardianError("the classifier's answer is not a chat completion") from exc
+    return verdict(content)
+
+
 class Guardian:
     def __init__(self, settings: Settings, *, http: httpx.Client | None = None) -> None:
         self.model = settings.guardian_model
         self.criteria = settings.guardian_criteria_list()
-        self._url = f"{(settings.guardian_url or '').rstrip('/')}/chat/completions"
-        self._headers = (
-            {"Authorization": f"Bearer {settings.guardian_api_key}"}
-            if settings.guardian_api_key
-            else {}
-        )
+        self._url, self._headers = endpoint(settings)
         self._http = http or httpx.Client(timeout=settings.guardian_timeout_seconds)
 
     def judge(self, text: str, criterion: str) -> str:
         """'yes' if ``text`` meets ``criterion``, else 'no'."""
-        body = {
-            "model": self.model,
-            "messages": [
-                {"role": "user", "content": text[:MAX_TEXT_CHARS]},
-                {
-                    "role": "user",
-                    "content": f"{JUDGE}\n\n### Criteria: {CRITERIA[criterion][2]}\n\n"
-                    f"### Scoring Schema: {SCHEMA}",
-                },
-            ],
-            "temperature": 0,
-            "max_tokens": 64,
-        }
+        body = judge_request(self.model, text, CRITERIA[criterion][2])
         try:
             resp = self._http.post(self._url, json=body, headers=self._headers)
         except httpx.HTTPError as exc:
             raise GuardianUnavailable(f"the classifier is unreachable: {exc}") from exc
-        if resp.status_code in (502, 503, 504):
-            raise GuardianUnavailable(f"the classifier is not ready ({resp.status_code})")
-        if resp.status_code != 200:
-            raise GuardianError(f"the classifier answered {resp.status_code}: {resp.text[:200]}")
-        try:
-            content = resp.json()["choices"][0]["message"]["content"] or ""
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise GuardianError("the classifier's answer is not a chat completion") from exc
-        return verdict(content)
+        return read_answer(resp)
 
     def classify(self, text: str) -> dict[str, Any]:
         """Every configured criterion's verdict; stops at the first error."""

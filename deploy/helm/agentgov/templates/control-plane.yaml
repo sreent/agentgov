@@ -3,6 +3,9 @@
 {{- $keycloak := include "agentgov.keycloakUrl" . }}
 {{- $realm := include "agentgov.realm" . }}
 {{- $v := .Values.controlPlane }}
+{{- if and $v.ledgerArchive.enabled (gt (int $v.replicas) 1) (not $v.ledgerArchive.existingClaim) (eq $v.ledgerArchive.accessMode "ReadWriteOnce") }}
+{{- fail "controlPlane.ledgerArchive with several replicas needs a volume each of them can write: set controlPlane.ledgerArchive.accessMode to ReadWriteMany (with a storageClass that offers it), or give an existingClaim" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,6 +46,11 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+            {{- if .Values.internalTLS.enabled }}
+            # For AgentGov's other components, over mutual TLS.
+            - name: internal
+              containerPort: 8443
+            {{- end }}
           env:
             {{- include "agentgov.commonEnv" . | nindent 12 }}
             - name: AGENTGOV_ADMIN_TOKEN
@@ -96,6 +104,7 @@ spec:
                 secretKeyRef: {name: {{ $secret }}, key: oidc-client-secret}
             - name: AGENTGOV_DESTINATION_SECRETS_DIR
               value: /destination-secrets
+            {{- include "agentgov.guardianEnv" . | nindent 12 }}
             - name: AGENTGOV_PROCESSOR_ADDRESS
               value: "{{ include "agentgov.name" (list . "processor") }}:50051"
             - name: AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS
@@ -103,6 +112,10 @@ spec:
             {{- if .Values.otelCollector.enabled }}
             - name: AGENTGOV_GATEWAY_OTLP_ENDPOINT
               value: "http://{{ include "agentgov.name" (list . "otel-collector") }}:4317"
+            {{- end }}
+            {{- if .Values.bundleSigning.enabled }}
+            - name: AGENTGOV_BUNDLE_SIGNING_KEY_FILE
+              value: /bundle-signing/key.pem
             {{- end }}
             {{- if $v.ledgerArchive.enabled }}
             - name: AGENTGOV_LEDGER_RETENTION_DAYS
@@ -140,6 +153,12 @@ spec:
             - name: destination-secrets
               mountPath: /destination-secrets
               readOnly: true
+            {{- include "agentgov.tlsMount" . | nindent 12 }}
+            {{- if .Values.bundleSigning.enabled }}
+            - name: bundle-signing
+              mountPath: /bundle-signing
+              readOnly: true
+            {{- end }}
             {{- if $v.ledgerArchive.enabled }}
             - name: ledger-archive
               mountPath: /ledger-archive
@@ -156,6 +175,14 @@ spec:
           secret:
             secretName: {{ include "agentgov.destinationSecretsSecret" . }}
             optional: true
+        {{- include "agentgov.tlsVolume" (list . "control-plane") | nindent 8 }}
+        {{- if .Values.bundleSigning.enabled }}
+        # Only the key, out of the bundle-signing Secret.
+        - name: bundle-signing
+          secret:
+            secretName: {{ include "agentgov.bundleSigningSecret" . }}
+            items: [{key: tls.key, path: key.pem}]
+        {{- end }}
         {{- if $v.ledgerArchive.enabled }}
         - name: ledger-archive
           persistentVolumeClaim:
@@ -180,6 +207,11 @@ spec:
     - name: http
       port: {{ $v.service.port }}
       targetPort: http
+    {{- if .Values.internalTLS.enabled }}
+    - name: internal
+      port: 8443
+      targetPort: internal
+    {{- end }}
 {{- if and $v.ledgerArchive.enabled (not $v.ledgerArchive.existingClaim) }}
 ---
 apiVersion: v1
@@ -192,7 +224,7 @@ metadata:
     # The archives are evidence: an uninstall leaves them.
     helm.sh/resource-policy: keep
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [{{ $v.ledgerArchive.accessMode }}]
   {{- with $v.ledgerArchive.storageClass }}
   storageClassName: {{ . }}
   {{- end }}

@@ -54,6 +54,7 @@ from agentgov.platforms import connections
 from agentgov.registry import access_packages, features, findings, teams, validation
 from agentgov.registry import agents as agents_svc
 from agentgov.registry.errors import Conflict, NotFound, RegistryError, ValidationError
+from agentgov.registry.versions import edited, start_edit
 
 FEATURE = "management-rules"
 POSTURE = "posture-checks"
@@ -351,13 +352,20 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> ManagementR
 
 
 def update(
-    session: Session, rule: ManagementRule, data: dict[str, Any], *, actor: str
+    session: Session,
+    rule: ManagementRule,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
 ) -> list[str]:
+    start_edit(session, rule, version, f"management rule {rule.name}")
     _known(data)
     if "name" in data and data["name"] != rule.name:
         raise ValidationError("a management rule's name can't change: the ledger names it")
     changed = _apply(session, rule, data)
     if changed:
+        edited(rule)
         ledger.append(
             session,
             type="rule.updated",
@@ -404,6 +412,7 @@ def to_dict(session: Session, rule: ManagementRule) -> dict[str, Any]:
     return {
         "id": rule.id,
         "name": rule.name,
+        "version": rule.version,
         **_details(rule),
         "effective_mode": effective(rule.mode, features.mode(session, FEATURE)),
         "matches": {

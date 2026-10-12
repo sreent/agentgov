@@ -244,14 +244,16 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | `AGENTGOV_COPILOT_STUDIO_TENANT_ID` | — | The tenant ID (a GUID) whose apps may call. By default the tenant of `AGENTGOV_M365_TENANT_ID` or of sign-in through Entra ID, when that is a GUID. |
 | `AGENTGOV_COPILOT_STUDIO_ON_ERROR` | `block` | The answer when AgentGov cannot decide in time (enforce mode): `block` or `allow`. |
 
-### Instruction classifier (optional)
+### Classifier, optional
 
 | Variable | Default | What it does |
 |---|---|---|
-| `AGENTGOV_GUARDIAN_URL` | — | IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp, Ollama), e.g. `http://guardian:8000/v1`. Without it, agent instructions are checked by AgentGov's rules only. |
+| `AGENTGOV_GUARDIAN_URL` | — | IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp, Ollama), e.g. `http://guardian:8000/v1`. The control plane asks it about agent instructions, and the processor about tool results, agents' answers and people's prompts (the traffic-classifier feature). Without it, AgentGov's rules decide alone. |
 | `AGENTGOV_GUARDIAN_MODEL`<br>`AGENTGOV_GUARDIAN_API_KEY` (secret) | `ibm-granite/granite-guardian-4.1-8b`<br>— | The name the server serves the model under, and its API key if it needs one. |
-| `AGENTGOV_GUARDIAN_CRITERIA` | `harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception` | Criteria to judge (one classifier call each): harm, jailbreak, social_bias, violence, profanity, unethical_behavior, exfiltration, deception. |
+| `AGENTGOV_GUARDIAN_CRITERIA` | `harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception` | Criteria to judge agent instructions by (one classifier call each): harm, jailbreak, social_bias, violence, profanity, unethical_behavior, exfiltration, deception. |
 | `AGENTGOV_GUARDIAN_TIMEOUT_SECONDS` | `60.0` | The longest one classifier call may take. |
+| `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` | `3.0` | How long the processor waits for the classifier's verdict on a call where it is enforced; past that, the rules alone decide, and the ledger says so. |
+| `AGENTGOV_CLASSIFIER_CONCURRENCY` | `4` | Classifier calls one processor makes at a time. In the background, what waits beyond a few hundred goes unclassified rather than piling up. |
 
 ### OPA (policy decisions)
 
@@ -259,6 +261,8 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 |---|---|---|
 | `AGENTGOV_OPA_URL` | — | Where the processor asks OPA for decisions, and the control plane for What if, such as `http://opa:8181`. |
 | `AGENTGOV_BUNDLE_LONG_POLL_SECONDS` | `30` | Longest a bundle long-poll request is held open. |
+| `AGENTGOV_BUNDLE_SIGNING_KEY_FILE` | — | A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles with; OPA verifies each with the matching certificate or public key, and refuses one that doesn't verify ([production](production.md)). `agentgov bundle-signing-key DIR` makes a pair. Unset, bundles go unsigned. |
+| `AGENTGOV_BUNDLE_SIGNING_KEY_ID` | `agentgov` | The key's name: OPA's configuration names the same one (bundles.&lt;name&gt;.signing.keyid). |
 
 ### agentgateway (enforcement)
 
@@ -273,6 +277,14 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | `AGENTGOV_GATEWAY_OTLP_ENDPOINT` | — | OTLP/gRPC endpoint for gateway traces, e.g. `http://otel-collector:4317`. |
 | `AGENTGOV_GATEWAY_IPV6` | `false` | agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts. |
 | `AGENTGOV_TRACE_URL` | — | Link to a trace in your trace viewer, with {trace_id} where the W3C trace ID goes, such as `http://localhost:16686/trace/{trace_id}` for Jaeger. Ledger entries recorded at the gateway then link to their trace. |
+
+### Mutual TLS between components
+
+| Variable | Default | What it does |
+|---|---|---|
+| `AGENTGOV_TLS_DIR` | — | Where this component finds its certificate (tls.crt), its key (tls.key) and the certificate of the authority that issued every component's (ca.crt), as cert-manager writes them. Set, AgentGov's components talk over mutual TLS: each serves TLS on its internal ports and asks callers for a certificate from the same authority, and the control plane gives the service role only on its internal port. `agentgov internal-certs DIR` makes an authority and the certificates. |
+| `AGENTGOV_INTERNAL_PORT` | `8443` | The control plane's port for AgentGov's other components, over mutual TLS. |
+| `AGENTGOV_GATEWAY_TLS_DIR` | `/tls` | Where agentgateway finds its tls.crt, tls.key and ca.crt, to call the processor over mutual TLS (the control plane writes it into the gateway's configuration). |
 
 ### Governance processor
 

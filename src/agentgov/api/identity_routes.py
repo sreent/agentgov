@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy import func, select
 
 from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.versions import if_match
 from agentgov.models import Agent
 from agentgov.registry import identity_issuers
 from agentgov.registry.errors import NotFound
@@ -61,7 +62,7 @@ def update_issuer(
 ) -> dict[str, Any]:
     with request.app.state.rt.db.session() as s:
         issuer = identity_issuers.get(s, ref)
-        identity_issuers.update(s, issuer, body, actor=principal.actor)
+        identity_issuers.update(s, issuer, body, actor=principal.actor, version=if_match(request))
         return _with_count(s, issuer)
 
 

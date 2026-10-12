@@ -39,6 +39,9 @@ def record_mcp_decisions(
     touched: dict[str, Agent] = {}
     for rec in records:
         kind = rec.get("kind")
+        if kind == "classifier":
+            touched |= {a.id: a for a in _classified(session, rec)}
+            continue
         model_call = kind == "model"
         a2a = kind == "a2a"
         agent_info = rec.get("agent") or {}
@@ -83,6 +86,9 @@ def record_mcp_decisions(
                         "prompt_injection",
                         "injection_score",
                         "injection_reasons",
+                        "jailbreak",
+                        "jailbreak_reasons",
+                        "classifier",
                         "truncated",
                     )
                     if k in detections
@@ -107,6 +113,10 @@ def record_mcp_decisions(
         touched[agent.id] = agent
         if model_call:
             _model_signals(session, agent, phase, effect, detections, resource, user)
+        elif a2a and phase == "response":
+            answered = _answer_signals(session, agent, rec, effect, detections, resource)
+            if answered is not None:
+                touched[answered.id] = answered
         elif a2a:
             discovery.record_activity(
                 session, agent.id, when=when, tool_calls=0, denied=1 if effect == "deny" else 0
@@ -188,6 +198,185 @@ def _chain(
     if ids_:
         out["delegation"] = ids_
     return out
+
+
+def _answered_by(session: Session, rec: dict[str, Any]) -> Agent | None:
+    """The agent that sent an answer (a decision on an answer names it under "a2a")."""
+    target = rec.get("a2a") if isinstance(rec.get("a2a"), dict) else {}
+    target_id = target.get("target_id")
+    return session.get(Agent, target_id) if target_id else None
+
+
+def _injected_answer(
+    session: Session, called: Agent, caller: Agent, resource: Any, how: str
+) -> None:
+    risk.add_signal(session, called.id, "prompt_injection", resource)
+    findings.raise_finding(
+        session,
+        type="agent.prompt_injection_in_answers",
+        severity="high",
+        subject=called.id,
+        agent_id=called.id,
+        category=findings.THREAT,
+        title=f"Answers from {called.name} carry instructions for the agents that read them",
+        description=f"An answer {called.name} sent {caller.name} contained instructions aimed "
+        f"at the agent reading it. {how}",
+        remediation=f"Find what {called.name} read that carried them: untrusted content can "
+        "pass from agent to agent.",
+    )
+
+
+def _answer_signals(
+    session: Session,
+    caller: Agent,
+    rec: dict[str, Any],
+    effect: str | None,
+    detections: dict[str, Any],
+    resource: Any,
+) -> Agent | None:
+    """Risk signals and findings from a decision on an answer one agent sent another:
+    about the agent that answered, which it returns."""
+    called = _answered_by(session, rec)
+    if called is None:
+        return None
+    if detections.get("prompt_injection"):
+        reasons = ", ".join(detections.get("injection_reasons") or [])
+        outcome = (
+            "It was withheld."
+            if effect == "deny"
+            else f"It reached {caller.name}: prompt-injection defence is not enforced."
+        )
+        _injected_answer(session, called, caller, resource, f"({reasons}) {outcome}")
+    if "secret" in set(detections.get("categories") or []):
+        risk.add_signal(session, called.id, "secret_detected", resource)
+        masked = "secret" in (rec.get("redacted") or [])
+        findings.raise_finding(
+            session,
+            type="agent.credentials_in_answers",
+            severity="high",
+            subject=called.id,
+            agent_id=called.id,
+            category=findings.THREAT,
+            title=f"{called.name} sent credentials to another agent",
+            description=f"Credentials ({', '.join(detections.get('entities') or [])}) were "
+            f"found in an answer {called.name} sent {caller.name}; "
+            + (
+                "they were masked."
+                if masked or effect == "deny"
+                else "they reached it: data protection is not enforced."
+            ),
+            remediation=f"Find where {called.name} got them, and rotate them.",
+        )
+    return called
+
+
+# What the classifier finds, by its criterion (agentgov.processor.classifier).
+_FOUND = {"injection": "instructions aimed at the agent", "jailbreak": "a jailbreak attempt"}
+
+
+def _classified(session: Session, rec: dict[str, Any]) -> list[Agent]:
+    """A verdict the classifier gave in the background, after the call went on: the
+    ledger has it, and what it flagged is a risk signal and a finding, as what the rules
+    flag is. The agents whose risk it changed."""
+    agent_info = rec.get("agent") or {}
+    agent = session.get(Agent, agent_info.get("id")) if agent_info.get("id") else None
+    identity = rec.get("identity") or {}
+    user = rec["user"] if isinstance(rec.get("user"), dict) else None
+    verdict = rec.get("classifier") if isinstance(rec.get("classifier"), dict) else {}
+    criterion = str(verdict.get("criterion") or "injection")
+    subject = str(rec.get("subject") or "tool result")
+    resource = rec.get("resource")
+    found = _FOUND.get(criterion, criterion)
+    caller = identity.get("client_id") or "unknown"
+    ledger.append(
+        session,
+        type="detection.classifier",
+        actor=f"agent:{agent.name}" if agent else f"client:{caller}",
+        agent=agent,
+        agent_name=None if agent else identity.get("client_id"),
+        severity="warning",
+        action=subject,
+        resource=resource,
+        reason=f"The classifier found {found} in {'an' if subject[0] in 'aeiou' else 'a'} "
+        f"{subject}, after it went on",
+        details={
+            "type": f"classifier.{criterion}",
+            "severity": "medium" if criterion == "jailbreak" else "high",
+            "classifier": verdict,
+            "phase": rec.get("phase"),
+            "identity": identity,
+            **({"user": user} if user else {}),
+        },
+        trace_id=_trace_id(rec.get("trace_id")),
+        on_behalf_of=people.name_of(user),
+        ts=_parse_ts(rec.get("ts")),
+    )
+    if agent is None:
+        return []
+    after = (
+        "It answered in the background, after the call went on: it is monitored, or the "
+        "check it supports is."
+    )
+    if subject == "answer":
+        # Another agent's answer: the agent that answered carries it.
+        called = _answered_by(session, rec)
+        if called is None:
+            return []
+        _injected_answer(session, called, agent, resource, f"The classifier found them. {after}")
+        return [called]
+    if criterion == "jailbreak":
+        risk.add_signal(session, agent.id, "jailbreak_attempt", resource)
+        findings.raise_finding(
+            session,
+            type="agent.jailbreak_attempts",
+            severity="medium",
+            subject=agent.id,
+            agent_id=agent.id,
+            category=findings.THREAT,
+            title=f"People tried to jailbreak {agent.name}",
+            description=f"The classifier found a jailbreak attempt in a prompt {agent.name} "
+            f"sent to {resource}"
+            + (f" on behalf of {people.name_of(user)}" if user else "")
+            + f". {after}",
+            remediation=(
+                f"Ask {people.name_of(user)} about it"
+                if user
+                else "Find who sent it in the agent's conversations"
+            )
+            + ", and check that the agent's instructions hold up against such prompts.",
+        )
+        return [agent]
+    risk.add_signal(session, agent.id, "prompt_injection", resource)
+    if rec.get("phase") == "response":
+        # A tool's result: the tool server's data carries it.
+        findings.raise_finding(
+            session,
+            type="toolserver.prompt_injection",
+            severity="high",
+            subject=str(resource),
+            category=findings.THREAT,
+            title=f"Prompt-injection payload returned by {resource}",
+            description=f"The classifier found instructions aimed at the agent in a result "
+            f"{resource} returned to {agent.name}. {after}",
+            remediation="Find where the tool's data came from; untrusted content may be "
+            "targeting your agents.",
+        )
+    else:
+        findings.raise_finding(
+            session,
+            type="agent.prompt_injection",
+            severity="high",
+            subject=agent.id,
+            agent_id=agent.id,
+            category=findings.THREAT,
+            title=f"A tool result tried to give {agent.name} instructions",
+            description="The classifier found instructions aimed at the agent in a tool result "
+            f"in one of its conversations with {resource}. {after}",
+            remediation="Find which of the agent's tools returned it: untrusted content may be "
+            "targeting your agents. Tools called through the MCP gateway are checked as they "
+            "answer.",
+        )
+    return [agent]
 
 
 def _model_signals(

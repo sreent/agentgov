@@ -17,17 +17,29 @@ import json
 import logging
 import tarfile
 import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.db import Database
-from agentgov.models import DELETED, Agent, ApprovedConnector, Blueprint, Policy, ToolServer
+from agentgov.models import (
+    DELETED,
+    Agent,
+    ApprovedConnector,
+    Blueprint,
+    IntegrationState,
+    Policy,
+    ToolServer,
+)
+from agentgov.opa.signing import SIGNATURES, Signer
 from agentgov.registry import access_packages, features, model_providers, model_usage
 from agentgov.registry import agents as agents_svc
 
@@ -35,6 +47,14 @@ log = logging.getLogger(__name__)
 
 BUNDLE_CONTENT_TYPE = "application/vnd.openpolicyagent.bundles"
 ROOTS = ["agentgov", "agentos", "registry", "system"]
+# How long a bundle built is served without being built again, even with no change heard
+# of: a change a replica didn't hear about (it lost the database for a while) reaches the
+# OPA instances it serves within this.
+MAX_AGE_SECONDS = 60.0
+# The OPA instances' last status reports, for every replica to show.
+OPA_STATUS = "opa-status"
+# An instance not heard from for this long drops off the list.
+OPA_FORGET = timedelta(days=1)
 
 # Decision-log hygiene, evaluated by OPA itself: never log raw tool arguments,
 # and skip gateway decisions on tool and model calls (the governance processor
@@ -182,7 +202,8 @@ class Bundle:
     revision: str
 
 
-def build(session: Session) -> Bundle:
+def build(session: Session, signer: Signer | None = None) -> Bundle:
+    """The bundle as the registry has it now; signed (.signatures.json) with ``signer``."""
     files = {**library_files(), "system/log.rego": SYSTEM_LOG_REGO, **custom_modules(session)}
     data = registry_snapshot(session)
     data_json = json.dumps(data, sort_keys=True, separators=(",", ":"))
@@ -197,6 +218,8 @@ def build(session: Session) -> Bundle:
         "registry/data.json": data_json,
         **files,
     }
+    if signer is not None:
+        entries[SIGNATURES] = signer.signatures(entries)
     buf = io.BytesIO()
     # Fixed mtimes keep the archive (and therefore the ETag) deterministic.
     with (
@@ -216,17 +239,20 @@ def build(session: Session) -> Bundle:
 class BundleServer:
     """Caches the current bundle and wakes long-polling OPA instances on change."""
 
-    def __init__(self, db: Database) -> None:
+    def __init__(
+        self, db: Database, *, max_age: float = MAX_AGE_SECONDS, signer: Signer | None = None
+    ) -> None:
         self._db = db
+        self.max_age = max_age
+        self._signer = signer
         self._lock = threading.Lock()
         self._generation = 0
-        # Keyed by generation and UTC day: budgets start again when the day does.
-        self._cached: tuple[tuple[int, str], Bundle] | None = None
+        # Keyed by generation and UTC day (budgets start again when the day does), and
+        # built at (monotonic seconds).
+        self._cached: tuple[tuple[int, str], Bundle, float] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._changed: asyncio.Condition | None = None
         self._wakeups: set[asyncio.Future[None]] = set()
-        self.last_status: dict[str, Any] | None = None
-        self.last_status_at: str | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -253,12 +279,13 @@ class BundleServer:
         with self._lock:
             key = (self._generation, model_usage.today())
             cached = self._cached
-        if cached is not None and cached[0] == key:
+        if cached is not None and cached[0] == key and time.monotonic() - cached[2] < self.max_age:
             return cached[1]
+        built_at = time.monotonic()
         with self._db.session() as session:
-            bundle = build(session)
+            bundle = build(session, self._signer)
         with self._lock:
-            self._cached = (key, bundle)
+            self._cached = (key, bundle, built_at)
         return bundle
 
     async def wait_for_change(self, etag: str | None, timeout: float) -> Bundle | None:
@@ -280,13 +307,56 @@ class BundleServer:
                 if changed_meanwhile:
                     continue  # a change landed while we were building; re-check
                 try:
-                    await asyncio.wait_for(self._changed.wait(), timeout=remaining)
+                    await asyncio.wait_for(
+                        self._changed.wait(), timeout=min(remaining, self.max_age)
+                    )
                 except TimeoutError:
-                    return None
+                    if loop.time() >= deadline:
+                        return None
+                    # Nothing heard of: look again all the same (see MAX_AGE_SECONDS).
 
-    def record_status(self, status: dict[str, Any]) -> None:
-        self.last_status = status
-        self.last_status_at = ids.isoformat(ids.utcnow())
+
+def record_status(session: Session, status: dict[str, Any]) -> None:
+    """Keep an OPA instance's status report: when it reported, and the bundle it runs."""
+    labels = status.get("labels") or {}
+    instance = str(labels.get("id") or "opa")[:100]
+    bundle = (status.get("bundles") or {}).get("agentgov") or {}
+    row = session.get(IntegrationState, OPA_STATUS, with_for_update=True)
+    if row is None:
+        try:
+            with session.begin_nested():
+                session.add(IntegrationState(key=OPA_STATUS, data={}))
+        except IntegrityError:
+            pass  # another replica added it meanwhile
+        row = session.get(
+            IntegrationState, OPA_STATUS, with_for_update=True, populate_existing=True
+        )
+        assert row is not None
+    now = ids.utcnow()
+    instances = {
+        key: value
+        for key, value in ((row.data or {}).get("instances") or {}).items()
+        if datetime.fromisoformat(value["at"]) > now - OPA_FORGET
+    }
+    instances[instance] = {
+        "at": ids.isoformat(now),
+        "revision": bundle.get("active_revision"),
+        "version": labels.get("version"),
+    }
+    row.data = {"instances": instances}
+    row.updated_at = now
+
+
+def opa_status(session: Session) -> dict[str, Any]:
+    """The OPA instances heard from in the last day: when each reported and its bundle."""
+    row = session.get(IntegrationState, OPA_STATUS)
+    instances = ((row.data or {}).get("instances") or {}) if row is not None else {}
+    listed = sorted(
+        ({"id": key, **value} for key, value in instances.items()),
+        key=lambda i: i["at"],
+        reverse=True,
+    )
+    return {"last_status_at": listed[0]["at"] if listed else None, "instances": listed}
 
 
 def parse_prefer_wait(header: str | None) -> float | None:

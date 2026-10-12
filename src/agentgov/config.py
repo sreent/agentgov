@@ -236,21 +236,28 @@ class Settings:
     # The answer when AgentGov cannot decide in time (enforce mode): "block" or "allow".
     copilot_studio_on_error: str = "block"
 
-    # --- Instruction classifier (optional) ----------------------------------------
+    # --- Classifier, optional (docs/detection.md) ---------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
-    # Ollama), e.g. http://guardian:8000/v1. Without it, agent instructions are
-    # checked by AgentGov's rules only.
+    # Ollama), e.g. http://guardian:8000/v1. The control plane asks it about agent
+    # instructions, and the processor about tool results, agents' answers and people's
+    # prompts (the traffic-classifier feature). Without it, AgentGov's rules decide alone.
     guardian_url: str | None = None
     # The name the server serves the model under, and its API key if it needs one.
     guardian_model: str = "ibm-granite/granite-guardian-4.1-8b"
     guardian_api_key: str | None = None
-    # Criteria to judge (one classifier call each): harm, jailbreak, social_bias,
-    # violence, profanity, unethical_behavior, exfiltration, deception.
+    # Criteria to judge agent instructions by (one classifier call each): harm, jailbreak,
+    # social_bias, violence, profanity, unethical_behavior, exfiltration, deception.
     guardian_criteria: str = (
         "harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception"
     )
     # The longest one classifier call may take.
     guardian_timeout_seconds: float = 60.0
+    # How long the processor waits for the classifier's verdict on a call where it is
+    # enforced; past that, the rules alone decide, and the ledger says so.
+    classifier_timeout_seconds: float = 3.0
+    # Classifier calls one processor makes at a time. In the background, what waits
+    # beyond a few hundred goes unclassified rather than piling up.
+    classifier_concurrency: int = 4
 
     # --- OPA (policy decisions) --------------------------------------------------
     # Where the processor asks OPA for decisions, and the control plane for What if, such
@@ -258,6 +265,13 @@ class Settings:
     opa_url: str | None = None
     # Longest a bundle long-poll request is held open.
     bundle_long_poll_seconds: int = 30
+    # A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles
+    # with; OPA verifies each with the matching certificate or public key, and refuses one
+    # that doesn't verify (docs/production.md). `agentgov bundle-signing-key DIR` makes a
+    # pair. Unset, bundles go unsigned.
+    bundle_signing_key_file: str | None = None
+    # The key's name: OPA's configuration names the same one (bundles.<name>.signing.keyid).
+    bundle_signing_key_id: str = "agentgov"
 
     # --- agentgateway (enforcement) ---------------------------------------------
     # Where the generated agentgateway config is written (shared volume).
@@ -281,6 +295,20 @@ class Settings:
     # goes, such as http://localhost:16686/trace/{trace_id} for Jaeger. Ledger entries
     # recorded at the gateway then link to their trace.
     trace_url: str | None = None
+
+    # --- Mutual TLS between components (docs/production.md) -----------------------
+    # Where this component finds its certificate (tls.crt), its key (tls.key) and the
+    # certificate of the authority that issued every component's (ca.crt), as
+    # cert-manager writes them. Set, AgentGov's components talk over mutual TLS: each
+    # serves TLS on its internal ports and asks callers for a certificate from the same
+    # authority, and the control plane gives the service role only on its internal port.
+    # `agentgov internal-certs DIR` makes an authority and the certificates.
+    tls_dir: str | None = None
+    # The control plane's port for AgentGov's other components, over mutual TLS.
+    internal_port: int = 8443
+    # Where agentgateway finds its tls.crt, tls.key and ca.crt, to call the processor
+    # over mutual TLS (the control plane writes it into the gateway's configuration).
+    gateway_tls_dir: str = "/tls"
 
     # --- Governance processor ----------------------------------------------------
     # Where it answers agentgateway about tool calls (gRPC).
@@ -347,6 +375,11 @@ class Settings:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
         if self.issues_interval_seconds < 0:
             raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
+        if self.classifier_timeout_seconds <= 0 or self.classifier_concurrency < 1:
+            raise ValueError(
+                "AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS must be positive and "
+                "AGENTGOV_CLASSIFIER_CONCURRENCY at least 1"
+            )
         if self.smtp_url:
             scheme = self.smtp_url.partition("://")[0]
             if scheme not in ("smtp", "smtps") or "@" in self.smtp_url:
@@ -398,6 +431,12 @@ class Settings:
         self.m365_types()  # raises on unknown package types
         self.guardian_criteria_list()  # raises on unknown criteria
         self.pii_thresholds()  # raises on malformed entries
+
+    def tls(self) -> Any:
+        """This component's certificate for mutual TLS (agentgov.tls), or None without."""
+        from agentgov.tls import Identity
+
+        return Identity.from_dir(self.tls_dir) if self.tls_dir else None
 
     def feature_pins(self) -> dict[str, str]:
         from agentgov.registry.features import parse_pins, unmet

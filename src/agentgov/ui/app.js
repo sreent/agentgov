@@ -296,16 +296,20 @@ function friendlyError(status, detail) {
   if (status === 403) return `Your role can't do this. ${d}`.trim();
   if (status === 404) return d || 'Not found.';
   if (status === 409) return d || 'That change conflicts with the current state. Refresh and try again.';
+  // An edit made from an older copy (the form sends the version it was opened with).
+  if (status === 412) return 'Someone else saved a change to this while you had it open, so yours would have undone theirs. Close this, open it again to see their change, and make yours on top.';
   if (status === 400 || status === 422) return `The control plane rejected the request. ${d}`.trim();
   if (status >= 502 && status <= 504) return d || `A service behind the control plane did not respond (HTTP ${status}).`;
   if (status >= 500) return `The control plane hit an error (HTTP ${status}). ${d}`.trim();
   return d || `The request failed (HTTP ${status}).`;
 }
 
-async function api(path, { method = 'GET', body, text, contentType = 'text/plain', raw = false, auth = true, signingIn = false } = {}) {
+async function api(path, { method = 'GET', body, text, contentType = 'text/plain', raw = false, auth = true, signingIn = false, ifMatch } = {}) {
   // Required on writes authenticated by the session cookie (other sites cannot set it).
   const headers = { Accept: 'application/json', 'X-AgentGov-CSRF': '1' };
   if (auth && token) headers.Authorization = `Bearer ${token}`;
+  // The version an edit was made from: the control plane refuses it if that's old (412).
+  if (ifMatch != null) headers['If-Match'] = `"${ifMatch}"`;
   const init = { method, headers, cache: 'no-store' };
   if (text !== undefined) {
     headers['Content-Type'] = contentType;
@@ -1545,7 +1549,8 @@ function controlPlaneCard(ov, info, features) {
       cell('Tool servers', plural(ts.total || 0, 'server'),
         `${plural(ts.tools || 0, 'tool')} in catalogs · ${fmt(ts.pending)} pending · ${fmt(ts.blocked)} blocked`, '#/toolservers'),
       cell('Policy bundle', ov.opa?.bundle_revision ? h('span', { class: 'hash', title: `Bundle revision ${ov.opa.bundle_revision}` }, `rev ${String(ov.opa.bundle_revision).slice(0, 12)}`) : 'Not built',
-        ov.opa?.last_status_at ? ['OPA reported ', timeEl(ov.opa.last_status_at)] : 'No OPA status report received by this control plane'),
+        opaNote(ov.opa)),
+      cell('Replicas', replicasValue(ov.replicas), replicasNote(ov.replicas)),
       cell('Evidence ledger', ov.ledger ? plural(ov.ledger.checked, 'entry', 'entries') : 'Not verified',
         ov.ledger?.head ? ['Head ', h('span', { class: 'hash', title: ov.ledger.head }, shortHash(ov.ledger.head))] : null, '#/ledger'),
       cell('Gateway', info?.gateway_url ? copyable(info.gateway_url, 'gateway URL') : 'Not configured',
@@ -1553,6 +1558,35 @@ function controlPlaneCard(ov, info, features) {
           features.find((f) => f.key === 'unknown-callers')?.mode === 'monitor' ? 'Unknown callers let through' : 'Unknown callers refused',
           ' · ', h('a', { href: '#/features' }, featureSummary(features)),
         ] : null)));
+}
+
+// The control plane's replicas, and the one that runs the scheduled work.
+function replicasValue(replicas) {
+  return replicas?.length ? plural(replicas.length, 'replica') : 'Unknown';
+}
+
+function replicasNote(replicas) {
+  if (!replicas?.length) return null;
+  if (replicas[0].database === 'sqlite') return 'One process, on SQLite';
+  const leader = replicas.find((r) => r.leader);
+  // The replica answering has lost its connection for hearing the others' changes.
+  const apart = replicas.some((r) => r.this && r.listening === false);
+  return [
+    leader ? ['Leader ', h('code', {}, leader.name)] : 'No leader at the moment',
+    apart ? h('span', { class: 'tone-text-warning' }, ' · this replica is out of touch with the others') : null,
+  ];
+}
+
+// When the OPA instances last reported, and whether they all run the current bundle.
+function opaNote(opa) {
+  const instances = opa?.instances || [];
+  if (!opa?.last_status_at) return 'No OPA instance has reported yet';
+  const behind = instances.filter((i) => i.revision && i.revision !== opa.bundle_revision).length;
+  return [
+    instances.length > 1 ? `${instances.length} OPA instances; the last reported ` : 'OPA reported ',
+    timeEl(opa.last_status_at),
+    behind ? h('span', { class: 'tone-text-warning' }, ` · ${plural(behind, 'instance')} on an earlier bundle`) : null,
+  ];
 }
 
 /* ------------------------------------------------------------------ agents */
@@ -2083,7 +2117,7 @@ async function agentForm(a) {
       }
       // Left unchanged, the tier follows the blueprint (as the API does).
       if (v.risk_tier && v.risk_tier !== a?.risk_tier) body.risk_tier = v.risk_tier;
-      if (editing) return api(`v1/agents/${encodeURIComponent(a.id)}`, { method: 'PATCH', body });
+      if (editing) return api(`v1/agents/${encodeURIComponent(a.id)}`, { method: 'PATCH', body, ifMatch: a.version });
       return api('v1/agents', { method: 'POST', body: { name: v.name, ...body, approve: v.approve } });
     },
   });
@@ -3173,7 +3207,7 @@ function toolserverForm(ts, draft = null) {
         trust_level: v.trust_level, data_classification: v.data_classification, labels: parseLabels(v.labels),
         gateway: v.gateway, developers: v.developers, packages: parsePackages(v.packages), registry_name: orNull(v.registry_name),
       };
-      if (editing) return api(`v1/toolservers/${encodeURIComponent(ts.name)}`, { method: 'PATCH', body });
+      if (editing) return api(`v1/toolservers/${encodeURIComponent(ts.name)}`, { method: 'PATCH', body, ifMatch: ts.version });
       return api('v1/toolservers', { method: 'POST', body: { name: v.name, ...body } });
     },
   });
@@ -3762,7 +3796,7 @@ async function teamForm(t, chats) {
         description: v.description, members: parseList(v.members), emails: parseList(v.emails),
         destinations: chats.filter((d) => v[`chat-${d.name}`]).map((d) => d.name), default: v.default,
       };
-      if (editing) return api(`v1/teams/${encodeURIComponent(t.name)}`, { method: 'PATCH', body });
+      if (editing) return api(`v1/teams/${encodeURIComponent(t.name)}`, { method: 'PATCH', body, ifMatch: t.version });
       return api('v1/teams', { method: 'POST', body: { name: v.name, ...body } });
     },
   });
@@ -3925,7 +3959,7 @@ async function blueprintFormFlow(b, servers) {
         acts_for: v.acts_for, people_groups: parseList(v.people_groups), approvals_by: v.approvals_by,
         team: v.team || null,
       };
-      if (editing) return api(`v1/blueprints/${encodeURIComponent(b.name)}`, { method: 'PATCH', body });
+      if (editing) return api(`v1/blueprints/${encodeURIComponent(b.name)}`, { method: 'PATCH', body, ifMatch: b.version });
       return api('v1/blueprints', { method: 'POST', body: { name: v.name, ...body } });
     },
   });
@@ -3986,7 +4020,7 @@ async function policyFormFlow(p) {
     },
     submit: (v) => {
       const body = { description: v.description, rego: v.rego, enabled: v.enabled };
-      if (editing) return api(`v1/policies/${encodeURIComponent(p.name)}`, { method: 'PUT', body });
+      if (editing) return api(`v1/policies/${encodeURIComponent(p.name)}`, { method: 'PUT', body, ifMatch: p.version });
       return api('v1/policies', { method: 'POST', body: { name: v.name, ...body } });
     },
   });
@@ -4155,7 +4189,7 @@ async function packageForm(pk, servers, blueprints) {
         agent_access: parseList(v.agent_access), blueprints: parseList(v.blueprints), approval: v.approval,
         duration_days: whole(v.duration_days, 'How long it lasts'), review_days: whole(v.review_days, 'The review period'),
       };
-      if (editing) return api(`v1/access-packages/${encodeURIComponent(pk.name)}`, { method: 'PATCH', body });
+      if (editing) return api(`v1/access-packages/${encodeURIComponent(pk.name)}`, { method: 'PATCH', body, ifMatch: pk.version });
       return api('v1/access-packages', { method: 'POST', body: { name: v.name, ...body } });
     },
   });
@@ -4380,7 +4414,7 @@ async function ruleForm(r, blueprints) {
     onReady: (found) => { controls = found; },
     submit: (v) => {
       const body = ruleBody(v);
-      if (editing) return api(`v1/rules/${encodeURIComponent(r.name)}`, { method: 'PATCH', body });
+      if (editing) return api(`v1/rules/${encodeURIComponent(r.name)}`, { method: 'PATCH', body, ifMatch: r.version });
       return api('v1/rules', { method: 'POST', body: { name: v.name, ...body } });
     },
   });
@@ -5318,7 +5352,7 @@ async function issuerForm(i) {
         issuer: v.issuer, keys_url: orNull(v.keys_url), description: v.description, labels: parseLabels(v.labels),
         ...(kind === 'oidc' ? { audience: orNull(v.audience), allow_reuse: v.allow_reuse } : {}),
       };
-      if (editing) return api(`v1/identity-issuers/${encodeURIComponent(i.name)}`, { method: 'PATCH', body });
+      if (editing) return api(`v1/identity-issuers/${encodeURIComponent(i.name)}`, { method: 'PATCH', body, ifMatch: i.version });
       return api('v1/identity-issuers', { method: 'POST', body: { name: v.name, kind, ...body } });
     },
   });
@@ -6247,7 +6281,7 @@ async function destinationForm(d) {
         ...(family === 'siem' ? { url: orNull(v.url) } : {}),
         ...(kind === 'webhook' ? { format: v.format } : {}),
       };
-      if (editing) return api(`v1/destinations/${encodeURIComponent(d.name)}`, { method: 'PATCH', body });
+      if (editing) return api(`v1/destinations/${encodeURIComponent(d.name)}`, { method: 'PATCH', body, ifMatch: d.version });
       return api('v1/destinations', { method: 'POST', body: { name: v.name, kind, ...body, ...(family === 'siem' && v.backfill ? { backfill: true } : {}) } });
     },
   });
@@ -6461,7 +6495,7 @@ async function providerForm(p) {
         kind: v.kind, base_url: v.kind === 'openai-compatible' ? orNull(v.base_url) : null, key_file: orNull(v.key_file),
         trust_level: v.trust_level, prices: parsePrices(v.prices), description: v.description,
       };
-      if (editing) return api(`v1/models/providers/${encodeURIComponent(p.name)}`, { method: 'PATCH', body });
+      if (editing) return api(`v1/models/providers/${encodeURIComponent(p.name)}`, { method: 'PATCH', body, ifMatch: p.version });
       return api('v1/models/providers', { method: 'POST', body: { name: v.name, ...body } });
     },
   });

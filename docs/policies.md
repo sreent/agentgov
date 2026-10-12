@@ -219,7 +219,11 @@ agent called in `input.target`. Its built-in rules refuse calls to agents that a
 registered, active or serving A2A, an agent calling itself, a loop back to an agent already
 in the chain, and chains of more than five agents; under `least-privilege`, a caller may call
 only the agents its `agent_access`, or an [access package](access-packages.md) it holds,
-names. [Agent to agent](agent-to-agent.md#in-policy) shows
+names. Each answer the agent called sends back asks the same decision, with
+`input.phase == "response"`: the built-in rules withhold an answer that carries instructions
+aimed at the caller, and mask credentials, and personal data unless the caller has the
+`pii-access` label (its own or its blueprint's); an organisation policy's `deny` and `redact` apply to answers
+too. [Agent to agent](agent-to-agent.md#in-policy) shows
 the input and an organisation policy for these calls. To ask the live OPA, use **What if**,
 `agentgov policies evaluate --agent … --call-agent …`, or send
 `"path": "agentgov/a2a/decision"` to `POST /v1/policies/evaluate`.
@@ -312,5 +316,11 @@ Things to know, verified against AGT 5.0.0:
 * The agent identity in these calls is self-declared by the agent process. Keep the
   gateway as the enforcement point for anything that must hold against a misbehaving agent.
 * AGT's adapter refuses plain HTTP to a non-local OPA: use TLS, or an OPA sidecar on localhost.
+* With mutual TLS between AgentGov's components ([production](production.md#mutual-tls-between-components),
+  on by default), AgentGov's OPA asks every caller for a certificate from AgentGov's
+  authority, which agents don't have. Run an OPA sidecar next to the agent instead: it
+  fetches AgentGov's bundles from the control plane's internal port with a certificate of
+  its own (`agentgov internal-certs DIR --component NAME`, from the authority's directory,
+  or cert-manager's issuer), and the agent asks it on localhost.
 * Configure AGT with `default_action: deny`. In 5.0.0, `govern()` treats an unreachable OPA
   as "no decision" and falls back to the YAML default.

@@ -118,8 +118,10 @@ The defaults of the Compose stack and of the Helm chart are for evaluation
   readable only by that user. It is a bearer credential with the person's roles until it
   expires: run `agentgov logout` on shared machines, and end lost sessions on the Access
   page.
-* If you run the instruction classifier, keep it on the private network: it receives
-  agents' instructions (with credentials already redacted).
+* If you run the classifier (IBM Granite Guardian), keep it on the private network, as
+  Presidio: it receives agents' instructions (with credentials already redacted) and,
+  while `traffic-classifier` is on, the tool results, answers and prompts it judges, as
+  they are.
 * The MCP registry (`mcp-registry`, off by default) is served without credentials, as
   developers' MCP clients read it: anyone who can reach the control plane can read the
   names, descriptions and addresses of the servers listed for developers. Serve it where
@@ -135,8 +137,15 @@ The defaults of the Compose stack and of the Helm chart are for evaluation
 
 ## Known limitations
 
-* The prompt-injection, jailbreak and tool-poisoning detectors are heuristics. They raise the cost
-  of common attacks; they are not a guarantee.
+* The prompt-injection, jailbreak and tool-poisoning detectors are heuristics, and the
+  classifier that can back up the first two is a model. They raise the cost of common and
+  reworded attacks; they are not a guarantee. A verdict the classifier gives in the
+  background (its default, monitored) comes after the call went on: it raises a finding,
+  it doesn't stop the call ([detection](docs/detection.md)).
+* The gateway checks agents' answers to other agents as they stream, event by event. An
+  answer, or an event, over 4 MiB, or one compressed although the gateway asked for it
+  plain, is withheld where `data-protection` or `prompt-injection` is enforced, and goes
+  through unchecked where neither is.
 * The checks on agents' instructions are rules plus, optionally, a model. Both can miss
   reworded or obfuscated instructions and can flag legitimate ones; treat a finding as a
   reason to review, and its absence as no proof of safety.
@@ -164,8 +173,17 @@ The defaults of the Compose stack and of the Helm chart are for evaluation
 * Token budgets count usage from the gateway's access logs as calls finish. Calls that
   run at the same time can take an agent past its budget, and the tokens of answers the
   gateway withholds aren't counted.
-* Connections between components are not mutually authenticated yet (mTLS is on the
-  [roadmap](docs/roadmap.md)); rely on network isolation.
+* AgentGov's components authenticate each other with mutual TLS, from an authority of
+  AgentGov's own, and OPA verifies the bundles the control plane signs
+  ([production](docs/production.md)); both are on by default in the Helm chart and the
+  Compose stack. Presidio's analyzer and Keycloak are outside it: keep Presidio reachable
+  from the processor only (the network policies do), and give Keycloak TLS of its own.
+  The authority's key (in the chart, the Secret `<release>-tls-ca`) can issue any
+  component's certificate: guard it as you guard the service token, and don't let the
+  authority issue certificates to anything else (with cert-manager, the chart makes one
+  for the release unless you name an Issuer of your own). The components read their
+  certificates when they start, and OPA every minute: after cert-manager renews one,
+  restart the pods.
 * Administrators' roles are read from the identity provider when they sign in. Removing a
   role or disabling an account there takes effect at the next sign-in; a session that is
   already open lasts until it expires (`AGENTGOV_SESSION_HOURS`, default 8), the person

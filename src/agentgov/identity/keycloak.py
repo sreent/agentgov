@@ -29,6 +29,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 from urllib.parse import quote
 
@@ -658,13 +660,25 @@ class IdentityReconciler:
     def trigger(self) -> None:
         self._wake.set()
 
-    def start(self, interval: float = 60.0) -> None:
+    def start(
+        self,
+        interval: float = 60.0,
+        *,
+        leading: Callable[[], bool] | None = None,
+        exclusive: Callable[[], AbstractContextManager[Any]] | None = None,
+    ) -> None:
+        """Reconcile every agent when triggered and every ``interval`` seconds; with
+        ``leading``, only while this replica leads, and inside ``exclusive`` (one run at a
+        time across replicas)."""
+
         def run() -> None:
             while not self._stop.is_set():
-                try:
-                    self.reconcile_all()
-                except Exception:  # keep the worker alive across DB/IdP hiccups
-                    log.exception("identity reconciliation failed")
+                if leading is None or leading():
+                    try:
+                        with exclusive() if exclusive is not None else nullcontext():
+                            self.reconcile_all()
+                    except Exception:  # keep the worker alive across DB/IdP hiccups
+                        log.exception("identity reconciliation failed")
                 self._wake.wait(timeout=interval)
                 self._wake.clear()
 

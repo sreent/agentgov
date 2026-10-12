@@ -15,7 +15,8 @@ person in the demo realm: sam signs in to the demo chat app, the agent exchanges
 sam's token for a token of its own, and sam signs in to AgentGov to approve what
 it wants to do for them (AGENTGOV_DEMO_PASSWORD is the demo users' password). It
 hands sam's question to another agent over A2A (examples/agents/billing), through
-the gateway, which tells that agent who handed it the work, up to sam. Its sponsor alice
+the gateway, which tells that agent who handed it the work, up to sam, and masks the
+personal data in its answer that the asking agent may not have. Its sponsor alice
 asks for an access package for it, which an administrator approves and later revokes.
 Then an agent with no secret at all authenticates with its service account token
 from a stand-in Kubernetes cluster (examples/identity/workload-issuer). Last, the
@@ -25,7 +26,9 @@ teams responsible for agents get their issues in their own channels
 (examples/secops/sink stands in for all of them). A management rule tells the agent's
 people before it would act. And the ledger gets a checkpoint, time-stamped by an
 authority (the sink stands in for one too) and checked with OpenSSL, next to a compliance
-report and the evidence pack for assessors.
+report and the evidence pack for assessors. Last, a classifier gives a second opinion
+on a tool result the rules let through (examples/models/mock stands in for IBM Granite
+Guardian, where the stack is started with AGENTGOV_GUARDIAN_URL pointing at it).
 """
 
 from __future__ import annotations
@@ -83,6 +86,9 @@ HANDOFF = "/v1/features/security-operations"
 # The agent other agents call (agents.yaml, examples/agents/billing), on the gateway.
 BILLING = "billing-agent"
 A2A_ROUTE = f"/a2a/{BILLING}"
+# How soon a block must stop the agent's calls (it takes well under a second; this leaves
+# room for a busy machine).
+KILL_SWITCH_SECONDS = 5
 
 BOLD, DIM, GREEN, RED, YELLOW, RESET = (
     "\033[1m",
@@ -520,6 +526,20 @@ async def agent_to_agent(name: str, creds: dict[str, str]) -> None:
             state == "TASK_STATE_COMPLETED" and f"for sam (sam > {name} > " in text,
             f"{BILLING} answered: {text}",
         )
+        # billing-agent may read customers' contact details (its blueprint's pii-access);
+        # the agent it answers may not: the gateway masks them in the answer.
+        artifacts = ((reply.get("result") or {}).get("task") or {}).get("artifacts") or [{}]
+        record = ((artifacts[0].get("parts") or [{}])[0].get("data")) or {}
+        answered = await asyncio.to_thread(
+            ledger_entry, {"agent": name, "type": "decision.a2a.response"}
+        )
+        redacted = ((answered or {}).get("details") or {}).get("redacted") or []
+        show(
+            "masked:",
+            "REDACTED" in str(record.get("email")) and "pii" in redacted,
+            f"{BILLING} read the customer's contact details; its answer reached {name} with "
+            f"them masked: {record.get('email')}, {record.get('phone')}",
+        )
         called = await asyncio.to_thread(
             ledger_entry, {"agent": name, "type": "decision.a2a.request"}
         )
@@ -657,7 +677,13 @@ async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
             while allowed and time.monotonic() - started < 30:
                 allowed, payload = await call(client, "get_customer", {"customer_id": "c-001"})
             elapsed = time.monotonic() - started
-            report(allowed, f"{payload} ({elapsed:.2f}s after the block)", expect_allowed=False)
+            # Whichever control-plane replica OPA asks, the block reaches it at once: seconds
+            # late would mean a replica didn't hear of it.
+            show(
+                "allowed" if allowed else "refused",
+                not allowed and elapsed < KILL_SWITCH_SECONDS,
+                f"{payload} ({elapsed:.2f}s after the block)",
+            )
             answered, text = await chat(http, "mock-small", "Hello?")
             report_answer(answered, text, expect_answered=False, ok="blocked" in text)
 
@@ -1122,6 +1148,68 @@ def evidence(name: str) -> None:
         )
 
 
+async def deeper_detection() -> None:
+    step("21. Deeper detection: a classifier's second opinion on what the rules let through")
+    if not (admin("GET", "/v1/info").get("classifier") or {}).get("enabled"):
+        print(
+            f"  {DIM}no classifier here: start the stack with AGENTGOV_GUARDIAN_URL set (the "
+            f"demo's stand-in for IBM Granite Guardian: http://demo-model:9100/guardian/v1){RESET}"
+        )
+        return
+    # An agent of its own: the first one is blocked, and risky, by now.
+    name = f"demo-agent-{secrets.token_hex(3)}"
+    admin(
+        "POST",
+        "/v1/agents",
+        json={
+            "name": name,
+            "blueprint": "customer-support",
+            "owner": "cx-platform",
+            "sponsors": ["alice@example.com"],
+        },
+    )
+    admin("POST", f"/v1/agents/{name}/approve", json={"reason": "demo"})
+    creds = admin("POST", f"/v1/agents/{name}/credentials", json={})
+    token = httpx.post(
+        creds["token_endpoint"],
+        data={"grant_type": "client_credentials"},
+        auth=(creds["client_id"], creds["client_secret"]),
+        timeout=30,
+    ).json()["access_token"]
+    # c-001: step 8 deleted c-003.
+    print(f"  {name} reads customer c-001's notes")
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx2.AsyncClient(
+            headers=headers, timeout=httpx2.Timeout(30.0, read=60.0)
+        ) as http:
+            transport = streamable_http_client(f"{GATEWAY}/mcp/crm", http_client=http)
+            async with Client(
+                transport, client_info=Implementation(name=name, version="1.0.0")
+            ) as client:
+                # A note asks the agent, in plain words, to wire money: the rules see data.
+                # Monitored (the default), the classifier answers once the result went on.
+                args = {"customer_id": "c-001"}
+                allowed, payload = await call(client, "get_customer_notes", args)
+                report(allowed, payload, expect_allowed=True)
+                verdict = await asyncio.to_thread(
+                    ledger_entry, {"agent": name, "type": "detection.classifier"}
+                )
+                show("classifier:", verdict is not None, (verdict or {}).get("reason") or "")
+                admin("PUT", "/v1/features/traffic-classifier", json={"mode": "enforce"})
+                print("  traffic-classifier set to enforce; the result now waits for its verdict")
+                try:
+                    allowed, payload = await once_mode_applies(
+                        client, "get_customer_notes", args, allowed=False
+                    )
+                    report(allowed, payload, expect_allowed=False)
+                finally:
+                    admin("PUT", "/v1/features/traffic-classifier", json={"mode": "monitor"})
+                    print("  traffic-classifier set back to monitor")
+    finally:
+        admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
+
+
 def main() -> None:
     wait_for_gateway("/mcp/crm", MODEL_ROUTE, A2A_ROUTE)
     step("1. Registration: a new agent is requested, approved and given an identity")
@@ -1136,6 +1224,7 @@ def main() -> None:
         issues(name)
         management_rules(name)
         evidence(name)
+        asyncio.run(deeper_detection())
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")
         print(f"{DIM}Open {CONTROL_PLANE}/ui for the admin view.{RESET}")

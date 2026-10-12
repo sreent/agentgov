@@ -8,10 +8,13 @@ kubelet would, as far as containers go:
 * a pod's containers share one network namespace, reachable under the pod's
   Service name, and its volumes (emptyDir and claims as volumes without Docker's
   copy-up, configMaps and Secrets as read-only files);
+* a Deployment's replicas are pods of their own under the one Service name, which
+  Docker's DNS spreads connections across; a Service published to the host gets a
+  proxy that hands each connection to the next replica, as kube-proxy would;
 * init containers run to completion first;
 * the pod's user and group, read-only root file systems, dropped capabilities
   and no-new-privileges apply as in the chart;
-* environment variables resolve from the rendered Secret, $(VAR) references
+* environment variables resolve from the rendered Secrets, $(VAR) references
   and the pod's name, as Kubernetes resolves them, and each Service's
   <NAME>_SERVICE_HOST, <NAME>_PORT and the like are set in every pod, as
   Kubernetes sets them, unless the pod turns service links off.
@@ -25,7 +28,7 @@ kind check (scripts/ci.sh --kind) covers them where kind runs.
                                                  workload identity issuer, the sink that
                                                  stands in for the security team's tools,
                                                  and the agent other agents call)
-  chart-on-docker.py secret RENDERED.yaml KEY    print a value of the chart's Secret
+  chart-on-docker.py secret RENDERED.yaml KEY    print KEY's value from the chart's Secrets
   chart-on-docker.py logs                        state and recent logs, for failures
   chart-on-docker.py down                        remove everything it started
 """
@@ -179,8 +182,19 @@ def docker_run(
     return [*args, container["image"], *expand(command[1:]), *expand(container.get("args") or [])]
 
 
-def start_pod(workload: dict[str, Any], docs: list[dict[str, Any]]) -> None:
-    pod = workload["metadata"]["name"]
+def replicas(workload: dict[str, Any]) -> int:
+    return int(workload["spec"].get("replicas", 1)) if workload["kind"] == "Deployment" else 1
+
+
+def pod_name(workload: dict[str, Any], replica: int) -> str:
+    """The first replica's pod goes by its workload's (and Service's) name."""
+    name = workload["metadata"]["name"]
+    return name if replica == 0 else f"{name}-{replica}"
+
+
+def start_pod(workload: dict[str, Any], docs: list[dict[str, Any]], replica: int = 0) -> None:
+    service = workload["metadata"]["name"]
+    pod = pod_name(workload, replica)
     spec = workload["spec"]["template"]["spec"]
     security = spec.get("securityContext") or {}
     user = ""
@@ -205,9 +219,12 @@ def start_pod(workload: dict[str, Any], docs: list[dict[str, Any]]) -> None:
                 sys.exit(f"{pod}: no Secret {source['secretName']}")
             folder = WORK / pod / name
             folder.mkdir(parents=True, exist_ok=True)
-            for key, content in secrets.get(source["secretName"], {}).items():
-                (folder / key).write_text(content)
-                (folder / key).chmod(0o644)
+            values = secrets.get(source["secretName"], {})
+            # With items, only those keys, each at its path.
+            items = source.get("items") or [{"key": k, "path": k} for k in values]
+            for item in items:
+                (folder / item["path"]).write_text(values[item["key"]])
+                (folder / item["path"]).chmod(0o644)
             folder.chmod(0o755)
             mounts[name] = f"type=bind,source={folder}"
         elif "emptyDir" in volume:
@@ -220,10 +237,13 @@ def start_pod(workload: dict[str, Any], docs: list[dict[str, Any]]) -> None:
         mounts[claim["metadata"]["name"]] = new_volume(
             f"{pod}-{claim['metadata']['name']}", owner=f"{group}:{group}" if group else None
         )
-    publish = [arg for port in PUBLISH.get(pod, []) for arg in ("-p", f"127.0.0.1:{port}")]
-    # The pod's network namespace, under its Service's name.
+    # One replica publishes its Service's ports itself; several have a proxy (service()).
+    ports = PUBLISH.get(service, []) if replicas(workload) == 1 else []
+    publish = [arg for port in ports for arg in ("-p", f"127.0.0.1:{port}")]
+    # The pod's network namespace, under its Service's name (and its own).
+    aliases = ["--network-alias", service] + (["--network-alias", pod] if pod != service else [])
     sh("docker", "run", "-d", "--name", pod, "--label", LABEL, "--network", NETWORK,
-       "--network-alias", pod, *publish, "--entrypoint", "sleep", HELPER, "infinity")  # fmt: skip
+       *aliases, *publish, "--entrypoint", "sleep", HELPER, "infinity")  # fmt: skip
     links = service_links(docs) if spec.get("enableServiceLinks", True) else {}
     common = {"pod": pod, "user": user, "mounts": mounts, "secrets": secrets, "links": links}
     for init in spec.get("initContainers") or []:
@@ -236,6 +256,62 @@ def start_pod(workload: dict[str, Any], docs: list[dict[str, Any]]) -> None:
         sh(*docker_run(container, f"{pod}-{container['name']}", detach=True, **common))
 
 
+# A TCP proxy that hands each connection to the next of its targets (host:port), on the
+# ports given; it runs with the workload's own image, which has Python.
+PROXY = """
+import asyncio, itertools, sys
+
+targets = itertools.cycle(sys.argv[2:])
+
+
+async def pipe(reader, writer):
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    except OSError:
+        pass
+    finally:
+        writer.close()
+
+
+async def handle(reader, writer):
+    host, port = next(targets).rsplit(":", 1)
+    try:
+        upstream_reader, upstream_writer = await asyncio.open_connection(host, int(port))
+    except OSError:
+        writer.close()
+        return
+    await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
+
+
+async def main():
+    ports = [int(p) for p in sys.argv[1].split(",")]
+    servers = [await asyncio.start_server(handle, "0.0.0.0", p) for p in ports]
+    await asyncio.gather(*(s.serve_forever() for s in servers))
+
+
+asyncio.run(main())
+"""
+
+
+def service(workload: dict[str, Any]) -> None:
+    """Publish a Service of several replicas to the host, as one address."""
+    name = workload["metadata"]["name"]
+    ports = PUBLISH.get(name, [])
+    if replicas(workload) == 1 or not ports:
+        return
+    image = workload["spec"]["template"]["spec"]["containers"][0]["image"]
+    inside = [p.split(":")[1] for p in ports]
+    targets = [
+        f"{pod_name(workload, r)}:{port}" for port in inside for r in range(replicas(workload))
+    ]
+    publish = [arg for port in ports for arg in ("-p", f"127.0.0.1:{port}")]
+    sh("docker", "run", "-d", "--name", f"{name}-service", "--label", LABEL,
+       "--network", NETWORK, *publish, "--entrypoint", "python", image,
+       "-c", PROXY, ",".join(inside), *targets)  # fmt: skip
+
+
 def new_volume(name: str, *, mode: str | None = None, owner: str | None = None) -> str:
     sh("docker", "volume", "create", "--label", LABEL, name)
     if mode:
@@ -246,8 +322,8 @@ def new_volume(name: str, *, mode: str | None = None, owner: str | None = None) 
     return f"type=volume,source={name},volume-nocopy"
 
 
-def wait_ready(workload: dict[str, Any]) -> None:
-    pod = workload["metadata"]["name"]
+def wait_ready(workload: dict[str, Any], replica: int = 0) -> None:
+    pod = pod_name(workload, replica)
     container = workload["spec"]["template"]["spec"]["containers"][0]
     probe = container["readinessProbe"]
     ports = {p["name"]: p["containerPort"] for p in container.get("ports") or []}
@@ -280,13 +356,19 @@ def up(rendered: str, demo: bool) -> None:
     for name in FIRST:
         workload = next((w for w in workloads if w["metadata"]["name"] == name), None)
         if workload is not None:
-            start_pod(workload, docs)
-            wait_ready(workload)
+            for replica in range(replicas(workload)):
+                start_pod(workload, docs, replica)
+            for replica in range(replicas(workload)):
+                wait_ready(workload, replica)
+            service(workload)
     rest = [w for w in workloads if w["metadata"]["name"] not in FIRST]
     for workload in rest:
-        start_pod(workload, docs)
+        for replica in range(replicas(workload)):
+            start_pod(workload, docs, replica)
     for workload in rest:
-        wait_ready(workload)
+        for replica in range(replicas(workload)):
+            wait_ready(workload, replica)
+        service(workload)
     if demo:
         # The examples' tool server and model provider.
         sh("docker", "run", "-d", "--name", "agentgov-demo-crm-mcp", "--label", LABEL,
@@ -339,7 +421,12 @@ def main(argv: list[str]) -> None:
         case ["up", rendered, *flags] if set(flags) <= {"--demo"}:
             up(rendered, demo="--demo" in flags)
         case ["secret", rendered, key]:
-            print(next(iter(secret_values(load(rendered)).values()))[key])
+            # The Secret that holds the key, of the several the chart renders (the
+            # components' certificates and the bundle-signing key are Secrets too).
+            held = [v[key] for v in secret_values(load(rendered)).values() if key in v]
+            if not held:
+                sys.exit(f"no Secret in {rendered} holds {key}")
+            print(held[0])
         case ["logs"]:
             logs()
         case ["down"]:

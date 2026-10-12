@@ -45,7 +45,7 @@ pipelines, use an API key instead.
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
 | `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)); sees nothing else |
-| `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector |
+| `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector; with mutual TLS between the components, only on the control plane's internal port ([production](production.md#mutual-tls-between-components)) |
 
 People who sign in with single sign-on get their roles from the identity provider each time
 they sign in (see [single sign-on](configuration.md#administrator-single-sign-on-oidc), and the
@@ -61,6 +61,8 @@ The UI only shows the controls a role may use; the API enforces the roles either
 |---|---|---|---|
 | Register an agent | Agents → **Register agent** | `agentgov agents create NAME --blueprint B --sponsor S [--approve]` | `POST /v1/agents` |
 | Edit an agent | Agent → **Edit** | `agentgov agents update REF --owner …` | `PATCH /v1/agents/{ref}` |
+| Edit only if nobody changed it since you looked ([production](production.md#people-working-at-once)) | Every **Edit** form does | `agentgov <kind> update ... --if-version N` | `If-Match: "N"` on `PATCH` (`PUT` for policies); 412 if it changed |
+| See the control plane's replicas and which one leads | Overview → *Control plane* | `agentgov replicas` | `GET /v1/replicas` |
 | Approve, block, unblock, delete, restore | Agent toolbar | `agentgov agents approve\|block\|unblock\|delete\|restore REF` | `POST /v1/agents/{ref}/{action}` |
 | Adopt a discovered agent | Agent → **Adopt** | `agentgov agents lifecycle REF adopt` | `POST /v1/agents/{ref}/adopt` |
 | Delete a deleted agent permanently (otherwise it is purged after `AGENTGOV_SOFT_DELETE_RETENTION_DAYS`, 30 by default) | Agent → **Delete permanently** | `agentgov agents purge REF` | `DELETE /v1/agents/{ref}` |

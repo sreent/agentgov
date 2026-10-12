@@ -221,6 +221,25 @@ CATALOG: tuple[Feature, ...] = (
         },
     ),
     Feature(
+        "traffic-classifier",
+        "Classifier on traffic",
+        "controls",
+        "IBM Granite Guardian gives a second opinion on what the prompt-injection and "
+        "jailbreak checks let through: tool results, the answers agents send each other, and "
+        "people's prompts to models. It follows the check it supports.",
+        CONTROL,
+        MONITOR,
+        {
+            ENFORCE: "Where the check it supports is enforced too, calls wait for its verdict "
+            "(AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS at most), and what it flags is withheld or "
+            "refused, and raises a finding.",
+            MONITOR: "It answers in the background, after the call went on: what it flags is "
+            "recorded and raises a finding.",
+            OFF: "It isn't asked.",
+        },
+        needs="IBM Granite Guardian (AGENTGOV_GUARDIAN_URL) where the processor runs",
+    ),
+    Feature(
         "tool-integrity",
         "Tool integrity",
         "controls",
@@ -585,6 +604,11 @@ def unmet(key: str, mode: str, settings: Settings) -> str | None:
             )
         if mode == ENFORCE and not settings.opa_url:
             return "enforcing Copilot Studio threat detection needs AGENTGOV_OPA_URL"
+    if key == "traffic-classifier" and mode != OFF and not settings.guardian_url:
+        return (
+            "the classifier needs IBM Granite Guardian: set AGENTGOV_GUARDIAN_URL where the "
+            "control plane and the processor run"
+        )
     return None
 
 
@@ -671,6 +695,9 @@ def describe(session: Session, settings: Settings, key: str | None = None) -> li
     for f in [feature(key)] if key else CATALOG:
         row = rows.get(f.key)
         current = row.mode if row is not None else f.default
+        # A default that needs what isn't there, or a mode chosen before it went away: it
+        # does nothing until it is there, and says so.
+        missing = unmet(f.key, current, settings)
         out.append(
             {
                 "key": f.key,
@@ -684,7 +711,9 @@ def describe(session: Session, settings: Settings, key: str | None = None) -> li
                 "set_by": "default" if row is None else DEPLOYMENT if row.pinned else "admin",
                 "changed_by": row.changed_by if row is not None else None,
                 "changed_at": ids.isoformat(row.changed_at) if row is not None else None,
-                "effect": f.effects.get(current, ""),
+                "effect": f"{missing[:1].upper()}{missing[1:]}."
+                if missing
+                else f.effects.get(current, ""),
                 "effects": dict(f.effects),
                 "needs": f.needs,
                 # Modes that can't be chosen yet, with the reason.

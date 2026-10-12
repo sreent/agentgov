@@ -34,10 +34,11 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.db import mark_changed
+from agentgov.db import lock, mark_changed
 from agentgov.models import DESTINATION_KINDS, Destination, LedgerHead, Team
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
+from agentgov.registry.versions import edited, start_edit
 
 OTLP, WEBHOOK, SPLUNK_HEC, SLACK, TEAMS = DESTINATION_KINDS
 SIEM = (OTLP, WEBHOOK, SPLUNK_HEC)
@@ -317,13 +318,20 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Destination
 
 
 def update(
-    session: Session, destination: Destination, data: dict[str, Any], *, actor: str
+    session: Session,
+    destination: Destination,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
 ) -> list[str]:
+    start_edit(session, destination, version, f"destination {destination.name}")
     _known(data, ("name", "kind"))
     if "kind" in data and data["kind"] != destination.kind:
         raise ValidationError("a destination's kind can't change: add another destination")
     changed = _apply(destination, data)
     if changed:
+        edited(destination)
         ledger.append(
             session,
             type="destination.updated",
@@ -342,6 +350,7 @@ def set_status(
     if action not in ("pause", "resume"):
         raise ValidationError(f"unknown action {action!r}")
     target = PAUSED if action == "pause" else ACTIVE
+    lock(session, destination)
     if destination.status == target:
         raise InvalidTransition(f"destination is already {target}")
     destination.status = target
@@ -405,6 +414,7 @@ def to_dict(
     out: dict[str, Any] = {
         "id": destination.id,
         "name": destination.name,
+        "version": destination.version,
         "kind": destination.kind,
         "description": destination.description or "",
         "url": destination.url,

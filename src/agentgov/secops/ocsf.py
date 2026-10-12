@@ -136,6 +136,8 @@ def _class(entry: LedgerEntry) -> int:
         return API_ACTIVITY
     if prefix == "admin":
         return AUTHENTICATION
+    if prefix == "detection":  # what a detector found, such as the classifier
+        return DETECTION_FINDING
     if prefix == "finding":
         category = (entry.details or {}).get("category")
         if category is None:
@@ -372,6 +374,7 @@ def _finding(entry: LedgerEntry, class_uid: int, agent: Agent | None) -> dict[st
     # open finding (as an issue, docs/issues.md) updates it.
     activity_id, activity = {
         "raised": (1, "Create"),
+        "classifier": (1, "Create"),
         "resolved": (3, "Close"),
         "dismissed": (3, "Close"),
         "accepted": (3, "Close"),
@@ -379,6 +382,7 @@ def _finding(entry: LedgerEntry, class_uid: int, agent: Agent | None) -> dict[st
     event = _base(entry, class_uid, activity_id, activity)
     status_id, status = {
         "raised": (1, "New"),
+        "classifier": (1, "New"),
         "reopened": (1, "New"),
         "assigned": (1, "New"),
         "escalated": (1, "New"),

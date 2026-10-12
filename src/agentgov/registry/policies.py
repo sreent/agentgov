@@ -14,6 +14,7 @@ from agentgov.opa import bundle as opa_bundle
 from agentgov.opa import rego
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
+from agentgov.registry.versions import start_edit
 
 
 def get(session: Session, ref: str) -> Policy:
@@ -70,7 +71,15 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Policy:
     return policy
 
 
-def update(session: Session, policy: Policy, data: dict[str, Any], *, actor: str) -> bool:
+def update(
+    session: Session,
+    policy: Policy,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    version: int | None = None,
+) -> bool:
+    start_edit(session, policy, version, f"policy {policy.name}")
     source = data.get("rego", policy.rego)
     enabled = bool(data.get("enabled", policy.enabled))
     description = str(data.get("description", policy.description) or "")

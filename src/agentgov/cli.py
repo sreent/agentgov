@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import html
 import http.server
@@ -21,6 +22,7 @@ import secrets
 import sys
 import threading
 import webbrowser
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
@@ -156,6 +158,18 @@ def _client() -> httpx.Client:
     token = _token(url)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return httpx.Client(base_url=url, headers=headers, timeout=30)
+
+
+IF_VERSION = typer.Option(
+    None,
+    "--if-version",
+    help="Only if it is still at this version (from get): refused if someone changed it since.",
+)
+
+
+def _if_version(version: int | None) -> dict[str, Any]:
+    """The request's If-Match, for an edit made from a version (registry/versions)."""
+    return {"headers": {"If-Match": f'"{version}"'}} if version is not None else {}
 
 
 def _call(method: str, path: str, **kwargs: Any) -> Any:
@@ -512,7 +526,9 @@ def server(
     port: int = typer.Option(8000, help="Port."),
     dev: bool = typer.Option(False, help="Development mode (generates an admin token)."),
 ) -> None:
-    """Run the control plane (API, admin UI, OPA bundle server)."""
+    """Run the control plane (API, admin UI, OPA bundle server). With AGENTGOV_TLS_DIR, it
+    also listens on AGENTGOV_INTERNAL_PORT for AgentGov's other components, over mutual
+    TLS."""
     import uvicorn
 
     from agentgov.config import Settings
@@ -522,13 +538,57 @@ def server(
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
-    uvicorn.run(
-        "agentgov.api.app:create_app",
-        factory=True,
-        host=host,
-        port=port,
-        timeout_keep_alive=Settings.from_env().http_keepalive_seconds,
+    settings = Settings.from_env()
+    if not settings.tls_dir:
+        uvicorn.run(
+            "agentgov.api.app:create_app",
+            factory=True,
+            host=host,
+            port=port,
+            timeout_keep_alive=settings.http_keepalive_seconds,
+        )
+        return
+    asyncio.run(_serve_two(settings, host, port))
+
+
+async def _serve_two(settings: Any, host: str, port: int) -> None:
+    """The control plane on its public port, and on its internal one over mutual TLS: one
+    app, one runtime."""
+    import uvicorn
+
+    from agentgov.api.app import create_app
+    from agentgov.tls import InternalListener
+
+    class Inner(uvicorn.Server):
+        """The internal listener: the public one handles the process's signals."""
+
+        @contextlib.contextmanager
+        def capture_signals(self) -> Iterator[None]:
+            yield
+
+    app = create_app(settings)
+    keepalive = settings.http_keepalive_seconds
+    public = uvicorn.Server(uvicorn.Config(app, host=host, port=port, timeout_keep_alive=keepalive))
+    internal = Inner(
+        uvicorn.Config(
+            InternalListener(app),
+            host=host,
+            port=settings.internal_port,
+            timeout_keep_alive=keepalive,
+            lifespan="off",
+            **settings.tls().uvicorn_options(),
+        )
     )
+    serving = asyncio.create_task(public.serve())
+    # Components wait for the runtime the public server starts.
+    while not public.started and not serving.done():
+        await asyncio.sleep(0.1)
+    inner = asyncio.create_task(internal.serve())
+    try:
+        await serving
+    finally:
+        internal.should_exit = True
+        await inner
 
 
 @app.command()
@@ -603,6 +663,50 @@ def db_upgrade(
         _done("database", migrations.head(), "already up to date")
 
 
+# AgentGov's components, by the names Compose reaches them by.
+COMPONENTS = ["control-plane", "processor", "opa", "gateway", "otel-collector"]
+
+
+@app.command("internal-certs")
+def internal_certs(
+    directory: Path = typer.Argument(
+        ..., help="Where the authority (ca/) and each component's certificate (<name>/) go."
+    ),
+    component: list[str] | None = typer.Option(
+        None,
+        "--component",
+        help="NAME, or NAME=HOST,HOST: a component and the names others reach it by "
+        f"(default: {', '.join(COMPONENTS)}, each by its name).",
+    ),
+) -> None:
+    """Make AgentGov's own certificate authority, and a certificate for each component, for
+    mutual TLS between them (AGENTGOV_TLS_DIR=<directory>/<name>). Each component's
+    directory holds tls.crt, tls.key and ca.crt, as cert-manager writes them. What is
+    there already is kept."""
+    from agentgov import tls
+
+    authority = tls.make_authority(directory / "ca")
+    for spec in component or COMPONENTS:
+        name, _, hosts = spec.partition("=")
+        names = [h for h in hosts.split(",") if h] or [name]
+        folder = tls.issue(
+            authority, directory / name, f"agentgov-{name}", [*names, "localhost", "127.0.0.1"]
+        )
+        typer.echo(f"{name}: {folder}")
+
+
+@app.command("bundle-signing-key")
+def bundle_signing_key(
+    directory: Path = typer.Argument(..., help="Where key.pem and cert.pem go."),
+) -> None:
+    """Make a key for signing OPA's bundles (key.pem, for AGENTGOV_BUNDLE_SIGNING_KEY_FILE)
+    and a certificate OPA verifies them with (cert.pem). A pair already there is kept."""
+    from agentgov.opa.signing import generate
+
+    key, cert = generate(directory)
+    typer.echo(f"key: {key}\ncertificate: {cert}")
+
+
 @app.command("gateway-config")
 def gateway_config(
     output: Path = typer.Option(
@@ -632,10 +736,12 @@ def gateway_config(
     settings = Settings.from_env()
     if not settings.service_token:
         _fail("set AGENTGOV_SERVICE_TOKEN (the control plane's service token)")
+    identity = settings.tls()  # mutual TLS: the control plane's internal port
     with httpx.Client(
         base_url=settings.control_plane_url,
         headers={"Authorization": f"Bearer {settings.service_token}"},
         timeout=10,
+        verify=identity.client_context() if identity else True,
     ) as client:
         keep_current(
             client,
@@ -697,6 +803,18 @@ def export() -> None:
 def overview() -> None:
     """Show the governance overview."""
     _print(_call("GET", "/v1/overview"))
+
+
+@app.command()
+def replicas() -> None:
+    """The control plane's replicas, and the one that runs the scheduled work."""
+    rows = _call("GET", "/v1/replicas")
+    for r in rows:
+        r["role"] = "leader" if r["leader"] else ""
+        r["answering"] = "this one" if r.get("this") else ""
+        if r.get("this") and r.get("listening") is False:
+            r["answering"] += ", out of touch with the others"
+    _table(rows, ["name", "role", "answering", "connected_since"])
 
 
 # -------------------------------------------------------------------- agents
@@ -929,6 +1047,7 @@ def agents_update(
     no_agent_access: bool = typer.Option(
         False, "--no-agent-access", help="Only the agents its blueprint may call."
     ),
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Change an agent's details. Only the options you pass are changed."""
     body = (
@@ -952,7 +1071,7 @@ def agents_update(
     )
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    agent = _call("PATCH", f"/v1/agents/{ref}", json=body)
+    agent = _call("PATCH", f"/v1/agents/{ref}", json=body, **_if_version(if_version))
     _done("agent", agent["name"], "updated")
 
 
@@ -1333,6 +1452,7 @@ def blueprints_update(
     ),
     team: str | None = BP_TEAM,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Change a blueprint. Every agent on it gets the change."""
     body = (
@@ -1347,7 +1467,7 @@ def blueprints_update(
     )
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    bp = _call("PATCH", f"/v1/blueprints/{name}", json=body)
+    bp = _call("PATCH", f"/v1/blueprints/{name}", json=body, **_if_version(if_version))
     _done("blueprint", bp["name"], "updated")
 
 
@@ -1493,6 +1613,7 @@ def toolservers_update(
     developers: bool | None = DEVELOPERS,
     package: list[str] | None = PACKAGE,
     registry_name: str | None = REGISTRY_NAME,
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Change a tool server's details."""
     body = _toolserver_fields(
@@ -1501,7 +1622,7 @@ def toolservers_update(
     )  # fmt: skip
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    ts = _call("PATCH", f"/v1/toolservers/{name}", json=body)
+    ts = _call("PATCH", f"/v1/toolservers/{name}", json=body, **_if_version(if_version))
     _done("toolserver", ts["name"], "updated")
 
 
@@ -1589,6 +1710,7 @@ def policies_update(
     name: str,
     file: Path | None = REGO_FILE,
     description: str | None = DESCRIPTION,
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Replace a policy's source or description (checked before it is saved)."""
     body = _given(description=description)
@@ -1596,7 +1718,7 @@ def policies_update(
         body["rego"] = file.read_text()
     if not body:
         _fail("nothing to change: pass --file or --description")
-    policy = _call("PUT", f"/v1/policies/{name}", json=body)
+    policy = _call("PUT", f"/v1/policies/{name}", json=body, **_if_version(if_version))
     _done("policy", policy["name"], f"version {policy['version']}")
 
 
@@ -2614,6 +2736,7 @@ def models_update(
         None, "--price", help="Prices model=input,output (replace them)."
     ),
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Change a model provider."""
     body = _provider_fields(
@@ -2627,7 +2750,9 @@ def models_update(
     )
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    out = _call("PATCH", f"/v1/models/providers/{quote(name)}", json=body)
+    out = _call(
+        "PATCH", f"/v1/models/providers/{quote(name)}", json=body, **_if_version(if_version)
+    )
     _done("model-provider", out["name"], "updated")
 
 
@@ -2737,6 +2862,7 @@ def issuers_update(
     allow_reuse: bool | None = ALLOW_REUSE,
     description: str | None = DESCRIPTION,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Change an identity issuer."""
     body = _issuer_fields(
@@ -2749,7 +2875,9 @@ def issuers_update(
     )
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    out = _call("PATCH", f"/v1/identity-issuers/{quote(name)}", json=body)
+    out = _call(
+        "PATCH", f"/v1/identity-issuers/{quote(name)}", json=body, **_if_version(if_version)
+    )
     _done("identity-issuer", out["name"], "updated")
 
 
@@ -2934,6 +3062,7 @@ def destinations_update(
     format: str | None = DEST_FORMAT,
     description: str | None = DESCRIPTION,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Change a destination."""
     body = _destination_fields(
@@ -2946,7 +3075,7 @@ def destinations_update(
     )
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    out = _call("PATCH", f"/v1/destinations/{quote(name)}", json=body)
+    out = _call("PATCH", f"/v1/destinations/{quote(name)}", json=body, **_if_version(if_version))
     _done("destination", out["name"], "updated")
 
 
@@ -3113,6 +3242,7 @@ def packages_update(
     review_days: int | None = PKG_REVIEW,
     no_review: bool = typer.Option(False, "--no-review", help="No periodic reviews."),
     approval: bool | None = PKG_APPROVAL,
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Change an access package: every agent that holds it gets the change."""
     body = _package_fields(
@@ -3121,7 +3251,7 @@ def packages_update(
     )  # fmt: skip
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    out = _call("PATCH", f"/v1/access-packages/{quote(name)}", json=body)
+    out = _call("PATCH", f"/v1/access-packages/{quote(name)}", json=body, **_if_version(if_version))
     _done("access-package", out["name"], "updated")
 
 
@@ -3290,12 +3420,13 @@ def teams_update(
     default: bool | None = typer.Option(
         None, "--default/--not-default", help="Whether issues without a team go to it."
     ),
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Change a team. Only the options you pass are changed."""
     body = _team_fields(description, member, email, channel, default)
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    out = _call("PATCH", f"/v1/teams/{quote(name)}", json=body)
+    out = _call("PATCH", f"/v1/teams/{quote(name)}", json=body, **_if_version(if_version))
     _done("team", out["name"], "updated")
 
 
@@ -3563,6 +3694,7 @@ def rules_update(
     max_actions: int | None = RULE_MAX,
     mode: str | None = RULE_MODE,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
+    if_version: int | None = IF_VERSION,
 ) -> None:
     """Change a management rule. Passing any condition replaces its conditions, and any
     scope option its scope."""
@@ -3576,7 +3708,7 @@ def rules_update(
     )  # fmt: skip
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    out = _call("PATCH", f"/v1/rules/{quote(name)}", json=body)
+    out = _call("PATCH", f"/v1/rules/{quote(name)}", json=body, **_if_version(if_version))
     _done("rule", out["name"], f"updated ({out['effective_mode']})")
 
 

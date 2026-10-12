@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, MetaData, create_engine, event
+from sqlalchemy import DateTime, MetaData, create_engine, event, inspect, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -17,6 +17,22 @@ from sqlalchemy.types import TypeDecorator
 log = logging.getLogger(__name__)
 
 _CHANGED = "agentgov.changed"
+
+
+def lock(session: Session, instance: Any) -> None:
+    """Lock ``instance``'s row until the transaction ends, and read it afresh: decisions on
+    the same thing (two approvers deciding one request at once, say) take turns, and the
+    later one sees the earlier one's outcome. Nothing to do on SQLite, where each write
+    transaction holds the whole database."""
+    if session.get_bind().dialect.name == "sqlite":
+        return
+    state = inspect(instance)
+    if state.identity is None:
+        return  # not in the database yet
+    keys = state.mapper.primary_key
+    where = [key == value for key, value in zip(keys, state.identity, strict=True)]
+    session.execute(select(*keys).where(*where).with_for_update())
+    session.refresh(instance)
 
 
 def mark_changed(session: Session, *topics: str) -> None:
@@ -86,10 +102,40 @@ def _configure_sqlite(engine: Engine, in_memory: bool) -> None:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
+# TCP keepalives on every connection to PostgreSQL, both ways: the server drops a replica
+# whose host vanished within half a minute, and with it the advisory locks it held (the
+# leader's, a job's), and the replica notices as soon that it lost the server.
+CLIENT_KEEPALIVES: dict[str, Any] = {
+    "keepalives": 1,
+    "keepalives_idle": 10,
+    "keepalives_interval": 5,
+    "keepalives_count": 3,
+}
+SERVER_KEEPALIVES = (
+    "SET tcp_keepalives_idle = 10",
+    "SET tcp_keepalives_interval = 5",
+    "SET tcp_keepalives_count = 3",
+)
+
+
+def _configure_postgresql(engine: Engine) -> None:
+    @event.listens_for(engine, "connect")
+    def _on_connect(dbapi_connection: Any, _record: Any) -> None:
+        # As statements rather than startup options, which poolers such as PgBouncer
+        # refuse; committed, so that they last as long as the connection.
+        with dbapi_connection.cursor() as cursor:
+            for statement in SERVER_KEEPALIVES:
+                cursor.execute(statement)
+        dbapi_connection.commit()
+
+
 class Database:
     def __init__(self, url: str, on_commit: Callable[[set[str]], None] | None = None) -> None:
         self.url = url
         self.on_commit = on_commit
+        # Called with a transaction's topics just before it commits, inside it: how the
+        # other replicas hear about them (agentgov.coordination).
+        self.before_commit: Callable[[Session, set[str]], None] | None = None
         kwargs: dict[str, Any] = {}
         is_sqlite = url.startswith("sqlite")
         in_memory = is_sqlite and (":memory:" in url or url.rstrip("/") == "sqlite:")
@@ -99,12 +145,23 @@ class Database:
                 kwargs["poolclass"] = StaticPool
         else:
             kwargs["pool_pre_ping"] = True
+        postgresql = url.startswith("postgresql")
+        if postgresql:
+            kwargs["connect_args"] = dict(CLIENT_KEEPALIVES)
         self.engine = create_engine(url, **kwargs)
         if is_sqlite:
             _configure_sqlite(self.engine, in_memory)
+        if postgresql:
+            _configure_postgresql(self.engine)
         self._sessionmaker = sessionmaker(bind=self.engine, expire_on_commit=False)
+        event.listen(self._sessionmaker, "before_commit", self._before_commit)
         event.listen(self._sessionmaker, "after_commit", self._after_commit)
         event.listen(self._sessionmaker, "after_rollback", self._after_rollback)
+
+    def _before_commit(self, session: Session) -> None:
+        topics = session.info.get(_CHANGED)
+        if topics and self.before_commit is not None:
+            self.before_commit(session, set(topics))
 
     def _after_commit(self, session: Session) -> None:
         topics = session.info.pop(_CHANGED, None)

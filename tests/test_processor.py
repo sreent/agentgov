@@ -115,14 +115,29 @@ def call_response(
     )
 
 
-def run(opa, cp=None, presidio=None, settings=None, *, request=None, response=None, metadata=()):
+def run(
+    opa,
+    cp=None,
+    presidio=None,
+    settings=None,
+    *,
+    request=None,
+    response=None,
+    metadata=(),
+    traffic_classifier=None,
+):
     """Start a real gRPC server, send one message, return (reply, control_plane)."""
     cp = cp or FakeControlPlane()
 
     async def go():
         recorder = DecisionRecorder(cp)
         processor = GovernanceProcessor(
-            settings or Settings(), opa=opa, control_plane=cp, recorder=recorder, presidio=presidio
+            settings or Settings(),
+            opa=opa,
+            control_plane=cp,
+            recorder=recorder,
+            presidio=presidio,
+            traffic_classifier=traffic_classifier,
         )
         server = grpc.aio.server()
         pb_grpc.add_ExtMcpServicer_to_server(processor, server)
@@ -138,6 +153,8 @@ def run(opa, cp=None, presidio=None, settings=None, *, request=None, response=No
                 )
             await asyncio.sleep(0)  # let fire-and-forget tasks run
             await asyncio.gather(*processor._background)
+            if traffic_classifier is not None:
+                await traffic_classifier.settle()
             await recorder.flush()
             return reply
         finally:

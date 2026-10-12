@@ -43,11 +43,12 @@ spec:
           env:
             {{- include "agentgov.commonEnv" . | nindent 12 }}
             - name: AGENTGOV_CONTROL_PLANE_URL
-              value: {{ include "agentgov.controlPlaneUrl" . | quote }}
+              value: {{ include "agentgov.internalControlPlaneUrl" . | quote }}
             {{- if .Values.presidio.enabled }}
             - name: AGENTGOV_PRESIDIO_URL
               value: "http://{{ include "agentgov.name" (list . "presidio") }}:3000"
             {{- end }}
+            {{- include "agentgov.guardianEnv" . | nindent 12 }}
             {{- range $key, $value := $v.env }}
             - name: {{ $key }}
               value: {{ $value | toString | quote }}
@@ -69,9 +70,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- include "agentgov.tlsMount" . | nindent 12 }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- include "agentgov.tlsVolume" (list . "processor") | nindent 8 }}
       {{- include "agentgov.scheduling" $v | nindent 6 }}
 ---
 apiVersion: v1

@@ -27,6 +27,7 @@ from agentgov.models import (
     LedgerEntry,
     ToolServer,
 )
+from agentgov.opa.bundle import opa_status
 from agentgov.registry import (
     access_packages,
     agents,
@@ -37,6 +38,7 @@ from agentgov.registry import (
     manifests,
 )
 from agentgov.registry.errors import ValidationError
+from agentgov.runtime import JOB_WAIT_SECONDS
 from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1")
@@ -233,7 +235,7 @@ def finding_action(
 
 @router.post("/posture/scan", tags=["findings"])
 def posture_scan(request: Request, _: Principal = Depends(admin)) -> dict[str, Any]:
-    result = _rt(request).run_posture_scan()
+    result = _rt(request).run_posture_scan(wait=JOB_WAIT_SECONDS)
     if result is None:
         raise HTTPException(409, "posture checks are off: turn them on in Features first")
     return result
@@ -390,11 +392,18 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
                 ledger.with_trace_link(ledger.to_dict(e), rt.settings.trace_url) for e in recent
             ],
             "ledger": head,
-            "opa": {
-                "last_status_at": rt.bundles.last_status_at,
-                "bundle_revision": bundle_revision,
-            },
+            "opa": {**opa_status(s), "bundle_revision": bundle_revision},
+            "replicas": rt.coordination.replicas(s),
         }
+
+
+@router.get("/replicas", tags=["overview"])
+def replicas(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+    """The control plane's replicas connected to the database, and the one that leads (runs
+    the scheduled work)."""
+    rt = _rt(request)
+    with rt.db.session() as s:
+        return rt.coordination.replicas(s)
 
 
 @router.get("/graph", tags=["overview"])
@@ -517,6 +526,7 @@ def evaluate_policy(
             f"{rt.settings.opa_url.rstrip('/')}/v1/data/{path}",
             json={"input": body.get("input", {})},
             timeout=5,
+            verify=rt.tls.client_context() if rt.tls else True,
         )
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"OPA unreachable: {exc}") from exc

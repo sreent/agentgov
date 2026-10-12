@@ -17,6 +17,8 @@
   AKS and EKS with each cloud's database, secrets, load balancer and certificates
 * [Configuration](configuration.md): every setting, where to set it, and which the
   deployment sets for you
+* [Running in production](production.md): several control-plane replicas, people working
+  at once, mutual TLS between the components, and signed policy bundles
 * [Features](features.md): which parts of AgentGov you use, and how strictly
 * [Administration](administration.md): signing in, roles, and every task in the admin UI,
   the CLI and the API
@@ -33,10 +35,12 @@
   act for, and approvals sent to the person
 * [Agents' own identities](agent-identity.md): Kubernetes service accounts, SPIFFE IDs and
   Microsoft Entra Agent ID instead of client secrets
-* [Agent to agent](agent-to-agent.md): calls between agents over A2A, and the chain of
-  delegation
+* [Agent to agent](agent-to-agent.md): calls between agents over A2A, their answers, and
+  the chain of delegation
 * [Agent instructions](instructions.md): checking agents' system prompts for harmful or
   malicious content
+* [Detection](detection.md): what the gateway's rules catch, and a classifier's second
+  opinion on tool results, people's prompts and agents' answers
 * [Access packages](access-packages.md): tools, models and agents an agent holds for a
   while once approved, with reminders, renewals and reviews
 * [Issues](issues.md): findings sent to the people responsible for each agent (its owner,

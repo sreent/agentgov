@@ -91,15 +91,17 @@ it is off.
 Any server with an OpenAI-compatible chat completions API can serve Granite
 Guardian. Point the control plane at it with `AGENTGOV_GUARDIAN_URL` (the API's base URL,
 such as `http://guardian:8000/v1`), and `AGENTGOV_GUARDIAN_API_KEY` if the server needs one;
-[configuration](configuration.md#instruction-classifier-optional) has the model name, the
-criteria and the timeout.
+[configuration](configuration.md#classifier-optional) has the model name, the criteria and
+the timeout. Give the governance processor the same settings, and the same classifier
+judges the traffic too: tool results, agents' answers and people's prompts
+([detection](detection.md)).
 
 * **With a GPU:** use vLLM, `vllm serve ibm-granite/granite-guardian-4.1-8b`. Each
   check takes well under a second.
 * **On a CPU:** use llama.cpp's server with the
   [GGUF build](https://huggingface.co/ibm-granite/granite-guardian-4.1-8b-GGUF).
   `deploy/compose/docker-compose.guardian.yml` runs it next to the reference stack
-  ([local](deploy/local.md#optional-a-classifier-for-agent-instructions)).
+  ([local](deploy/local.md#optional-a-classifier)).
   Each criterion takes a few seconds, which is fine because classification runs in
   the background.
 

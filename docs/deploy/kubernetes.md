@@ -93,8 +93,15 @@ The defaults are for evaluation. For an installation others use:
   for MCP clients and agents: give its load balancer a timeout of minutes, not seconds.
 * **Network policies on** (`networkPolicy.enabled=true`, with a network plugin that
   enforces them): OPA, the processor, Presidio and PostgreSQL then take connections only
-  from AgentGov's own parts. Agents that use the Agent Governance Toolkit query OPA
-  directly: allow them with a policy of your own.
+  from AgentGov's own parts, and the control plane's internal port only from them. Agents
+  that use the Agent Governance Toolkit ask an OPA sidecar of their own
+  ([policies](../policies.md#in-process-enforcement-with-the-agent-governance-toolkit)).
+* **Mutual TLS and signed bundles** are on by default (`internalTLS`, `bundleSigning`): the
+  chart makes an authority, the components' certificates and the signing key on install
+  and keeps them, or cert-manager issues the certificates
+  ([production](../production.md)).
+* **Two control-plane replicas or more** (`controlPlane.replicas`) for high availability:
+  each part running several gets a PodDisruptionBudget.
 * **No demo users** (`keycloak.demoUsers=false`), which also leaves out the demo app
   `agentgov-demo-chat`, set before the first install: Keycloak imports AgentGov's realm on
   its first start only ([below](#keycloaks-realm)). Name the apps people use agents from in
@@ -200,17 +207,22 @@ The chart always sets `AGENTGOV_OIDC_CLIENT_SECRET` from the Secret, so a value 
 | `image.repository`, `image.tag` | `ghcr.io/sreent/agentgov`, the chart's appVersion | The AgentGov image |
 | `urls.controlPlane`, `urls.gateway`, `urls.keycloak` | `http://localhost:8000`, `:8080`, `:8180` | The addresses people and agents use |
 | `secrets.existingSecret` | generated | The Secret with the tokens and client secrets |
-| `controlPlane.replicas` | `1` | Keep one ([scaling notes](../architecture.md#scaling-notes)) |
+| `controlPlane.replicas` | `1` | Two or more for high availability, on PostgreSQL ([production](../production.md#several-replicas)) |
 | `controlPlane.autoMigrate` | `true` | Migrate the database when the control plane starts |
 | `controlPlane.env`, `controlPlane.envFrom`, `processor.env`, `processor.envFrom` | — | More settings ([configuration](../configuration.md#helm)) |
 | `controlPlane.extraVolumes`, `controlPlane.extraVolumeMounts` | — | More volumes, such as the database's certificate authority |
-| `controlPlane.ledgerArchive.enabled`, `.retentionDays`, `.existingClaim`, `.size`, `.storageClass` | off, 365, —, 20Gi, — | Keep the ledger's entries in the database for `retentionDays` (183 at least), then archive them to a volume, the chart's or yours ([evidence](../evidence.md#retention)). The chart's volume is kept when the release is uninstalled |
+| `controlPlane.ledgerArchive.enabled`, `.retentionDays`, `.existingClaim`, `.size`, `.storageClass`, `.accessMode` | off, 365, —, 20Gi, —, `ReadWriteOnce` | Keep the ledger's entries in the database for `retentionDays` (183 at least), then archive them to a volume, the chart's or yours ([evidence](../evidence.md#retention)). The chart's volume is kept when the release is uninstalled. Several replicas need `ReadWriteMany` |
+| `internalTLS.enabled` | `true` | Mutual TLS between AgentGov's components, with an authority and certificates the chart makes and keeps ([production](../production.md#mutual-tls-between-components)) |
+| `internalTLS.certManager.enabled`, `.issuerRef`, `.duration` | off, an authority of the release's own, `87600h` | cert-manager issues the components' certificates instead: from an authority it makes for the release, or from your Issuer in the release's namespace, a CA issuer that issues AgentGov's certificates only (not a ClusterIssuer) ([production](../production.md#mutual-tls-between-components)) |
+| `bundleSigning.enabled`, `.existingSecret`, `.algorithm` | on, generated, `RS256` | Signed OPA bundles: the chart's key and certificate, or a `kubernetes.io/tls` Secret of yours ([production](../production.md#signed-bundles)) |
+| `podDisruptionBudget.enabled` | `true` | A PodDisruptionBudget for each part running two or more replicas |
 | `features` | — | Features the deployment pins, such as `{least-privilege: monitor}` ([features](../features.md)); administrators choose the rest in the app |
 | `controlPlane.ingress`, `gateway.ingress`, `keycloak.ingress` | off | Ingresses, at the hosts of the addresses above unless `host` is set |
 | `controlPlane.httpRoute`, `gateway.httpRoute`, `keycloak.httpRoute` | off | Gateway API routes instead, attached to the Gateway in `parentRefs`, with optional `timeouts` |
 | `gateway.replicas`, `processor.replicas`, `opa.replicas` | `1` | The decision path; scale them together |
 | `gateway.configInterval` | `5` | Seconds between the gateway's checks for configuration changes |
 | `presidio.enabled` | `true` | Personal-data detection |
+| `guardian.url`, `guardian.model`, `guardian.existingSecret` | —, `ibm-granite/granite-guardian-4.1-8b`, — | IBM Granite Guardian, served elsewhere (vLLM, llama.cpp): its API's base URL, the model's name, and a Secret with its API key (key `api-key`) if it needs one. The control plane asks it about agents' instructions and the processor about their traffic ([detection](../detection.md)) |
 | `otelCollector.enabled` | `true` | Receive agents' traces (OTLP) for discovery and activity |
 | `postgresql.enabled` | `true` | The bundled PostgreSQL; otherwise `externalDatabase` |
 | `externalDatabase.existingSecret`, `externalDatabase.key` | —, `database-url` | The Secret with AgentGov's database URL |

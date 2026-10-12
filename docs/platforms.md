@@ -249,16 +249,17 @@ if you add the Graph *application* permission `CopilotPackages.Read.All` to it.
 
 When an admin signs in, AgentGov keeps the refresh token that Entra ID returns and swaps
 it for short-lived access tokens to the Power Platform API or Graph when needed. The
-refresh token is held in the control plane's memory only, for as long as the AgentGov
-session lasts (`AGENTGOV_SESSION_HOURS`, 8 by default). It is never written to the
-database or the ledger, and it is useless without the app's client secret. Signing out,
-an admin ending the session on the **Access** page, or the session running out discards
-it.
+refresh token is kept in the database for as long as the AgentGov session lasts
+(`AGENTGOV_SESSION_HOURS`, 8 by default), so that every control-plane replica can act as
+the admin, and a restart doesn't sign them out of Microsoft. It is sealed (AES-256-GCM)
+with a key derived from the app's client secret and bound to its session, so the
+database alone doesn't give it away; it never reaches the ledger, and it is useless
+without the client secret anyway. Signing out, an admin ending the session on the
+**Access** page, or the session running out deletes it. Access tokens stay in each
+replica's memory until they expire.
 
-A restart of the control plane loses every Microsoft sign-in. Admins stay signed in to
+A new client secret makes the sealed sign-ins unreadable: admins stay signed in to
 AgentGov, but they need to sign in again to act in Microsoft, and AgentGov says so.
-Because the sign-ins live in one process's memory, run a single control plane (or route
-each admin to the same one).
 
 ### From the CLI
 

@@ -105,6 +105,8 @@ class Blueprint(Base):
     team: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # Raised by each edit: an edit made from an older copy is refused (registry/versions).
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class Agent(Base):
@@ -175,6 +177,8 @@ class Agent(Base):
     created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # Raised by each edit: an edit made from an older copy is refused (registry/versions).
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     last_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
@@ -217,6 +221,8 @@ class ToolServer(Base):
     created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # Raised by each edit: an edit made from an older copy is refused (registry/versions).
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class ModelProvider(Base):
@@ -244,6 +250,8 @@ class ModelProvider(Base):
     created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # Raised by each edit: an edit made from an older copy is refused (registry/versions).
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class IdentityIssuer(Base):
@@ -278,6 +286,8 @@ class IdentityIssuer(Base):
     created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # Raised by each edit: an edit made from an older copy is refused (registry/versions).
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class Destination(Base):
@@ -312,6 +322,8 @@ class Destination(Base):
     created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # Raised by each edit: an edit made from an older copy is refused (registry/versions).
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class ModelUsage(Base):
@@ -428,6 +440,20 @@ class CliLogin(Base):
     code_hash: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     identity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+
+
+class MicrosoftGrant(Base):
+    """A signed-in administrator's Microsoft sign-in, which AgentGov acts with in Microsoft
+    365 and Power Platform (agentgov.identity.delegation): the refresh token, sealed with a
+    key derived from the client secret, kept for as long as the AgentGov session lasts."""
+
+    __tablename__ = "microsoft_grants"
+
+    # The AgentGov session it belongs to (during a CLI sign-in, the sign-in's state).
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    sealed: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class PlatformAgent(Base):
@@ -596,6 +622,8 @@ class Team(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # Raised by each edit: an edit made from an older copy is refused (registry/versions).
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class AccessPackage(Base):
@@ -621,6 +649,8 @@ class AccessPackage(Base):
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # Raised by each edit: an edit made from an older copy is refused (registry/versions).
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class AccessAssignment(Base):
@@ -674,6 +704,8 @@ class ManagementRule(Base):
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = _updated()
+    # Raised by each edit: an edit made from an older copy is refused (registry/versions).
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class RuleMatch(Base):

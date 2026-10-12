@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from agentgov import ledger
 from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.versions import if_match
 from agentgov.identity.keycloak import KeycloakError
 from agentgov.models import ACTIVE
 from agentgov.registry import (
@@ -123,7 +124,7 @@ def update_agent(
 ) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         agent = agents.get(s, ref)
-        agents.update(s, agent, body, actor=principal.actor)
+        agents.update(s, agent, body, actor=principal.actor, version=if_match(request))
         return agents.to_dict(agent)
 
 
@@ -278,7 +279,7 @@ def update_blueprint(
 ) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         bp = blueprints.get(s, ref)
-        blueprints.update(s, bp, body, actor=principal.actor)
+        blueprints.update(s, bp, body, actor=principal.actor, version=if_match(request))
         return blueprints.to_dict(bp)
 
 
@@ -325,7 +326,7 @@ def update_team(
 ) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         team = teams.get(s, ref)
-        teams.update_team(s, team, body, actor=principal.actor)
+        teams.update_team(s, team, body, actor=principal.actor, version=if_match(request))
         return teams.to_dict(team)
 
 
@@ -384,7 +385,7 @@ def update_toolserver(
     rt = _rt(request)
     with rt.db.session() as s:
         ts = toolservers.get(s, ref)
-        toolservers.update(s, ts, body, actor=principal.actor)
+        toolservers.update(s, ts, body, actor=principal.actor, version=if_match(request))
         return toolservers.to_dict(ts, rt.settings.gateway_public_url)
 
 
@@ -450,7 +451,7 @@ def update_policy(
 ) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         policy = policies.get(s, ref)
-        policies.update(s, policy, body, actor=principal.actor)
+        policies.update(s, policy, body, actor=principal.actor, version=if_match(request))
         return policies.to_dict(policy)
 
 

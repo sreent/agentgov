@@ -10,7 +10,9 @@ calls, and:
   calls (least privilege, data protection, acting for people, risk, approvals);
 * tells the agent called who handed it the work, and carries that on: the calls it makes
   for the work, to tools, models and other agents, carry the chain of agents that handed
-  it down, with the person at its head, to policy and to the ledger.
+  it down, with the person at its head, to policy and to the ledger;
+* checks the answer as it streams back, as it checks tool results: credentials and
+  personal data are masked, and instructions aimed at the agent that asked are withheld.
 
 ```mermaid
 sequenceDiagram
@@ -29,7 +31,12 @@ sequenceDiagram
     B->>G: tools/call get_customer, with its own token and the delegation
     G->>Pr: the tool call and the delegation
     Pr->>O: data.agentgov.mcp.decision, with the chain sam > support-bot > billing-agent
-    Pr--)Pr: both decisions → ledger, with the chain
+    B-->>G: the answer, whole or streamed
+    G->>Pr: external processing: the answer, as it comes
+    Pr->>O: data.agentgov.a2a.decision, phase response
+    Pr-->>G: the answer, masked as decided, or an error in its place
+    G-->>S: the answer
+    Pr--)Pr: the decisions → ledger, with the chain
 ```
 
 ## Agents that serve A2A
@@ -133,6 +140,37 @@ it: it is a JWT that only AgentGov's processors sign and check, with a key deriv
 [transaction tokens](https://datatracker.ietf.org/doc/draft-ietf-oauth-transaction-tokens/)
 carry the context of a request between workloads.
 
+## Answers
+
+The agent called answers the agent that asked through the gateway too, and the processor
+checks each answer as agentgateway hands it over (external processing), with the controls
+that check tool results:
+
+| Found in an answer | With the control enforced | Monitored |
+|---|---|---|
+| Credentials | Masked (`data-protection`) | Recorded |
+| Personal data | Masked, unless the agent that asked may have it (its `pii-access` label) | Recorded |
+| Instructions aimed at the agent that asked (by the rules, or the [classifier](detection.md)) | Withheld (`prompt-injection`): a JSON-RPC error with the answer's ID takes its place | Recorded, and a finding |
+
+So data an agent may see, because its blueprint lets it, doesn't reach the agents it
+answers that may not: in the demo, billing-agent reads customers' contact details, and
+its answer reaches the support agent with them masked.
+
+* **Streamed answers stay streamed.** Each event (a status update, a message, an
+  artifact) is checked as soon as it is whole, and goes on at once. A withheld event is
+  replaced by an error, and nothing after it passes.
+* **Whole answers are held until their end**, and so is each event, up to 4 MiB; past
+  that, an answer is withheld while a control that looks at answers is enforced, and
+  passes unchecked otherwise.
+* **Whatever their label.** A2A's clients read JSON whatever the content type says, so
+  the gateway looks at every answer: a JSON-RPC answer in its result or its error, other
+  JSON (A2A's REST binding) whole. The agent's card, failures, and answers that aren't
+  JSON (gRPC's among them) pass as they are.
+* **Plain, not compressed.** The gateway asks the agent for answers that aren't
+  compressed. One compressed anyway can't be read, and counts as one too long.
+* What was found in an answer is a finding about the agent that answered, and adds to its
+  risk score: `agent.prompt_injection_in_answers`, `agent.credentials_in_answers`.
+
 ## In policy
 
 The processor asks `data.agentgov.a2a.decision`:
@@ -149,8 +187,10 @@ The processor asks `data.agentgov.a2a.decision`:
 }
 ```
 
-Organisation policies tell calls between agents by `input.kind == "a2a"`, and read
-`input.chain` on tool and model calls too:
+For an answer, the input has `"phase": "response"` and `"method": "answer"`, and its
+`detections` hold what was found in it, `prompt_injection` included; the decision's
+`redact` lists what to mask. Organisation policies tell calls between agents by
+`input.kind == "a2a"`, and read `input.chain` on tool and model calls too:
 
 ```rego
 package agentgov.custom.payments
@@ -180,6 +220,7 @@ To try a call, choose **A call to another agent** in **What if** on the Policies
 | Entry | |
 |---|---|
 | `decision.a2a.request` | A call between agents: the caller is the agent, the agent called the resource, the A2A method the action, and the person in `on_behalf_of`. Its details hold the A2A context and task, the whole chain (ending with the agent called) and the delegation it gave (`uid`) with its parent's (`parent_uid`) |
+| `decision.a2a.response` | An answer in which something was found, masked or withheld (clean answers aren't recorded): what was found, what was masked, and the agent that answered. The trace links it to its call |
 | `decision.request`, `decision.model.request`… | A tool or model call made under a delegation holds the chain, ending with the agent calling, and the delegation's IDs |
 
 [Security operations](secops.md) hands both to SIEMs as OCSF API Activity: the agent
@@ -198,12 +239,13 @@ called as the `api.service` and a `resources` entry of type `AI Agent`, the A2A 
 The Compose stack runs **billing-agent** ([examples/agents/billing](../examples/agents/billing/server.py)),
 an A2A agent with no secret (it authenticates with its service account token from the
 demo cluster) that looks customers up in the CRM through the gateway. The
-`customer-support` blueprint's agents may call it. Step 11 of
+`customer-support` blueprint's agents may call it. Step 12 of
 `python examples/agents/demo_agent.py`:
 
 1. the demo agent, acting for sam, reads billing-agent's card through the gateway, and
    asks it what a customer owes, claiming to act for someone else;
-2. billing-agent answers, and says who asked and for whom: the demo agent, for sam;
+2. billing-agent answers, and says who asked and for whom: the demo agent, for sam; the
+   customer's contact details it read reach the demo agent masked;
 3. the ledger holds the call between the agents, and billing-agent's own call to the CRM,
    each with the chain `sam > demo-agent-… > billing-agent`;
 4. a delegation the demo agent made up is refused;
@@ -211,11 +253,9 @@ demo cluster) that looks customers up in the CRM through the gateway. The
 
 ## Limits
 
-* AgentGov checks the requests agents send each other, not the answers: agentgateway asks
-  the processor before it passes a request on. The agent called is governed in turn: its
-  own tool and model calls go through the gateway with the chain.
-* Personal data in a message is found and recorded, not masked: the gateway passes the
-  request on as it is. Credentials are refused.
+* Personal data in a message an agent sends is found and recorded, not masked: the
+  gateway passes the request on as it is. Credentials are refused. In answers, both are
+  masked.
 * The processor reads each request whole, up to 256 KiB: agentgateway refuses larger ones
   (HTTP 413) before they reach policy.
 * The headers are only as trustworthy as the network between the gateway and the agent:

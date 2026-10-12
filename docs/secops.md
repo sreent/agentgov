@@ -163,10 +163,11 @@ Each ledger entry is one event:
 
 | Ledger entries | OCSF class | Activity |
 |---|---|---|
-| `decision.*` (tool and model calls, and calls between agents), `approval.*`, tools used without the gateway | API Activity (6003) | Tool call, Model call, Agent call, list and read calls as Read, approvals as *Approval requested*, *approved*… |
+| `decision.*` (tool and model calls, calls between agents, and their answers), `approval.*`, tools used without the gateway | API Activity (6003) | Tool call, Model call, Agent call, list and read calls as Read, approvals as *Approval requested*, *approved*… |
 | `admin.*` (sign-ins and sessions) | Authentication (3002) | Logon, Logoff |
 | `finding.*` about posture | Compliance Finding (2003) | Create, Update, Close |
 | `finding.*` about threats | Detection Finding (2004) | Create, Update, Close |
+| `detection.*` (what the [classifier](detection.md) flagged in the background) | Detection Finding (2004) | Create |
 | Everything else | Entity Management (3004) | Create, Update, Delete, Enable (unblock), Disable (block)… |
 
 * **The agent** is `ai_agent` (OCSF's AI Operation profile): its ID, name and framework;
