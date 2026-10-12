@@ -122,7 +122,7 @@ Only what you turn on needs any:
 | Copilot Studio threat detection | A public HTTPS address for the control plane, an app registration, and a Power Platform administrator to connect it ([connections](microsoft-connections.md#copilot-studio-threat-detection)) |
 | Read the agents on AWS | AWS credentials, or a role per account, allowed to read Bedrock agents, AgentCore's harnesses, runtimes and gateways, Amazon Quick's agents and AWS Agent Registry's records ([other platforms](other-platforms.md#aws)) |
 | Read the agents on Google Cloud | Google credentials allowed, in each project, to list Agent Runtime agents and read their IAM policies, and to list Agent Registry's agents and MCP servers ([other platforms](other-platforms.md#google-cloud)) |
-| Read the agents on Databricks | A service principal with an OAuth secret, a workspace admin in each workspace it reads ([other platforms](other-platforms.md#databricks)) |
+| Read the agents on Databricks | A service principal with an OAuth secret, a workspace admin in each workspace it reads, and `READ METADATA` on the metastore for its MCP services ([other platforms](other-platforms.md#databricks)) |
 | Read the agents on Salesforce | An integration user with API Enabled, View Setup and Configuration and View All Users, and an External Client App it signs in through ([other platforms](other-platforms.md#salesforce)) |
 | Model calls | Each provider's API key, given to the gateway only ([model calls](models.md)) |
 | Security operations | Your SIEM's endpoint or token, and Teams or Slack webhooks ([security operations](secops.md)) |

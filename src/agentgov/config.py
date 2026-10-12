@@ -50,7 +50,7 @@ GOOGLE_REGION = re.compile(r"^(?:[a-z]+-[a-z]+\d{1,2}|us|eu)$")
 SALESFORCE_URL = re.compile(r"^https://[A-Za-z0-9.-]+/?$")
 # A Databricks workspace's URL (https://dbc-1234.cloud.databricks.com), and what to read there.
 DATABRICKS_URL = SALESFORCE_URL
-DATABRICKS_KINDS = ("serving", "apps", "genie")
+DATABRICKS_KINDS = ("serving", "apps", "genie", "mcp-services")
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
@@ -331,8 +331,9 @@ class Settings:
     # Instead, a personal access token, valid in the workspaces named.
     databricks_token: str | None = None
     # What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent
-    # Bricks agents) and genie (Genie agents).
-    databricks_read: str = "serving,apps,genie"
+    # Bricks agents), genie (Genie agents) and mcp-services (the MCP services registered in
+    # Unity Catalog, read catalog by catalog).
+    databricks_read: str = "serving,apps,genie,mcp-services"
 
     # --- Classifier, optional (docs/detection.md) ---------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
@@ -553,7 +554,8 @@ class Settings:
         for kind in self.databricks_kind_list():
             if kind not in DATABRICKS_KINDS:
                 raise ValueError(
-                    f"AGENTGOV_DATABRICKS_READ: {kind!r} is not serving, apps or genie"
+                    f"AGENTGOV_DATABRICKS_READ: {kind!r} is not serving, apps, genie or "
+                    "mcp-services"
                 )
         if self.classifier_timeout_seconds <= 0 or self.classifier_concurrency < 1:
             raise ValueError(

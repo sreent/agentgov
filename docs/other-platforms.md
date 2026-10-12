@@ -290,15 +290,21 @@ AgentGov reads, in each workspace you name:
   resources it holds (their tools), and the scopes they act for their users with.
 * **Genie agents** (Genie spaces), with who may ask them questions, the tables they answer
   from, and their instructions.
-
-MCP services in Unity Catalog aren't read yet.
+* **MCP services** in Unity Catalog, the MCP servers registered there for agents (Unity
+  Gateway's MCPs), read catalog by catalog and schema by schema: who may call each (its
+  `EXECUTE` grants, inherited ones too), the tools it exposes, its rate limits, and the
+  connection it reaches its server through, with the server's host and how the connection
+  signs in to it. Databricks' own MCPs (in the `system` catalog) are left out, and so are
+  catalogs that mirror other systems or shares. Unity Catalog is the metastore's, so a service
+  that workspaces sharing a metastore both show is one agent.
 
 | Check | Raised when |
 |---|---|
-| `platform.shared_with_everyone` | the workspace's `users` group, or the account's `account users`, may use the agent |
+| `platform.shared_with_everyone` | the workspace's `users` group, or the account's `account users`, may use the agent (call an MCP service's tools) |
 | `platform.plain_secret` | an environment variable whose name says it holds a secret has its value in the agent's configuration, rather than from a secret scope (`{{secrets/scope/key}}`, or an app's `valueFrom`) |
 | `platform.risky_tool` | a Supervisor Agent: every one can run the code its model writes (in a sandbox without internet access, reading the tables and volumes it is given) |
 | `platform.broad_identity` | an agent on Model Serving calls Databricks with a fixed credential (`DATABRICKS_TOKEN` or `DATABRICKS_CLIENT_SECRET`), or an Agent Bricks agent's service principal may change, not only use, a resource (`CAN_MANAGE`, `IS_OWNER`, `MODIFY`, a secret scope's `WRITE` or `MANAGE`) |
+| `platform.maker_credentials` | an MCP service's connection signs in to its server with one credential for everyone who may call it (a bearer token, an OAuth client, one person's OAuth sign-in, a user name and password), rather than each caller's own (OAuth per user) |
 
 Genie agents', Knowledge Assistants' and Supervisor Agents' instructions go through the
 instruction checks. An agent whose permissions
@@ -310,14 +316,21 @@ they were.
 1. Make a service principal for AgentGov in your Databricks account, give it an OAuth secret,
    and add it to each workspace to read. Databricks has no role that may read every endpoint,
    app and Genie space without changing them, so make it a workspace admin; a service
-   principal that isn't sees only what it has been given.
+   principal that isn't sees only what it has been given. For the MCP services, a metastore
+   admin grants it `READ METADATA` on the metastore (or on each catalog to read), with which it
+   sees the MCP services, who may call them and their connections, without being able to call
+   one or read data; Unity Catalog shows a principal only what it may see:
+
+   ```sql
+   GRANT READ METADATA ON METASTORE TO `<application-id>`;
+   ```
 2. Name the workspaces, and give AgentGov the service principal's credentials:
 
    ```bash
    AGENTGOV_DATABRICKS_HOSTS=https://dbc-1234.cloud.databricks.com,https://adb-5678.azuredatabricks.net
    AGENTGOV_DATABRICKS_CLIENT_ID=...       # the service principal's application ID
    AGENTGOV_DATABRICKS_CLIENT_SECRET=...   # its OAuth secret
-   AGENTGOV_DATABRICKS_READ=serving,apps,genie   # leave out what you don't want read
+   AGENTGOV_DATABRICKS_READ=serving,apps,genie,mcp-services   # leave out what you don't want read
    ```
 
    A personal access token (`AGENTGOV_DATABRICKS_TOKEN`) works too, for one workspace or

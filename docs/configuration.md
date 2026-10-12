@@ -270,7 +270,7 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into t
 | `AGENTGOV_DATABRICKS_HOSTS` | empty | Databricks: the workspaces to read agents in, comma-separated URLs, such as `https://dbc-1234.cloud.databricks.com` (empty: Databricks isn't read). |
 | `AGENTGOV_DATABRICKS_CLIENT_ID`<br>`AGENTGOV_DATABRICKS_CLIENT_SECRET` (secret) | —<br>— | The service principal AgentGov reads as (OAuth machine-to-machine): its application ID and an OAuth secret of its own. |
 | `AGENTGOV_DATABRICKS_TOKEN` (secret) | — | Instead, a personal access token, valid in the workspaces named. |
-| `AGENTGOV_DATABRICKS_READ` | `serving,apps,genie` | What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent Bricks agents) and genie (Genie agents). |
+| `AGENTGOV_DATABRICKS_READ` | `serving,apps,genie,mcp-services` | What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent Bricks agents), genie (Genie agents) and mcp-services (the MCP services registered in Unity Catalog, read catalog by catalog). |
 
 ### Classifier, optional
 

@@ -126,7 +126,7 @@ Turning one off stops it even where it is configured.
 | `aws` | off, **on** | Reads the agents on AWS into the inventory: Amazon Bedrock agents, AgentCore's harnesses, agent runtimes and gateways, Amazon Quick's agents, and AWS Agent Registry's agents and MCP servers, with their risky settings as findings |
 | `google-cloud` | off, **on** | Reads the agents on Google Cloud into the inventory: Agent Runtime agents (formerly Vertex AI Agent Engine), and Agent Registry's agents and MCP servers (on Cloud Run and GKE, Gemini Enterprise's, registered by hand), with their risky settings as findings |
 | `salesforce` | off, **on** | Reads the Agentforce agents in your Salesforce org into the inventory, with their risky settings as findings and their topics' instructions checked |
-| `databricks` | off, **on** | Reads the agents in your Databricks workspaces into the inventory: agents on Model Serving (Knowledge Assistants and Supervisor Agents among them), Agent Bricks agents and Genie agents, with their risky settings as findings |
+| `databricks` | off, **on** | Reads the agents in your Databricks workspaces into the inventory: agents on Model Serving (Knowledge Assistants and Supervisor Agents among them), Agent Bricks agents, Genie agents, and the MCP services in Unity Catalog, with their risky settings as findings |
 
 ### Security operations
 

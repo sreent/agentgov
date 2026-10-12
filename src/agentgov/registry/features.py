@@ -706,8 +706,8 @@ CATALOG: tuple[Feature, ...] = (
         "Databricks agents",
         "platforms",
         "AgentGov reads the agents in your Databricks workspaces into the inventory (agents on "
-        "Model Serving, Agent Bricks agents and Genie agents), with their risky settings as "
-        "findings, on a schedule and on demand.",
+        "Model Serving, Agent Bricks agents, Genie agents, and the MCP services in Unity "
+        "Catalog), with their risky settings as findings, on a schedule and on demand.",
         SWITCH,
         ON,
         {
