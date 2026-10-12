@@ -116,6 +116,7 @@ class A2AGuard:
             called: dict[str, Any] | None = None,
             approval_id: str | None = None,
             decision_id: str | None = None,
+            redacted: list[str] | None = None,
         ) -> None:
             self.p._record(
                 kind="a2a",
@@ -129,7 +130,7 @@ class A2AGuard:
                 user=person,
                 effect=effect,
                 reasons=reasons,
-                redacted=[],
+                redacted=redacted or [],
                 detections=inspection.summary,
                 approval_id=approval_id,
                 monitored=monitored,
@@ -239,6 +240,9 @@ class A2AGuard:
             )
             return refuse(rpc_id, "deny", reasons, approval_id)
         response = self._pass_on(agent, called, handed_down, chain, person, issued)
+        # What the gateway masks in the message on its way (a2a-masking enforced;
+        # agentgov.processor.a2a_answers does it).
+        redacted = set(decision.get("redact") or []) & inspection.scan.categories()
         finish(
             "allow",
             reasons,
@@ -246,6 +250,7 @@ class A2AGuard:
             called=called,
             approval_id=approval_id,
             decision_id=decision_id,
+            redacted=sorted(redacted),
         )
         return response
 

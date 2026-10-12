@@ -25,9 +25,9 @@
 # itself or an agent already in its chain, and a chain holds at most max_depth agents.
 # The controls apply as their features say (see agentgov.mcp). Organisation policies
 # under agentgov.custom.* take part through deny (always), require_approval (on calls, as
-# the approvals control is) and redact (in answers, as data-protection is); they tell
-# agents' calls from others by input.kind == "a2a", answers by input.phase == "response",
-# and can read input.chain.
+# the approvals control is) and redact (in answers, as data-protection is, and in messages,
+# as a2a-masking is); they tell agents' calls from others by input.kind == "a2a", answers by
+# input.phase == "response", and can read input.chain.
 package agentgov.a2a
 
 import data.agentgov.context as ctx
@@ -44,6 +44,9 @@ categories contains c if some c in object.get(detections, "categories", [])
 target_id := data.registry.agent_names[input.target]
 
 target := data.registry.agents[target_id]
+
+# The agent called may have personal data: its pii-access label, or its blueprint's.
+target_pii_access if object.get(object.get(target, "labels", {}), "pii-access", "") == "true"
 
 chain := object.get(input, "chain", [])
 
@@ -218,6 +221,29 @@ in_target_groups if {
 }
 
 # ---------------------------------------------------------------------------
+# Masking in messages (requests), the a2a-masking control: personal data the agent
+# called may not have. Credentials in a message are refused (data-protection) instead.
+# ---------------------------------------------------------------------------
+
+to_mask contains "pii" if {
+	phase == "request"
+	"pii" in categories
+	not target_pii_access
+}
+
+to_mask contains category if {
+	phase == "request"
+	some name
+	some category in data.agentgov.custom[name].redact
+}
+
+redact contains category if {
+	phase == "request"
+	ctx.enforced("a2a-masking")
+	some category in to_mask
+}
+
+# ---------------------------------------------------------------------------
 # Masking in answers (data loss prevention), the data-protection control:
 # credentials, and personal data unless the agent reading it may have it.
 # ---------------------------------------------------------------------------
@@ -240,6 +266,7 @@ to_mask contains category if {
 }
 
 redact contains category if {
+	phase == "response"
 	ctx.enforced("data-protection")
 	some category in to_mask
 }
@@ -254,7 +281,15 @@ monitored contains sprintf("%s: %s", [v.control, v.message]) if {
 }
 
 monitored contains sprintf("data-protection: would mask %s", [category]) if {
+	phase == "response"
 	ctx.monitored("data-protection")
+	some category in to_mask
+	category in categories
+}
+
+monitored contains sprintf("a2a-masking: would mask %s", [category]) if {
+	phase == "request"
+	ctx.monitored("a2a-masking")
 	some category in to_mask
 	category in categories
 }

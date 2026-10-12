@@ -28,7 +28,10 @@ is in the database, and they coordinate through it.
   before it sends to it.
 * **A job runs once at a time** across replicas, however it started: a scan, a round of
   rules, retention or a Microsoft sync an administrator asks for waits for a run already
-  going (15 seconds at most), then answers 409.
+  going (15 seconds at most), then answers 409. A job's lock is held by its connection to
+  the database: when the database restarts mid-run, or drops that connection, another
+  replica may start the job, and the run that lost its lock stops at its next commit,
+  with nothing more written.
 * **Nothing lives in one replica's memory.** Administrators' Microsoft sign-ins are kept
   in the database, sealed with a key derived from the client secret, so any replica acts
   as them ([platforms](platforms.md#how-agentgov-holds-the-sign-in)); sign-in attempts and
@@ -58,7 +61,9 @@ other is told the request was already decided, rather than overwriting it. The s
 for access package requests (deciding, revoking, reviewing), findings (acknowledging,
 accepting the risk, resolving, dismissing), agents' lifecycle (approving, blocking,
 deleting, attesting), the status of tool servers, model providers, identity issuers and
-destinations, and an approval being used: two identical calls at once use it once.
+destinations, and an approval being used: two identical calls at once use it once. Each
+transaction writes its ledger entries last, as it commits, so decisions that lock the same
+rows in another order wait for each other rather than deadlock.
 
 **Edits made from an older copy are refused.** Agents, blueprints, tool servers, model
 providers, identity issuers, destinations, policies, teams, access packages and management

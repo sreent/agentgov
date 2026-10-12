@@ -1047,6 +1047,7 @@ def test_siem_events_skip_what_was_not_chosen(rt) -> None:
     with rt.db.session() as s:
         ledger.append(s, type="admin.login", actor="admin:ada")
         ledger.append(s, type="agent.updated", actor="admin:ada", severity="warning")
+    with rt.db.session() as s:
         entries = list(s.scalars(select(LedgerEntry).order_by(LedgerEntry.seq)))
         assert [e["class_uid"] for e in delivery.siem_events(s, entries, ["access"], "info")] == [
             3002

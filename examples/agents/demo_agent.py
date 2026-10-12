@@ -556,6 +556,29 @@ async def agent_to_agent(name: str, creds: dict[str, str]) -> None:
             f"{BILLING}'s own call {(crm or {}).get('resource')} for "
             f"{(crm or {}).get('on_behalf_of')}: {' > '.join(chain_of(crm))}",
         )
+        # Masking in messages, enforced: each message goes through the gateway's external
+        # processing on its way too. billing-agent may have personal data (its blueprint's
+        # pii-access), so it gets the message whole.
+        admin("PUT", "/v1/features/a2a-masking", json={"mode": "enforce"})
+        print("  a2a-masking set to enforce")
+        try:
+            await asyncio.sleep(8)  # the gateway's configuration, and the processor, follow
+            _, reply = await ask_agent(
+                http, "What does customer c-002 owe? Copy ada@example.com in."
+            )
+            state, text = answer_of(reply)
+            asked = await asyncio.to_thread(
+                ledger_entry, {"agent": name, "type": "decision.a2a.request"}
+            )
+            redacted = ((asked or {}).get("details") or {}).get("redacted")
+            show(
+                "whole:",
+                state == "TASK_STATE_COMPLETED" and redacted == [],
+                f"{BILLING} may have personal data, so the email reached it as it was: {text}",
+            )
+        finally:
+            admin("PUT", "/v1/features/a2a-masking", json={"mode": "monitor"})
+            print("  a2a-masking set back to monitor")
         # A chain an agent makes up: AgentGov signs the delegations it gives.
         me = admin("GET", f"/v1/agents/{name}")["id"]
         forged = jwt.encode(

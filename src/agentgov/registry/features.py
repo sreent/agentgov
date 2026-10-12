@@ -192,6 +192,24 @@ CATALOG: tuple[Feature, ...] = (
         needs="Presidio, for personal data (credentials are found without it)",
     ),
     Feature(
+        "a2a-masking",
+        "Masking in calls between agents",
+        "controls",
+        "Personal data in the messages agents send each other is masked, unless the agent "
+        "called may have it (its pii-access label). Data protection finds it, and refuses "
+        "credentials in messages whatever this says.",
+        CONTROL,
+        MONITOR,
+        {
+            ENFORCE: "Personal data is masked before the agent called gets the message, unless "
+            "that agent may have it.",
+            MONITOR: "Messages go as they are; each call's decision records what would have "
+            "been masked.",
+            OFF: "Messages go as they are; the personal data in them is recorded.",
+        },
+        needs="data protection on, to find personal data",
+    ),
+    Feature(
         "prompt-injection",
         "Prompt-injection defence",
         "controls",

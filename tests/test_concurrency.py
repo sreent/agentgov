@@ -7,6 +7,7 @@ transaction at a time, so it can't have them.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -14,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from agentgov import db, ledger
 from agentgov.config import Settings
 from agentgov.models import LedgerEntry
 from agentgov.registry import access_packages, agents, approvals
@@ -326,6 +328,48 @@ def test_two_blocks_at_once(pg: Runtime) -> None:
 
     assert together(block, block) == ["ok", "refused"]
     assert _entries(pg, "agent.block") == 1
+
+
+@postgres
+def test_the_chain_head_is_locked_last(pg: Runtime) -> None:
+    """One transaction appends to the ledger, then locks a row; another locks the row, then
+    appends. Were the chain's head locked as each appended, each would wait for the other
+    (a deadlock: PostgreSQL fails one); it is locked as each commits, so they take turns."""
+    agent_id = _agent(pg)
+    appended, locked = threading.Event(), threading.Event()
+    failed: list[BaseException] = []
+
+    def append_then_lock() -> None:
+        try:
+            with pg.db.session() as s:
+                ledger.append(s, type="test.first", actor="test")
+                appended.set()
+                assert locked.wait(5)
+                db.lock(s, agents.get(s, agent_id))  # waits for the other to commit
+        except BaseException as exc:
+            failed.append(exc)
+
+    def lock_then_append() -> None:
+        try:
+            with pg.db.session() as s:
+                assert appended.wait(5)
+                db.lock(s, agents.get(s, agent_id))
+                locked.set()
+                time.sleep(0.3)  # the other is waiting for the row by now
+                ledger.append(s, type="test.second", actor="test")
+        except BaseException as exc:
+            failed.append(exc)
+
+    threads = [threading.Thread(target=append_then_lock), threading.Thread(target=lock_then_append)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert failed == []
+    with pg.db.session() as s:
+        types = list(s.scalars(select(LedgerEntry.type).order_by(LedgerEntry.seq)))
+        assert types[-2:] == ["test.second", "test.first"]  # in the order they committed
+        assert ledger.verify(s)["valid"] is True
 
 
 def test_the_cli_names_the_version_too(client: TestClient, monkeypatch) -> None:

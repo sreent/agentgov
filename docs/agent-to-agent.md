@@ -7,7 +7,8 @@ built them. AgentGov puts those calls through the gateway, as it does tool and m
 calls, and:
 
 * decides each call with policy: who may call whom, and the controls that apply to tool
-  calls (least privilege, data protection, acting for people, risk, approvals);
+  calls (least privilege, data protection, acting for people, risk, approvals), and masks
+  the personal data in the message as you choose;
 * tells the agent called who handed it the work, and carries that on: the calls it makes
   for the work, to tools, models and other agents, carry the chain of agents that handed
   it down, with the person at its head, to policy and to the ledger;
@@ -140,6 +141,25 @@ it: it is a JWT that only AgentGov's processors sign and check, with a key deriv
 [transaction tokens](https://datatracker.ietf.org/doc/draft-ietf-oauth-transaction-tokens/)
 carry the context of a request between workloads.
 
+## Messages
+
+What one agent sends another goes through the processor before the agent called gets it:
+the call's check, above, sees the message as it was sent. Credentials in a message stop the
+call (`data-protection`). Personal data in it is found and recorded, and masked as the
+`a2a-masking` [feature](features.md) says:
+
+| `a2a-masking` | Personal data in a message |
+|---|---|
+| enforce | Masked before the agent called gets it, unless that agent may have it (its `pii-access` label, or its blueprint's) |
+| monitor (the default) | Goes as it is; the call's decision records what would have been masked (`a2a-masking: would mask pii`) |
+| off | Goes as it is; recorded |
+
+It starts monitored because an agent often needs what it is sent: see on real traffic what
+would be masked, label the agents that need personal data `pii-access`, then enforce it.
+Enforced, the gateway also sends each message through external processing, after the
+call's check, which masks it on its way; the call's decision says what was masked
+(`redacted` in `decision.a2a.request`).
+
 ## Answers
 
 The agent called answers the agent that asked through the gateway too, and the processor
@@ -245,7 +265,9 @@ demo cluster) that looks customers up in the CRM through the gateway. The
 1. the demo agent, acting for sam, reads billing-agent's card through the gateway, and
    asks it what a customer owes, claiming to act for someone else;
 2. billing-agent answers, and says who asked and for whom: the demo agent, for sam; the
-   customer's contact details it read reach the demo agent masked;
+   customer's contact details it read reach the demo agent masked; and with `a2a-masking`
+   enforced, an email in what the demo agent asks reaches billing-agent whole, as it may
+   have personal data;
 3. the ledger holds the call between the agents, and billing-agent's own call to the CRM,
    each with the chain `sam > demo-agent-… > billing-agent`;
 4. a delegation the demo agent made up is refused;
@@ -253,9 +275,8 @@ demo cluster) that looks customers up in the CRM through the gateway. The
 
 ## Limits
 
-* Personal data in a message an agent sends is found and recorded, not masked: the
-  gateway passes the request on as it is. Credentials are refused. In answers, both are
-  masked.
+* Personal data in a message an agent sends is masked only while `a2a-masking` is
+  enforced. A compressed message can't be read: nothing in it is found or masked.
 * The processor reads each request whole, up to 256 KiB: agentgateway refuses larger ones
   (HTTP 413) before they reach policy.
 * The headers are only as trustworthy as the network between the gateway and the agent:

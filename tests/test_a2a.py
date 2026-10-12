@@ -30,7 +30,14 @@ from tests.conftest import ADMIN, seed
 from tests.test_cli import _Shared, ok, runner
 from tests.test_model_guard import HEADERS as MODEL_HEADERS
 from tests.test_model_guard import prompt, user
-from tests.test_processor import AGENT, FakeControlPlane, FakeOpa, call_request, run
+from tests.test_processor import (
+    AGENT,
+    FakeControlPlane,
+    FakeOpa,
+    FakePresidio,
+    call_request,
+    run,
+)
 
 SECRET = "test-service-token"
 KEY = chains.signing_key(SECRET)
@@ -76,13 +83,16 @@ def ask(
     path: str = "/a2a/billing-agent",
     cp: FakeControlPlane | None = None,
     settings: Settings = SETTINGS,
+    presidio: Any = None,
 ) -> tuple[httpx.Response, FakeControlPlane]:
     """One check, as agentgateway asks the processor about a request to /a2a/billing-agent."""
     cp = cp or FakeControlPlane()
 
     async def go() -> httpx.Response:
         recorder = DecisionRecorder(cp)
-        processor = GovernanceProcessor(settings, opa=opa, control_plane=cp, recorder=recorder)
+        processor = GovernanceProcessor(
+            settings, opa=opa, control_plane=cp, recorder=recorder, presidio=presidio
+        )
         app = ModelGuard(processor).app()
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://processor"
@@ -274,6 +284,19 @@ class TestA2AGuard:
         ask(opa, body=message)
         assert "secret" in opa.inputs[0][1]["detections"]["categories"]
 
+    def test_what_the_gateway_masks_in_the_message_is_recorded(self) -> None:
+        def masks(inp: dict[str, Any]) -> dict[str, Any]:
+            return {**allow(inp), "redact": ["pii"]}  # a2a-masking enforced
+
+        message = json.loads(json.dumps(SEND))
+        message["params"]["message"]["parts"] = [{"text": "Write to ada@example.com"}]
+        resp, cp = ask(FakeOpa(masks), body=message, presidio=FakePresidio())
+        assert resp.status_code == 200
+        assert cp.records[0]["redacted"] == ["pii"]
+        # Nothing in the message to mask: nothing masked.
+        _, cp = ask(FakeOpa(masks), presidio=FakePresidio())
+        assert cp.records[0]["redacted"] == []
+
     def test_organisation_policies_can_ask_for_approval(self) -> None:
         def wait(inp: dict[str, Any]) -> dict[str, Any]:
             return {
@@ -422,6 +445,21 @@ class TestGatewayRoutes:
         kb = routes["a2a-kb"]["policies"]
         assert kb["urlRewrite"] == {"path": {"prefix": "/a2a"}} and kb["backendTLS"] == {}
         assert routes["a2a-kb"]["backends"] == [{"host": "kb.internal:8443"}]
+
+    def test_messages_go_through_the_processor_while_masking_is_enforced(self) -> None:
+        def options(**modes: str) -> dict[str, Any]:
+            route = self.routes([_agent("billing-agent")], **modes)["a2a-billing-agent"]
+            return route["policies"]["extProc"]["processingOptions"]
+
+        assert options()["requestBodyMode"] == "none"  # monitored, by default
+        enforced = options(**{"a2a-masking": "enforce"})
+        assert (enforced["requestHeaderMode"], enforced["requestBodyMode"]) == (
+            "send",
+            "fullDuplexStreamed",
+        )
+        # Data protection off finds nothing to mask.
+        off = options(**{"a2a-masking": "enforce", "data-protection": "off"})
+        assert off["requestBodyMode"] == "none"
 
     def test_answers_go_unchecked_with_both_controls_off(self) -> None:
         modes = {"data-protection": "off", "prompt-injection": "off"}

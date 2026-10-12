@@ -219,7 +219,9 @@ agent called in `input.target`. Its built-in rules refuse calls to agents that a
 registered, active or serving A2A, an agent calling itself, a loop back to an agent already
 in the chain, and chains of more than five agents; under `least-privilege`, a caller may call
 only the agents its `agent_access`, or an [access package](access-packages.md) it holds,
-names. Each answer the agent called sends back asks the same decision, with
+names. While `a2a-masking` is enforced, the decision's `redact` names the personal data to
+mask in the message, unless the agent called has the `pii-access` label (its own or its
+blueprint's). Each answer the agent called sends back asks the same decision, with
 `input.phase == "response"`: the built-in rules withhold an answer that carries instructions
 aimed at the caller, and mask credentials, and personal data unless the caller has the
 `pii-access` label (its own or its blueprint's); an organisation policy's `deny` and `redact` apply to answers

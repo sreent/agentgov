@@ -134,8 +134,10 @@ agent called a delegation of its own, a token signed with a key derived from the
 token that names the chain of agents and the person at its head, and agentgateway passes
 it on in headers, over any the caller set. The agent called sends the delegation with
 the calls it makes for that work, and the processor puts the chain into policy and the
-ledger of each one. The answer comes back through the processor too (external processing
-over gRPC, fail-closed), event by event when it streams: credentials and personal data in
+ledger of each one. While `a2a-masking` is enforced, the message goes through the
+processor's external processing too, after the decision, which masks the personal data the
+agent called may not have. The answer comes back through the processor too (external
+processing over gRPC, fail-closed), event by event when it streams: credentials and personal data in
 it are masked, and instructions aimed at the agent that asked are withheld.
 [Agent to agent](agent-to-agent.md) has the details.
 
@@ -179,8 +181,10 @@ evaluated against the live status.
 
 Every lifecycle change, admin action, approval, policy decision and OPA decision log
 is appended to a hash chain (`hash = sha256(prev_hash ‖ canonical_json(entry))`).
-Appenders take a row lock on the chain head, so concurrent writers extend it one at a
-time. `GET /v1/ledger/verify` recomputes the chain and reports the first broken entry
+A transaction writes its entries as it commits, after everything else it changed, under a
+row lock on the chain head: writers extend the chain one at a time, and the head is the
+last row a transaction locks, so two transactions that lock the same rows in another order
+take turns rather than deadlock. `GET /v1/ledger/verify` recomputes the chain and reports the first broken entry
 (edited, deleted or truncated). The overview's integrity badge checks new entries as they
 arrive and re-verifies the whole chain every five minutes. `GET /v1/ledger/export`
 streams the ledger as JSON Lines for offline verification
@@ -226,6 +230,7 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | A custom Rego policy fails to compile | Rejected at submission, after a compile and a smoke evaluation, so a broken module never reaches OPA |
 | OPA cannot activate a bundle anyway, or it doesn't verify | OPA keeps the last good bundle; its status report raises a critical finding |
 | A control-plane replica stops | The others answer; if it led, another takes the scheduled work over within seconds ([production](production.md#several-replicas)) |
+| The database restarts during a job | Another replica may start the job; the run that lost its lock stops at its next commit, with nothing more written |
 | A replica loses the database for a while | When it finds it again, it acts as if everything changed; meanwhile its bundles are at most a minute old |
 | Control plane down | Enforcement continues with the last bundle; decision records queue in the processor and are retried |
 | Database schema out of date | The control plane migrates it at start-up (one replica at a time, under a PostgreSQL advisory lock), or, with automatic migration off, refuses to start until `agentgov db upgrade` has run. A schema newer than the version knows stops it with a message |

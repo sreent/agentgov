@@ -221,9 +221,17 @@ def a2a_agents() -> list[Agent]:
 
 @pytest.mark.skipif(not _docker_ready(), reason=f"docker or {IMAGE} not available")
 def test_agentgateway_accepts_generated_config(tmp_path: Path) -> None:
-    config = render(servers(), SETTINGS, providers=providers("/cfg/keys"), agents=a2a_agents())
+    # Messages masked too: the A2A route's external processing at its fullest.
+    config = render(
+        servers(),
+        SETTINGS,
+        {"a2a-masking": "enforce"},
+        providers=providers("/cfg/keys"),
+        agents=a2a_agents(),
+    )
     routes = {r["name"]: r for r in config["binds"][0]["listeners"][0]["routes"]}
-    assert "extProc" in routes["a2a-billing-agent"]["policies"]
+    options = routes["a2a-billing-agent"]["policies"]["extProc"]["processingOptions"]
+    assert options["requestBodyMode"] == "fullDuplexStreamed"
     for route in config["binds"][0]["listeners"][0]["routes"]:
         if "jwtAuth" in route.get("policies", {}):
             route["policies"]["jwtAuth"]["jwks"] = JWKS

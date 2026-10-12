@@ -22,6 +22,8 @@ from agentgov.processor.server import GovernanceProcessor
 from tests.test_classifier import MARK, Guardian, asking
 from tests.test_processor import AGENT, FakeControlPlane, FakeOpa, FakePresidio
 
+MASKING = {"a2a-masking": "enforce"}
+
 CALLED = {"id": "agt_billing", "name": "billing-agent", "status": "active"}
 SECRET = "AKIAIOSFODNN7EXAMPLE"  # AWS's documented example key
 
@@ -392,3 +394,131 @@ def test_findings_are_about_the_agent_that_answered(client) -> None:
     # The agent that answered carries the risk, not the one that asked.
     agents = {a["name"]: a for a in client.get("/v1/agents", headers=ADMIN).json()}
     assert agents["billing-agent"]["risk"]["score"] > agents["support-bot"]["risk"]["score"]
+
+
+# ------------------------------------------------------------------------ messages
+
+
+def decide_message(inp: dict[str, Any]) -> dict[str, Any]:
+    """As data.agentgov.a2a decides on a message to an agent that may not have personal
+    data, with a2a-masking enforced."""
+    found = set(inp["detections"].get("categories") or [])
+    redact = sorted(found & {"pii"})
+    return {"effect": "allow", "reasons": [], "redact": redact, "agent": AGENT, "target": CALLED}
+
+
+def request_headers(**meta: str) -> pb.ProcessingRequest:
+    req = pb.ProcessingRequest()
+    for key, value in (
+        (":method", "POST"),
+        ("content-type", "application/json"),
+        ("content-length", "9"),
+    ):
+        header = req.request_headers.headers.headers.add()
+        header.key, header.raw_value = key, value.encode()
+    fields = struct_pb2.Struct()
+    fields.update(
+        {
+            "agent": "billing-agent",
+            "path": "/a2a/billing-agent",
+            "agent_id": "agt_1",
+            "client_id": "agent-bot",
+        }
+        | meta
+    )
+    req.metadata_context.filter_metadata["agentgov"].CopyFrom(fields)
+    return req
+
+
+def request_body(data: bytes, end: bool = False) -> pb.ProcessingRequest:
+    req = pb.ProcessingRequest()
+    req.request_body.body, req.request_body.end_of_stream = data, end
+    return req
+
+
+def request_trailers() -> pb.ProcessingRequest:
+    req = pb.ProcessingRequest()
+    req.request_trailers.trailers.headers.add().key = "x-done"
+    return req
+
+
+def sent_on(replies: list[pb.ProcessingResponse]) -> list[bytes]:
+    """What passed on of the message, one piece per piece that came in."""
+    return [
+        r.request_body.response.body_mutation.streamed_response.body
+        for r in replies
+        if r.WhichOneof("response") == "request_body"
+    ]
+
+
+def send(text: str) -> dict[str, Any]:
+    message = {"role": "ROLE_USER", "messageId": "m-1", "parts": [{"text": text}]}
+    return {"jsonrpc": "2.0", "id": 7, "method": "SendMessage", "params": {"message": message}}
+
+
+def test_a_message_is_masked_while_masking_is_enforced() -> None:
+    raw = json.dumps(send("Write to ada@example.com about c-001")).encode()
+    opa = FakeOpa(decide_message, modes=MASKING)
+    replies, cp = process(
+        [request_headers(), request_body(raw[:30]), request_body(raw[30:], end=True)],
+        opa=opa,
+        presidio=FakePresidio(),
+    )
+    removed = replies[0].request_headers.response.header_mutation.remove_headers
+    assert list(removed) == ["content-length"]
+    pieces = sent_on(replies)
+    assert pieces[0] == b""  # held until its end
+    passed = json.loads(pieces[1])
+    assert "ada@example.com" not in passed["params"]["message"]["parts"][0]["text"]
+    assert (passed["id"], passed["method"]) == (7, "SendMessage")
+    [(path, inp)] = opa.inputs
+    assert path == "agentgov/a2a/decision" and inp["phase"] == "request"
+    assert (inp["target"], inp["agent"]) == (
+        "billing-agent",
+        {"agent_id": "agt_1", "client_id": "agent-bot"},
+    )
+    # The call's check recorded it, with what is masked (agentgov.processor.a2a_guard).
+    assert cp.records == []
+
+
+def test_a_message_goes_as_it_is_otherwise() -> None:
+    raw = json.dumps(send("Write to ada@example.com")).encode()
+    for modes in ({"a2a-masking": "monitor"}, MASKING | {"data-protection": "off"}):
+        replies, _ = process(
+            [request_headers(), request_body(raw, end=True)],
+            opa=FakeOpa(decide_message, modes=modes),
+            presidio=FakePresidio(),
+        )
+        assert sent_on(replies) == [raw]
+
+    def entitled(inp: dict[str, Any]) -> dict[str, Any]:  # the agent called may have it
+        return {**decide_message(inp), "redact": []}
+
+    replies, _ = process(
+        [request_headers(), request_body(raw, end=True)],
+        opa=FakeOpa(entitled, modes=MASKING),
+        presidio=FakePresidio(),
+    )
+    assert sent_on(replies) == [raw]
+    # What isn't a message passes as it is: a task asked for, and what isn't JSON.
+    task = json.dumps({"jsonrpc": "2.0", "id": 8, "method": "GetTask", "params": {"id": "t1"}})
+    for body in (task.encode(), b"not json"):
+        replies, _ = process(
+            [request_headers(), request_body(body, end=True)],
+            opa=FakeOpa(decide_message, modes=MASKING),
+        )
+        assert sent_on(replies) == [body]
+
+
+def test_a_rest_message_ending_with_trailers_is_masked() -> None:
+    message = {"role": "ROLE_USER", "parts": [{"text": "Write to ada@example.com"}]}
+    raw = json.dumps({"message": message}).encode()
+    replies, _ = process(
+        [request_headers(), request_body(raw[:10]), request_body(raw[10:]), request_trailers()],
+        opa=FakeOpa(decide_message, modes=MASKING),
+        presidio=FakePresidio(),
+    )
+    kinds = [r.WhichOneof("response") for r in replies]
+    assert kinds == ["request_headers", *["request_body"] * 3, "request_trailers"]
+    pieces = sent_on(replies)
+    assert pieces[:2] == [b"", b""] and "ada@example.com" not in pieces[2].decode()

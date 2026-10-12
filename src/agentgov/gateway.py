@@ -42,7 +42,9 @@ token:
 * ``extProc``       - every answer goes to the processor as it streams back
                       (``agentgov.processor.a2a_answers``), which masks credentials and
                       personal data in it or withholds it, as it does tool results; while
-                      data protection or prompt-injection defence is on. The agent is
+                      data protection or prompt-injection defence is on. While
+                      a2a-masking is enforced, every message goes there too, after
+                      ``extAuthz``, to mask the personal data in it. The agent is
                       asked for answers that aren't compressed (``requestHeaderModifier``),
                       which the processor couldn't read.
 
@@ -291,10 +293,12 @@ A2A_MAX_BODY = 256 * 1024
 # than not found.
 
 
-def _answer_checks(agent: Agent, settings: Settings) -> dict[str, Any]:
+def _answer_checks(agent: Agent, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
     """agentgateway's external processing of the agent's answers, by the processor
     (agentgov.processor.a2a_answers): each answer as it streams, with whom it answers in
-    metadata. Guarded expressions give "" where a claim or a header is missing."""
+    metadata; and while a2a-masking is enforced, each message sent to it, to mask it.
+    Guarded expressions give "" where a claim or a header is missing."""
+    masking = modes["a2a-masking"] == features.ENFORCE and modes["data-protection"] != features.OFF
 
     def claim(path: str, *, as_json: bool = False) -> str:
         parts = path.split(".")
@@ -322,13 +326,14 @@ def _answer_checks(agent: Agent, settings: Settings) -> dict[str, Any]:
                 ),
             }
         },
-        # Only the answers: the call itself went to the processor already (extAuthz).
-        # Streamed, so that a streamed answer reaches the caller as it comes. With a
-        # streamed body agentgateway sends trailers whatever these say (and warns when
-        # they say skip); the processor passes them on.
+        # The answers; and the messages only to mask them, as the call itself went to the
+        # processor already (extAuthz, which sees the message as it was sent). Streamed, so
+        # that a streamed answer reaches the caller as it comes. With a streamed body
+        # agentgateway sends trailers whatever these say (and warns when they say skip);
+        # the processor passes them on.
         "processingOptions": {
-            "requestHeaderMode": "skip",
-            "requestBodyMode": "none",
+            "requestHeaderMode": "send" if masking else "skip",
+            "requestBodyMode": "fullDuplexStreamed" if masking else "none",
             "requestTrailerMode": "send",
             "responseHeaderMode": "send",
             "responseBodyMode": "fullDuplexStreamed",
@@ -371,7 +376,7 @@ def a2a_route_for(agent: Agent, settings: Settings, modes: dict[str, str]) -> di
         },
     }
     if modes["data-protection"] != features.OFF or modes["prompt-injection"] != features.OFF:
-        policies["extProc"] = _answer_checks(agent, settings)
+        policies["extProc"] = _answer_checks(agent, settings, modes)
         # Answers the processor can read: not compressed, whatever the caller accepts.
         policies["requestHeaderModifier"] = {"set": {"accept-encoding": "identity"}}
     if url.scheme == "https":
