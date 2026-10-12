@@ -125,6 +125,7 @@ Turning one off stops it even where it is configured.
 |---|---|---|
 | `aws` | off, **on** | Reads the agents on AWS into the inventory: Amazon Bedrock agents and AgentCore's harnesses and agent runtimes, with their risky settings as findings |
 | `google-cloud` | off, **on** | Reads the agents on Google Cloud into the inventory: Agent Runtime agents (formerly Vertex AI Agent Engine), with their risky settings as findings |
+| `salesforce` | off, **on** | Reads the Agentforce agents in your Salesforce org into the inventory, with their risky settings as findings and their topics' instructions checked |
 
 ### Security operations
 

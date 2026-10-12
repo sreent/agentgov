@@ -15,6 +15,7 @@ from agentgov.config import Settings
 from agentgov.platforms.aws import AwsConnector
 from agentgov.platforms.base import Inventory
 from agentgov.platforms.google import GoogleConnector
+from agentgov.platforms.salesforce import SalesforceConnector
 
 
 class Connector(Protocol):
@@ -30,4 +31,6 @@ def connectors(settings: Settings, *, http: httpx.Client | None = None) -> dict[
         found["aws"] = AwsConnector(settings, http=http)
     if settings.google_cloud_project_list():
         found["google-cloud"] = GoogleConnector(settings, http=http)
+    if settings.salesforce_url:
+        found["salesforce"] = SalesforceConnector(settings, http=http)
     return found

@@ -45,6 +45,8 @@ AWS_ROLE = re.compile(r"^arn:aws(?:-[a-z]+)*:iam::\d{12}:role/[\w+=,.@/-]{1,512}
 # (us-central1) or multi-region (us, eu).
 GOOGLE_PROJECT = re.compile(r"^(?:[a-z0-9.-]+:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 GOOGLE_REGION = re.compile(r"^(?:[a-z]+-[a-z]+\d{1,2}|us|eu)$")
+# A Salesforce org's My Domain URL (https://contoso.my.salesforce.com), with nothing after it.
+SALESFORCE_URL = re.compile(r"^https://[A-Za-z0-9.-]+/?$")
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
@@ -292,6 +294,17 @@ class Settings:
     google_cloud_projects: str = ""
     # The regions to read them in, comma-separated (us and eu for the multi-regions).
     google_cloud_regions: str = "us-central1"
+    # Salesforce: the org to read Agentforce agents in, by its My Domain URL, such as
+    # https://contoso.my.salesforce.com (empty: Salesforce isn't read).
+    salesforce_url: str | None = None
+    # The External Client App AgentGov signs in with: its consumer key, and its consumer
+    # secret, for the client credentials flow (as the app's Run As user).
+    salesforce_client_id: str | None = None
+    salesforce_client_secret: str | None = None
+    # Instead of the secret, the JWT bearer flow: the user AgentGov signs in as, and the
+    # private key (PEM) of the certificate uploaded to the app.
+    salesforce_username: str | None = None
+    salesforce_private_key_file: str | None = None
 
     # --- Classifier, optional (docs/detection.md) ---------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
@@ -470,6 +483,21 @@ class Settings:
             if not GOOGLE_REGION.match(region):
                 raise ValueError(
                     f"AGENTGOV_GOOGLE_CLOUD_REGIONS: {region!r} is not a Google Cloud region"
+                )
+        if self.salesforce_url:
+            if not SALESFORCE_URL.match(self.salesforce_url):
+                raise ValueError(
+                    "AGENTGOV_SALESFORCE_URL must be the org's My Domain URL, such as "
+                    "https://contoso.my.salesforce.com"
+                )
+            if not self.salesforce_client_id:
+                raise ValueError("AGENTGOV_SALESFORCE_URL needs AGENTGOV_SALESFORCE_CLIENT_ID")
+            if not self.salesforce_client_secret and not (
+                self.salesforce_username and self.salesforce_private_key_file
+            ):
+                raise ValueError(
+                    "AGENTGOV_SALESFORCE_CLIENT_ID needs AGENTGOV_SALESFORCE_CLIENT_SECRET, or "
+                    "AGENTGOV_SALESFORCE_USERNAME and AGENTGOV_SALESFORCE_PRIVATE_KEY_FILE"
                 )
         if self.classifier_timeout_seconds <= 0 or self.classifier_concurrency < 1:
             raise ValueError(

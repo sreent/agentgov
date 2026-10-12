@@ -14,12 +14,13 @@ keeps running: stop it in its platform's console as well.
 |---|---|---|
 | AWS | Amazon Bedrock agents, AgentCore harnesses and AgentCore agent runtimes | [AWS](#aws) |
 | Google Cloud | Agent Runtime agents (formerly Vertex AI Agent Engine) | [Google Cloud](#google-cloud) |
+| Salesforce | Agentforce agents, with their topics and actions | [Salesforce](#salesforce) |
 
 Each platform is read where its settings are set, when the control plane starts and every
 hour after that (`AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS`; `0` reads only on demand). Admins
 can read one at any time with **Sync now** on the Platforms page or `agentgov platforms sync
-aws` (or `google-cloud`). Each has a switch on the [Features](features.md) page (on by default) that stops it
-being read, even where it could be.
+aws` (or `google-cloud`, `salesforce`). Each has a switch on the [Features](features.md) page
+(on by default) that stops it being read, even where it could be.
 
 ## What AgentGov does with each agent
 
@@ -31,7 +32,7 @@ periodic attestation, like any other agent. AgentGov issues these agents no gate
 credentials and doesn't apply blueprints to them, because they never call the gateway.
 
 AgentGov reads each platform in parts (an AWS account's region, a Google Cloud project's
-region). Agents gone from a part
+region, a Salesforce org). Agents gone from a part
 it read in full stay in the registry, marked as gone, so their history is kept: delete them
 when you no longer need the record. A part that can't be read (its region refuses, say) is
 named on the Platforms page; its agents are left as the last sync saw them, and their findings
@@ -185,6 +186,48 @@ may use it are left as they were.
    ```
 
 AgentGov gets its tokens itself, without Google's client libraries.
+
+## Salesforce
+
+AgentGov reads the **Agentforce agents** in your org: service agents, which talk to customers,
+and employee agents, which people use inside Salesforce. For each, the version in use, its
+topics with their instructions and their actions (its tools), the user a service agent runs
+as and what that user may do, and who has an employee agent.
+
+Einstein Bots aren't read: they aren't agents. Nor, yet, are the channels a service agent is
+deployed on, so whether a channel lets people in without signing in isn't checked.
+
+| Check | Raised when |
+|---|---|
+| `platform.broad_identity` | a service agent's user may modify or view all data, manage users, author Apex or modify metadata (high), or customize the application (medium) |
+| `platform.shared_with_everyone` | an employee agent is given, through permission sets or profiles, to nine in ten or more of the org's active people |
+
+Its topics' instructions go through the instruction checks, and its actions that reach outside
+Salesforce (external services, MCP tools, APIs, integration procedures, Slack) are marked
+among its tools. AgentGov uses the newest API version the org offers (60.0 or later); what an
+org's release doesn't have yet is left out, and the agent's card says what wasn't read.
+
+### Setting it up
+
+1. Make an integration user for AgentGov, with a permission set that gives it **API Enabled**,
+   **View Setup and Configuration** and, to count who has each employee agent, **View All
+   Users**. Salesforce's own Salesforce Integration user licence fits.
+2. Make an External Client App for AgentGov (Setup > External Client App Manager), with OAuth
+   on and the `api` scope, and either:
+   * the **client credentials flow** on, running as the integration user: AgentGov signs in
+     with the app's consumer key and secret; or
+   * the **JWT bearer flow**: upload a certificate to the app, pre-authorize the integration
+     user, and give AgentGov the certificate's private key.
+3. Name the org and the app:
+
+   ```bash
+   AGENTGOV_SALESFORCE_URL=https://contoso.my.salesforce.com   # Setup > My Domain
+   AGENTGOV_SALESFORCE_CLIENT_ID=3MVG9...                      # the consumer key
+   AGENTGOV_SALESFORCE_CLIENT_SECRET=...                       # the client credentials flow
+   # or, for the JWT bearer flow:
+   AGENTGOV_SALESFORCE_USERNAME=agentgov@contoso.com
+   AGENTGOV_SALESFORCE_PRIVATE_KEY_FILE=/etc/agentgov/salesforce.key
+   ```
 
 ## Doing it from the CLI or the API
 

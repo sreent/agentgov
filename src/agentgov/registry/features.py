@@ -686,6 +686,21 @@ CATALOG: tuple[Feature, ...] = (
         needs="AGENTGOV_GOOGLE_CLOUD_PROJECTS, and Google credentials allowed to read them",
     ),
     Feature(
+        "salesforce",
+        "Salesforce agents",
+        "platforms",
+        "AgentGov reads the Agentforce agents in your Salesforce org into the inventory, with "
+        "their risky settings as findings and their topics' instructions checked, on a "
+        "schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has the org's URL and an app to sign in with.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_SALESFORCE_URL, and an External Client App allowed to read the org",
+    ),
+    Feature(
         "security-operations",
         "Hand-off to security operations",
         "secops",
