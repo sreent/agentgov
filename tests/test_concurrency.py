@@ -386,3 +386,59 @@ def test_the_cli_names_the_version_too(client: TestClient, monkeypatch) -> None:
     assert stale.exit_code == 1 and "error 412" in stale.output
     replicas = runner.invoke(cli.app, ["replicas"])
     assert replicas.exit_code == 0 and "this one" in replicas.output
+
+
+# ------------------------------------------------- background jobs over many agents
+
+
+@postgres
+def test_the_identity_sync_holds_no_agent_while_keycloak_answers(rt, settings) -> None:
+    """The identity sync takes the agents one at a time, each in a transaction of its own:
+    while Keycloak answers about one, those before it are synced, committed and free for
+    the jobs that update many agents at once (the posture scan's risk scores), which would
+    otherwise wait for the whole pass, or deadlock with it."""
+    import httpx
+    from sqlalchemy import text
+
+    from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
+    from agentgov.models import Agent
+    from agentgov.registry import blueprints
+    from tests.test_keycloak import FakeKeycloak
+
+    with rt.db.session() as s:
+        blueprints.create(s, {"name": "bp", "require_sponsor": False}, actor="t")
+        made = [
+            agents.register(s, settings, {"name": name, "blueprint": "bp"}, actor="t", approve=True)
+            for name in ("one", "two", "three")
+        ]
+        order = sorted((a.id, a.client_id) for a in made)
+    first, waiting_for = order[0][0], order[1][1]
+    keycloak, reached, go = FakeKeycloak(), threading.Event(), threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("clientId") == waiting_for:
+            reached.set()
+            go.wait(10)
+        return keycloak.handler(request)
+
+    admin = KeycloakAdmin(
+        "http://kc", "agentgov", "agentgov-control-plane", "secret",
+        http=httpx.Client(transport=httpx.MockTransport(handler)),
+    )  # fmt: skip
+    reconciler = IdentityReconciler(rt.db, settings, admin)
+    counts: dict[str, int] = {}
+    sync = threading.Thread(target=lambda: counts.update(reconciler.reconcile_all()))
+    sync.start()
+    try:
+        assert reached.wait(10)
+        # Keycloak is answering about the second agent: the first is synced and committed,
+        # and another transaction updates it, as the posture scan does, without waiting.
+        with rt.db.session() as s:
+            s.execute(text("SET LOCAL lock_timeout = '2s'"))
+            agent = s.get(Agent, first)
+            assert agent is not None and agent.identity_synced_at is not None
+            agent.risk_score = 7
+    finally:
+        go.set()
+        sync.join(10)
+    assert counts == {"synced": 3, "failed": 0}

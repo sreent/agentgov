@@ -685,7 +685,17 @@ class IdentityReconciler:
                 self.sync_issuers(session)
             except (KeycloakError, httpx.HTTPError) as exc:
                 log.warning("identity issuers: %s", exc)
-            for agent in session.scalars(select(Agent).where(Agent.status != DISCOVERED)).unique():
+            found = session.scalars(
+                select(Agent.id).where(Agent.status != DISCOVERED).order_by(Agent.id)
+            ).all()
+        # Each agent in a transaction of its own: Keycloak takes its time to answer, and
+        # the jobs that update many agents at once (the posture scan's risk scores) neither
+        # wait for a pass over all of them nor deadlock with it.
+        for agent_id in found:
+            with self.db.session() as session:
+                agent = session.get(Agent, agent_id)
+                if agent is None or agent.status == DISCOVERED:
+                    continue
                 try:
                     self.sync(agent, scopes)
                     synced += 1

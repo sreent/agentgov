@@ -482,7 +482,9 @@ def purge_expired(session: Session, settings: Settings) -> list[str]:
         return []
     cutoff = ids.utcnow() - timedelta(days=days)
     expired = session.scalars(
-        select(Agent).where(Agent.status == DELETED, Agent.deleted_at < cutoff)
+        select(Agent)
+        .where(Agent.status == DELETED, Agent.deleted_at < cutoff)
+        .order_by(Agent.id)  # in the posture scan's order (registry/posture)
     ).unique()
     names = []
     for agent in list(expired):

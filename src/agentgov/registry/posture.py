@@ -62,7 +62,13 @@ def scan(
 
     # Copilot Studio checks (connector allowlist, sharing) first: they count towards risk.
     platform_findings = platforms.evaluate(session)
-    agents = session.scalars(select(Agent).where(Agent.status != DELETED)).unique().all()
+    # In one order, as the other jobs that update many agents at once take them: none of
+    # them waits for a row another holds while holding one the other wants.
+    agents = (
+        session.scalars(select(Agent).where(Agent.status != DELETED).order_by(Agent.id))
+        .unique()
+        .all()
+    )
     for agent in agents:
         managed = agent.status in (ACTIVE, PENDING, BLOCKED)
         # Agents run by another platform (Microsoft 365, Copilot Studio) never call
