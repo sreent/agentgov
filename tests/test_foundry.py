@@ -21,6 +21,20 @@ SUPPORT = "https://contoso.services.ai.azure.com/api/projects/support"
 RESEARCH = "https://fabrikam.services.ai.azure.com/api/projects/research"
 HELPDESK_IDENTITY = "0a0a0a0a-1111-2222-3333-444444444444"
 ACCOUNTS = f"/subscriptions/{SUBSCRIPTION}/resourceGroups/ai/providers/Microsoft.CognitiveServices"
+CONNECTIONS = f"{ACCOUNTS}/accounts/contoso/projects/support/connections"
+
+
+def connection(name: str, credential: str, target: str, kind: str = "RemoteTool") -> dict:
+    """A project connection as Foundry lists it: how it signs in, never its credentials."""
+    return {
+        "name": name,
+        "id": f"{CONNECTIONS}/{name}",
+        "type": kind,
+        "target": target,
+        "isDefault": False,
+        "credentials": {"type": credential},
+        "metadata": {},
+    }
 
 
 def version(number: str, definition: dict[str, Any], **extra: Any) -> dict[str, Any]:
@@ -42,6 +56,7 @@ class FakeFoundry:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.tokens: list[str] = []
+        self.connections_refused = False
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -66,6 +81,8 @@ class FakeFoundry:
             )
         if path == "/api/projects/support/agents":
             return self.agents(request)
+        if path == "/api/projects/support/connections":
+            return self.connections(request)
         if path == "/api/projects/support/agents/pinned/versions/2":
             return httpx.Response(
                 200,
@@ -131,6 +148,33 @@ class FakeFoundry:
             )
         raise AssertionError(f"unexpected {path}")  # legacy-oai's projects aren't asked for
 
+    def connections(self, request: httpx.Request) -> httpx.Response:
+        if self.connections_refused:
+            return httpx.Response(
+                403,
+                json={"error": {"code": "PermissionDenied", "message": "lacks connections/read"}},
+            )
+        if request.url.params.get("skipToken") == "2":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        connection("wiki-keys", "CustomKeys", "https://wiki.contoso.example/mcp"),
+                        connection("bing", "ApiKey", "https://api.bing.microsoft.com/", "ApiKey"),
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    connection("crm-key", "ApiKey", "https://crm.contoso.example/", "OpenAPI"),
+                    connection("calendar-oauth", "OAuth2", "https://calendar.contoso.example/mcp"),
+                ],
+                "nextLink": f"{SUPPORT}/connections?api-version=v1&skipToken=2",
+            },
+        )
+
     def agents(self, request: httpx.Request) -> httpx.Response:
         assert request.url.params["limit"] == "100"
         if request.url.params.get("after") == "legacy-faq-id":
@@ -174,6 +218,37 @@ class FakeFoundry:
                     "openapi": {"name": "weather", "spec": {}, "auth": {"type": "anonymous"}},
                 },
                 {"type": "file_search", "vector_store_ids": ["vs_1", "vs_2"]},
+                # Signing in through the project's connections: MCP tools name theirs, the
+                # others give its ID.
+                {
+                    "type": "mcp",
+                    "server_label": "wiki",
+                    "server_url": "https://old-wiki.contoso.example/mcp",
+                    "project_connection_id": "wiki-keys",
+                    "require_approval": {"never": ["search"]},
+                },
+                {
+                    "type": "mcp",
+                    "server_label": "calendar",
+                    "server_url": "https://calendar.contoso.example/mcp",
+                    "project_connection_id": "calendar-oauth",
+                },
+                {
+                    "type": "openapi",
+                    "openapi": {
+                        "name": "crm",
+                        "spec": {},
+                        "auth": {
+                            "type": "project_connection",
+                            "security_scheme": {"project_connection_id": f"{CONNECTIONS}/crm-key"},
+                        },
+                    },
+                },
+                {
+                    "type": "a2a_preview",
+                    "base_url": "https://agents.contoso.example/billing",
+                    "project_connection_id": f"{CONNECTIONS}/old-a2a",
+                },
             ],
         }
         return {
@@ -415,6 +490,72 @@ def test_an_entra_agent_identity_read_after_its_foundry_agent_is_that_agent(
     assert agent["platform"] == "Foundry prompt agent"
     resp = foundry_client.get("/v1/agents/helpdesk-agent-identity", headers=ADMIN)
     assert resp.status_code == 404
+
+
+def test_tools_that_sign_in_through_project_connections(foundry_client, foundry) -> None:
+    resp = foundry_client.post("/v1/platforms/microsoft-foundry/sync", headers=ADMIN)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["failed"] == 2  # the research project and the locked resource
+
+    tools = {t["name"]: t for t in _view(_agent(foundry_client, "helpdesk"))["tools"]}
+    # The server is the connection's: Foundry calls its endpoint when the two differ.
+    assert tools["wiki"] == {
+        "name": "wiki",
+        "kind": "MCP server",
+        "detail": "https://wiki.contoso.example · through the connection wiki-keys with shared "
+        "custom keys · these of its tools run without asking: search",
+        "tone": "warning",
+    }
+    assert tools["calendar"] == {
+        "name": "calendar",
+        "kind": "MCP server",
+        "detail": "https://calendar.contoso.example · through the connection calendar-oauth as "
+        "each user, who signs in (OAuth identity passthrough)",
+    }
+    assert tools["crm"]["detail"] == "through the connection crm-key with one shared API key"
+    assert tools["crm"]["tone"] == "warning"
+    assert tools["https://agents.contoso.example"]["detail"] == "its connection old-a2a is gone"
+
+    found = _findings(foundry_client, "helpdesk")["platform.maker_credentials"]
+    assert found["severity"] == "medium"
+    assert found["details"]["connections"] == ["crm-key", "wiki-keys"]
+    assert "wiki (connection wiki-keys, with shared custom keys)" in found["description"]
+    assert "calendar" not in found["description"]
+
+    # Listed once for the project, over its two pages, and never with their credentials.
+    listed = [r for r in foundry.requests if r.url.path.endswith("/connections")]
+    assert len(listed) == 2
+    assert not [r for r in foundry.requests if "WithCredentials" in r.url.path]
+    assert {r.method for r in foundry.requests if r.url.host.endswith(".azure.com")} == {"GET"}
+
+
+def test_connections_agentgov_may_not_read(foundry_client, foundry) -> None:
+    sync = "/v1/platforms/microsoft-foundry/sync"
+    assert foundry_client.post(sync, headers=ADMIN).status_code == 200
+    assert "platform.maker_credentials" in _findings(foundry_client, "helpdesk")
+
+    foundry.connections_refused = True
+    for _ in range(3):
+        resp = foundry_client.post(sync, headers=ADMIN)
+        assert resp.status_code == 200, resp.text
+    assert resp.json()["failed"] == 3
+    status = {
+        s["source"]: s for s in foundry_client.get("/v1/platforms", headers=ADMIN).json()["sources"]
+    }
+    sync_message = status["microsoft-foundry"]["last_sync"]["message"]
+    assert "contoso/support (its connections)" in sync_message
+    assert "lacks connections/read" in sync_message
+
+    # The agent is still read; how its connections sign in isn't, so its finding stays open,
+    # unverified, rather than close unchecked.
+    view = _view(_agent(foundry_client, "helpdesk"))
+    assert "couldn't be read" in _facts(view)["Not read in full"]
+    tools = {t["name"]: t for t in view["tools"]}
+    assert tools["crm"]["detail"] == "through the connection crm-key"
+    found = _findings(foundry_client, "helpdesk")["platform.maker_credentials"]
+    assert found["verified"] is False
+    # Agents whose tools use no connection are read in full.
+    assert "Not read in full" not in _facts(_view(_agent(foundry_client, "builder")))
 
 
 def test_foundry_settings_are_checked() -> None:

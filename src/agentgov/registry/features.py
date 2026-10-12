@@ -730,7 +730,7 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "Not read, even where it could be.",
         },
         needs="AGENTGOV_FOUNDRY_PROJECTS or AGENTGOV_FOUNDRY_SUBSCRIPTIONS, and AgentGov's "
-        "Microsoft app (AGENTGOV_M365_*) allowed to read the projects' agents",
+        "Microsoft app (AGENTGOV_M365_*) allowed to read the projects' agents and connections",
     ),
     Feature(
         "security-operations",
