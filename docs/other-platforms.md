@@ -245,23 +245,26 @@ AgentGov reads, in each workspace you name:
 
 * **Agents on Model Serving**: serving endpoints whose task is an agent's, with what they
   serve, who may query them, whether their requests and answers are kept in inference tables,
-  and the names of their environment variables.
+  and the names of their environment variables. An endpoint that serves a **Knowledge
+  Assistant** or a **Supervisor Agent** (Agent Bricks, whose APIs are in Beta) is shown as
+  one, with its instructions and, for a supervisor, its subagents and tools.
 * **Agent Bricks agents**: the Databricks Apps the Agent Bricks CLI deploys agents as (named
   `agent-bricks-…`), with who may use them, the service principal they run as and the
   resources it holds (their tools), and the scopes they act for their users with.
 * **Genie agents** (Genie spaces), with who may ask them questions, the tables they answer
   from, and their instructions.
 
-Knowledge Assistant and Supervisor Agent agents, and MCP services in Unity Catalog, aren't read
-yet.
+MCP services in Unity Catalog aren't read yet.
 
 | Check | Raised when |
 |---|---|
 | `platform.shared_with_everyone` | the workspace's `users` group, or the account's `account users`, may use the agent |
 | `platform.plain_secret` | an environment variable whose name says it holds a secret has its value in the agent's configuration, rather than from a secret scope (`{{secrets/scope/key}}`, or an app's `valueFrom`) |
+| `platform.risky_tool` | a Supervisor Agent: every one can run the code its model writes (in a sandbox without internet access, reading the tables and volumes it is given) |
 | `platform.broad_identity` | an agent on Model Serving calls Databricks with a fixed credential (`DATABRICKS_TOKEN` or `DATABRICKS_CLIENT_SECRET`), or an Agent Bricks agent's service principal may change, not only use, a resource (`CAN_MANAGE`, `IS_OWNER`, `MODIFY`, a secret scope's `WRITE` or `MANAGE`) |
 
-A Genie agent's instructions go through the instruction checks. An agent whose permissions
+Genie agents', Knowledge Assistants' and Supervisor Agents' instructions go through the
+instruction checks. An agent whose permissions
 AgentGov may not read is shown as such, and its findings about who may use it are left as
 they were.
 
