@@ -35,6 +35,7 @@ come second: they report, but they don't enforce.
 | 14 | Evidence | **Ledger checkpoints in a transparency log** (done, [evidence](evidence.md#a-transparency-log)): each checkpoint signed with AgentGov's key and added to Sigstore's public Rekor or a log of your own, its proof checked with the log's key and kept, and handed to assessors as Sigstore bundles that verify offline with cosign | Sigstore Rekor v2 (rekor-tiles) |
 | 15 | Policy | **AuthZEN, both ways** (done, [policies](policies.md#authzen)): AgentGov's policies answer AuthZEN evaluations, for enforcement points other than its gateway, and the processor can ask a decision point of yours (Cedar, Cerbos, Topaz, OpenFGA, Keycloak) beside AgentGov's, monitored before it is enforced | OpenID AuthZEN Authorization API 1.0 |
 | 16 | Developer tools | **Developers sign in at the gateway** (done, [developer tools](developer-tools.md#signing-in-at-the-gateway)): developers' MCP clients reach the tool servers on the gateway with the developer's own token, signing in where the gateway tells them, to an agent registered as a public client that acts for them; the same controls check their calls, and the ledger names the developer | MCP authorization (OAuth 2.1, protected resource metadata), agentgateway's MCP authentication |
+| 17 | Identity | **Identity assertions for MCP servers outside the gateway** (done, [acting for people](acting-for-people.md#mcp-servers-outside-the-gateway)): AgentGov gives agents, acting for people or on their own, identity assertions (ID-JAG) for the MCP servers that take tokens from an authorization server of their own, as their grants and blueprints allow, which they trade there for access tokens; each one in the ledger; Keycloak 26.8 checked as the authorization server that takes them | MCP enterprise-managed authorization (ID-JAG, an IETF draft), OAuth 2.0 Token Exchange |
 
 ## Later
 
@@ -43,7 +44,6 @@ come second: they report, but they don't enforce.
 | Security | **Workload identities for the components**: certificates from SPIFFE / SPIRE rather than AgentGov's own authority, rotated automatically | SPIFFE / SPIRE (agentgateway takes SVIDs for its backend TLS) |
 | Admin access | **Back-channel logout**: end administrator sessions as soon as the identity provider ends them, instead of at expiry | OpenID Connect Back-Channel Logout (supported by Keycloak) |
 | Identity | **Incremental identity reconciliation**: a change notification per agent instead of a periodic full sync | — |
-| Identity | **Enterprise-managed authorization for MCP**: accept and issue identity assertions (ID-JAG) for MCP servers outside the gateway | MCP enterprise-managed authorization |
 | Registry | **More platform connectors**: import agents from cloud agent platforms and SaaS agent builders (AWS, Google, Salesforce, Databricks) the way [Microsoft 365 and Copilot Studio](platforms.md) are, when someone needs one | Platform APIs |
 | Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
 

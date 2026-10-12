@@ -24,7 +24,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -71,6 +71,8 @@ drop if startswith(input.path, "agentgov/mcp")
 drop if startswith(input.path, "agentgov/models")
 
 drop if startswith(input.path, "agentgov/a2a")
+
+drop if startswith(input.path, "agentgov/idjag")
 
 drop if startswith(input.path, "registry")
 """
@@ -136,11 +138,14 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
         if agent.client_id:
             clients[agent.client_id] = agent.id
     servers: dict[str, Any] = {}
-    # Servers only for developers never reach the gateway, so OPA never decides on them.
-    for ts in session.scalars(select(ToolServer).where(ToolServer.gateway.is_(True))):
+    # Servers only for developers never reach the gateway, so OPA never decides on them;
+    # it does on those agents get identity assertions for (agentgov.idjag).
+    reached = or_(ToolServer.gateway.is_(True), ToolServer.authorization_server.is_not(None))
+    for ts in session.scalars(select(ToolServer).where(reached)):
         servers[ts.name] = {
             "name": ts.name,
             "status": ts.status,
+            "gateway": bool(ts.gateway),
             "trust_level": ts.trust_level,
             "data_classification": ts.data_classification,
             "labels": ts.labels or {},

@@ -28,9 +28,11 @@ people before it would act. And the ledger gets a checkpoint, time-stamped by an
 authority (the sink stands in for one too) and checked with OpenSSL, next to a compliance
 report and the evidence pack for assessors. A classifier gives a second opinion on a tool
 result the rules let through (examples/models/mock stands in for IBM Granite Guardian,
-where the stack is started with AGENTGOV_GUARDIAN_URL pointing at it). Last, developers'
-MCP clients sign in at the gateway: dana, a developer, signs in in a browser as an MCP
-client has them do, and calls a tool with their own token.
+where the stack is started with AGENTGOV_GUARDIAN_URL pointing at it). Developers' MCP
+clients sign in at the gateway: dana, a developer, signs in in a browser as an MCP client
+has them do, and calls a tool with their own token. Last, dana's MCP client gets an
+identity assertion (ID-JAG) from AgentGov for a server outside the gateway, the wiki,
+which it would trade at the wiki's own authorization server for an access token.
 """
 
 from __future__ import annotations
@@ -1519,6 +1521,76 @@ async def developer_sign_in() -> None:
         admin("PUT", "/v1/features/developer-sign-in", json={"mode": "off"})
 
 
+def identity_assertions() -> None:
+    step("24. A server outside the gateway: an identity assertion (ID-JAG) for it, from AgentGov")
+    admin("PUT", "/v1/features/identity-assertions", json={"mode": "on"})
+    try:
+        meta = httpx.get(f"{CONTROL_PLANE}/.well-known/oauth-authorization-server", timeout=10)
+        meta.raise_for_status()
+        issuer = meta.json()
+        wiki = admin("GET", "/v1/toolservers/wiki")
+        creds = admin("POST", f"/v1/agents/{DEVELOPERS_AGENT}/credentials", json={})
+        keys = httpx.get(issuer["jwks_uri"], timeout=10).json()["keys"]
+
+        def assertion_for(person: str) -> httpx.Response:
+            # The person's MCP client, signed in, asks AgentGov for one (RFC 8693).
+            token = browser_sign_in(person, creds, wiki["url"])
+            return httpx.post(
+                issuer["token_endpoint"],
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                    "requested_token_type": "urn:ietf:params:oauth:token-type:id-jag",
+                    "subject_token": token,
+                    "subject_token_type": ACCESS_TOKEN,
+                    "audience": wiki["authorization_server"],
+                    "resource": wiki["url"],
+                },
+                timeout=30,
+            )
+
+        given = assertion_for("dana")
+        claims: dict[str, Any] = {}
+        if given.status_code == 200:
+            token = given.json()["access_token"]
+            header = jwt.get_unverified_header(token)
+            key = next((k for k in keys if k["kid"] == header.get("kid")), None)
+            if key is not None:
+                claims = jwt.decode(
+                    token,
+                    jwt.PyJWK.from_dict(key).key,
+                    algorithms=["ES256"],
+                    audience=wiki["authorization_server"],
+                )
+            show(
+                "given:",
+                header.get("typ") == "oauth-id-jag+jwt" and claims.get("resource") == wiki["url"],
+                f"for {claims.get('sub')} at {claims.get('aud')}, as client "
+                f"{claims.get('client_id')}, by {claims.get('act', {}).get('sub')}, for "
+                f"{given.json().get('expires_in')}s; checked with AgentGov's published key",
+            )
+        else:
+            show("given:", False, f"{given.status_code} {given.text[:200]}")
+        entry = ledger_entry({"type": "decision.assertion", "user": "dana"})
+        show(
+            "recorded:" if entry else "not recorded",
+            entry is not None and entry["decision"] == "allow",
+            f"{entry['type']} {entry['resource']} for {entry['on_behalf_of']}" if entry else "",
+        )
+        refused = assertion_for("sam")
+        answer = (
+            refused.json()
+            if refused.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
+        show(
+            "refused:",
+            refused.status_code == 400 and answer.get("error") == "invalid_target",
+            f"sam: {answer.get('error_description')}",
+        )
+    finally:
+        admin("PUT", "/v1/features/identity-assertions", json={"mode": "off"})
+
+
 def main() -> None:
     wait_for_gateway("/mcp/crm", MODEL_ROUTE, A2A_ROUTE)
     step("1. Registration: a new agent is requested, approved and given an identity")
@@ -1536,6 +1608,7 @@ def main() -> None:
         asyncio.run(deeper_detection())
         authzen_decision_point()
         asyncio.run(developer_sign_in())
+        identity_assertions()
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")
         print(f"{DIM}Open {CONTROL_PLANE}/ui for the admin view.{RESET}")

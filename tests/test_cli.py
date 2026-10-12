@@ -168,6 +168,24 @@ class TestRegistry:
         ok(agentgov("toolservers", "delete", "wiki", "--yes"))
         assert client.get("/v1/toolservers/wiki", headers=ADMIN).status_code == 404
 
+    def test_a_server_outside_the_gateway(self, client, agentgov) -> None:
+        out = ok(
+            agentgov(
+                "toolservers", "create", "docs", "--url", "https://docs.example.com/mcp",
+                "--no-gateway", "--authorization-server", "https://id.docs.example.com",
+                "--oauth-client-id", "agentgov-agents",
+            )
+        )  # fmt: skip
+        assert "reached with assertions for https://id.docs.example.com" in out
+        ok(agentgov("toolservers", "update", "docs", "--oauth-client-id", ""))
+        ts = client.get("/v1/toolservers/docs", headers=ADMIN).json()
+        assert (ts["authorization_server"], ts["oauth_client_id"]) == (
+            "https://id.docs.example.com",
+            None,
+        )
+        on_the_gateway = agentgov("toolservers", "update", "docs", "--gateway")
+        assert on_the_gateway.exit_code == 1 and "outside the gateway" in on_the_gateway.output
+
     @requires_opa
     def test_policies(self, client, agentgov, tmp_path: Path) -> None:
         source = tmp_path / "no-deletes.rego"

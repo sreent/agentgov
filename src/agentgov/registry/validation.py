@@ -167,6 +167,19 @@ def a2a_url(value: Any) -> str | None:
     return str(value).rstrip("/")
 
 
+def issuer_url(value: Any, field: str) -> str | None:
+    """An OAuth issuer identifier: an http(s) URL without a query or fragment."""
+    if value is None or value == "":
+        return None
+    parts = urlsplit(str(value))
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValidationError(f"{field} must be an http(s) URL, its issuer (got {value!r})")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise ValidationError(f"{field} must not hold credentials, a query or a fragment")
+    # Exactly as the issuer names itself (some end with "/"): assertions name it so.
+    return str(value)
+
+
 # What stops calls to an agent that don't come through the gateway, as its owners say
 # (registry/reachability): the network lets only the gateway reach it, or the agent refuses
 # calls without the delegation the gateway gives with each one.

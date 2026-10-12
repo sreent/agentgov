@@ -81,6 +81,9 @@ spec:
   permissions:
     - server: crm
       tools: [search_customers, get_customer]
+    # Outside the gateway: its agents get identity assertions for it (toolservers.yaml).
+    - server: wiki
+      tools: [search, get_page]
   # Only for people (they sign in to its agents: docs/developer-tools.md), and only for
   # developers.
   acts_for: people

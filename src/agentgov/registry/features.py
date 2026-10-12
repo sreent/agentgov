@@ -481,6 +481,25 @@ CATALOG: tuple[Feature, ...] = (
         "providers; SPIFFE issuers need Keycloak's spiffe preview feature",
     ),
     Feature(
+        "identity-assertions",
+        "Identity assertions for servers outside the gateway",
+        "identity",
+        "Agents get identity assertions (ID-JAG, MCP's enterprise-managed authorization) for "
+        "the MCP servers outside the gateway that take access tokens from an authorization "
+        "server of their own, as their grants and blueprints allow, and trade them there for "
+        "access tokens. AgentGov's token endpoint gives them, for the agent or the person it "
+        "acts for, and the ledger records each one.",
+        SWITCH,
+        OFF,
+        {
+            ON: "Agents get assertions at <control plane>/oauth2/token for the tool servers "
+            "registered with an authorization server.",
+            OFF: "No assertions are given. Those given before expire within five minutes.",
+        },
+        needs="the service token, Keycloak's issuer and keys, and OPA, where the control plane "
+        "runs; and the servers' authorization servers trusting AgentGov's",
+    ),
+    Feature(
         "registration-approval",
         "Registration approval",
         "lifecycle",
@@ -723,6 +742,19 @@ def unmet(key: str, mode: str, settings: Settings) -> str | None:
             "developers sign in to Keycloak, whose tokens the gateway checks: set "
             "AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL"
         )
+    if key == "identity-assertions" and mode != OFF:
+        if not settings.service_token:
+            return (
+                "AgentGov signs identity assertions with a key it derives from the service "
+                "token: set AGENTGOV_SERVICE_TOKEN where the control plane runs"
+            )
+        if not (settings.keycloak_issuer and settings.keycloak_jwks_url):
+            return (
+                "AgentGov checks the tokens agents bring with Keycloak's keys: set "
+                "AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL"
+            )
+        if not settings.opa_url:
+            return "AgentGov's policies decide which agents get them: set AGENTGOV_OPA_URL"
     if key == "traffic-classifier" and mode != OFF and not settings.guardian_url:
         return (
             "the classifier needs IBM Granite Guardian: set AGENTGOV_GUARDIAN_URL where the "

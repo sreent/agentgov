@@ -91,6 +91,7 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 | Feature | Modes | What it does |
 |---|---|---|
 | `workload-identity` | off, **on** | Agents authenticate with an identity they already have, such as a Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID, from the identity issuers an administrator approves, instead of a client secret ([agents' own identities](agent-identity.md)). Off, no issuer is trusted: agents with a workload identity can't authenticate until it is on again. Needs Keycloak 26.6 or later, and Keycloak's `spiffe` preview feature for SPIFFE issuers |
+| `identity-assertions` | **off**, on | Agents get identity assertions (ID-JAG, MCP's enterprise-managed authorization) at `<control plane>/oauth2/token` for the MCP servers outside the gateway registered with an authorization server, as their grants and blueprints allow, and trade them there for access tokens ([acting for people](acting-for-people.md#mcp-servers-outside-the-gateway)). The ledger records each one given or refused. Off, none are given. Needs the service token, Keycloak's issuer and keys, and OPA, where the control plane runs |
 
 ### Lifecycle
 

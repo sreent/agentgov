@@ -23,6 +23,7 @@ from starlette.types import Scope
 from agentgov import __version__
 from agentgov.api import (
     access_routes,
+    assertion_routes,
     authzen_routes,
     copilot_studio_routes,
     evidence_routes,
@@ -187,6 +188,7 @@ def create_app(
     app.include_router(mcp_routes.router)
     app.include_router(mcp_routes.public)
     app.include_router(authzen_routes.router)
+    app.include_router(assertion_routes.router)
 
     ui_dir = Path(str(resources.files("agentgov") / "ui"))
     if (ui_dir / "index.html").exists():

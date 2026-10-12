@@ -1643,6 +1643,8 @@ def _toolserver_fields(
     developers: bool | None = None,
     package: list[str] | None = None,
     registry_name: str | None = None,
+    authorization_server: str | None = None,
+    oauth_client_id: str | None = None,
 ) -> dict[str, Any]:
     body = _given(
         url=url,
@@ -1660,6 +1662,10 @@ def _toolserver_fields(
         body["packages"] = _packages(package)
     if registry_name is not None:
         body["registry_name"] = registry_name or None
+    if authorization_server is not None:
+        body["authorization_server"] = authorization_server or None
+    if oauth_client_id is not None:
+        body["oauth_client_id"] = oauth_client_id or None
     return body
 
 
@@ -1679,6 +1685,19 @@ PACKAGE = typer.Option(
 REGISTRY_NAME = typer.Option(
     None, help="Its name in the MCP registry (default <namespace>/<name>)."
 )
+AUTHORIZATION_SERVER = typer.Option(
+    None,
+    "--authorization-server",
+    help="For a server outside the gateway: the issuer of the authorization server it takes "
+    "access tokens from. Agents get identity assertions (ID-JAG) for it from AgentGov ('' "
+    "to remove it).",
+)
+OAUTH_CLIENT_ID = typer.Option(
+    None,
+    "--oauth-client-id",
+    help="The client AgentGov's agents are at that authorization server (default: each "
+    "agent's own client ID; '' to go back to it).",
+)
 
 
 @toolservers_app.command("create")
@@ -1696,16 +1715,21 @@ def toolservers_create(
     developers: bool | None = DEVELOPERS,
     package: list[str] | None = PACKAGE,
     registry_name: str | None = REGISTRY_NAME,
+    authorization_server: str | None = AUTHORIZATION_SERVER,
+    oauth_client_id: str | None = OAUTH_CLIENT_ID,
 ) -> None:
     """Register a tool server (admins: approved at once; registrars: pending review)."""
     body = _toolserver_fields(
         url, description, owner, trust, classification, label,
         gateway=gateway, developers=developers, package=package, registry_name=registry_name,
+        authorization_server=authorization_server, oauth_client_id=oauth_client_id,
     )  # fmt: skip
     ts = _call("POST", "/v1/toolservers", json={"name": name, **body})
     where = [f"published at {ts['gateway_url']}"] if ts["gateway_url"] else []
     if ts["developers"]:
         where.append("listed for developers")
+    if ts.get("authorization_server"):
+        where.append(f"reached with assertions for {ts['authorization_server']}")
     _done("toolserver", ts["name"], ", ".join([ts["status"], *where]))
 
 
@@ -1722,12 +1746,15 @@ def toolservers_update(
     developers: bool | None = DEVELOPERS,
     package: list[str] | None = PACKAGE,
     registry_name: str | None = REGISTRY_NAME,
+    authorization_server: str | None = AUTHORIZATION_SERVER,
+    oauth_client_id: str | None = OAUTH_CLIENT_ID,
     if_version: int | None = IF_VERSION,
 ) -> None:
     """Change a tool server's details."""
     body = _toolserver_fields(
         url, description, owner, trust, classification, label,
         gateway=gateway, developers=developers, package=package, registry_name=registry_name,
+        authorization_server=authorization_server, oauth_client_id=oauth_client_id,
     )  # fmt: skip
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")

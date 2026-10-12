@@ -10,6 +10,10 @@ A tool server can also be listed for developers (``developers``), in the MCP
 registry their MCP clients read (``agentgov.registry.mcp_registry``): through
 the gateway, or, for a server only developers use (``gateway`` off), at its own
 address or as packages they run on their machines.
+
+A server outside the gateway that takes access tokens from an authorization server of its
+own (``authorization_server``) is one agents reach directly, with an identity assertion
+(ID-JAG) AgentGov gives them for it, as their grants allow (``agentgov.identity.assertions``).
 """
 
 from __future__ import annotations
@@ -41,6 +45,8 @@ FIELDS = (
     "developers",
     "registry_name",
     "packages",
+    "authorization_server",
+    "oauth_client_id",
 )
 # What developers' MCP clients see in the registry: a change bumps the server's version there.
 REGISTRY_FIELDS = {"url", "description", "gateway", "developers", "registry_name", "packages"}
@@ -129,6 +135,12 @@ def _apply(ts: ToolServer, data: dict[str, Any]) -> list[str]:
             if not isinstance(value, list) or len(value) > 20:
                 raise ValidationError("packages must be a list of at most 20 packages")
             value = [_package(i, p) for i, p in enumerate(value)]
+        elif key == "authorization_server":
+            value = validation.issuer_url(value, key)
+        elif key == "oauth_client_id":
+            value = value or None
+            if value is not None and (not isinstance(value, str) or len(value) > 200):
+                raise ValidationError("oauth_client_id is a client ID, of at most 200 characters")
         elif key == "trust_level":
             value = validation.trust_level(value)
         elif key == "data_classification":
@@ -148,9 +160,22 @@ def _apply(ts: ToolServer, data: dict[str, Any]) -> list[str]:
 
 def _check(ts: ToolServer) -> None:
     """What a tool server must have, whoever uses it."""
-    if not ts.gateway and not ts.developers:
+    if ts.authorization_server:
+        # Agents reach a server on the gateway through it, with their AgentGov token: an
+        # access token of the server's own would let them go around it.
+        if ts.gateway:
+            raise ValidationError(
+                "an authorization server is for servers outside the gateway (gateway: false): "
+                "agents reach servers on the gateway through it"
+            )
+        if not ts.url:
+            raise ValidationError("a server with an authorization server needs its url")
+    elif ts.oauth_client_id:
+        raise ValidationError("oauth_client_id is the client at its authorization_server")
+    if not ts.gateway and not ts.developers and not ts.authorization_server:
         raise ValidationError(
-            "a tool server is published on the gateway, listed for developers, or both"
+            "a tool server is published on the gateway, listed for developers, reached with "
+            "identity assertions (an authorization_server), or more than one of these"
         )
     if ts.gateway and not ts.url:
         raise ValidationError("url is required for a server published on the gateway")
@@ -403,6 +428,8 @@ def to_dict(ts: ToolServer, gateway_url: str | None = None) -> dict[str, Any]:
         "developers": ts.developers,
         "registry_name": ts.registry_name,
         "packages": ts.packages or [],
+        "authorization_server": ts.authorization_server,
+        "oauth_client_id": ts.oauth_client_id,
         "revision": ts.revision or 0,
         "description": ts.description,
         "owner": ts.owner,

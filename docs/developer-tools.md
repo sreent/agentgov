@@ -19,6 +19,7 @@ A tool server can be used by agents, by developers, or both:
 | `developers` | Listed in the MCP registry for developers' MCP clients |
 | `packages` | For a server developers run on their machines: the package, such as `npm` `@playwright/mcp` `0.0.41` (`registry_type` is one of `npm`, `pypi`, `oci`, `nuget`, `cargo` and `mcpb`) |
 | `registry_name` | Its name in the registry. By default `<namespace>/<name>`, where the namespace is `AGENTGOV_MCP_REGISTRY_NAMESPACE`, or the control plane's host name reversed (`com.contoso.agentgov`), or `local.agentgov` for a host name without a dot, such as `localhost` |
+| `authorization_server` | For a server outside the gateway with an authorization server of its own: agents get identity assertions for it from AgentGov ([acting for people](acting-for-people.md#mcp-servers-outside-the-gateway)) |
 
 A server listed for developers and published on the gateway is listed with the
 gateway's address. A server only for developers (`gateway: false`) is listed with its

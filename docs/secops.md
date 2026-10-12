@@ -163,7 +163,7 @@ Each ledger entry is one event:
 
 | Ledger entries | OCSF class | Activity |
 |---|---|---|
-| `decision.*` (tool and model calls, calls between agents, and their answers), `approval.*`, tools used without the gateway | API Activity (6003) | Tool call, Model call, Agent call, list and read calls as Read, approvals as *Approval requested*, *approved*… |
+| `decision.*` (tool and model calls, calls between agents, and their answers, and identity assertions for servers outside the gateway), `approval.*`, tools used without the gateway | API Activity (6003) | Tool call, Model call, Agent call, Identity assertion, list and read calls as Read, approvals as *Approval requested*, *approved*… |
 | `admin.*` (sign-ins and sessions) | Authentication (3002) | Logon, Logoff |
 | `finding.*` about posture | Compliance Finding (2003) | Create, Update, Close |
 | `finding.*` about threats | Detection Finding (2004) | Create, Update, Close |

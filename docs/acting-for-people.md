@@ -109,14 +109,8 @@ supported.
 Whichever it is, the agent is the client the token was issued to (its `agent_id` claim
 and `azp`), so its own grants, risk and status apply as always.
 
-### MCP enterprise-managed authorization (ID-JAG)
-
-The MCP specification's enterprise-managed authorization lets an MCP client get access
-to a third-party MCP server with an identity assertion from the enterprise's identity
-provider (an ID-JAG), instead of a consent screen per server. It decides whether a
-person's client may connect to a server at all; AgentGov decides each call, and the
-servers behind the gateway trust the gateway. Keycloak 26.7 can accept ID-JAGs as an
-experimental feature. AgentGov doesn't issue or accept them yet.
+For an MCP server outside the gateway, an agent acting for a person gets an identity
+assertion for them from AgentGov instead ([below](#mcp-servers-outside-the-gateway)).
 
 ## Whom an agent may act for
 
@@ -220,6 +214,123 @@ who is asked.
 An approval is for the person it was requested for: it lets the agent make that call for
 that person only, not for someone else or on its own.
 
+## MCP servers outside the gateway
+
+Some MCP servers aren't behind AgentGov's gateway: a SaaS vendor's, or one another team
+runs, which takes access tokens from an authorization server of its own. The MCP
+specification's *enterprise-managed authorization* lets the enterprise decide which of
+them people's clients and agents may reach, without a consent screen per server: the
+client trades a token it has for an **identity assertion** from the enterprise's issuer (an
+Identity Assertion JWT Authorization Grant, or ID-JAG), and the assertion at the server's
+authorization server for an access token.
+
+Keycloak can take ID-JAGs, as an experimental feature, but can't give them, so AgentGov
+does: its policies decide which agents get one, for which server and for whom, and the
+ledger records each one. The agent's calls then go straight to the server: AgentGov
+decides whether the agent gets in, but doesn't see what it does there.
+
+1. **Register the server** with the authorization server it takes tokens from.
+2. **Grant it** to the agents that may reach it, as any tool server: a grant on any of its
+   tools (`{"server": "wiki", "tools": ["search"]}`) lets the agent get an assertion.
+3. **Turn on the `identity-assertions` [feature](features.md).** AgentGov then serves its
+   metadata at `<control plane>/.well-known/oauth-authorization-server`, and its public
+   key at `<control plane>/oauth2/jwks` (the key is served with the feature off too).
+4. **Have the server's authorization server trust AgentGov** ([below](#taking-agentgovs-assertions-keycloak)).
+
+| Field | Meaning |
+|---|---|
+| `authorization_server` | The issuer of the authorization server the tool server takes access tokens from, exactly as it names itself: each assertion's audience. Only for servers outside the gateway (`gateway: false`), with their `url`: agents reach a server on the gateway through it, with their AgentGov token |
+| `oauth_client_id` | The client AgentGov's agents are at that authorization server, which each assertion names. By default each agent's own client ID |
+
+| | How |
+|---|---|
+| Admin UI | **Tool servers** → **Register tool server** or **Edit**, *Outside the gateway* |
+| CLI | `agentgov toolservers create wiki --url https://wiki.example.com/mcp --no-gateway --authorization-server https://id.wiki.example.com/realms/wiki --oauth-client-id agentgov-agents` |
+| API | `authorization_server` and `oauth_client_id` in `POST /v1/toolservers` and `PATCH /v1/toolservers/{name}` |
+| Manifests | The same fields in a `ToolServer`'s spec ([example](../examples/manifests/toolservers.yaml)) |
+
+An agent asks AgentGov's token endpoint with the token it has for the gateway, its own or
+one it got for a person (OAuth 2.0 Token Exchange, RFC 8693):
+
+```http
+POST /oauth2/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+&requested_token_type=urn:ietf:params:oauth:token-type:id-jag
+&subject_token=<its token for the gateway>
+&subject_token_type=urn:ietf:params:oauth:token-type:access_token
+&audience=https://id.wiki.example.com/realms/wiki
+&resource=https://wiki.example.com/mcp
+```
+
+AgentGov checks the token with Keycloak's keys (it must be for the gateway; an ID token
+Keycloak issued for the agent's client is taken too, as `...:token-type:id_token`), finds
+the server registered with that authorization server (and that `resource`, when several
+share it), and asks its policies (`data.agentgov.idjag.decision`). The agent must be
+active and the server approved; and the controls apply as their modes say, as they do to
+tool calls: least privilege (a grant on the server), access packages, whom its blueprint
+lets it act for, and risk-based access. It answers with the assertion:
+
+```json
+{"access_token": "<the ID-JAG>", "issued_token_type": "urn:ietf:params:oauth:token-type:id-jag",
+ "token_type": "N_A", "expires_in": 300}
+```
+
+or with why not: `{"error": "invalid_target", "error_description": "No tool of wiki is
+granted to agent helper"}`. The assertion is signed with a P-256 key AgentGov derives from
+the service token (ES256, `typ` `oauth-id-jag+jwt`):
+
+| Claim | |
+|---|---|
+| `iss` | AgentGov: `AGENTGOV_PUBLIC_URL` |
+| `sub` | The person the agent acts for (their ID in AgentGov's Keycloak realm), or the agent's own service account when it acts on its own |
+| `aud` | The authorization server |
+| `client_id` | The agent's client there |
+| `resource`, `scope` | The server, and the scopes asked for, if any |
+| `act` | The agent, when it acts for a person |
+| `email` | The person's, if they have one |
+| `jti`, `iat`, `exp` | Its ID, to be used once, and at most five minutes (`AGENTGOV_ASSERTION_LIFETIME_SECONDS`) |
+
+The agent trades it at the authorization server for an access token (RFC 7523:
+`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=<the ID-JAG>`, as its
+client there), and calls the server with that. The ledger records every assertion given or
+refused as `decision.assertion`, with the agent, the person, the server and the
+assertion's ID and expiry; the security team's tools get them as API Activity events.
+
+### Taking AgentGov's assertions (Keycloak)
+
+Keycloak 26.7 and later take ID-JAGs with the experimental `identity-assertion-jwt`
+feature, on top of its JWT authorization grant (RFC 7523). In the realm that guards the
+server (checked with Keycloak 26.8):
+
+1. Start Keycloak with `--features=identity-assertion-jwt`.
+2. Add an identity provider for AgentGov of the type *JWT Authorization Grant*
+   (`jwt-authorization-grant`): AgentGov's issuer (`AGENTGOV_PUBLIC_URL`), its keys
+   (`<control plane>/oauth2/jwks`, or the public key and its key ID), the grant on,
+   assertions used once, and at most 300 seconds.
+3. Add a confidential client for AgentGov's agents (the server's `oauth_client_id`) with
+   the grant on and that identity provider allowed (the attributes
+   `oauth2.jwt.authorization.grant.enabled` and `oauth2.jwt.authorization.grant.idp`).
+4. Link each person to that identity provider, with their ID in AgentGov's realm as their
+   user ID there: Keycloak takes assertions only for people it finds this way.
+
+Keycloak then refuses an assertion used twice, for another client or another audience, or
+for someone it can't find. It doesn't check `resource`, nor the longest lifetime it is set
+to allow, so AgentGov keeps its assertions short. `tests/test_assertions.py` runs this
+against Keycloak 26.8 where Docker is available.
+
+### Limits of identity assertions
+
+* The ID-JAG specification is an IETF draft (draft-ietf-oauth-identity-assertion-authz-grant),
+  on which MCP's enterprise-managed authorization builds.
+* MCP clients that ask the same issuer that signs people in for their assertions, such as
+  VS Code's enterprise-managed authorization, need one issuer for both: AgentGov gives the
+  assertions, and Keycloak signs people in. Agents, and clients that can ask an issuer of
+  their own, use AgentGov's.
+* AgentGov decides whether an agent gets in, and records it; the calls it then makes don't
+  pass the gateway, so AgentGov doesn't check or see them.
+
 ## Trying it
 
 The Compose stack and the Helm chart (with `keycloak.demoUsers`) come with a demo app
@@ -227,7 +338,10 @@ client, `agentgov-demo-chat`, and a person, **sam**, in the group `support`, who
 is the demo users'. In step 11 of the demo, `python examples/agents/demo_agent.py` signs sam
 in to the demo app,
 has its agent act for sam through the gateway, and has sam sign in to AgentGov to approve
-what the agent wants to do.
+what the agent wants to do. In step 24, a developer's MCP client gets an identity assertion
+for the wiki, a server outside the gateway
+([examples/manifests/toolservers.yaml](../examples/manifests/toolservers.yaml)), and
+another person's is refused.
 
 ## Limits
 
@@ -239,5 +353,6 @@ what the agent wants to do.
 * Groups reach policy from Keycloak's group mapper on each agent's client, as full paths.
 * The person's tokens and their exchange are Keycloak's: AgentGov sets up the clients and
   scopes, and the apps and agents do the exchange.
-* Developers' own MCP clients (VS Code, Copilot) don't go through the gateway with a
-  person's token yet: the gateway takes agents' tokens.
+* Developers' own MCP clients go through the gateway with their own token by signing in
+  to an agent registered as a public client
+  ([developer tools](developer-tools.md#signing-in-at-the-gateway)).

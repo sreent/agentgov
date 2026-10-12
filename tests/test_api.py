@@ -638,6 +638,36 @@ spec:
         ).json()["results"]
         assert {r["action"] for r in again} == {"unchanged"}
 
+    def test_public_clients_and_servers_outside_the_gateway_round_trip(self, client) -> None:
+        manifest = (
+            self.MANIFEST
+            + """---
+apiVersion: agentgov/v1alpha1
+kind: ToolServer
+metadata: {name: wiki}
+spec:
+  url: https://wiki.example.com/mcp
+  gateway: false
+  authorization_server: https://id.wiki.example.com/realms/wiki
+  oauth_client_id: agentgov-agents
+---
+apiVersion: agentgov/v1alpha1
+kind: Agent
+metadata: {name: vscode}
+spec: {blueprint: bp, sponsors: [a], client_type: public, redirect_uris: ["http://127.0.0.1/*"]}
+"""
+        )
+        headers = {**ADMIN, "Content-Type": "application/yaml"}
+        client.post("/v1/apply", content=manifest, headers=headers).raise_for_status()
+        exported = client.get("/v1/export", headers=ADMIN).text
+        assert "authorization_server: https://id.wiki.example.com/realms/wiki" in exported
+        assert "client_type: public" in exported
+        # Defaults stay out: the other agent's client type, and servers' missing fields.
+        assert exported.count("client_type:") == 1
+        assert exported.count("authorization_server:") == 1
+        again = client.post("/v1/apply", content=exported, headers=headers).json()["results"]
+        assert {r["action"] for r in again} == {"unchanged"}
+
     @pytest.mark.parametrize(
         "doc",
         [

@@ -94,20 +94,33 @@ class Keys:
 
     def jwk(self) -> dict[str, str]:
         """The public key as a JWK, its ID the key's thumbprint (RFC 7638)."""
-        numbers = self.public.public_numbers()
-        key = {
-            "crv": "P-256",
-            "kty": "EC",
-            "x": _b64(numbers.x.to_bytes(32, "big")),
-            "y": _b64(numbers.y.to_bytes(32, "big")),
-        }
-        canonical = json.dumps(key, sort_keys=True, separators=(",", ":")).encode()
-        kid = _b64(hashlib.sha256(canonical).digest())
-        return {**key, "kid": kid, "alg": ALGORITHM, "use": "sig"}
+        return public_jwk(self.public)
 
     @property
     def kid(self) -> str:
         return self.jwk()["kid"]
+
+
+def public_jwk(public: ec.EllipticCurvePublicKey) -> dict[str, str]:
+    """A P-256 public key as a JWK for ES256, its ID the key's thumbprint (RFC 7638)."""
+    numbers = public.public_numbers()
+    key = {
+        "crv": "P-256",
+        "kty": "EC",
+        "x": _b64(numbers.x.to_bytes(32, "big")),
+        "y": _b64(numbers.y.to_bytes(32, "big")),
+    }
+    canonical = json.dumps(key, sort_keys=True, separators=(",", ":")).encode()
+    kid = _b64(hashlib.sha256(canonical).digest())
+    return {**key, "kid": kid, "alg": ALGORITHM, "use": "sig"}
+
+
+def derive_key(secret: str, purpose: bytes) -> ec.EllipticCurvePrivateKey:
+    """A P-256 key derived from the service token, one for each purpose, so that every
+    component that holds the token holds the same key."""
+    seed = hmac.new(secret.encode(), purpose, hashlib.sha256).digest()
+    scalar = int.from_bytes(seed, "big") % (_P256_ORDER - 1) + 1
+    return ec.derive_private_key(scalar, ec.SECP256R1())
 
 
 def keys(secret: str | None) -> Keys | None:
@@ -116,9 +129,7 @@ def keys(secret: str | None) -> Keys | None:
     legacy = signing_key(secret)
     if not secret or legacy is None:
         return None
-    seed = hmac.new(secret.encode(), b"agentgov-delegation-es256-v1", hashlib.sha256).digest()
-    scalar = int.from_bytes(seed, "big") % (_P256_ORDER - 1) + 1
-    return Keys(private=ec.derive_private_key(scalar, ec.SECP256R1()), legacy=legacy)
+    return Keys(private=derive_key(secret, b"agentgov-delegation-es256-v1"), legacy=legacy)
 
 
 def jwks(found: Keys | None) -> dict[str, Any]:

@@ -174,6 +174,10 @@ class Settings:
     # client ID, which these apps may request: the person's token is then one the agent
     # can exchange for a token of its own, on the person's behalf.
     people_app_clients: str = ""
+    # Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers
+    # outside the gateway last, at most 300: the agent trades one for an access token
+    # at once (docs/acting-for-people.md#mcp-servers-outside-the-gateway).
+    assertion_lifetime_seconds: int = 300
 
     # --- Administrator single sign-on (OIDC) -------------------------------------
     # The control plane signs administrators in with an OIDC provider (Keycloak by
@@ -430,6 +434,8 @@ class Settings:
             raise ValueError("AGENTGOV_AUTHZEN_URL is the decision point's http(s) URL")
         if self.authzen_timeout_seconds <= 0:
             raise ValueError("AGENTGOV_AUTHZEN_TIMEOUT_SECONDS must be more than 0")
+        if not 30 <= self.assertion_lifetime_seconds <= 300:
+            raise ValueError("AGENTGOV_ASSERTION_LIFETIME_SECONDS is between 30 and 300")
         if self.ledger_tsa_url and not self.ledger_tsa_url.startswith(("https://", "http://")):
             raise ValueError("AGENTGOV_LEDGER_TSA_URL is the authority's http(s) URL")
         if self.ledger_rekor_url:

@@ -228,6 +228,12 @@ class ToolServer(Base):
     packages: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
     # Bumped when what the registry lists changes, so developers' clients see a new version.
     revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # A server outside the gateway that takes access tokens from an authorization server of
+    # its own (its issuer), for which AgentGov gives agents identity assertions (ID-JAG,
+    # agentgov.identity.assertions); and the client AgentGov's agents are there (none: each
+    # agent's own client ID).
+    authorization_server: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oauth_client_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Catalog observed through the gateway: [{name, description, annotations,
     # fingerprint, first_seen, changed_at}]. Fingerprints detect definition drift.
     tools: Mapped[list[Any]] = mapped_column(JSON, default=list)

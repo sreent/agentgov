@@ -3276,7 +3276,7 @@ function toolserverForm(ts, draft = null) {
     iconName: editing ? 'edit' : 'toolservers', confirm: editing ? 'Save changes' : 'Register server',
     fields: [
       editing ? null : { id: 'name', label: 'Name', required: true, mono: true, value: ts?.name || '', placeholder: 'crm', hint: `${NAME_HINT} It becomes the gateway path /mcp/<name>.` },
-      { id: 'url', label: 'Upstream URL', mono: true, value: ts?.url || '', placeholder: 'http://crm-mcp:8000/mcp', hint: 'The streamable HTTP MCP endpoint, required on the gateway. Agents never call it directly, only through the gateway.' },
+      { id: 'url', label: 'Upstream URL', mono: true, value: ts?.url || '', placeholder: 'http://crm-mcp:8000/mcp', hint: 'The streamable HTTP MCP endpoint, required on the gateway: agents reach it through the gateway, never directly. For a server outside the gateway, where agents reach it.' },
       { id: 'description', label: 'Description', type: 'textarea', value: ts?.description || '' },
       { id: 'owner', label: 'Owner', value: ts?.owner || '', placeholder: 'Team or person' },
       { type: 'row', fields: [
@@ -3289,12 +3289,19 @@ function toolserverForm(ts, draft = null) {
       { id: 'developers', label: "Developers, in the MCP registry", type: 'checkbox', value: Boolean(ts?.developers), hint: 'Listed in the registry GitHub Copilot and VS Code read (Developer tools).' },
       { id: 'packages', label: 'Packages developers run', type: 'code', rows: 2, value: formatPackages(ts?.packages), placeholder: 'npm:@playwright/mcp@0.0.41', hint: 'For a server developers run on their machines: one per line, type:identifier@version (npm, pypi, oci, nuget, cargo, mcpb).' },
       { id: 'registry_name', label: 'Name in the registry', mono: true, value: ts?.registry_name || '', placeholder: 'com.contoso/crm', hint: 'By default <namespace>/<name>.' },
+      { type: 'section', label: 'Outside the gateway' },
+      {
+        id: 'authorization_server', label: 'Its authorization server', mono: true, value: ts?.authorization_server || '', placeholder: 'https://id.wiki.example.com/realms/wiki',
+        hint: "For a server outside the gateway that takes access tokens from an authorization server of its own: its issuer. Agents get identity assertions (ID-JAG) for it from AgentGov, as their grants allow, while Identity assertions is on, and trade them there for access tokens.",
+      },
+      { id: 'oauth_client_id', label: "AgentGov's agents' client there", mono: true, value: ts?.oauth_client_id || '', placeholder: 'agentgov-agents', hint: "The client ID agents have at that authorization server. Empty: each agent's own client ID." },
     ].filter(Boolean),
     submit: (v) => {
       const body = {
         url: v.url, description: v.description, owner: orNull(v.owner),
         trust_level: v.trust_level, data_classification: v.data_classification, labels: parseLabels(v.labels),
         gateway: v.gateway, developers: v.developers, packages: parsePackages(v.packages), registry_name: orNull(v.registry_name),
+        authorization_server: orNull(v.authorization_server), oauth_client_id: orNull(v.oauth_client_id),
       };
       if (editing) return api(`v1/toolservers/${encodeURIComponent(ts.name)}`, { method: 'PATCH', body, ifMatch: ts.version });
       return api('v1/toolservers', { method: 'POST', body: { name: v.name, ...body } });
@@ -3305,9 +3312,10 @@ function toolserverForm(ts, draft = null) {
 async function registerToolserver() {
   const created = await toolserverForm(null);
   if (!created) return;
-  toast(created.gateway
-    ? `Registered ${created.name}. Agents reach it at ${created.gateway_url || `/mcp/${created.name}`}.`
-    : `Registered ${created.name} for developers.`);
+  let said = `Registered ${created.name} for developers.`;
+  if (created.gateway) said = `Registered ${created.name}. Agents reach it at ${created.gateway_url || `/mcp/${created.name}`}.`;
+  else if (created.authorization_server) said = `Registered ${created.name}. Agents get identity assertions for it from AgentGov.`;
+  toast(said);
   await refresh();
 }
 
@@ -3375,7 +3383,8 @@ function serverCard(ts) {
         h('div', { class: 'server-title' },
           h('div', { class: 'title-row' }, h('h2', { id: headingId, class: 'tool-name' }, ts.name), chip('server', ts.status), trustChip,
             plainChip(humanize(ts.data_classification || 'unclassified'), { iconName: 'lock', title: 'Data classification' }),
-            ts.developers ? plainChip(ts.gateway ? 'Listed for developers' : 'Developers only', { iconName: 'developers', title: 'In the MCP registry developers\' MCP clients read' }) : null),
+            ts.developers ? plainChip(ts.gateway ? 'Listed for developers' : 'Developers only', { iconName: 'developers', title: 'In the MCP registry developers\' MCP clients read' }) : null,
+            ts.authorization_server ? plainChip('Identity assertions', { iconName: 'key', title: 'Agents reach it outside the gateway, with identity assertions (ID-JAG) AgentGov gives them' }) : null),
           ts.description ? h('p', { style: 'color:var(--ink-2)' }, ts.description) : null),
         h('div', { class: 'btn-row' }, actions)),
       poisoned.length ? callout('critical', 'octagon', h('span', {}, h('strong', {}, `${plural(poisoned.length, 'tool')} quarantined. `),
@@ -3383,7 +3392,9 @@ function serverCard(ts) {
       changed.length ? callout('warning', 'triangle', h('span', {}, h('strong', {}, `${plural(changed.length, 'tool')} changed since approval. `),
         'Calls are refused until an administrator approves the new definition.')) : null,
       facts([
-        ts.gateway ? ['Gateway URL', ts.gateway_url ? copyable(ts.gateway_url, 'gateway URL') : h('span', { class: 'muted' }, 'Gateway public URL not configured')] : ['Gateway', h('span', { class: 'muted' }, 'Not published: only for developers')],
+        ts.gateway ? ['Gateway URL', ts.gateway_url ? copyable(ts.gateway_url, 'gateway URL') : h('span', { class: 'muted' }, 'Gateway public URL not configured')] : ['Gateway', h('span', { class: 'muted' }, ts.authorization_server ? 'Not published: agents reach it directly' : 'Not published: only for developers')],
+        ts.authorization_server ? ['Authorization server', h('code', { class: 'break' }, ts.authorization_server)] : null,
+        ts.authorization_server ? ["Agents' client there", ts.oauth_client_id ? h('code', {}, ts.oauth_client_id) : h('span', { class: 'muted' }, "Each agent's own client ID")] : null,
         ['Upstream', ts.url ? h('code', { class: 'break' }, ts.url) : null],
         (ts.packages || []).length ? ['Packages', h('div', { class: 'chip-row' }, ts.packages.map((pk) => plainChip(formatPackages([pk]), { mono: true })))] : null,
         ['Owner', ts.owner],

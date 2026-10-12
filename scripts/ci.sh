@@ -34,6 +34,9 @@ CRDS_CATALOG='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Gr
 KUBECTL_VERSION=1.34.1
 CHART=deploy/helm/agentgov
 AGENTGATEWAY_IMAGE=ghcr.io/agentgateway/agentgateway:v1.6.0
+# Keycloak, as the authorization server of a server outside the gateway, takes AgentGov's
+# identity assertions in a test (tests/test_assertions.py).
+KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.0
 POSTGRES_IMAGE=postgres:17-alpine
 COMPOSE=(docker compose -p agentgov-ci -f deploy/compose/docker-compose.yml)
 E2E_PORTS=(8000 8080 8180 8181 4317 4318 9200 9300)
@@ -267,9 +270,12 @@ lint_rego() {
 # run_tests <venv>: pytest as CI runs it; with Docker, generated agentgateway
 # configs are also validated by the real binary.
 run_tests() {
-  if docker_ready && ! docker image inspect "$AGENTGATEWAY_IMAGE" >/dev/null 2>&1; then
-    docker pull --quiet "$AGENTGATEWAY_IMAGE" >/dev/null ||
-      echo "${yellow}could not pull $AGENTGATEWAY_IMAGE; its validation test will be skipped${reset}"
+  local image
+  if docker_ready; then
+    for image in "$AGENTGATEWAY_IMAGE" "$KEYCLOAK_IMAGE"; do
+      docker image inspect "$image" >/dev/null 2>&1 || docker pull --quiet "$image" >/dev/null ||
+        echo "${yellow}could not pull $image; the tests that run it will be skipped${reset}"
+    done
   fi
   "$1/bin/pytest" -rs
 }

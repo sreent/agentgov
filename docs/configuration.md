@@ -208,6 +208,7 @@ never in a values file you share.
 | `AGENTGOV_KEYCLOAK_JWKS_URL` | — | JWKS URL the gateway uses to validate agent tokens. |
 | `AGENTGOV_GATEWAY_AUDIENCE` | `agentgov-gateway` | Audience every agent token carries; the gateway requires it. |
 | `AGENTGOV_PEOPLE_APP_CLIENTS` | empty | Keycloak clients of the apps people sign in to and use agents from (comma-separated client IDs). Each agent that acts for people has a client scope named after its client ID, which these apps may request: the person's token is then one the agent can exchange for a token of its own, on the person's behalf. |
+| `AGENTGOV_ASSERTION_LIFETIME_SECONDS` | `300` | Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers outside the gateway last, at most 300: the agent trades one for an access token at once ([acting-for-people](acting-for-people.md)#mcp-servers-outside-the-gateway). |
 
 ### Administrator single sign-on (OIDC)
 
