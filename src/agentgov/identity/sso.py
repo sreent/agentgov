@@ -7,6 +7,11 @@ code and validates the tokens, and the browser only ever holds an HttpOnly
 cookie with a random session token (the backend-for-frontend pattern from
 OAuth 2.0 for Browser-Based Applications). Provider roles such as
 ``agentgov-approver`` map to AgentGov roles.
+
+When the provider ends a person's session (they sign out there, from another app, or an
+administrator ends it), it can tell the control plane at ``/auth/backchannel-logout``
+with a logout token (OpenID Connect Back-Channel Logout 1.0), and their AgentGov sessions
+end with it rather than at expiry.
 """
 
 from __future__ import annotations
@@ -43,6 +48,8 @@ LOGIN_TTL = timedelta(minutes=10)
 CLI_CODE_TTL = timedelta(minutes=2)
 # Asymmetric algorithms only: a token "signed" with HS256 and the public key must fail.
 SIGNING_ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384"]
+# What makes a token a logout token (OpenID Connect Back-Channel Logout 1.0).
+LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout"
 JWKS_REFETCH_SECONDS = 30
 
 
@@ -60,6 +67,8 @@ class Identity:
     name: str
     roles: list[str]
     id_token: str
+    # The provider's session (the ID token's sid), which its logout tokens name.
+    provider_session: str | None = None
 
 
 def _b64url(data: bytes) -> str:
@@ -218,6 +227,34 @@ class OIDCClient:
             raise SSOError("state", "ID token nonce does not match this sign-in")
         return claims
 
+    def validate_logout(self, token: str) -> dict[str, Any]:
+        """A logout token: the provider's signature, for this client, with the logout
+        event, naming a session (sid) or a person (sub), and no nonce, which would make it
+        an ID token (OpenID Connect Back-Channel Logout 1.0, 2.6)."""
+        key = self._key_for(token)
+        try:
+            claims = jwt.decode(
+                token,
+                key.key,
+                algorithms=[key.algorithm_name]
+                if key.algorithm_name in SIGNING_ALGORITHMS
+                else SIGNING_ALGORITHMS,
+                audience=self.settings.oidc_client_id,
+                issuer=self.endpoints["issuer"],
+                leeway=30,
+                options={"require": ["iat", "iss", "aud"]},
+            )
+        except jwt.PyJWTError as exc:
+            raise SSOError("token", f"logout token rejected: {exc}") from exc
+        events = claims.get("events")
+        if not isinstance(events, dict) or not isinstance(events.get(LOGOUT_EVENT), dict):
+            raise SSOError("token", "not a logout token: it has no back-channel logout event")
+        if not isinstance(claims.get("sid"), str) and not isinstance(claims.get("sub"), str):
+            raise SSOError("token", "the logout token names no session (sid) or person (sub)")
+        if "nonce" in claims:
+            raise SSOError("token", "a logout token has no nonce")
+        return claims
+
     def identify(self, tokens: dict[str, Any], nonce: str) -> Identity:
         """Validate the token response and work out who signed in, with which roles."""
         if "id_token" not in tokens:
@@ -235,11 +272,13 @@ class OIDCClient:
             if access.get("azp") not in (None, self.settings.oidc_client_id):
                 raise SSOError("token", "access token was issued to a different client")
             roles = roles_from_claims(access, path, prefix)
+        sid = claims.get("sid")
         return Identity(
             subject=str(claims["sub"]),
             name=display_name(claims),
             roles=roles,
             id_token=tokens["id_token"],
+            provider_session=sid if isinstance(sid, str) and sid else None,
         )
 
 
@@ -312,6 +351,7 @@ def cli_signed_in(session: Session, state: str, who: Identity) -> str:
         "name": who.name,
         "roles": who.roles,
         "id_token": who.id_token,
+        "provider_session": who.provider_session,
     }
     login.expires_at = ids.utcnow() + CLI_CODE_TTL
     return code
@@ -349,6 +389,7 @@ def start_session(
         name=who.name,
         roles=who.roles,
         id_token=who.id_token,
+        provider_session=who.provider_session,
         expires_at=ids.utcnow() + timedelta(hours=settings.session_hours),
     )
     session.add(record)
@@ -400,3 +441,28 @@ def end_session(session: Session, token: str) -> str | None:
     )
     session.delete(record)
     return id_token or ""
+
+
+def end_provider_sessions(session: Session, claims: dict[str, Any]) -> list[str]:
+    """End the sessions a logout token names: those from its provider session (sid), or,
+    when it names only a person (sub), all of theirs. Returns the IDs of those ended."""
+    sid, sub = claims.get("sid"), claims.get("sub")
+    query = select(AdminSession)
+    if isinstance(sid, str):
+        query = query.where(AdminSession.provider_session == sid)
+        if isinstance(sub, str):
+            query = query.where(AdminSession.subject == sub)
+    else:
+        query = query.where(AdminSession.subject == sub)
+    ended = []
+    for record in session.scalars(query.order_by(AdminSession.id)):
+        ledger.append(
+            session,
+            type="admin.logout",
+            actor=f"sso:{record.name}",
+            reason="the identity provider ended the session",
+            details={"session_id": record.id, "by": "identity provider"},
+        )
+        session.delete(record)
+        ended.append(record.id)
+    return ended

@@ -214,6 +214,9 @@ the gateway. It shows each control in turn:
     from AgentGov for the wiki, a server with an authorization server of its own, which it
     would trade there for an access token; sam's is refused, and both are in the ledger
     ([acting for people](docs/acting-for-people.md#mcp-servers-outside-the-gateway)).
+25. **Signing out everywhere**: alice signs in to AgentGov, then signs out at Keycloak
+    itself; Keycloak tells AgentGov, and her AgentGov session ends at once
+    ([administration](docs/administration.md#signing-out-everywhere)).
 
 Then look around:
 

@@ -418,7 +418,8 @@ class AdminSession(Base):
     """An administrator signed in through single sign-on.
 
     The browser holds a random token in an HttpOnly cookie; only its hash is
-    stored. The provider's ID token is kept for RP-initiated logout.
+    stored. The provider's ID token is kept for RP-initiated logout, and the
+    provider's session it came from for back-channel logout.
     """
 
     __tablename__ = "admin_sessions"
@@ -429,6 +430,8 @@ class AdminSession(Base):
     name: Mapped[str] = mapped_column(String(255))
     roles: Mapped[list[Any]] = mapped_column(JSON, default=list)
     id_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The ID token's sid: the provider's logout tokens name the session they end by it.
+    provider_session: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     created_at: Mapped[datetime] = _created()
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
 

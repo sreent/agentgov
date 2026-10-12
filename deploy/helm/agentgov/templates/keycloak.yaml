@@ -119,6 +119,10 @@ spec:
             - name: AGENTGOV_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: oidc-client-secret}
+            # Where Keycloak tells the control plane that a person's session ended, so their
+            # AgentGov sessions end with it (back-channel logout).
+            - name: AGENTGOV_BACKCHANNEL_LOGOUT_URL
+              value: {{ printf "http://%s:8000/auth/backchannel-logout" (include "agentgov.name" (list . "control-plane")) | quote }}
             {{- if $v.demoUsers }}
             - name: AGENTGOV_DEMO_PASSWORD
               valueFrom:

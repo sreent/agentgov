@@ -26,7 +26,7 @@ from sqlalchemy import update
 from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.identity.sso import display_name, roles_from_claims
+from agentgov.identity.sso import LOGOUT_EVENT, display_name, roles_from_claims
 from agentgov.models import AdminSession, CliLogin
 from agentgov.registry import findings
 from agentgov.runtime import Runtime
@@ -823,3 +823,81 @@ class TestClaims:
         assert display_name(claims) == "mallory"
         assert display_name({**claims, "email_verified": True}) == "boss@example.com"
         assert display_name({"sub": "s"}) == "s"
+
+
+class TestBackChannelLogout:
+    """The identity provider ends a person's session: the AgentGov sessions that came from
+    it end with it (OpenID Connect Back-Channel Logout 1.0)."""
+
+    @staticmethod
+    def logout_token(provider: FakeProvider, *, key: Any = None, **claims: Any) -> str:
+        now = int(time.time())
+        token = {
+            "iss": provider.issuer,
+            "aud": CLIENT_ID,
+            "iat": now,
+            "exp": now + 120,
+            "jti": secrets.token_hex(8),
+            "events": {LOGOUT_EVENT: {}},
+            **claims,
+        }
+        return provider.sign({k: v for k, v in token.items() if v is not None}, key=key)
+
+    def test_the_session_the_provider_ended_ends(self, sso, provider) -> None:
+        sign_in(sso, provider, roles=["agentgov-admin"], id_claims={"sid": "kc-1"})
+        cli = cli_session(sso, provider, roles=["agentgov-admin"], id_claims={"sid": "kc-1"})
+        sign_in(sso, provider, roles=["agentgov-admin"], id_claims={"sid": "kc-2"})
+        token = self.logout_token(provider, sid="kc-1", sub="user-1")
+        resp = sso.post("/auth/backchannel-logout", data={"logout_token": token})
+        assert resp.status_code == 200 and resp.headers["cache-control"] == "no-store"
+        # The browser's session from kc-1, and the CLI's, ended; the one from kc-2 didn't.
+        cli_bearer = {"Authorization": f"Bearer {cli['token']}"}
+        assert sso.get("/v1/me", headers=cli_bearer).status_code == 401
+        assert sso.get("/auth/session").json()["signed_in"] is True
+        ended = sso.get("/v1/ledger", params={"type": "admin.logout"}, headers=ADMIN).json()
+        assert len(ended) == 2
+        assert {e["reason"] for e in ended} == {"the identity provider ended the session"}
+        # Naming the person alone ends all of their sessions.
+        token = self.logout_token(provider, sub="user-1")
+        assert sso.post("/auth/backchannel-logout", data={"logout_token": token}).status_code == 200
+        assert sso.get("/auth/session").json() == {"signed_in": False}
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"aud": "another-client"},
+            {"iss": "https://elsewhere.test/realms/agentgov"},
+            {"events": None},
+            {"events": {"http://schemas.openid.net/event/something-else": {}}},
+            {"nonce": "an-id-token-has-one"},
+            {"sid": None, "sub": None},
+            {"exp": int(time.time()) - 600},
+            {"key": "other"},
+        ],
+    )
+    def test_anything_but_the_providers_logout_token_is_refused(
+        self, sso, provider, change
+    ) -> None:
+        sign_in(sso, provider, roles=["agentgov-admin"], id_claims={"sid": "kc-1"})
+        change = dict(change)
+        key = provider.other_key if change.pop("key", None) else None
+        token = self.logout_token(provider, key=key, **{"sid": "kc-1", "sub": "user-1", **change})
+        resp = sso.post("/auth/backchannel-logout", data={"logout_token": token})
+        assert resp.status_code == 400 and resp.json()["error"] == "invalid_request"
+        assert sso.get("/auth/session").json()["signed_in"] is True
+
+    def test_it_takes_one_logout_token_in_a_form(self, sso, provider) -> None:
+        sign_in(sso, provider, roles=["agentgov-admin"], id_claims={"sid": "kc-1"})
+        assert sso.post("/auth/backchannel-logout", data={}).status_code == 400
+        token = self.logout_token(provider, sid="kc-1")
+        twice = sso.post(
+            "/auth/backchannel-logout",
+            content=f"logout_token={token}&logout_token={token}",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert twice.status_code == 400
+        assert sso.get("/auth/session").json()["signed_in"] is True
+
+    def test_without_single_sign_on_there_is_nothing_to_end(self, client) -> None:
+        resp = client.post("/auth/backchannel-logout", data={"logout_token": "x"})
+        assert resp.status_code == 404

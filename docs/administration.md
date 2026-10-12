@@ -35,6 +35,26 @@ To sign in on a machine you reach over SSH, forward a port and fix the CLI to it
 machine, and open the link it prints in your local browser. For scripts and CI
 pipelines, use an API key instead.
 
+### Signing out everywhere
+
+When your session at the identity provider ends (you sign out there or in another app
+that signs you in there, or its administrators end it or disable your account), the
+provider can tell AgentGov, and your AgentGov sessions from it end too, in the UI and the
+CLI, rather than when they would have expired. This is OpenID Connect Back-Channel
+Logout: the provider posts a logout token it signed to
+`<control plane>/auth/backchannel-logout`, and AgentGov checks that it comes from the
+provider, for its client, and names your provider session or you. Each session it ends is
+an `admin.logout` entry in the ledger, from the identity provider.
+
+The Keycloak that comes with Compose and the chart is set up for it
+(`AGENTGOV_BACKCHANNEL_LOGOUT_URL` on Keycloak, read as it first imports the realm). For
+a realm made before, or another provider, set the client's back-channel logout URL to the
+address above, as the provider reaches the control plane, and ask for the session ID in
+logout tokens (Keycloak: the `agentgov-admin` client's **Backchannel logout URL** and
+**Backchannel logout session required**). A provider that can't do this leaves sessions
+to end at expiry (`AGENTGOV_SESSION_HOURS`), or when you sign them out on the **Access**
+page.
+
 ## Roles
 
 | Role | Can |

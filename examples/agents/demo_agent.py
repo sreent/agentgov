@@ -30,9 +30,10 @@ report and the evidence pack for assessors. A classifier gives a second opinion 
 result the rules let through (examples/models/mock stands in for IBM Granite Guardian,
 where the stack is started with AGENTGOV_GUARDIAN_URL pointing at it). Developers' MCP
 clients sign in at the gateway: dana, a developer, signs in in a browser as an MCP client
-has them do, and calls a tool with their own token. Last, dana's MCP client gets an
-identity assertion (ID-JAG) from AgentGov for a server outside the gateway, the wiki,
-which it would trade at the wiki's own authorization server for an access token.
+has them do, and calls a tool with their own token. dana's MCP client gets an identity
+assertion (ID-JAG) from AgentGov for a server outside the gateway, the wiki, which it
+would trade at the wiki's own authorization server for an access token. Last, alice signs
+out at Keycloak, and Keycloak tells AgentGov, which ends her session there too.
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ import zipfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 import httpx2
@@ -1591,6 +1592,39 @@ def identity_assertions() -> None:
         admin("PUT", "/v1/features/identity-assertions", json={"mode": "off"})
 
 
+def back_channel_logout() -> None:
+    step("25. Signing out everywhere: alice signs out at Keycloak, and AgentGov signs her out")
+    alice = agentgov_session("alice")
+    signed_in = alice.get(f"{CONTROL_PLANE}/auth/session").json().get("signed_in") is True
+    show("alice signed in to AgentGov", signed_in, "through Keycloak, as her browser does")
+    # She signs out at Keycloak itself, as she would from any app that signs her in there.
+    where = httpx.get(f"{CONTROL_PLANE}/auth/login", follow_redirects=False).headers["location"]
+    page = alice.get(where.split("?", 1)[0].rsplit("/", 1)[0] + "/logout")
+    form = re.search(r'<form[^>]*action="([^"]+)"[^>]*>(.*?)</form>', page.text, re.S)
+    if form is None:
+        raise SystemExit(f"no sign-out form at {page.url}")
+    fields = dict(re.findall(r'name="([^"]+)"\s+value="([^"]*)"', form.group(2)))
+    for cookie in alice.cookies.jar:
+        cookie.secure = False
+    alice.post(
+        urljoin(str(page.url), html.unescape(form.group(1))),
+        data={**fields, "confirmLogout": "Logout"},
+    )
+    ended, waited = until(
+        lambda: alice.get(f"{CONTROL_PLANE}/auth/session").json().get("signed_in") is False,
+        timeout=20,
+    )
+    show(
+        "alice's AgentGov session ended",
+        ended,
+        f"{waited:.1f}s after she signed out at Keycloak, which told the control plane "
+        "(back-channel logout), rather than when the session would have expired",
+    )
+    entry = ledger_entry({"type": "admin.logout"})
+    reason = (entry or {}).get("reason") or ""
+    show("recorded:", "identity provider" in reason, f"admin.logout for alice: {reason}")
+
+
 def main() -> None:
     wait_for_gateway("/mcp/crm", MODEL_ROUTE, A2A_ROUTE)
     step("1. Registration: a new agent is requested, approved and given an identity")
@@ -1609,6 +1643,7 @@ def main() -> None:
         authzen_decision_point()
         asyncio.run(developer_sign_in())
         identity_assertions()
+        back_channel_logout()
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")
         print(f"{DIM}Open {CONTROL_PLANE}/ui for the admin view.{RESET}")

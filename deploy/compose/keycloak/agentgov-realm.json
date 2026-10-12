@@ -41,7 +41,9 @@
       "webOrigins": [],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:8000/ui/"
+        "post.logout.redirect.uris": "http://localhost:8000/ui/",
+        "backchannel.logout.url": "${AGENTGOV_BACKCHANNEL_LOGOUT_URL:}",
+        "backchannel.logout.session.required": "true"
       }
     },
     {
