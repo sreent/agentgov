@@ -128,6 +128,7 @@ PLATFORMS = {
     "google-cloud": "Google Cloud",
     "salesforce": "Salesforce",
     "databricks": "Databricks",
+    "microsoft-foundry": "Microsoft Foundry",
 }
 # Entries listed per preview, at most.
 PREVIEW_LIMIT = 200

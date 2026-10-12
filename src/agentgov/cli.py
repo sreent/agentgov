@@ -860,7 +860,7 @@ def agents_list(
     source: str | None = typer.Option(
         None,
         help="registered, discovered:<how>, or platform:<platform> (microsoft-365, "
-        "copilot-studio, aws, google-cloud, salesforce, databricks).",
+        "copilot-studio, aws, google-cloud, salesforce, databricks, microsoft-foundry).",
     ),
 ) -> None:
     """List agents (all but deleted ones, unless --status is given)."""
@@ -2504,7 +2504,7 @@ def platforms_status() -> None:
 
 SYNC_SOURCES = ("microsoft-365", "copilot-studio", "entra-agent-id", "purview-audit", "defender")
 # Platforms read by a connector of AgentGov's own (docs/other-platforms.md).
-OTHER_PLATFORMS = ("aws", "google-cloud", "salesforce", "databricks")
+OTHER_PLATFORMS = ("aws", "google-cloud", "salesforce", "databricks", "microsoft-foundry")
 
 
 def _sync_summary(source: str, c: dict[str, Any]) -> str:
@@ -2531,7 +2531,8 @@ def platforms_sync(
         "all",
         help="all (every connection AgentGov's app may use), microsoft-365, entra-agent-id, "
         "purview-audit, defender, copilot-studio (as you, after `agentgov login` through "
-        "Microsoft Entra ID), or another platform: aws, google-cloud, salesforce, databricks.",
+        "Microsoft Entra ID), or another platform: aws, google-cloud, salesforce, databricks, "
+        "microsoft-foundry.",
     ),
 ) -> None:
     """Sync now (AgentGov's app connections and other platforms also sync on a schedule)."""

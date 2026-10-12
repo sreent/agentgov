@@ -140,7 +140,8 @@ def sync_source(
     request: Request, source: str, principal: Principal = Depends(admin)
 ) -> dict[str, Any]:
     """Run one of the app's connections now (entra-agent-id, purview-audit or defender), or
-    read another platform's agents (aws, google-cloud, salesforce or databricks)."""
+    read another platform's agents (aws, google-cloud, salesforce, databricks or
+    microsoft-foundry)."""
     rt = request.app.state.rt
     if source in platforms.INVENTORY_SOURCES:
         if source not in rt.platforms:

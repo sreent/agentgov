@@ -14,9 +14,18 @@ service is skipped, and one that refuses is reported without holding up the rest
 * AgentCore gateways, the MCP servers AgentCore hosts in front of tools
   (:func:`agentcore_gateway`), with their targets: a part of their own, so that
   credentials allowed to read agents but not gateways leave the agents read.
+* Amazon Quick's agents, the chat agents people build in Amazon Quick (the
+  QuickSight API): their instructions, spaces, action connectors and who they are
+  shared with (:func:`quick_agent`); an account that doesn't use Quick is skipped.
+* AWS Agent Registry's agents and MCP servers (:func:`registry_record`): those
+  registered by hand, and the AgentCore runtimes and gateways an organisation's
+  registry detects in its member accounts. Those of accounts AgentGov reads itself
+  are left to that read, which has all of them; the others are known only from the
+  registry, so that one account's registry shows the whole organisation.
 
-Secrets never leave AWS: of environment variables and remote MCP servers'
-headers AgentGov keeps the names, and of those servers' URLs the host.
+``AGENTGOV_AWS_READ`` chooses which of these are read. Secrets never leave AWS: of
+environment variables and remote MCP servers' headers AgentGov keeps the names, and
+of those servers' URLs the host.
 """
 
 from __future__ import annotations
@@ -25,6 +34,7 @@ import json
 import re
 import socket
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
@@ -38,6 +48,8 @@ from agentgov.platforms.base import Found, Inventory, PlatformError, Risk
 BEDROCK_AGENTS = "bedrock-agents"
 AGENTCORE = "agentcore"
 GATEWAYS = "agentcore-gateways"
+QUICK = "quick"
+REGISTRY = "agent-registry"
 # Each kind of list is paged this far at most.
 MAX_PAGES = 50
 # Throttled or failing requests are tried again after these pauses (seconds).
@@ -95,6 +107,10 @@ class AwsConnector:
             )
             for arn in settings.aws_role_arn_list()
         ]
+        self.kinds = settings.aws_kind_list()
+        # The accounts AgentGov reads itself: its roles' (in their ARNs), and its own
+        # credentials' once STS has said which that is.
+        self.accounts = {s.role_arn.split(":")[4] for s in self.sessions if s.role_arn}
         self._resolves = resolves
         self._sleep = sleep
 
@@ -106,13 +122,18 @@ class AwsConnector:
             except PlatformError as exc:
                 inventory.failed[session.role_arn or "AgentGov's AWS credentials"] = str(exc)
                 continue
+            self.accounts.add(account)
             for region in self.regions:
                 api = _Api(self, session, region)
                 for service, read in (
                     (BEDROCK_AGENTS, _bedrock),
                     (AGENTCORE, _agentcore),
                     (GATEWAYS, _gateways),
+                    (QUICK, _quick),
+                    (REGISTRY, _registry),
                 ):
+                    if service not in self.kinds:
+                        continue
                     part = f"{account}/{region}/{service}"
                     try:
                         inventory.found += read(api, account, region, part)
@@ -269,6 +290,140 @@ def _gateways(api: _Api, account: str, region: str, part: str) -> list[Found]:
     return found
 
 
+QUICKSIGHT = ("quicksight", "quicksight")
+# Answers to ListAgents that mean the account doesn't use Amazon Quick in the region.
+NO_QUICK = ("UnsupportedUserEditionException", "PreconditionNotMetException", "ResourceNotFound")
+
+
+def _quick(api: _Api, account: str, region: str, part: str) -> list[Found]:
+    base = f"/accounts/{quote(account, safe='')}"
+    summaries: list[dict[str, Any]] = []
+    token = None
+    try:
+        for _ in range(MAX_PAGES):
+            params = {"max-results": 100, **({"next-token": token} if token else {})}
+            page = api.call(*QUICKSIGHT, "GET", f"{base}/agents", params=params)
+            summaries += [a for a in page.get("AgentSummaries") or [] if isinstance(a, dict)]
+            token = page.get("NextToken")
+            if not token:
+                break
+    except PlatformError as exc:
+        if exc.status == 404 or any(kind in str(exc) for kind in NO_QUICK):
+            raise _NotOffered(str(exc)) from exc
+        raise
+    connectors: dict[str, dict[str, Any] | None] = {}
+    found = []
+    for summary in summaries:
+        agent_id = quote(str(summary["AgentId"]), safe="")
+        why = None
+        try:
+            agent = {
+                **summary,
+                **(api.call(*QUICKSIGHT, "GET", f"{base}/agents/{agent_id}").get("Agent") or {}),
+            }
+        except PlatformError as exc:
+            if exc.status == 404:
+                continue
+            agent, why = dict(summary), _refused(exc)
+        permissions = None
+        try:
+            permissions = (
+                api.call(*QUICKSIGHT, "GET", f"{base}/agents/{agent_id}/permissions").get(
+                    "Permissions"
+                )
+                or []
+            )
+        except PlatformError as exc:
+            why = why or _refused(exc)
+        for arn in agent.get("ActionConnectors") or []:
+            if arn in connectors:
+                continue
+            connector_id = quote(str(arn).rsplit("/", 1)[-1], safe="")
+            try:
+                connectors[arn] = (
+                    api.call(*QUICKSIGHT, "GET", f"{base}/action-connectors/{connector_id}").get(
+                        "ActionConnector"
+                    )
+                    or {}
+                )
+            except PlatformError as exc:
+                connectors[arn] = None
+                if exc.status != 404:
+                    why = why or _refused(exc)
+        mine = {arn: connectors.get(arn) for arn in agent.get("ActionConnectors") or []}
+        item = quick_agent(agent, permissions, mine, account, region, part)
+        found.append(_partial(item, why) if why else item)
+    return found
+
+
+# AWS Agent Registry signs as agent-registry. Its records that are agents, or the MCP servers
+# they use: skills and custom entries aren't.
+REGISTRY_SIGNING = "agent-registry"
+RECORD_TYPES = ("AGENT", "MCP", "GATEWAY")
+# What its auto-detection catalogs, and the part that reads it in its own account.
+DETECTED = {
+    "AWS::BedrockAgentCore::Runtime": AGENTCORE,
+    "AWS::BedrockAgentCore::Gateway": GATEWAYS,
+}
+# A registry whose records can't be listed yet, or any more.
+UNLISTED = ("CREATING", "CREATE_FAILED", "DELETING")
+
+
+def _registry(api: _Api, account: str, region: str, part: str) -> list[Found]:
+    endpoint = (REGISTRY_SIGNING, f"agent-registry-control.{region}.api.aws")
+    found = []
+    for registry in api.pages(*endpoint, "POST", "/registries-list", "registries", body={}):
+        if registry.get("status") in UNLISTED:
+            continue
+        base = f"/registries/{quote(str(registry['registryId']), safe='')}"
+        try:
+            records = list(
+                api.pages(*endpoint, "POST", f"{base}/records-list", "registryRecords", body={})
+            )
+        except PlatformError as exc:
+            if exc.status == 404:
+                continue  # deleted since it was listed
+            raise
+        kept = [
+            r
+            for r in records
+            if r.get("recordType") in RECORD_TYPES and not _read_directly(api.connector, r)
+        ]
+        # A name with several versions is a record for each.
+        names = Counter(str(r.get("name")) for r in kept)
+        for summary in kept:
+            why = None
+            try:
+                path = f"{base}/records/{quote(str(summary['recordId']), safe='')}"
+                record = {**summary, **api.call(*endpoint, "GET", path)}
+            except PlatformError as exc:
+                if exc.status == 404:
+                    continue
+                record, why = dict(summary), _refused(exc)
+            versions = names[str(summary.get("name"))]
+            item = registry_record(record, registry, account, region, part, versions=versions)
+            found.append(_partial(item, why) if why else item)
+    return found
+
+
+def _read_directly(connector: AwsConnector, record: dict[str, Any]) -> bool:
+    """Whether a record the registry detected is a runtime or gateway AgentGov reads in its
+    own account: that read has all of it, and the record only some."""
+    for source in record.get("provenanceSummaryList") or []:
+        if not isinstance(source, dict):
+            continue
+        arn = str(source.get("sourceId") or "").split(":")
+        kind = DETECTED.get(str(source.get("sourceType")))
+        if (
+            kind in connector.kinds
+            and len(arn) > 5
+            and arn[4] in connector.accounts
+            and arn[3] in connector.regions
+        ):
+            return True
+    return False
+
+
 class _NotOffered(Exception):
     """The region doesn't offer the service: its endpoint has no address."""
 
@@ -291,7 +446,8 @@ class _Api:
         body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        host = f"{endpoint}.{self.region}.amazonaws.com"
+        # A service's endpoint in the region's amazonaws.com, or a host of its own.
+        host = endpoint if "." in endpoint else f"{endpoint}.{self.region}.amazonaws.com"
         url = f"https://{host}{path}"
         if params:
             url += "?" + urlencode(params)
@@ -698,6 +854,10 @@ def harness(record: dict[str, Any], account: str, region: str, part: str) -> Fou
     )
 
 
+# What a runtime is, by the protocol it serves.
+RUNTIME_KINDS = {"MCP": "AgentCore runtime (MCP server)", "A2A": "AgentCore runtime (A2A agent)"}
+
+
 def agent_runtime(
     runtime: dict[str, Any],
     account: str,
@@ -721,7 +881,6 @@ def agent_runtime(
     container = (artifact.get("containerConfiguration") or {}).get("containerUri")
     code = artifact.get("codeConfiguration") or {}
     mmds = (runtime.get("metadataConfiguration") or {}).get("requireMMDSV2")
-    kinds = {"MCP": "AgentCore runtime (MCP server)", "A2A": "AgentCore runtime (A2A agent)"}
     anyone = bool(policy) and _open_to_anyone(policy or {})
     if jwt:
         policy_fact = None  # a runtime that takes tokens must let "*" in: tokens decide
@@ -773,7 +932,7 @@ def agent_runtime(
     return Found(
         external_id=arn,
         name=name,
-        kind=kinds.get(protocol, "AgentCore agent runtime"),
+        kind=RUNTIME_KINDS.get(protocol, "AgentCore agent runtime"),
         part=part,
         description=runtime.get("description"),
         details={
@@ -858,6 +1017,18 @@ def _target(target: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _open_gateway(name: str, host: str | None) -> Risk:
+    return Risk(
+        "platform.no_authentication",
+        "high",
+        f"{name} lets anyone call its tools",
+        f"It has no inbound authorization, so anyone who can reach {host or 'its URL'} may list "
+        "and call its tools, which reach its targets with the gateway's own credentials.",
+        "Give it a JWT authorizer or AWS IAM authorization: AWS advises against gateways "
+        "without one beyond testing.",
+    )
+
+
 def agentcore_gateway(
     gateway: dict[str, Any],
     targets: list[dict[str, Any]],
@@ -880,18 +1051,7 @@ def agentcore_gateway(
     policy_fact = None
     if authorizer == "NONE":
         authentication = _fact("Authentication", "None: anyone who can reach it", tone="serious")
-        risks.append(
-            Risk(
-                "platform.no_authentication",
-                "high",
-                f"{name} lets anyone call its tools",
-                "It has no inbound authorization, so anyone who can reach "
-                f"{_host(gateway.get('gatewayUrl')) or 'its URL'} may list and call its tools, "
-                "which reach its targets with the gateway's own credentials.",
-                "Give it a JWT authorizer or AWS IAM authorization: AWS advises against gateways "
-                "without one beyond testing.",
-            )
-        )
+        risks.append(_open_gateway(name, _host(gateway.get("gatewayUrl"))))
     elif jwt or authorizer in ("CUSTOM_JWT", "AUTHENTICATE_ONLY"):
         authentication, auth_risks = _authentication(name, jwt)
         risks += auth_risks
@@ -979,4 +1139,383 @@ def agentcore_gateway(
         risks=risks,
         # What it tells the agents that use it, as an MCP server's instructions.
         instructions=mcp.get("instructions") or None,
+    )
+
+
+# How an Amazon Quick action connector signs in to the system it acts on, and whether that
+# one credential stands for everyone who uses the agent.
+QUICK_AUTH = {
+    "OAUTH2_AUTHORIZATION_CODE": ("as each user (OAuth)", False),
+    "OAUTH2_CLIENT_CREDENTIALS": ("with one shared OAuth client", True),
+    "API_KEY": ("with one shared API key", True),
+    "BASIC": ("with one shared user name and password", True),
+    "IAM": ("with an IAM role", True),
+    "NONE": ("with no authentication", False),
+}
+UPPER = {"CRM", "HTTP", "S3", "SAP", "HR", "AWS"}
+
+
+def _words(value: Any) -> str:
+    """An enum value in words: SALESFORCE_CRM is Salesforce CRM."""
+    return " ".join(w if w in UPPER else w.capitalize() for w in str(value or "").split("_") if w)
+
+
+def quick_agent(
+    agent: dict[str, Any],
+    permissions: list[dict[str, Any]] | None,
+    connectors: dict[str, dict[str, Any] | None],
+    account: str,
+    region: str,
+    part: str,
+) -> Found:
+    """An Amazon Quick agent (DescribeAgent over its ListAgents summary), with who it is shared
+    with (None when unread) and its action connectors (None for one that wasn't read)."""
+    name = str(agent.get("Name") or agent["AgentId"])
+    arn = agent.get("Arn") or f"arn:aws:quicksight:{region}:{account}:agent/{agent['AgentId']}"
+    principals = [str(p.get("Principal")) for p in permissions or [] if isinstance(p, dict)]
+    namespaces = sorted(p.rsplit("/", 1)[-1] for p in principals if ":namespace/" in p and "/" in p)
+    risks: list[Risk] = []
+    if namespaces:
+        risks.append(
+            Risk(
+                "platform.shared_with_everyone",
+                "medium",
+                f"{name} is shared with everyone in Amazon Quick",
+                "It is shared with whole namespaces, every user in them: "
+                + ", ".join(namespaces)
+                + ".",
+                "Share it with the users and groups that need it, or confirm everyone should "
+                "have it and dismiss this finding.",
+                {"namespaces": namespaces},
+            )
+        )
+    tools, shared = [], []
+    for connector_arn, connector in connectors.items():
+        if connector is None:
+            tools.append(
+                {
+                    "name": connector_arn.rsplit("/", 1)[-1],
+                    "kind": "Action connector",
+                    "detail": "AgentGov may not read it",
+                }
+            )
+            continue
+        auth = str((connector.get("AuthenticationConfig") or {}).get("AuthenticationType") or "")
+        how, one = QUICK_AUTH.get(auth, (auth.lower() or None, False))
+        label = str(connector.get("Name") or connector_arn.rsplit("/", 1)[-1])
+        if one:
+            shared.append(label)
+        actions = len(connector.get("EnabledActions") or [])
+        tools.append(
+            {
+                "name": label,
+                "kind": _words(connector.get("Type")) or "Action connector",
+                "detail": " · ".join(
+                    filter(
+                        None,
+                        [
+                            how,
+                            f"{actions} action{'s' if actions != 1 else ''}" if actions else None,
+                            "through a VPC connection"
+                            if connector.get("VpcConnectionArn")
+                            else None,
+                        ],
+                    )
+                ),
+                **({"tone": "warning"} if one or auth == "NONE" else {}),
+            }
+        )
+    if shared:
+        risks.append(
+            Risk(
+                "platform.maker_credentials",
+                "medium",
+                f"{name} acts with one shared credential",
+                "These action connectors sign in with one credential for everyone who uses the "
+                "agent, so its users act there with that credential's access, not their own: "
+                + ", ".join(sorted(shared))
+                + ".",
+                "Use connectors that sign in as each user (OAuth authorization code), or confirm "
+                "the shared access is intended and dismiss this finding.",
+                {"connectors": sorted(shared)},
+            )
+        )
+    prompt = agent.get("CustomPromptInterface") or {}
+    if permissions is None:
+        who = "AgentGov may not read who may use it"
+    elif namespaces:
+        who = "Everyone in " + ", ".join(namespaces)
+    else:
+        users = sum(1 for p in principals if ":user/" in p)
+        groups = sum(1 for p in principals if ":group/" in p)
+        who = (
+            ", ".join(
+                filter(
+                    None,
+                    [
+                        f"{users} user{'s' if users != 1 else ''}" if users else None,
+                        f"{groups} group{'s' if groups != 1 else ''}" if groups else None,
+                    ],
+                )
+            )
+            or "Only its owners"
+        )
+    facts = _facts(
+        _fact("Account", account, code=True),
+        _fact("Region", region),
+        _fact(
+            "Lifecycle",
+            {"PUBLISHED": "Published", "PREVIEW": "Preview"}.get(str(agent.get("AgentLifecycle"))),
+        ),
+        _fact("Status", agent.get("AgentStatus")),
+        _fact("Created by", agent.get("Creator")),
+        _fact("Shared with", who, **({"tone": "warning"} if namespaces else {})),
+        _fact("Spaces", len(agent.get("Spaces") or []) or None),
+        _fact("Changed", agent.get("UpdatedAt")),
+    )
+    instructions = "\n\n".join(
+        str(prompt[key]) for key in ("Identity", "CustomInstructions") if prompt.get(key)
+    )
+    return Found(
+        external_id=arn,
+        name=name,
+        kind="Amazon Quick agent",
+        part=part,
+        description=agent.get("Description"),
+        details={
+            "facts": facts,
+            "tools": tools,
+            "status": agent.get("AgentStatus"),
+            "region": region,
+            "account": account,
+        },
+        external_ids={"aws_arn": arn},
+        risks=risks,
+        instructions=instructions or None,
+    )
+
+
+# How the registry words a record's status.
+RECORD_STATUS = {
+    "DRAFT": "Draft",
+    "PENDING_APPROVAL": "Waiting for approval",
+    "APPROVED": "Approved",
+    "REJECTED": "Rejected",
+    "DEPRECATED": "Deprecated",
+    "CREATING": "Being created",
+    "UPDATING": "Being updated",
+    "CREATE_FAILED": "Couldn't be created",
+    "UPDATE_FAILED": "Couldn't be updated",
+}
+# The protocols a record's descriptors describe.
+DESCRIPTORS = {"a2aAgentCard": "A2A", "mcpServer": "MCP", "http": "HTTP", "agui": "AG-UI"}
+# How an A2A agent card says callers sign in: its schemes' types (A2A 0.3), or their names
+# (A2A 1.0).
+SCHEMES = {
+    "apiKey": "API key",
+    "http": "HTTP authentication",
+    "oauth2": "OAuth 2.0",
+    "openIdConnect": "OpenID Connect",
+    "mutualTLS": "Mutual TLS",
+    "apiKeySecurityScheme": "API key",
+    "httpAuthSecurityScheme": "HTTP authentication",
+    "oauth2SecurityScheme": "OAuth 2.0",
+    "openIdConnectSecurityScheme": "OpenID Connect",
+    "mtlsSecurityScheme": "Mutual TLS",
+}
+
+
+def _json(text: Any) -> Any:
+    """A descriptor's data: JSON in a string, or None when it isn't."""
+    try:
+        return json.loads(text) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+def _short(text: Any, limit: int = 200) -> str | None:
+    words = " ".join(str(text or "").split())
+    return (words if len(words) <= limit else words[: limit - 1] + "…") or None
+
+
+def _items(value: Any) -> list[dict[str, Any]]:
+    """The objects in a list a descriptor's data has (people write those by hand)."""
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
+def _schemes(card: dict[str, Any]) -> list[str]:
+    schemes = card.get("securitySchemes")
+    found = []
+    for scheme in schemes.values() if isinstance(schemes, dict) else []:
+        if isinstance(scheme, dict):
+            kind = scheme.get("type") or next(iter(scheme), None)
+            found.append(SCHEMES.get(str(kind), str(kind)))
+    return sorted(set(found))
+
+
+def registry_record(
+    record: dict[str, Any],
+    registry: dict[str, Any],
+    account: str,
+    region: str,
+    part: str,
+    *,
+    versions: int = 1,
+) -> Found:
+    """A record of AWS Agent Registry (GetRegistryRecord over its ListRegistryRecords summary)
+    in ``account``'s ``registry``: an agent or MCP server registered by hand, or an AgentCore
+    runtime or gateway the registry detected in an account AgentGov doesn't read itself, known
+    by its own ARN. ``versions``: how many records have its name, one for each version."""
+    sources = [
+        p
+        for p in record.get("provenance") or record.get("provenanceSummaryList") or []
+        if isinstance(p, dict) and p.get("sourceId")
+    ]
+    source = sources[0] if sources else {}
+    detected = DETECTED.get(str(source.get("sourceType")))
+    source_arn = str(source.get("sourceId") or "")
+    arn_parts = source_arn.split(":")
+    # The account of the runtime or gateway it detected.
+    owner = arn_parts[4] if detected and len(arn_parts) > 5 else None
+    origin = source.get("sourceDetails") or {}
+    runtime = origin.get("agentcoreRuntime") or {}
+    gateway = origin.get("agentcoreGateway") or {}
+    descriptors = record.get("descriptors") or {}
+    card = _json((descriptors.get("a2aAgentCard") or {}).get("data"))
+    card = card if isinstance(card, dict) else {}
+    mcp = descriptors.get("mcpServer") or {}
+    server = _json(mcp.get("data"))
+    server = server if isinstance(server, dict) else {}
+
+    label = str(record.get("name") or record["recordId"])
+    if owner and label.startswith("aws-autodetected-"):
+        label = source_arn.rsplit("/", 1)[-1]  # its ID, not the name the registry made up
+    name = str(record.get("displayName") or label)
+    if versions > 1 and record.get("recordVersion"):
+        name = f"{name} ({record['recordVersion']})"
+
+    risks: list[Risk] = []
+    authentication = None
+    if detected == GATEWAYS or record.get("recordType") == "GATEWAY":
+        kind = "AgentCore gateway (MCP server)"
+        protocol = None
+        authorizer = str(gateway.get("authorizerType") or "")
+        jwt = _jwt(gateway)
+        if authorizer == "NONE":
+            authentication = _fact(
+                "Authentication", "None: anyone who can reach it", tone="serious"
+            )
+        elif jwt or authorizer in ("CUSTOM_JWT", "AUTHENTICATE_ONLY"):
+            authentication = _fact("Authentication", f"Tokens from {jwt.get('discoveryUrl')}")
+        elif authorizer == "AWS_IAM":
+            authentication = _fact("Authentication", "AWS credentials (IAM, SigV4)")
+    elif detected == AGENTCORE:
+        protocol = (runtime.get("protocolConfiguration") or {}).get("serverProtocol")
+        kind = RUNTIME_KINDS.get(str(protocol), "AgentCore agent runtime")
+        jwt = _jwt(runtime)
+        if jwt:
+            authentication = _fact("Authentication", f"Tokens from {jwt.get('discoveryUrl')}")
+        elif runtime:
+            authentication = _fact("Authentication", "AWS credentials (IAM, SigV4)")
+    else:
+        kind = (
+            "MCP server"
+            if record.get("recordType") == "MCP"
+            else "Agent registered in AWS Agent Registry"
+        )
+        protocol = ", ".join(word for key, word in DESCRIPTORS.items() if descriptors.get(key))
+        if card:
+            schemes = _schemes(card)
+            authentication = _fact(
+                "Authentication",
+                "Declared in its agent card: " + ", ".join(schemes)
+                if schemes
+                else "None declared in its agent card",
+            )
+
+    urls = [
+        ((d.get("source") or {}).get("fromUrl") or {}).get("url")
+        for d in descriptors.values()
+        if isinstance(d, dict)
+    ]
+    urls += [card.get("url")] + [
+        i.get("url")
+        for i in _items(card.get("supportedInterfaces")) + _items(card.get("additionalInterfaces"))
+    ]
+    urls += [r.get("url") for r in _items(server.get("remotes"))]
+    hosts = sorted({h for h in map(_host, urls) if h})
+    if authentication and authentication.get("tone") == "serious":
+        risks.append(_open_gateway(name, hosts[0] if hosts else None))
+
+    listed = _json(((mcp.get("additionalData") or {}).get("tools") or {}).get("data"))
+    listed = listed.get("tools") if isinstance(listed, dict) else listed
+    tools = [
+        {"name": str(t["name"]), "kind": "MCP tool", "detail": _short(t.get("description"))}
+        for t in _items(listed)
+        if t.get("name")
+    ]
+    skills = [
+        str(s.get("name") or s.get("id"))
+        for s in _items(card.get("skills"))
+        if s.get("name") or s.get("id")
+    ]
+    identity = (runtime or gateway).get("workloadIdentityDetails") or {}
+    status = str(record.get("status") or "")
+    creator = record.get("createdBy")
+    facts = _facts(
+        # Where the runtime or gateway is; of what was registered by hand, the registry says.
+        _fact("Account", owner, code=True),
+        _fact("Region", region if owner else None),
+        _fact(
+            "Registry",
+            f"{registry.get('name') or registry.get('registryId')} ({account}, {region})",
+        ),
+        _fact(
+            "Registry status",
+            RECORD_STATUS.get(status, status),
+            **({"tone": "warning"} if status == "REJECTED" else {}),
+        ),
+        _fact(
+            "Known from",
+            "The registry's auto-detection only: AgentGov doesn't read it in its own account"
+            if owner
+            else None,
+        ),
+        _fact("Protocol", protocol),
+        authentication,
+        _fact("Workload identity", identity.get("workloadIdentityArn"), code=True),
+        _fact("Endpoints", ", ".join(hosts), code=True),
+        _fact("Skills", ", ".join(skills)),
+        _fact("Version", record.get("recordVersion")),
+        _fact(
+            "Registered from account",
+            creator if not owner and creator not in (None, account) else None,
+            code=True,
+        ),
+        _fact("Changed", record.get("updatedAt")),
+    )
+    arn = record.get("recordArn") or (
+        f"arn:aws:agent-registry:{region}:{account}:registry/{registry.get('registryId')}"
+        f"/record/{record['recordId']}"
+    )
+    external_id = source_arn if owner else arn
+    return Found(
+        external_id=external_id,
+        name=name,
+        kind=kind,
+        part=part,
+        description=record.get("description")
+        or card.get("description")
+        or server.get("description"),
+        details={
+            "facts": facts,
+            **({"tools": tools} if tools else {}),
+            "status": status or None,
+            "registry": registry.get("registryArn"),
+            "record": arn,
+            "region": region,
+            "account": owner or account,
+        },
+        external_ids={"aws_arn": external_id},
+        risks=risks,
     )

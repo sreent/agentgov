@@ -41,6 +41,7 @@ _SERVICE_LINK = re.compile(r"^(?:tcp|udp|sctp)://[^/\s]+:\d+$")
 # An AWS region (us-east-1, us-gov-west-1) and an IAM role's ARN.
 AWS_REGION = re.compile(r"^[a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\d{1,2}$")
 AWS_ROLE = re.compile(r"^arn:aws(?:-[a-z]+)*:iam::\d{12}:role/[\w+=,.@/-]{1,512}$")
+AWS_KINDS = ("bedrock-agents", "agentcore", "agentcore-gateways", "quick", "agent-registry")
 # A Google Cloud project ID (6-30 characters; a domain-scoped one has a prefix), and a region
 # (us-central1) or multi-region (us, eu).
 GOOGLE_PROJECT = re.compile(r"^(?:[a-z0-9.-]+:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$")
@@ -49,7 +50,10 @@ GOOGLE_REGION = re.compile(r"^(?:[a-z]+-[a-z]+\d{1,2}|us|eu)$")
 SALESFORCE_URL = re.compile(r"^https://[A-Za-z0-9.-]+/?$")
 # A Databricks workspace's URL (https://dbc-1234.cloud.databricks.com), and what to read there.
 DATABRICKS_URL = SALESFORCE_URL
-DATABRICKS_KINDS = ("serving", "apps", "genie")
+DATABRICKS_KINDS = ("serving", "apps", "genie", "mcp-services")
+# A Microsoft Foundry project's endpoint:
+# https://contoso.services.ai.azure.com/api/projects/support
+FOUNDRY_PROJECT = re.compile(r"^https://[A-Za-z0-9.-]+/api/projects/[A-Za-z0-9_.-]+/?$")
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
@@ -273,14 +277,15 @@ class Settings:
     copilot_studio_on_error: str = "block"
 
     # --- Agents on other platforms --------------------------------------------------
-    # AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into the
-    # inventory, each where its settings below are set (docs/other-platforms.md).
+    # AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Microsoft
+    # Foundry into the inventory, each where its settings below are set
+    # (docs/other-platforms.md).
 
     # Seconds between reads of each platform; 0 reads them only on demand.
     platform_sync_interval_seconds: int = 3600
-    # AWS: the regions to read Amazon Bedrock agents and AgentCore's harnesses, agent
-    # runtimes and gateways in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS
-    # isn't read).
+    # AWS: the regions to read Amazon Bedrock agents, AgentCore's harnesses, agent runtimes
+    # and gateways, Amazon Quick's agents and AWS Agent Registry's in, comma-separated, such
+    # as us-east-1,eu-west-1 (empty: AWS isn't read).
     # AgentGov signs its requests with AWS credentials from the usual places:
     # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, IAM roles for service accounts or Pod
     # Identity on EKS, or the instance's role.
@@ -290,6 +295,12 @@ class Settings:
     aws_role_arns: str = ""
     # The external ID those roles' trust policies ask for, if any.
     aws_external_id: str | None = None
+    # What to read in each account's regions, comma-separated: bedrock-agents (Amazon
+    # Bedrock agents), agentcore (AgentCore's harnesses and agent runtimes),
+    # agentcore-gateways (its gateways), quick (Amazon Quick's agents) and agent-registry
+    # (AWS Agent Registry's agents and MCP servers; with auto-detection, an organisation's
+    # registry has the AgentCore runtimes and gateways of all its accounts).
+    aws_read: str = "bedrock-agents,agentcore,agentcore-gateways,quick,agent-registry"
     # Google Cloud: the projects to read Agent Runtime (formerly Vertex AI Agent Engine)
     # agents in, comma-separated project IDs (empty: Google Cloud isn't read). AgentGov gets
     # its tokens where Google's libraries do: the file GOOGLE_APPLICATION_CREDENTIALS names (a
@@ -324,8 +335,20 @@ class Settings:
     # Instead, a personal access token, valid in the workspaces named.
     databricks_token: str | None = None
     # What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent
-    # Bricks agents) and genie (Genie agents).
-    databricks_read: str = "serving,apps,genie"
+    # Bricks agents), genie (Genie agents) and mcp-services (the MCP services registered in
+    # Unity Catalog, read catalog by catalog).
+    databricks_read: str = "serving,apps,genie,mcp-services"
+    # Microsoft Foundry: the projects to read agents in, comma-separated project endpoints,
+    # such as https://contoso.services.ai.azure.com/api/projects/support. AgentGov reads them
+    # as its Microsoft app registration (AGENTGOV_M365_*), which needs a role on each project
+    # that may read agents.
+    foundry_projects: str = ""
+    # Azure subscriptions to find Foundry projects in, comma-separated IDs: every project of
+    # every Foundry resource the app may see there (Reader on the subscription).
+    foundry_subscriptions: str = ""
+    # Foundry's token audience and Azure Resource Manager: change them for a national cloud.
+    foundry_audience: str = "https://ai.azure.com"
+    azure_management_url: str = "https://management.azure.com"
 
     # --- Classifier, optional (docs/detection.md) ---------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
@@ -497,6 +520,12 @@ class Settings:
                 raise ValueError(f"AGENTGOV_AWS_ROLE_ARNS: {arn!r} is not an IAM role's ARN")
         if self.aws_role_arn_list() and not self.aws_region_list():
             raise ValueError("AGENTGOV_AWS_ROLE_ARNS needs AGENTGOV_AWS_REGIONS")
+        for kind in self.aws_kind_list():
+            if kind not in AWS_KINDS:
+                raise ValueError(
+                    f"AGENTGOV_AWS_READ: {kind!r} is not bedrock-agents, agentcore, "
+                    "agentcore-gateways, quick or agent-registry"
+                )
         for project in self.google_cloud_project_list():
             if not GOOGLE_PROJECT.match(project):
                 raise ValueError(f"AGENTGOV_GOOGLE_CLOUD_PROJECTS: {project!r} is not a project ID")
@@ -537,10 +566,29 @@ class Settings:
                 "AGENTGOV_DATABRICKS_HOSTS needs AGENTGOV_DATABRICKS_CLIENT_ID and "
                 "AGENTGOV_DATABRICKS_CLIENT_SECRET, or AGENTGOV_DATABRICKS_TOKEN"
             )
+        for endpoint in self.foundry_project_list():
+            if not FOUNDRY_PROJECT.match(endpoint):
+                raise ValueError(
+                    f"AGENTGOV_FOUNDRY_PROJECTS: {endpoint!r} is not a project's endpoint, such as "
+                    "https://contoso.services.ai.azure.com/api/projects/support"
+                )
+        for subscription in self.foundry_subscription_list():
+            if not _GUID.match(subscription):
+                raise ValueError(
+                    f"AGENTGOV_FOUNDRY_SUBSCRIPTIONS: {subscription!r} is not a subscription ID"
+                )
+        if (self.foundry_project_list() or self.foundry_subscription_list()) and not (
+            self.m365_tenant_id and self.m365_client_id and self.m365_client_secret
+        ):
+            raise ValueError(
+                "Microsoft Foundry is read as AgentGov's Microsoft app: set "
+                "AGENTGOV_M365_TENANT_ID, AGENTGOV_M365_CLIENT_ID and AGENTGOV_M365_CLIENT_SECRET"
+            )
         for kind in self.databricks_kind_list():
             if kind not in DATABRICKS_KINDS:
                 raise ValueError(
-                    f"AGENTGOV_DATABRICKS_READ: {kind!r} is not serving, apps or genie"
+                    f"AGENTGOV_DATABRICKS_READ: {kind!r} is not serving, apps, genie or "
+                    "mcp-services"
                 )
         if self.classifier_timeout_seconds <= 0 or self.classifier_concurrency < 1:
             raise ValueError(
@@ -670,6 +718,9 @@ class Settings:
     def aws_role_arn_list(self) -> list[str]:
         return [r.strip() for r in self.aws_role_arns.split(",") if r.strip()]
 
+    def aws_kind_list(self) -> list[str]:
+        return [k.strip() for k in self.aws_read.split(",") if k.strip()]
+
     def google_cloud_project_list(self) -> list[str]:
         return [p.strip() for p in self.google_cloud_projects.split(",") if p.strip()]
 
@@ -684,6 +735,12 @@ class Settings:
 
     def databricks_kind_list(self) -> list[str]:
         return [k.strip() for k in self.databricks_read.split(",") if k.strip()]
+
+    def foundry_project_list(self) -> list[str]:
+        return [p.strip().rstrip("/") for p in self.foundry_projects.split(",") if p.strip()]
+
+    def foundry_subscription_list(self) -> list[str]:
+        return [s.strip() for s in self.foundry_subscriptions.split(",") if s.strip()]
 
     def m365_types(self) -> set[str]:
         types = {t.strip().lower() for t in self.m365_package_types.split(",") if t.strip()}

@@ -14,6 +14,9 @@ Read-only, as a service principal (OAuth machine-to-machine) or with a token:
   the scopes they act for their users with.
 * **Genie agents** (Genie spaces), with who may run them, the tables they answer from and
   their instructions.
+* **MCP services** in Unity Catalog: the MCP servers registered there for agents to use, with
+  who may call them, the tools they expose, and how their connection signs in to the server
+  (:func:`mcp_service`). Databricks' own, in the ``system`` catalog, are left out.
 
 A part is a workspace's kind of agent (``dbc-1234.cloud.databricks.com/serving``).
 """
@@ -33,8 +36,8 @@ import httpx
 from agentgov.config import Settings
 from agentgov.platforms.base import Found, Inventory, PlatformError, Risk
 
-SERVING, APPS, GENIE = "serving", "apps", "genie"
-KINDS = (SERVING, APPS, GENIE)
+SERVING, APPS, GENIE, MCP = "serving", "apps", "genie", "mcp-services"
+KINDS = (SERVING, APPS, GENIE, MCP)
 AGENT_TASKS = {"agent/v1/chat", "agent/v2/chat", "agent/v1/responses"}
 AGENT_APP = "agent-bricks-"
 # The groups that hold everyone: a workspace's users, and the account's.
@@ -45,6 +48,22 @@ SECRET_REFERENCE = re.compile(r"^\{\{\s*secrets/[^/\s]+/[^}\s]+\s*\}\}$")
 FIXED = ("DATABRICKS_TOKEN", "DATABRICKS_CLIENT_SECRET")
 # What an app's service principal may hold that lets it change, not just use, things.
 BROAD = {"CAN_MANAGE", "IS_OWNER", "WRITE", "MANAGE", "MODIFY", "WRITE_VOLUME"}
+# Catalogs that hold no one's MCP services: Databricks' own and its samples, the legacy Hive
+# metastore, and catalogs that mirror other systems or shares.
+OWN_CATALOGS = {"system", "samples", "hive_metastore", "__databricks_internal"}
+OTHER_CATALOGS = {"SYSTEM_CATALOG", "INTERNAL_CATALOG", "FOREIGN_CATALOG", "DELTASHARING_CATALOG"}
+# How a connection signs in to the server behind an MCP service, and whether that one
+# credential stands for everyone who calls the service.
+CREDENTIALS = {
+    "OAUTH_U2M_MAPPING": ("as each caller (OAuth, per user)", False),
+    "OAUTH_U2M": ("as the person who signed the connection in, for everyone (OAuth)", True),
+    "OAUTH_M2M": ("as one OAuth client (machine to machine)", True),
+    "BEARER_TOKEN": ("with one shared bearer token", True),
+    "USERNAME_PASSWORD": ("with one shared user name and password", True),
+    "ANY_STATIC_CREDENTIAL": ("with one shared credential", True),
+}
+# What Databricks answers when a workspace doesn't offer an API.
+NOT_OFFERED = ("ENDPOINT_NOT_FOUND", "FEATURE_DISABLED", "NOT_IMPLEMENTED")
 MAX_PAGES = 50
 RETRIES = (0.5, 1.0, 2.0)
 EARLY = 300  # renew tokens this many seconds before they expire
@@ -72,7 +91,7 @@ class DatabricksConnector:
 
     def inventory(self) -> Inventory:
         inventory = Inventory()
-        readers = {SERVING: self._serving, APPS: self._apps, GENIE: self._genie}
+        readers = {SERVING: self._serving, APPS: self._apps, GENIE: self._genie, MCP: self._mcp}
         for url in self.hosts:
             host = urlsplit(url).hostname or url
             for kind in self.kinds:
@@ -176,6 +195,20 @@ class DatabricksConnector:
                 return None
             raise
 
+    def _maybe(
+        self, url: str, path: str, key: str | None = None, params: dict[str, Any] | None = None
+    ) -> Any:
+        """An object (or, with ``key``, every item of a paged list), or None when AgentGov may
+        not read it or it is gone."""
+        try:
+            if key:
+                return list(self._pages(url, path, key, params))
+            return self._get(url, path, params)
+        except PlatformError as exc:
+            if exc.status in (403, 404):
+                return None
+            raise
+
     # -- the agents ---------------------------------------------------------------
 
     def _serving(self, url: str, host: str) -> list[Found]:
@@ -237,6 +270,49 @@ class DatabricksConnector:
             found.append(app_agent(app, acl, host))
         return found
 
+    def _mcp(self, url: str, host: str) -> list[Found]:
+        """Every catalog's MCP services, schema by schema: Unity Catalog lists them no other way."""
+        uc = "/api/2.1/unity-catalog"
+        found = []
+        connections: dict[str, dict[str, Any] | None] = {}
+        for catalog in self._pages(url, f"{uc}/catalogs", "catalogs", {"max_results": 0}):
+            name = str(catalog.get("name") or "")
+            if not name or name in OWN_CATALOGS or catalog.get("catalog_type") in OTHER_CATALOGS:
+                continue
+            schemas = self._maybe(
+                url, f"{uc}/schemas", "schemas", {"catalog_name": name, "max_results": 0}
+            )
+            for schema in schemas or []:
+                if not schema.get("name") or schema["name"] == "information_schema":
+                    continue
+                parent = f"schemas/{name}.{schema['name']}"
+                params = {"parent": parent, "view": "FULL", "page_size": 200}
+                try:
+                    services = list(self._pages(url, f"{uc}/mcp-services", "mcp_services", params))
+                except PlatformError as exc:
+                    if exc.status == 501 or any(code in str(exc) for code in NOT_OFFERED):
+                        return found  # the workspace doesn't offer MCP services
+                    if exc.status in (403, 404):
+                        continue  # not AgentGov's to see, or gone since it was listed
+                    raise
+                for service in services:
+                    full = str(service.get("name") or "").removeprefix("mcp-services/")
+                    if not full:
+                        continue
+                    grants = self._maybe(
+                        url,
+                        f"{uc}/effective-permissions/mcp_service/{quote(full, safe='')}",
+                        "privilege_assignments",
+                        {"max_results": 0},
+                    )
+                    source = (service.get("config") or {}).get("source_connection") or {}
+                    key = str(source.get("name") or "").removeprefix("connections/")
+                    if key and not source.get("is_deleted") and key not in connections:
+                        path = f"{uc}/connections/{quote(key, safe='')}"
+                        connections[key] = self._maybe(url, path)
+                    found.append(mcp_service(service, grants, connections.get(key), host))
+        return found
+
     def _genie(self, url: str, host: str) -> list[Found]:
         found = []
         for space in self._pages(url, "/api/2.0/genie/spaces", "spaces", {"page_size": 100}):
@@ -292,11 +368,11 @@ def _who(acl: list[dict[str, Any]] | None, levels: set[str]) -> tuple[list[str],
     return sorted(everyone), sorted(named)
 
 
-def _shared(name: str, everyone: list[str], what: str) -> Risk:
+def _shared(name: str, everyone: list[str], what: str, where: str = "the workspace") -> Risk:
     return Risk(
         "platform.shared_with_everyone",
         "medium",
-        f"{name} may be used by everyone in the workspace",
+        f"{name} may be used by everyone in {where}",
         f"Its permissions let {', '.join(everyone)} {what}.",
         "Give it to the groups that need it, or confirm everyone should have it and dismiss "
         "this finding.",
@@ -592,4 +668,103 @@ def genie_agent(space: dict[str, Any], acl: list[dict[str, Any]] | None, host: s
         risks=risks,
         instructions="\n".join(texts) or None,
         complete=acl is not None,
+    )
+
+
+def _host(url: Any) -> str | None:
+    """A URL's scheme and host: its path or query may carry credentials."""
+    parts = urlsplit(str(url or ""))
+    return f"{parts.scheme}://{parts.hostname}" if parts.hostname else None
+
+
+def mcp_service(
+    service: dict[str, Any],
+    grants: list[dict[str, Any]] | None,
+    connection: dict[str, Any] | None,
+    host: str,
+) -> Found:
+    """An MCP service in Unity Catalog (from its schema's list, FULL view), with who may call it
+    (its effective grants, inherited ones too; None when unread) and the connection it reaches
+    its server through (None when unread or gone)."""
+    resource = str(service["name"])
+    full = resource.removeprefix("mcp-services/")
+    config = service.get("config") or {}
+    source = config.get("source_connection") or {}
+    everyone, named = set(), set()
+    for assignment in grants or []:
+        privileges = {
+            str(p.get("privilege"))
+            for p in assignment.get("privileges") or []
+            if isinstance(p, dict)
+        }
+        if not privileges & {"EXECUTE", "ALL_PRIVILEGES"}:
+            continue
+        principal = str(assignment.get("principal") or "")
+        (everyone if principal.lower() in EVERYONE else named).add(principal)
+    risks = []
+    account = any(e.lower() == "account users" for e in everyone)
+    where = "the account" if account else "the workspace"
+    if everyone:
+        risks.append(_shared(full, sorted(everyone), "call its tools", where))
+    key = str(source.get("name") or "").removeprefix("connections/")
+    credential = str((connection or {}).get("credential_type") or "")
+    if source.get("options"):
+        # What a caller needs to sign in with: its connection signs in each caller.
+        how, one = CREDENTIALS["OAUTH_U2M_MAPPING"]
+    elif credential:
+        how, one = CREDENTIALS.get(credential, (credential.replace("_", " ").lower(), False))
+    else:
+        how, one = None, False
+    server = _host((connection or {}).get("url"))
+    if one:
+        risks.append(
+            Risk(
+                "platform.maker_credentials",
+                "medium",
+                f"{full} calls its server with one shared credential",
+                f"Its connection signs in to {server or 'the MCP server'} {how}, so everyone who "
+                "may call it acts there with that credential's access rather than their own.",
+                "Use a connection that signs each caller in (OAuth, per user), or confirm the "
+                "shared access is intended and dismiss this finding.",
+                {"connection": source.get("name"), "credential": credential},
+            )
+        )
+    if grants is None:
+        who = _fact("Who may call it", "AgentGov may not read its permissions")
+    elif everyone:
+        who = _fact("Who may call it", f"Everyone in {where}", tone="warning")
+    else:
+        who = _fact("Who may call it", ", ".join(sorted(named)) or "Only its owner")
+    selectors = [str(t) for t in config.get("include_tool_selectors") or []]
+    limits = len(config.get("rate_limits") or [])
+    if source.get("is_deleted"):
+        signs_in = _fact("Connection", "Deleted: its tools can't be called", tone="warning")
+    elif how:
+        signs_in = _fact("Signs in", how, **({"tone": "warning"} if one else {}))
+    else:
+        signs_in = _fact("Signs in", "AgentGov may not read its connection" if key else None)
+    facts = _facts(
+        _fact("Workspace", host, code=True),
+        _fact("MCP service", full, code=True),
+        _fact("Owner", service.get("effective_owner")),
+        _fact("Server", server, code=True),
+        _fact("Connection", None if source.get("is_deleted") else key, code=True),
+        signs_in,
+        _fact("Tools it exposes", ", ".join(selectors) if selectors else "All of its server's"),
+        who,
+        _fact("Rate limits", limits or "None"),
+        _fact("Created by", service.get("created_by")),
+        _fact("Changed", service.get("update_time")),
+    )
+    return Found(
+        # Unity Catalog is the metastore's, shared by the workspaces attached to it.
+        external_id=f"{service.get('metastore_id') or host}/{resource}",
+        name=full,
+        kind="MCP service (Unity Catalog)",
+        part="",
+        description=service.get("comment"),
+        details={"facts": facts, "mcp_service": full},
+        external_ids={"databricks_mcp_service": full},
+        risks=risks,
+        complete=grants is not None,
     )

@@ -252,14 +252,15 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 
 ### Agents on other platforms
 
-AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into the inventory, each where its settings below are set ([other-platforms](other-platforms.md)).
+AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Microsoft Foundry into the inventory, each where its settings below are set ([other-platforms](other-platforms.md)).
 
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS` | `3600` | Seconds between reads of each platform; 0 reads them only on demand. |
-| `AGENTGOV_AWS_REGIONS` | empty | AWS: the regions to read Amazon Bedrock agents and AgentCore's harnesses, agent runtimes and gateways in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS isn't read). AgentGov signs its requests with AWS credentials from the usual places: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, IAM roles for service accounts or Pod Identity on EKS, or the instance's role. |
+| `AGENTGOV_AWS_REGIONS` | empty | AWS: the regions to read Amazon Bedrock agents, AgentCore's harnesses, agent runtimes and gateways, Amazon Quick's agents and AWS Agent Registry's in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS isn't read). AgentGov signs its requests with AWS credentials from the usual places: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, IAM roles for service accounts or Pod Identity on EKS, or the instance's role. |
 | `AGENTGOV_AWS_ROLE_ARNS` | empty | Roles to assume, comma-separated ARNs, to read other AWS accounts too (in the same regions), with the credentials above. |
 | `AGENTGOV_AWS_EXTERNAL_ID` | — | The external ID those roles' trust policies ask for, if any. |
+| `AGENTGOV_AWS_READ` | `bedrock-agents,agentcore,agentcore-gateways,quick,agent-registry` | What to read in each account's regions, comma-separated: bedrock-agents (Amazon Bedrock agents), agentcore (AgentCore's harnesses and agent runtimes), agentcore-gateways (its gateways), quick (Amazon Quick's agents) and agent-registry (AWS Agent Registry's agents and MCP servers; with auto-detection, an organisation's registry has the AgentCore runtimes and gateways of all its accounts). |
 | `AGENTGOV_GOOGLE_CLOUD_PROJECTS` | empty | Google Cloud: the projects to read Agent Runtime (formerly Vertex AI Agent Engine) agents in, comma-separated project IDs (empty: Google Cloud isn't read). AgentGov gets its tokens where Google's libraries do: the file GOOGLE_APPLICATION_CREDENTIALS names (a workload identity federation configuration, or a service account key), gcloud's application default credentials, or the metadata server (Workload Identity on GKE). |
 | `AGENTGOV_GOOGLE_CLOUD_REGIONS` | `us-central1` | The regions to read them in, comma-separated (us and eu for the multi-regions). |
 | `AGENTGOV_GOOGLE_CLOUD_READ` | `agent-runtime,agent-registry` | What to read in each project, comma-separated: agent-runtime (its agents, in each region) and agent-registry (Agent Registry's agents and MCP servers, in each region and global: agents on Cloud Run and GKE, Gemini Enterprise's, and those registered by hand). |
@@ -269,7 +270,10 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into t
 | `AGENTGOV_DATABRICKS_HOSTS` | empty | Databricks: the workspaces to read agents in, comma-separated URLs, such as `https://dbc-1234.cloud.databricks.com` (empty: Databricks isn't read). |
 | `AGENTGOV_DATABRICKS_CLIENT_ID`<br>`AGENTGOV_DATABRICKS_CLIENT_SECRET` (secret) | —<br>— | The service principal AgentGov reads as (OAuth machine-to-machine): its application ID and an OAuth secret of its own. |
 | `AGENTGOV_DATABRICKS_TOKEN` (secret) | — | Instead, a personal access token, valid in the workspaces named. |
-| `AGENTGOV_DATABRICKS_READ` | `serving,apps,genie` | What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent Bricks agents) and genie (Genie agents). |
+| `AGENTGOV_DATABRICKS_READ` | `serving,apps,genie,mcp-services` | What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent Bricks agents), genie (Genie agents) and mcp-services (the MCP services registered in Unity Catalog, read catalog by catalog). |
+| `AGENTGOV_FOUNDRY_PROJECTS` | empty | Microsoft Foundry: the projects to read agents in, comma-separated project endpoints, such as `https://contoso.services.ai.azure.com/api/projects/support`. AgentGov reads them as its Microsoft app registration (`AGENTGOV_M365_`*), which needs a role on each project that may read agents. |
+| `AGENTGOV_FOUNDRY_SUBSCRIPTIONS` | empty | Azure subscriptions to find Foundry projects in, comma-separated IDs: every project of every Foundry resource the app may see there (Reader on the subscription). |
+| `AGENTGOV_FOUNDRY_AUDIENCE`<br>`AGENTGOV_AZURE_MANAGEMENT_URL` | `https://ai.azure.com`<br>`https://management.azure.com` | Foundry's token audience and Azure Resource Manager: change them for a national cloud. |
 
 ### Classifier, optional
 

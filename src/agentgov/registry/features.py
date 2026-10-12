@@ -659,9 +659,10 @@ CATALOG: tuple[Feature, ...] = (
         "aws",
         "AWS agents",
         "platforms",
-        "AgentGov reads the agents on AWS into the inventory (Amazon Bedrock agents, and "
-        "AgentCore's harnesses, agent runtimes and gateways), with their risky settings as "
-        "findings, on a schedule and on demand.",
+        "AgentGov reads the agents on AWS into the inventory (Amazon Bedrock agents, "
+        "AgentCore's harnesses, agent runtimes and gateways, Amazon Quick's agents, and AWS "
+        "Agent Registry's agents and MCP servers), with their risky settings as findings, on a "
+        "schedule and on demand.",
         SWITCH,
         ON,
         {
@@ -705,8 +706,8 @@ CATALOG: tuple[Feature, ...] = (
         "Databricks agents",
         "platforms",
         "AgentGov reads the agents in your Databricks workspaces into the inventory (agents on "
-        "Model Serving, Agent Bricks agents and Genie agents), with their risky settings as "
-        "findings, on a schedule and on demand.",
+        "Model Serving, Agent Bricks agents, Genie agents, and the MCP services in Unity "
+        "Catalog), with their risky settings as findings, on a schedule and on demand.",
         SWITCH,
         ON,
         {
@@ -714,6 +715,22 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "Not read, even where it could be.",
         },
         needs="AGENTGOV_DATABRICKS_HOSTS, and a service principal in those workspaces",
+    ),
+    Feature(
+        "microsoft-foundry",
+        "Microsoft Foundry agents",
+        "platforms",
+        "AgentGov reads the agents in your Microsoft Foundry projects into the inventory "
+        "(prompt, hosted and workflow agents), with their risky settings as findings, linked to "
+        "their Entra agent identities, on a schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has Foundry projects to read and its Microsoft app.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_FOUNDRY_PROJECTS or AGENTGOV_FOUNDRY_SUBSCRIPTIONS, and AgentGov's "
+        "Microsoft app (AGENTGOV_M365_*) allowed to read the projects' agents",
     ),
     Feature(
         "security-operations",

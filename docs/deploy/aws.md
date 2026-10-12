@@ -305,10 +305,10 @@ kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
 
 ## Agents built on AWS
 
-AgentGov can read the Amazon Bedrock agents and AgentCore agents in your accounts into its
-inventory ([other platforms](../other-platforms.md#aws)). Give its service account a role
-that may read them, with Pod Identity, where `read-agents.json` holds the policy from that
-page, then name the regions to read:
+AgentGov can read the Amazon Bedrock, AgentCore and Amazon Quick agents in your accounts, and
+AWS Agent Registry's, into its inventory ([other platforms](../other-platforms.md#aws)). Give
+its service account a role that may read them, with Pod Identity, where `read-agents.json`
+holds the policy from that page, then name the regions to read:
 
 ```bash
 aws iam create-role --role-name agentgov-agent-reader --assume-role-policy-document '{
