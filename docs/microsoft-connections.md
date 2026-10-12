@@ -64,7 +64,8 @@ AgentGov reads every agent identity in the tenant
 the agent the other sources report under the same Entra agent ID: the Copilot Studio
 inventory's `entraAgentId` and the catalog's `agentIdentityId`. An agent identity's
 object ID and app ID are the same, so either works. Identities that no other source
-reports, such as agents built in Microsoft Foundry or your own agents with an Entra agent
+reports, such as agents in Microsoft Foundry projects AgentGov doesn't read ([other
+platforms](other-platforms.md#microsoft-foundry)) or your own agents with an Entra agent
 ID, become discovered agents of their own (source `platform:entra-agent-id`).
 
 The agent's page shows its identity: whether it is enabled, the blueprint it was created

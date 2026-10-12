@@ -15,6 +15,7 @@ from agentgov.config import Settings
 from agentgov.platforms.aws import AwsConnector
 from agentgov.platforms.base import Inventory
 from agentgov.platforms.databricks import DatabricksConnector
+from agentgov.platforms.foundry import FoundryConnector
 from agentgov.platforms.google import GoogleConnector
 from agentgov.platforms.salesforce import SalesforceConnector
 
@@ -36,4 +37,6 @@ def connectors(settings: Settings, *, http: httpx.Client | None = None) -> dict[
         found["salesforce"] = SalesforceConnector(settings, http=http)
     if settings.databricks_host_list():
         found["databricks"] = DatabricksConnector(settings, http=http)
+    if settings.foundry_project_list() or settings.foundry_subscription_list():
+        found["microsoft-foundry"] = FoundryConnector(settings, http=http)
     return found

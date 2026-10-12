@@ -252,7 +252,7 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 
 ### Agents on other platforms
 
-AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into the inventory, each where its settings below are set ([other-platforms](other-platforms.md)).
+AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Microsoft Foundry into the inventory, each where its settings below are set ([other-platforms](other-platforms.md)).
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -271,6 +271,9 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into t
 | `AGENTGOV_DATABRICKS_CLIENT_ID`<br>`AGENTGOV_DATABRICKS_CLIENT_SECRET` (secret) | —<br>— | The service principal AgentGov reads as (OAuth machine-to-machine): its application ID and an OAuth secret of its own. |
 | `AGENTGOV_DATABRICKS_TOKEN` (secret) | — | Instead, a personal access token, valid in the workspaces named. |
 | `AGENTGOV_DATABRICKS_READ` | `serving,apps,genie,mcp-services` | What to read in each, comma-separated: serving (agents on Model Serving), apps (Agent Bricks agents), genie (Genie agents) and mcp-services (the MCP services registered in Unity Catalog, read catalog by catalog). |
+| `AGENTGOV_FOUNDRY_PROJECTS` | empty | Microsoft Foundry: the projects to read agents in, comma-separated project endpoints, such as `https://contoso.services.ai.azure.com/api/projects/support`. AgentGov reads them as its Microsoft app registration (`AGENTGOV_M365_`*), which needs a role on each project that may read agents. |
+| `AGENTGOV_FOUNDRY_SUBSCRIPTIONS` | empty | Azure subscriptions to find Foundry projects in, comma-separated IDs: every project of every Foundry resource the app may see there (Reader on the subscription). |
+| `AGENTGOV_FOUNDRY_AUDIENCE`<br>`AGENTGOV_AZURE_MANAGEMENT_URL` | `https://ai.azure.com`<br>`https://management.azure.com` | Foundry's token audience and Azure Resource Manager: change them for a national cloud. |
 
 ### Classifier, optional
 

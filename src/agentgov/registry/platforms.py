@@ -58,10 +58,13 @@ SOURCES = {
     "google-cloud": "Google Cloud",
     "salesforce": "Salesforce",
     "databricks": "Databricks",
+    "microsoft-foundry": "Microsoft Foundry",
 }
 # The platforms read by a connector of AgentGov's own (agentgov.platforms.base): each
 # reports its agents and their risky settings the same way.
-INVENTORY_SOURCES = ("aws", "google-cloud", "salesforce", "databricks")
+INVENTORY_SOURCES = ("aws", "google-cloud", "salesforce", "databricks", "microsoft-foundry")
+# What an agent known only by its Entra identity is, until a source reports what it is.
+ENTRA_PLATFORM = "Microsoft Entra Agent ID"
 # The agent identity blueprint Copilot Studio creates its agents' identities from.
 COPILOT_STUDIO_BLUEPRINT = "25664c89-cea5-4ab6-b924-a54fd8a19ae0"
 FINDING_TYPES = {
@@ -172,7 +175,8 @@ def upsert(
         mark_changed(session, "agents")
     else:
         agent.external_ids = {**(agent.external_ids or {}), **external_ids}
-        agent.platform = agent.platform or platform
+        if not agent.platform or agent.platform == ENTRA_PLATFORM:
+            agent.platform = platform
         if description and not agent.description:
             agent.description = description
     if entra_id:
@@ -447,7 +451,7 @@ def record_agent_identities(
             source="entra-agent-id",
             external_id=identity_id,
             name=str(identity.get("displayName") or identity_id),
-            platform="Copilot Studio" if from_studio else "Microsoft Entra Agent ID",
+            platform="Copilot Studio" if from_studio else ENTRA_PLATFORM,
             details=details,
             external_ids={"entra_agent_id": identity_id},
             entra_index=index,
@@ -657,6 +661,8 @@ def record_inventory(
     seen: set[str] = set()
     present: set[str] = set()
     partial: set[str] = set()  # agents read in part: their findings can't be resolved
+    # An agent with an Entra agent identity (Foundry's) is the agent Entra Agent ID reports.
+    index = _entra_index(session)
     for item in inventory.found:
         key = f"{source}:{item.external_id}"
         if key in seen:
@@ -672,7 +678,7 @@ def record_inventory(
             platform=item.kind,
             details=details,
             external_ids=item.external_ids,
-            entra_index={},
+            entra_index=index,
             description=item.description,
         )
         counts["created" if created else "updated"] += 1

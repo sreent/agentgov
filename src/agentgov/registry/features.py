@@ -717,6 +717,22 @@ CATALOG: tuple[Feature, ...] = (
         needs="AGENTGOV_DATABRICKS_HOSTS, and a service principal in those workspaces",
     ),
     Feature(
+        "microsoft-foundry",
+        "Microsoft Foundry agents",
+        "platforms",
+        "AgentGov reads the agents in your Microsoft Foundry projects into the inventory "
+        "(prompt, hosted and workflow agents), with their risky settings as findings, linked to "
+        "their Entra agent identities, on a schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has Foundry projects to read and its Microsoft app.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_FOUNDRY_PROJECTS or AGENTGOV_FOUNDRY_SUBSCRIPTIONS, and AgentGov's "
+        "Microsoft app (AGENTGOV_M365_*) allowed to read the projects' agents",
+    ),
+    Feature(
         "security-operations",
         "Hand-off to security operations",
         "secops",

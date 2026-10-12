@@ -2539,6 +2539,7 @@ function agentLedgerCard(a, entries) {
 const INSTRUCTION_SOURCES = {
   registered: 'Registered', telemetry: 'Reported in telemetry', 'microsoft-365': 'From Microsoft 365',
   aws: 'From AWS', 'google-cloud': 'From Google Cloud', salesforce: 'From Salesforce', databricks: 'From Databricks',
+  'microsoft-foundry': 'From Microsoft Foundry',
 };
 
 function classifierLine(c, settings) {
@@ -4338,6 +4339,7 @@ function ruleWhen(c) {
 const RULE_PLATFORMS = {
   gateway: 'the gateway', 'microsoft-365': 'Microsoft 365', 'copilot-studio': 'Copilot Studio',
   aws: 'AWS', 'google-cloud': 'Google Cloud', salesforce: 'Salesforce', databricks: 'Databricks',
+  'microsoft-foundry': 'Microsoft Foundry',
 };
 
 function ruleScope(scope) {
@@ -4496,7 +4498,7 @@ async function ruleForm(r, blueprints) {
         { id: 'teams', label: 'Teams', value: (scope.teams || []).join(', '), mono: true, hint: teams.length ? `Teams: ${teams.map((t) => t.name).join(', ')}.` : null },
       ] },
       { type: 'row', fields: [
-        { id: 'platforms', label: 'Platforms', value: (scope.platforms || []).join(', '), mono: true, hint: 'gateway, microsoft-365, copilot-studio, aws, google-cloud, salesforce or databricks.' },
+        { id: 'platforms', label: 'Platforms', value: (scope.platforms || []).join(', '), mono: true, hint: 'gateway, microsoft-365, copilot-studio, aws, google-cloud, salesforce, databricks or microsoft-foundry.' },
         { id: 'environments', label: 'Environments', value: (scope.environments || []).join(', '), mono: true },
       ] },
       { id: 'scope_labels', label: 'With labels', value: formatLabels(scope.labels), mono: true, hint: 'key=value, separated by commas. Agents labelled agentgov/exempt-rules with the rule’s name, or *, are left out.' },
@@ -5627,9 +5629,9 @@ async function revokeApiKey(k) {
 
 /* --------------------------------------------------------------- platforms */
 
-// Agents built on other platforms (Microsoft 365 Copilot, Copilot Studio, AWS, Google
-// Cloud, Salesforce, Databricks). They never call the gateway, so AgentGov governs what
-// their platform reports about them.
+// Agents built on other platforms (Microsoft 365 Copilot, Copilot Studio, Microsoft Foundry,
+// AWS, Google Cloud, Salesforce, Databricks). They never call the gateway, so AgentGov
+// governs what their platform reports about them.
 const PLATFORM_SOURCES = {
   'platform:microsoft-365': 'Microsoft 365',
   'platform:copilot-studio': 'Copilot Studio',
@@ -5638,9 +5640,10 @@ const PLATFORM_SOURCES = {
   'platform:google-cloud': 'Google Cloud',
   'platform:salesforce': 'Salesforce',
   'platform:databricks': 'Databricks',
+  'platform:microsoft-foundry': 'Microsoft Foundry',
 };
 // The platforms a connector of AgentGov's own reads: each reports its agents the same way.
-const INVENTORY_SOURCES = new Set(['aws', 'google-cloud', 'salesforce', 'databricks']);
+const INVENTORY_SOURCES = new Set(['aws', 'google-cloud', 'salesforce', 'databricks', 'microsoft-foundry']);
 // The platforms whose agents AgentGov can block there (an Entra identity alone isn't one).
 const BLOCKABLE_SOURCES = new Set(['copilot-studio', 'microsoft-365']);
 const M365_SETTINGS = 'AGENTGOV_M365_TENANT_ID, AGENTGOV_M365_CLIENT_ID and AGENTGOV_M365_CLIENT_SECRET';

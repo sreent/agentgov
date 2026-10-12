@@ -12,15 +12,17 @@ keeps running: stop it in its platform's console as well.
 
 | Platform | What AgentGov reads | Set up |
 |---|---|---|
-| AWS | Amazon Bedrock agents, AgentCore harnesses and AgentCore agent runtimes | [AWS](#aws) |
-| Google Cloud | Agent Runtime agents (formerly Vertex AI Agent Engine) | [Google Cloud](#google-cloud) |
+| AWS | Amazon Bedrock agents, AgentCore's harnesses, agent runtimes and gateways, Amazon Quick's agents, and AWS Agent Registry's | [AWS](#aws) |
+| Google Cloud | Agent Runtime agents (formerly Vertex AI Agent Engine), and Agent Registry's agents and MCP servers | [Google Cloud](#google-cloud) |
 | Salesforce | Agentforce agents, with their topics and actions | [Salesforce](#salesforce) |
-| Databricks | Agents on Model Serving, Agent Bricks agents and Genie agents | [Databricks](#databricks) |
+| Databricks | Agents on Model Serving, Agent Bricks agents, Genie agents, and Unity Catalog's MCP services | [Databricks](#databricks) |
+| Microsoft Foundry | Prompt, hosted and workflow agents, linked to their Entra agent identities | [Microsoft Foundry](#microsoft-foundry) |
 
 Each platform is read where its settings are set, when the control plane starts and every
 hour after that (`AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS`; `0` reads only on demand). Admins
 can read one at any time with **Sync now** on the Platforms page or `agentgov platforms sync
-<platform>` (`aws`, `google-cloud`, `salesforce` or `databricks`). Each has a switch on the
+<platform>` (`aws`, `google-cloud`, `salesforce`, `databricks` or `microsoft-foundry`). Each
+has a switch on the
 [Features](features.md) page (on by default) that stops it being read, even where it could be.
 
 ## What AgentGov does with each agent
@@ -335,6 +337,79 @@ they were.
 
    A personal access token (`AGENTGOV_DATABRICKS_TOKEN`) works too, for one workspace or
    several where it is valid, but Databricks recommends OAuth.
+
+## Microsoft Foundry
+
+AgentGov reads, in each Foundry project you name and in each project of the Azure
+subscriptions you name:
+
+* **Prompt agents**: their model, instructions, tools, content filter and skills.
+* **Hosted agents**: their container or code, and the names of their environment variables.
+* **Workflow agents** (which Foundry retires on 1 December 2026), and **external agents**, the
+  third-party agents registered in Foundry for observability.
+
+Each agent is read as of the version its endpoint serves, with who may call that endpoint (its
+authorization schemes: Microsoft Entra ID with a Foundry role, or Microsoft 365 and Teams, for
+people with a Foundry role or for everyone in the organisation), its protocols, whether it is
+published to Microsoft 365 and Teams, and the identity it acts with. Of an MCP server's URL
+only the host is kept, and of its headers only the names.
+
+An agent made since Foundry gives each agent an Entra agent identity of its own is linked to
+that identity: what [Microsoft Entra Agent ID](microsoft-connections.md#microsoft-entra-agent-id)
+reports and what Foundry reports are one agent in AgentGov, and so is the Microsoft 365
+catalog's entry once it is published there. Agents made before then act with their project's
+shared identity. Agent Applications, the older way Foundry published agents, aren't read.
+
+| Check | Raised when |
+|---|---|
+| `platform.risky_tool` | an agent has a shell or computer use (high), or a code interpreter, a browser or file edits (medium) |
+| `platform.plain_secret` | an MCP server's headers or access token are in the agent's definition, or a hosted agent's environment variable whose name says it holds a secret has a value that isn't a Key Vault reference |
+| `platform.broad_identity` | an agent acts with its project's shared agent identity, so it has whatever any of the project's older agents is given |
+| `platform.shared_with_everyone` | an agent is published to Microsoft 365 and Teams for everyone in the organisation (`BotServiceTenant`) |
+
+Prompt agents' instructions go through the instruction checks.
+
+### Setting it up
+
+1. AgentGov reads Foundry as its Microsoft app registration, the one its [Microsoft
+   connections](microsoft-connections.md) use (`AGENTGOV_M365_TENANT_ID`,
+   `AGENTGOV_M365_CLIENT_ID` and `AGENTGOV_M365_CLIENT_SECRET`). Give the app a role that may
+   read agents on each project, or on the Foundry resources that hold them. Foundry has no
+   built-in role that reads agents without changing them, so make one with only the agents'
+   read data action:
+
+   ```json
+   {
+     "Name": "AgentGov Foundry agent reader",
+     "IsCustom": true,
+     "Description": "Reads Foundry agents, for AgentGov's inventory.",
+     "Actions": [],
+     "DataActions": ["Microsoft.CognitiveServices/accounts/AIServices/agents/read"],
+     "AssignableScopes": ["/subscriptions/<subscription-id>"]
+   }
+   ```
+
+   ```bash
+   az role definition create --role-definition agentgov-foundry-reader.json
+   az role assignment create --assignee <app-id> --role "AgentGov Foundry agent reader" \
+     --scope /subscriptions/<subscription-id>/resourceGroups/<group>/providers/Microsoft.CognitiveServices/accounts/<resource>
+   ```
+
+   The action reads agents' conversations too, which AgentGov doesn't. **Foundry User** works
+   as well, but may change agents.
+2. Name the projects, by their endpoints, or the subscriptions to find them in; finding them
+   needs **Reader** on the subscription, to list its Foundry resources and their projects:
+
+   ```bash
+   AGENTGOV_FOUNDRY_PROJECTS=https://contoso.services.ai.azure.com/api/projects/support
+   AGENTGOV_FOUNDRY_SUBSCRIPTIONS=00000000-0000-0000-0000-000000000000
+   ```
+
+   For a national cloud, set `AGENTGOV_FOUNDRY_AUDIENCE`, `AGENTGOV_AZURE_MANAGEMENT_URL` and
+   `AGENTGOV_ENTRA_LOGIN_URL`.
+
+A project that refuses is named on the Platforms page and the rest are still read, and so is a
+Foundry resource whose projects the app may not list.
 
 ## Doing it from the CLI or the API
 

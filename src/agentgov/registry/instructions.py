@@ -41,6 +41,7 @@ SOURCES = {
     "google-cloud": "Google Cloud",
     "salesforce": "Salesforce",
     "databricks": "Databricks",
+    "microsoft-foundry": "Microsoft Foundry",
 }
 FINDING = "agent.unsafe_instructions"
 SYSTEM_ACTOR = "system:instructions"

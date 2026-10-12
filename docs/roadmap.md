@@ -49,12 +49,13 @@ come second: they report, but they don't enforce.
 | 28 | Registry | **Amazon Quick's agents** (done, [other platforms](other-platforms.md#aws)): the chat agents people build in Amazon Quick read with AWS's other agents, with their instructions (checked), spaces, who they are shared with and their action connectors; an agent shared with a whole namespace, and connectors that act with one shared credential for everyone, as findings | Amazon Quick (QuickSight) API |
 | 29 | Registry | **AWS Agent Registry** (done, [other platforms](other-platforms.md#aws)): agents and MCP servers registered by hand read with AWS's other agents, with their protocol, endpoints, skills and tools; and the AgentCore runtimes and gateways an organisation's registry detects in accounts AgentGov doesn't read, so one account's registry shows the organisation's, a gateway without inbound authorization as a finding; what is read on AWS chosen with `AGENTGOV_AWS_READ` | AWS Agent Registry API |
 | 30 | Registry | **Unity Catalog's MCP services** (done, [other platforms](other-platforms.md#databricks)): the MCP servers registered in Databricks' Unity Catalog read with its agents, catalog by catalog: who may call each (inherited grants too), the tools it exposes, its rate limits and the connection to its server; one everyone in the account may call, and a connection that signs in with one credential for everyone, as findings; Databricks' own MCPs left out | Unity Catalog API |
+| 31 | Registry | **Agents in Microsoft Foundry** (done, [other platforms](other-platforms.md#microsoft-foundry)): prompt, hosted and workflow agents read from the projects named and those found in the subscriptions named, as of the version each endpoint serves: model, instructions (checked), tools, who may call it and whether it is published to Microsoft 365 and Teams; one with an Entra agent identity of its own is the agent Entra Agent ID reports; code-running tools, credentials in its definition, a project's shared identity and publishing to the whole organisation as findings | Foundry Agent Service API, Azure Resource Manager |
 
 ## Later
 
 | Theme | Item | Building block |
 |---|---|---|
-| Registry | **More platform connectors**: read more of each platform the way [AWS, Google Cloud, Salesforce and Databricks](other-platforms.md) and [Microsoft 365 and Copilot Studio](platforms.md) are read: from Salesforce, the channels its service agents are deployed on | Platform APIs |
+| Registry | **More platform connectors**: read more of each platform the way [AWS, Google Cloud, Salesforce, Databricks and Microsoft Foundry](other-platforms.md) and [Microsoft 365 and Copilot Studio](platforms.md) are read: from Salesforce, the channels its service agents are deployed on | Platform APIs |
 | Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
 
 ## Out of scope

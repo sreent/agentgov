@@ -10,7 +10,8 @@ front of these agents, but AgentGov can govern what Microsoft reports about them
 * the **Copilot Studio inventory**: Copilot Studio and Agent Builder agents, imported
   from the Power Platform inventory together with the connectors each one uses;
 * **Microsoft Entra Agent ID**: the tenant's agent identities, linked to the agents
-  above, plus agents built elsewhere that have one, such as in Microsoft Foundry
+  above, plus agents built elsewhere that have one, such as in Microsoft Foundry projects
+  AgentGov doesn't read
   ([details](microsoft-connections.md#microsoft-entra-agent-id)).
 
 Each agent becomes a registry agent with the source `platform:microsoft-365`,
@@ -21,8 +22,9 @@ and doesn't apply blueprints to them, because they never call the gateway. When 
 one source reports the same agent (a Copilot Studio agent published to Microsoft 365, and
 its Entra agent identity), AgentGov matches them by Entra agent ID.
 
-Agents built on AWS, Google Cloud, Salesforce and Databricks are read the same way, by
-connectors of AgentGov's own ([other platforms](other-platforms.md)).
+Agents built on AWS, Google Cloud, Salesforce, Databricks and Microsoft Foundry are read the
+same way, by connectors of AgentGov's own ([other platforms](other-platforms.md)); a Foundry
+agent and its Entra agent identity are one agent.
 
 Microsoft's other services can tell AgentGov more, or let it act: the Purview audit log
 (who uses each agent, and attacks on them), Defender's alerts, Power Platform's connector
