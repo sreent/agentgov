@@ -22,7 +22,7 @@ from agentgov.models import LedgerCheckpoint
 from agentgov.notify import Notifier
 from agentgov.opa.bundle import BundleServer
 from agentgov.opa.signing import Signer
-from agentgov.platforms import connections
+from agentgov.platforms import connections, inventories
 from agentgov.platforms.microsoft import (
     MicrosoftAdmin,
     MicrosoftApp,
@@ -120,6 +120,7 @@ class Runtime:
         destinations_http: httpx.Client | None = None,
         tsa_http: httpx.Client | None = None,
         tlog_http: httpx.Client | None = None,
+        platforms_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
         # This component's certificate, for mutual TLS with the others (agentgov.tls).
@@ -172,6 +173,9 @@ class Runtime:
             )
         # Optional classifier for agent instructions (IBM Granite Guardian).
         self.guardian = Guardian(settings, http=guardian_http) if settings.guardian_url else None
+        # Agents on AWS, Google Cloud, Salesforce and Databricks, each read by a connector
+        # of AgentGov's own where it is configured (agentgov.platforms.inventories).
+        self.platforms = inventories.connectors(settings, http=platforms_http)
         # Each replica writes the gateway's configuration file (Compose), and sends
         # destinations what it wrote to the ledger (each claims a destination first).
         self._gateway_worker = _Worker("gateway-config", self.gateway.sync, 300)
@@ -230,6 +234,16 @@ class Runtime:
             if settings.issues_interval_seconds > 0
             else None
         )
+        self._platforms_worker = (
+            _Worker(
+                "platform-sync",
+                self._scheduled_platform_sync,
+                settings.platform_sync_interval_seconds,
+                leading=leading,
+            )
+            if self.platforms and settings.platform_sync_interval_seconds > 0
+            else None
+        )
         self._started = False
 
     def _leader_workers(self) -> list[_Worker]:
@@ -241,6 +255,7 @@ class Runtime:
             self._retention_worker,
             self._m365_worker,
             self._issues_worker,
+            self._platforms_worker,
         ]
         return [w for w in workers if w is not None]
 
@@ -639,6 +654,39 @@ class Runtime:
                     log.warning("Microsoft sync of %s failed: %s", key, outcome["error"])
         except PlatformError as exc:
             log.warning("Microsoft sync failed: %s", exc)
+
+    # -- AgentGov's connectors to other platforms -------------------------------------
+
+    def sync_platform(
+        self, source: str, *, actor: str | None = None, wait: float | None = None
+    ) -> dict[str, int]:
+        """Read one platform's agents into the registry; returns the counts. One run per
+        platform at a time, on one replica."""
+        connector = self.platforms.get(source)
+        if connector is None:
+            raise PlatformError(f"{platforms.SOURCES.get(source, source)} is not configured")
+        with self.coordination.job(f"platform-sync:{source}", wait=wait):
+            try:
+                inventory = connector.inventory()  # before the transaction: it can be slow
+            except PlatformError as exc:
+                with self.db.session() as session:
+                    platforms.sync_failed(session, source, str(exc), actor=actor)
+                raise
+            with self.db.session() as session:
+                counts = platforms.record_inventory(
+                    session, source, inventory, actor=actor, classify=self.guardian is not None
+                )
+                platforms.refresh_risk(session, self.settings)
+                return counts
+
+    def _scheduled_platform_sync(self) -> None:
+        with self.db.session() as session:
+            turned_on = [source for source in self.platforms if features.is_on(session, source)]
+        for source in turned_on:
+            try:
+                self.sync_platform(source)
+            except PlatformError as exc:
+                log.warning("sync of %s failed: %s", source, exc)
 
     def _failed(self, key: str, exc: PlatformError, actor: str | None) -> None:
         with self.db.session() as session:

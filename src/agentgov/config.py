@@ -38,6 +38,9 @@ REPLACED = {
 # as AGENTGOV_GATEWAY_PORT=tcp://10.96.0.12:8080 for a Service named agentgov-gateway: never
 # one of these settings.
 _SERVICE_LINK = re.compile(r"^(?:tcp|udp|sctp)://[^/\s]+:\d+$")
+# An AWS region (us-east-1, us-gov-west-1) and an IAM role's ARN.
+AWS_REGION = re.compile(r"^[a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\d{1,2}$")
+AWS_ROLE = re.compile(r"^arn:aws(?:-[a-z]+)*:iam::\d{12}:role/[\w+=,.@/-]{1,512}$")
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
@@ -260,6 +263,24 @@ class Settings:
     # The answer when AgentGov cannot decide in time (enforce mode): "block" or "allow".
     copilot_studio_on_error: str = "block"
 
+    # --- Agents on other platforms --------------------------------------------------
+    # AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into the
+    # inventory, each where its settings below are set (docs/other-platforms.md).
+
+    # Seconds between reads of each platform; 0 reads them only on demand.
+    platform_sync_interval_seconds: int = 3600
+    # AWS: the regions to read Amazon Bedrock agents and AgentCore's harnesses and agent
+    # runtimes in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS isn't read).
+    # AgentGov signs its requests with AWS credentials from the usual places:
+    # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, IAM roles for service accounts or Pod
+    # Identity on EKS, or the instance's role.
+    aws_regions: str = ""
+    # Roles to assume, comma-separated ARNs, to read other AWS accounts too (in the same
+    # regions), with the credentials above.
+    aws_role_arns: str = ""
+    # The external ID those roles' trust policies ask for, if any.
+    aws_external_id: str | None = None
+
     # --- Classifier, optional (docs/detection.md) ---------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
     # Ollama), e.g. http://guardian:8000/v1. The control plane asks it about agent
@@ -418,6 +439,18 @@ class Settings:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
         if self.issues_interval_seconds < 0:
             raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
+        if self.platform_sync_interval_seconds < 0:
+            raise ValueError(
+                "AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS must be 0 (on demand only) or more"
+            )
+        for region in self.aws_region_list():
+            if not AWS_REGION.match(region):
+                raise ValueError(f"AGENTGOV_AWS_REGIONS: {region!r} is not an AWS region")
+        for arn in self.aws_role_arn_list():
+            if not AWS_ROLE.match(arn):
+                raise ValueError(f"AGENTGOV_AWS_ROLE_ARNS: {arn!r} is not an IAM role's ARN")
+        if self.aws_role_arn_list() and not self.aws_region_list():
+            raise ValueError("AGENTGOV_AWS_ROLE_ARNS needs AGENTGOV_AWS_REGIONS")
         if self.classifier_timeout_seconds <= 0 or self.classifier_concurrency < 1:
             raise ValueError(
                 "AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS must be positive and "
@@ -539,6 +572,12 @@ class Settings:
             return configured
         scheme, _, rest = self.public_url.partition("://")
         return [f"{scheme}://{rest.split('/', 1)[0]}"]
+
+    def aws_region_list(self) -> list[str]:
+        return [r.strip() for r in self.aws_regions.split(",") if r.strip()]
+
+    def aws_role_arn_list(self) -> list[str]:
+        return [r.strip() for r in self.aws_role_arns.split(",") if r.strip()]
 
     def m365_types(self) -> set[str]:
         types = {t.strip().lower() for t in self.m365_package_types.split(",") if t.strip()}

@@ -470,6 +470,7 @@ const STATUS = {
     monitor: ['neutral', 'eye', 'Monitoring'],
     enforce: ['good', 'shield-check', 'Enforcing'],
     turned_off: ['neutral', 'power', 'Turned off in Features'],
+    partial: ['warning', 'triangle', 'Partly read'],
   },
   mode: {
     enforce: ['good', 'shield-check', 'Enforce'],
@@ -2537,6 +2538,7 @@ function agentLedgerCard(a, entries) {
 
 const INSTRUCTION_SOURCES = {
   registered: 'Registered', telemetry: 'Reported in telemetry', 'microsoft-365': 'From Microsoft 365',
+  aws: 'From AWS', 'google-cloud': 'From Google Cloud', salesforce: 'From Salesforce', databricks: 'From Databricks',
 };
 
 function classifierLine(c, settings) {
@@ -4333,7 +4335,10 @@ function ruleWhen(c) {
   return parts.join(' · ') || '—';
 }
 
-const RULE_PLATFORMS = { gateway: 'the gateway', 'microsoft-365': 'Microsoft 365', 'copilot-studio': 'Copilot Studio' };
+const RULE_PLATFORMS = {
+  gateway: 'the gateway', 'microsoft-365': 'Microsoft 365', 'copilot-studio': 'Copilot Studio',
+  aws: 'AWS', 'google-cloud': 'Google Cloud', salesforce: 'Salesforce', databricks: 'Databricks',
+};
 
 function ruleScope(scope) {
   const parts = [];
@@ -4491,7 +4496,7 @@ async function ruleForm(r, blueprints) {
         { id: 'teams', label: 'Teams', value: (scope.teams || []).join(', '), mono: true, hint: teams.length ? `Teams: ${teams.map((t) => t.name).join(', ')}.` : null },
       ] },
       { type: 'row', fields: [
-        { id: 'platforms', label: 'Platforms', value: (scope.platforms || []).join(', '), mono: true, hint: 'gateway, microsoft-365 or copilot-studio.' },
+        { id: 'platforms', label: 'Platforms', value: (scope.platforms || []).join(', '), mono: true, hint: 'gateway, microsoft-365, copilot-studio, aws, google-cloud, salesforce or databricks.' },
         { id: 'environments', label: 'Environments', value: (scope.environments || []).join(', '), mono: true },
       ] },
       { id: 'scope_labels', label: 'With labels', value: formatLabels(scope.labels), mono: true, hint: 'key=value, separated by commas. Agents labelled agentgov/exempt-rules with the rule’s name, or *, are left out.' },
@@ -5622,13 +5627,20 @@ async function revokeApiKey(k) {
 
 /* --------------------------------------------------------------- platforms */
 
-// Agents built on Microsoft 365 Copilot and Copilot Studio. They never call the
-// gateway, so AgentGov governs what their platform reports about them.
+// Agents built on other platforms (Microsoft 365 Copilot, Copilot Studio, AWS, Google
+// Cloud, Salesforce, Databricks). They never call the gateway, so AgentGov governs what
+// their platform reports about them.
 const PLATFORM_SOURCES = {
   'platform:microsoft-365': 'Microsoft 365',
   'platform:copilot-studio': 'Copilot Studio',
   'platform:entra-agent-id': 'Microsoft Entra Agent ID',
+  'platform:aws': 'AWS',
+  'platform:google-cloud': 'Google Cloud',
+  'platform:salesforce': 'Salesforce',
+  'platform:databricks': 'Databricks',
 };
+// The platforms a connector of AgentGov's own reads: each reports its agents the same way.
+const INVENTORY_SOURCES = new Set(['aws', 'google-cloud', 'salesforce', 'databricks']);
 // The platforms whose agents AgentGov can block there (an Entra identity alone isn't one).
 const BLOCKABLE_SOURCES = new Set(['copilot-studio', 'microsoft-365']);
 const M365_SETTINGS = 'AGENTGOV_M365_TENANT_ID, AGENTGOV_M365_CLIENT_ID and AGENTGOV_M365_CLIENT_SECRET';
@@ -5667,7 +5679,51 @@ async function renderPlatforms() {
     platformsCallout(view),
     connectionsCard(view),
     h('div', { class: 'grid-halves' }, m365Card(sources['microsoft-365']), copilotStudioCard(sources['copilot-studio'], view.admin_actions)),
-    connectorsCard(usage, view));
+    connectorsCard(usage, view),
+    otherPlatformsCard(view));
+}
+
+function inventoryStatus(src) {
+  if (!src.configured) return 'off';
+  if (!src.turned_on) return 'turned_off';
+  const last = src.last_sync;
+  if (!last) return 'waiting';
+  if (last.ok) return 'ok';
+  // Some parts (a region, an account) couldn't be read, but the rest was.
+  return last.counts?.failed && (last.counts.created || last.counts.updated) ? 'partial' : 'failing';
+}
+
+function otherPlatformsCard(view) {
+  const rows = view.sources.filter((src) => INVENTORY_SOURCES.has(src.source));
+  if (!rows.length) return null;
+  const names = rows.map((src) => src.name);
+  const listed = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0];
+  return card({
+    title: 'Other platforms',
+    sub: `Agents built on ${listed}. AgentGov reads each platform it is set up for, on a schedule, and flags its agents' risky settings; it doesn't change them.`,
+    flush: true,
+    body: h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, 'Other platforms'),
+      h('thead', {}, h('tr', {}, ['Platform', 'Status', 'Last sync', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+      h('tbody', {}, rows.map((src) => {
+        const status = inventoryStatus(src);
+        const last = src.last_sync;
+        const help = status === 'off' && src.needs ? `Needs ${src.needs}.`
+          : status === 'turned_off' ? 'Turn it on again on the Features page.' : null;
+        return h('tr', { 'data-platform': src.source },
+          h('td', { 'data-label': 'Platform' }, h('span', { class: 'cell-title' }, src.name),
+            h('div', { class: 'cell-sub' }, src.agents
+              ? h('a', { href: `#/agents?source=${encodeURIComponent(`platform:${src.source}`)}` }, plural(src.agents, 'agent'))
+              : 'No agents yet')),
+          h('td', { 'data-label': 'Status' }, chip('connection', status), help ? h('div', { class: 'cell-sub break' }, help) : null),
+          h('td', { 'data-label': 'Last sync' }, last
+            ? h('div', {}, timeEl(last.at), h('div', { class: last.ok ? 'cell-sub' : 'cell-sub tone-text-critical' }, last.ok ? syncCounts(last.counts || {}) : last.message))
+            : h('span', { class: 'muted' }, 'Never')),
+          h('td', { 'data-label': '' }, can('admin') && src.configured && src.turned_on
+            ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `sync-${src.source}`, onclick: (e) => syncConnection({ key: src.source, name: src.name }, e.currentTarget) }, icon('refresh'), 'Sync now')
+            : null));
+      })))),
+  });
 }
 
 function platformsCallout(view) {
@@ -6031,8 +6087,38 @@ function usageRows(v) {
   ];
 }
 
+// What a connector of AgentGov's own read about an agent on its platform.
+function inventoryCard(v) {
+  const notes = v.in_inventory === false
+    ? [callout('warning', 'triangle', `${v.source_name} no longer reports this agent. Delete it here when you no longer need its record.`)]
+    : [];
+  const value = (f) => {
+    if (f.tone) return plainChip(f.value, { tone: f.tone, iconName: f.tone === 'serious' ? 'triangle' : 'alert-circle' });
+    return f.code ? h('code', {}, f.value) : f.value;
+  };
+  const rows = [
+    ['Name there', v.display_name],
+    ['What it is', v.kind],
+    ...(v.facts || []).map((f) => [f.label, value(f)]),
+    ['ID', copyable(v.external_id, `${v.source_name} ID`)],
+    /^https:\/\//.test(v.url || '') ? ['Open', h('a', { href: v.url, target: '_blank', rel: 'noopener noreferrer' }, `In ${v.source_name}`)] : null,
+    ['Synced', timeEl(v.synced_at)],
+  ];
+  const tools = v.tools || [];
+  return card({
+    title: v.source_name,
+    sub: `As ${v.source_name} reported it at the last sync`,
+    body: [...notes, facts(rows), tools.length ? h('div', { class: 'stack', style: 'gap:8px; margin-top:14px' },
+      h('h3', { class: 'dialog-section' }, 'Tools'),
+      h('ul', { class: 'perm-list', role: 'list' }, tools.map((t) => h('li', {},
+        h('span', { class: 'perm-server' }, h('code', {}, t.name), ' ', plainChip(t.kind, { tone: t.tone || null })),
+        t.detail ? h('div', { class: 'cell-sub break' }, t.detail) : null)))) : null],
+  });
+}
+
 function platformCard(a, v, where) {
   if (v.source === 'entra-agent-id') return entraCard(v);
+  if (INVENTORY_SOURCES.has(v.source)) return inventoryCard(v);
   const studio = v.source === 'copilot-studio';
   // Only on the card for the record the control plane acts on.
   const acts = where && where.source === v.source;

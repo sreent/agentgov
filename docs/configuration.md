@@ -250,6 +250,17 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | `AGENTGOV_COPILOT_STUDIO_TENANT_ID` | — | The tenant ID (a GUID) whose apps may call. By default the tenant of `AGENTGOV_M365_TENANT_ID` or of sign-in through Entra ID, when that is a GUID. |
 | `AGENTGOV_COPILOT_STUDIO_ON_ERROR` | `block` | The answer when AgentGov cannot decide in time (enforce mode): `block` or `allow`. |
 
+### Agents on other platforms
+
+AgentGov reads the agents on AWS, Google Cloud, Salesforce and Databricks into the inventory, each where its settings below are set ([other-platforms](other-platforms.md)).
+
+| Variable | Default | What it does |
+|---|---|---|
+| `AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS` | `3600` | Seconds between reads of each platform; 0 reads them only on demand. |
+| `AGENTGOV_AWS_REGIONS` | empty | AWS: the regions to read Amazon Bedrock agents and AgentCore's harnesses and agent runtimes in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS isn't read). AgentGov signs its requests with AWS credentials from the usual places: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, IAM roles for service accounts or Pod Identity on EKS, or the instance's role. |
+| `AGENTGOV_AWS_ROLE_ARNS` | empty | Roles to assume, comma-separated ARNs, to read other AWS accounts too (in the same regions), with the credentials above. |
+| `AGENTGOV_AWS_EXTERNAL_ID` | — | The external ID those roles' trust policies ask for, if any. |
+
 ### Classifier, optional
 
 | Variable | Default | What it does |

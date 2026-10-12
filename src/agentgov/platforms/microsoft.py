@@ -27,6 +27,7 @@ from urllib.parse import quote
 import httpx
 
 from agentgov.config import Settings
+from agentgov.platforms.base import PlatformError
 
 # Agents are the packages Microsoft 365 Copilot can host.
 AGENTS_FILTER = "supportedHosts/any(h:h eq 'Copilot')"
@@ -34,17 +35,6 @@ MAX_PAGES = 200
 DECLARATIVE_AGENT = "declarativeagent"
 # Entra object IDs: what may go into a Graph $filter.
 GUID = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
-
-
-class PlatformError(Exception):
-    """A platform could not be read or changed; the message says why.
-
-    ``status`` is Microsoft's HTTP status, when it answered.
-    """
-
-    def __init__(self, message: str, *, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
 
 
 def token_roles(token: str) -> frozenset[str] | None:

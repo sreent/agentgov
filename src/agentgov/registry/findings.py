@@ -140,6 +140,11 @@ def raise_finding(
     return finding, reopened
 
 
+def _open(types: set[str], subjects: set[str] | None) -> Any:
+    query = select(Finding).where(Finding.status == "open", Finding.type.in_(types))
+    return query if subjects is None else query.where(Finding.subject.in_(subjects))
+
+
 def resolve_absent(
     session: Session,
     *,
@@ -147,14 +152,14 @@ def resolve_absent(
     present_keys: set[str],
     actor: str = "system:posture-scan",
     clean: int = 1,
+    subjects: set[str] | None = None,
 ) -> int:
     """Auto-resolve open findings whose condition no longer holds, once ``clean`` checks in
     a row found it gone: findings from other systems' data take two, so that one odd sync
-    doesn't close and reopen them."""
+    doesn't close and reopen them. ``subjects`` limits it to the findings about those (a
+    platform's agents, where other platforms raise findings of the same types)."""
     count = 0
-    open_findings = session.scalars(
-        select(Finding).where(Finding.status == "open", Finding.type.in_(types))
-    ).all()
+    open_findings = session.scalars(_open(types, subjects)).all()
     for finding in open_findings:
         if finding.key in present_keys:
             continue
@@ -170,14 +175,18 @@ def resolve_absent(
     return count
 
 
-def mark_unverified(session: Session, *, types: set[str], verified: bool = False) -> int:
+def mark_unverified(
+    session: Session,
+    *,
+    types: set[str],
+    verified: bool = False,
+    subjects: set[str] | None = None,
+) -> int:
     """The check behind these findings couldn't run (a sync failed): their open findings
     may or may not still hold, so they stay open, marked unverified, until it runs again
-    (``verified=True``, when it does)."""
+    (``verified=True``, when it does). ``subjects`` as for :func:`resolve_absent`."""
     count = 0
-    for finding in session.scalars(
-        select(Finding).where(Finding.status == "open", Finding.type.in_(types))
-    ):
+    for finding in session.scalars(_open(types, subjects)):
         if finding.verified != verified:
             finding.verified = verified
             count += 1

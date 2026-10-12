@@ -39,12 +39,13 @@ come second: they report, but they don't enforce.
 | 18 | Security | **Workload identities for the components** (done, [production](production.md#workload-identities-from-spire)): the components' certificates from SPIRE, as X.509-SVIDs, besides AgentGov's own authority and cert-manager; each component takes a renewed certificate without a restart, agentgateway included; and, as SPIRE gives every workload one, the components, OPA included, take only the callers they name, by their SPIFFE IDs | SPIFFE / SPIRE (the CSI driver, the controller manager's ClusterSPIFFEIDs, spiffe-helper) |
 | 19 | Admin access | **Signing out everywhere** (done, [administration](administration.md#signing-out-everywhere)): when the identity provider ends a person's session, it tells AgentGov, and their sessions in the admin UI and the CLI end with it rather than at expiry; checked with Keycloak 26.8, as a person signs out there | OpenID Connect Back-Channel Logout 1.0 |
 | 20 | Identity | **Incremental identity reconciliation** (done, [architecture](architecture.md#keeping-components-in-sync)): after a change, AgentGov syncs with Keycloak only the agents whose clients should change, or whose last sync failed, and every agent on a slower schedule you choose (`AGENTGOV_IDENTITY_FULL_SYNC_SECONDS`), which also repairs what was changed in Keycloak itself; and the sync takes one agent at a time, so the jobs that update many agents at once don't wait for it | — |
+| 21 | Registry | **Agents on AWS** (done, [other platforms](other-platforms.md#aws)): Amazon Bedrock agents and AgentCore's harnesses and runtimes read into the registry, in each region and account named, with their tools, how they check callers and what they run as; their risky settings (no guardrail, code-running tools, tokens taken for any application, a resource policy open to any AWS account, secrets in their environment) as findings, and their instructions checked; AWS's requests signed by AgentGov itself, without the AWS SDK | Agents for Amazon Bedrock, Amazon Bedrock AgentCore, AWS Signature Version 4 |
 
 ## Later
 
 | Theme | Item | Building block |
 |---|---|---|
-| Registry | **More platform connectors**: import agents from cloud agent platforms and SaaS agent builders (AWS, Google, Salesforce, Databricks) the way [Microsoft 365 and Copilot Studio](platforms.md) are, when someone needs one | Platform APIs |
+| Registry | **More platform connectors**: read agents from Google Cloud, Salesforce and Databricks the way [AWS](other-platforms.md#aws) and [Microsoft 365 and Copilot Studio](platforms.md) are; and from AWS, its AgentCore gateways, Agent Registry and Amazon Quick's agents | Platform APIs |
 | Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
 
 ## Out of scope

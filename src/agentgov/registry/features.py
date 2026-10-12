@@ -52,6 +52,7 @@ GROUPS = {
     "lifecycle": "Lifecycle",
     "policy": "Policy",
     "microsoft": "Microsoft",
+    "platforms": "Other platforms",
     "secops": "Security operations",
 }
 
@@ -653,6 +654,21 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "AgentGov refuses Copilot Studio's calls.",
         },
         needs="AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS and the tenant ID (and OPA to enforce)",
+    ),
+    Feature(
+        "aws",
+        "AWS agents",
+        "platforms",
+        "AgentGov reads the agents on AWS into the inventory (Amazon Bedrock agents, and "
+        "AgentCore agent runtimes and gateways), with their risky settings as findings, on a "
+        "schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has AWS credentials and regions to read.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_AWS_REGIONS, and AWS credentials allowed to read them",
     ),
     Feature(
         "security-operations",

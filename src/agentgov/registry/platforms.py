@@ -44,8 +44,9 @@ from agentgov.models import (
     PlatformAgent,
     PlatformSync,
 )
+from agentgov.platforms.base import Inventory
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import discovery, findings
+from agentgov.registry import discovery, features, findings
 from agentgov.registry import instructions as instructions_svc
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
@@ -53,7 +54,14 @@ SOURCES = {
     "microsoft-365": "Microsoft 365",
     "copilot-studio": "Copilot Studio",
     "entra-agent-id": "Microsoft Entra Agent ID",
+    "aws": "AWS",
+    "google-cloud": "Google Cloud",
+    "salesforce": "Salesforce",
+    "databricks": "Databricks",
 }
+# The platforms read by a connector of AgentGov's own (agentgov.platforms.base): each
+# reports its agents and their risky settings the same way.
+INVENTORY_SOURCES = ("aws", "google-cloud", "salesforce", "databricks")
 # The agent identity blueprint Copilot Studio creates its agents' identities from.
 COPILOT_STUDIO_BLUEPRINT = "25664c89-cea5-4ab6-b924-a54fd8a19ae0"
 FINDING_TYPES = {
@@ -61,6 +69,17 @@ FINDING_TYPES = {
     "platform.no_authentication",
     "platform.maker_credentials",
     "platform.shared_with_everyone",
+}
+# What the connectors of INVENTORY_SOURCES may find, on their own agents.
+INVENTORY_FINDINGS = {
+    "platform.no_authentication",
+    "platform.weak_authentication",
+    "platform.shared_with_everyone",
+    "platform.maker_credentials",
+    "platform.no_guardrail",
+    "platform.plain_secret",
+    "platform.broad_identity",
+    "platform.risky_tool",
 }
 # The findings each sync's data raises: while its latest sync failed, they are
 # unverified (docs/issues.md), and verified again when one succeeds.
@@ -532,6 +551,14 @@ def _records(session: Session, source: str) -> list[PlatformAgent]:
     )
 
 
+def subjects(session: Session, source: str) -> set[str]:
+    """The agents a source reports, deleted or not: its findings are about them, and other
+    sources raise findings of the same types about theirs."""
+    return set(
+        session.scalars(select(PlatformAgent.agent_id).where(PlatformAgent.source == source))
+    )
+
+
 def evaluate(session: Session) -> int:
     """Raise or resolve the Copilot Studio findings; returns how many are open."""
     approved = {c.connector_id for c in approved_connectors(session)}
@@ -605,8 +632,108 @@ def evaluate(session: Session) -> int:
                 remediation="Share it with the groups that need it, or confirm that everyone "
                 "should have it and dismiss this finding.",
             )
-    findings.resolve_absent(session, types=FINDING_TYPES, present_keys=present, actor=SYSTEM_ACTOR)
+    findings.resolve_absent(
+        session,
+        types=FINDING_TYPES,
+        present_keys=present,
+        actor=SYSTEM_ACTOR,
+        subjects=subjects(session, "copilot-studio"),
+    )
     return len(present)
+
+
+def record_inventory(
+    session: Session,
+    source: str,
+    inventory: Inventory,
+    *,
+    actor: str | None = None,
+    classify: bool = False,
+) -> dict[str, int]:
+    """Store what a connector read from ``source``: each agent, with its risky settings
+    as findings. Agents gone from a part read in full are marked gone; a part that
+    couldn't be read leaves its agents and their findings as they were, unverified."""
+    counts = {"created": 0, "updated": 0, "skipped": 0}
+    seen: set[str] = set()
+    present: set[str] = set()
+    partial: set[str] = set()  # agents read in part: their findings can't be resolved
+    for item in inventory.found:
+        key = f"{source}:{item.external_id}"
+        if key in seen:
+            counts["skipped"] += 1
+            continue
+        seen.add(key)
+        details = {**item.details, "kind": item.kind, "part": item.part, "in_inventory": True}
+        agent, created = upsert(
+            session,
+            source=source,
+            external_id=item.external_id,
+            name=item.name,
+            platform=item.kind,
+            details=details,
+            external_ids=item.external_ids,
+            entra_index={},
+            description=item.description,
+        )
+        counts["created" if created else "updated"] += 1
+        if not item.complete:
+            partial.add(agent.id)
+        if agent.status == DELETED:
+            continue
+        if item.instructions and item.instructions.strip():
+            with contextlib.suppress(ValidationError):  # too long to keep
+                instructions_svc.report(
+                    session,
+                    agent,
+                    source=source,
+                    text=item.instructions,
+                    actor=f"system:{source}",
+                    classify=classify,
+                )
+        for risk in item.risks:
+            finding, _ = findings.raise_finding(
+                session,
+                type=risk.type,
+                severity=risk.severity,
+                subject=agent.id,
+                agent_id=agent.id,
+                title=risk.title,
+                description=risk.description,
+                remediation=risk.remediation,
+                details={"platform": SOURCES[source], **risk.details},
+            )
+            present.add(finding.key)
+    # Agents gone from what was read stay in the registry, marked as gone.
+    unread: set[str] = set(partial)
+    for record in session.scalars(select(PlatformAgent).where(PlatformAgent.source == source)):
+        part = (record.data or {}).get("part")
+        if part in inventory.failed or (part not in inventory.read and record.id not in seen):
+            unread.add(record.agent_id)
+        elif record.id not in seen and (record.data or {}).get("in_inventory", True):
+            record.data = {**(record.data or {}), "in_inventory": False}
+    checked = subjects(session, source) - unread
+    findings.resolve_absent(
+        session,
+        types=INVENTORY_FINDINGS,
+        present_keys=present,
+        actor=SYSTEM_ACTOR,
+        subjects=checked,
+        clean=2,  # one odd answer from the platform doesn't close and reopen them
+    )
+    findings.mark_unverified(session, types=INVENTORY_FINDINGS, subjects=unread)
+    counts["findings"] = len(present)
+    if inventory.failed:
+        counts["failed"] = len(inventory.failed)
+    message = "; ".join(f"{part}: {error}" for part, error in sorted(inventory.failed.items()))
+    set_sync(session, source, ok=not inventory.failed, counts=counts, message=message, actor=actor)
+    return counts
+
+
+def sync_failed(session: Session, source: str, message: str, *, actor: str | None) -> None:
+    """A connector couldn't read its platform at all: its agents' findings stay open,
+    unverified, until a sync succeeds."""
+    set_sync(session, source, ok=False, counts={}, message=message, actor=actor)
+    findings.mark_unverified(session, types=INVENTORY_FINDINGS, subjects=subjects(session, source))
 
 
 def refresh_risk(session: Session, settings: Settings) -> None:
@@ -680,7 +807,13 @@ def set_sync(
     sync.synced_at, sync.ok, sync.message, sync.counts = ids.utcnow(), ok, message, counts
     session.add(sync)
     if source in SYNCED_FINDINGS:
-        findings.mark_unverified(session, types=SYNCED_FINDINGS[source], verified=ok)
+        findings.mark_unverified(
+            session,
+            types=SYNCED_FINDINGS[source],
+            verified=ok,
+            # Defender's and Entra's findings come from those sources alone.
+            subjects=subjects(session, source) if source == "copilot-studio" else None,
+        )
     if actor:
         ledger.append(
             session,
@@ -693,7 +826,12 @@ def set_sync(
         )
 
 
-def overview(session: Session, *, m365_configured: bool) -> dict[str, Any]:
+def overview(
+    session: Session, *, m365_configured: bool, connected: set[str] | None = None
+) -> dict[str, Any]:
+    """Each source, how many agents it reports and how its last sync went. ``connected``:
+    the INVENTORY_SOURCES whose connector is configured."""
+    connected = connected or set()
     agents = dict(
         session.execute(
             select(PlatformAgent.source, func.count())
@@ -705,12 +843,25 @@ def overview(session: Session, *, m365_configured: bool) -> dict[str, Any]:
     sources = []
     for source, name in SOURCES.items():
         sync = session.get(PlatformSync, source)
+        extra: dict[str, Any] = {}
+        if source in INVENTORY_SOURCES:
+            configured = source in connected
+            feature = features.BY_KEY.get(source)
+            if feature is None:
+                continue  # no connector for it yet
+            extra = {
+                "turned_on": feature is not None and features.is_on(session, source),
+                "needs": feature.needs if feature else None,
+            }
+        else:
+            configured = True if source == "copilot-studio" else m365_configured
         sources.append(
             {
+                **extra,
                 "source": source,
                 "name": name,
                 "mode": "import" if source == "copilot-studio" else "sync",
-                "configured": True if source == "copilot-studio" else m365_configured,
+                "configured": configured,
                 "agents": agents.get(source, 0),
                 "last_sync": {
                     "at": ids.isoformat(sync.synced_at),

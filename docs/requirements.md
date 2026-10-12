@@ -107,7 +107,7 @@ Going out, as you use them:
 | From | To |
 |---|---|
 | Gateway | Your MCP servers, model providers' APIs, the A2A endpoints of agents it publishes, and Keycloak's keys, to check agents' tokens |
-| Control plane | Keycloak's admin API; Microsoft Entra ID (`login.microsoftonline.com`), Microsoft Graph and the Power Platform API; your SIEM, Splunk, Teams and Slack; the Granite Guardian server; your mail server; a time-stamping authority and a transparency log, for the ledger's checkpoints ([evidence](evidence.md)) |
+| Control plane | Keycloak's admin API; Microsoft Entra ID (`login.microsoftonline.com`), Microsoft Graph and the Power Platform API; AWS's APIs (STS, Agents for Amazon Bedrock, AgentCore) in the regions it reads; your SIEM, Splunk, Teams and Slack; the Granite Guardian server; your mail server; a time-stamping authority and a transparency log, for the ledger's checkpoints ([evidence](evidence.md)) |
 | Governance processor | The Granite Guardian server, for the classifier's second opinion on traffic ([detection](detection.md)) |
 | Keycloak | The keys of the identity issuers agents authenticate with, and the identity providers people sign in through |
 
@@ -120,6 +120,7 @@ Only what you turn on needs any:
 | Read the Microsoft 365 agent catalog, Entra Agent ID, the Purview audit log or Defender's alerts | A Microsoft Entra app registration with the Microsoft Graph application permission for each, admin-consented ([connections](microsoft-connections.md)). The catalog needs a Microsoft Agent 365 licence |
 | Quarantine Copilot Studio agents, block Microsoft 365 agents, push connector policies | Administrators who sign in through Microsoft Entra ID, and the delegated permissions in [platforms](platforms.md#setting-it-up) |
 | Copilot Studio threat detection | A public HTTPS address for the control plane, an app registration, and a Power Platform administrator to connect it ([connections](microsoft-connections.md#copilot-studio-threat-detection)) |
+| Read the agents on AWS | AWS credentials, or a role per account, allowed to read Bedrock agents and AgentCore's harnesses and runtimes ([other platforms](other-platforms.md#aws)) |
 | Model calls | Each provider's API key, given to the gateway only ([model calls](models.md)) |
 | Security operations | Your SIEM's endpoint or token, and Teams or Slack webhooks ([security operations](secops.md)) |
 | Agents' own identities | Keycloak able to reach each identity issuer's keys ([agents' own identities](agent-identity.md)) |

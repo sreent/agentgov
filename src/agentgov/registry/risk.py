@@ -35,12 +35,17 @@ SIGNAL_WEIGHTS: dict[str, tuple[int, int]] = {
 # An open "unsafe instructions" finding, by its severity.
 INSTRUCTION_POINTS = {"critical": 40, "high": 25, "medium": 10, "low": 5}
 
-# Open findings about how an agent on another platform (Copilot Studio) is set up.
+# Open findings about how an agent on another platform is set up.
 FINDING_WEIGHTS: dict[str, tuple[str, int]] = {
     "platform.no_authentication": ("Published without user authentication", 25),
     "platform.unapproved_connector": ("Uses connectors that are not approved", 20),
+    "platform.plain_secret": ("Secrets in its settings, in plain text", 20),
+    "platform.weak_authentication": ("Callers aren't narrowed down", 15),
+    "platform.broad_identity": ("Runs with broad or default access", 15),
+    "platform.risky_tool": ("Can run code or work a computer", 15),
     "platform.maker_credentials": ("Tools run with the maker's connections", 10),
     "platform.shared_with_everyone": ("Shared with the whole organisation", 10),
+    "platform.no_guardrail": ("No guardrails on what it says", 10),
     "defender.alert": ("Open Microsoft Defender alerts", 20),
     "entra.disabled_by_microsoft": ("Entra agent identity disabled by Microsoft", 25),
 }
