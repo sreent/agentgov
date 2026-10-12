@@ -529,6 +529,8 @@ class FakePlatform:
                     "networkConfiguration": {"networkMode": "VPC"},
                 },
             )
+        if path.startswith("/gateways/"):
+            return self.gateways(path)
         if path.startswith("/resourcepolicy/"):
             # The ARN, percent-encoded in the path (and signed encoded once more).
             assert "%3A" in request.url.raw_path.decode()
@@ -544,6 +546,97 @@ class FakePlatform:
                 ],
             }
             return httpx.Response(200, json={"policy": json.dumps(policy)})
+        return httpx.Response(404, json={"message": f"no {path}"})
+
+    def gateways(self, path: str) -> httpx.Response:
+        """Three gateways: one that lets anyone in, one that takes any token from its
+        identity provider, and one that checks AWS credentials but lets any account in."""
+        arn = f"arn:aws:bedrock-agentcore:us-east-1:{ACCOUNT}:gateway/"
+        summaries = {
+            "orders-gw": {"name": "orders-tools", "authorizerType": "NONE"},
+            "hr-gw": {"name": "hr-tools", "authorizerType": "CUSTOM_JWT"},
+            "ledger-gw": {"name": "ledger-tools", "authorizerType": "AWS_IAM"},
+        }
+        if path == "/gateways/":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"gatewayId": gid, "status": "READY", "protocolType": "MCP", **summary}
+                        for gid, summary in summaries.items()
+                    ]
+                },
+            )
+        gid, _, rest = path.removeprefix("/gateways/").partition("/")
+        if gid not in summaries:
+            return httpx.Response(404, json={"message": f"no gateway {gid}"})
+        if rest == "":
+            detail: dict[str, Any] = {
+                "gatewayId": gid,
+                "gatewayArn": arn + gid,
+                "gatewayUrl": f"https://{gid}.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+                "roleArn": f"arn:aws:iam::{ACCOUNT}:role/{gid}",
+                "updatedAt": "2026-10-01T10:00:00Z",
+                **summaries[gid],
+            }
+            if gid == "hr-gw":
+                detail["authorizerConfiguration"] = {
+                    "customJWTAuthorizer": {
+                        "discoveryUrl": "https://login.contoso.com/.well-known/openid-configuration",
+                        "allowedScopes": ["mcp"],
+                    }
+                }
+                detail["exceptionLevel"] = "DEBUG"
+                detail["policyEngineConfiguration"] = {"arn": arn + "pe", "mode": "LOG_ONLY"}
+                detail["protocolConfiguration"] = {
+                    "mcp": {"instructions": "Use these tools to look up employees' records."}
+                }
+            return httpx.Response(200, json=detail)
+        if rest == "targets/":
+            targets = {"orders-gw": ["refunds", "carrier"], "hr-gw": [], "ledger-gw": []}[gid]
+            return httpx.Response(
+                200,
+                json={"items": [{"targetId": t, "name": t, "status": "READY"} for t in targets]},
+            )
+        if rest == "targets/refunds/":
+            return httpx.Response(
+                200,
+                json={
+                    "targetId": "refunds",
+                    "name": "refunds",
+                    "status": "READY",
+                    "targetConfiguration": {
+                        "mcp": {
+                            "lambda": {
+                                "lambdaArn": f"arn:aws:lambda:us-east-1:{ACCOUNT}:function:refunds",
+                                "toolSchema": {"inlinePayload": []},
+                            }
+                        }
+                    },
+                    "credentialProviderConfigurations": [
+                        {"credentialProviderType": "GATEWAY_IAM_ROLE"}
+                    ],
+                },
+            )
+        if rest == "targets/carrier/":
+            return httpx.Response(
+                200,
+                json={
+                    "targetId": "carrier",
+                    "name": "carrier",
+                    "status": "READY",
+                    "targetConfiguration": {
+                        "http": {
+                            "passthrough": {
+                                "endpoint": "https://mcp.carrier.example/v1?key=s3cr3t-in-url",
+                                "protocolType": "MCP",
+                                "staticQueryParameters": {"api_key": "s3cr3t-param"},
+                            }
+                        }
+                    },
+                    "credentialProviderConfigurations": [],
+                },
+            )
         return httpx.Response(404, json={"message": f"no {path}"})
 
 
@@ -588,7 +681,7 @@ def test_agents_on_aws_are_read_into_the_registry(aws_client, platform) -> None:
     resp = aws_client.post("/v1/platforms/aws/sync", headers=ADMIN)
     assert resp.status_code == 200, resp.text
     counts = resp.json()
-    assert (counts["created"], counts["failed"]) == (5, 1)
+    assert (counts["created"], counts["failed"]) == (8, 1)
 
     support = _agent(aws_client, "support-agent")
     assert (support["source"], support["platform"]) == ("platform:aws", "Amazon Bedrock agent")
@@ -648,6 +741,69 @@ def test_agents_on_aws_are_read_into_the_registry(aws_client, platform) -> None:
     assert "agentcore" not in last["message"]  # not offered in eu-west-1: skipped
 
 
+def test_agentcore_gateways_are_read_with_their_targets(aws_client, platform) -> None:
+    assert aws_client.post("/v1/platforms/aws/sync", headers=ADMIN).status_code == 200
+
+    orders = _agent(aws_client, "orders-tools")
+    assert orders["platform"] == "AgentCore gateway (MCP server)"
+    [view] = orders["platforms"]
+    assert view["part"] == f"{ACCOUNT}/us-east-1/agentcore-gateways"
+    facts = {f["label"]: f["value"] for f in view["facts"]}
+    assert facts["Authentication"] == "None: anyone who can reach it"
+    assert facts["Policy engine"] == "None"
+    tools = {t["name"]: t for t in view["tools"]}
+    assert tools["refunds"]["kind"] == "Lambda function"
+    assert tools["refunds"]["detail"].endswith(":function:refunds · as the gateway's role")
+    assert tools["carrier"] == {
+        "name": "carrier",
+        "kind": "Passthrough (MCP)",
+        "detail": "https://mcp.carrier.example · with no authorization",
+        "tone": "warning",
+    }
+    # Of the target's URL only the host is kept, and none of its static parameters.
+    text = json.dumps(orders)
+    assert "s3cr3t" not in text
+    found = _findings(aws_client, "orders-tools")
+    assert found["platform.no_authentication"]["severity"] == "high"
+
+    hr = _agent(aws_client, "hr-tools")
+    facts = {f["label"]: f["value"] for f in hr["platforms"][0]["facts"]}
+    assert facts["Policy engine"] == "Logs only, decides nothing"
+    assert facts["Errors"].startswith("Detailed (DEBUG)")
+    assert _findings(aws_client, "hr-tools")["platform.weak_authentication"]["severity"] == "medium"
+
+    ledger = _agent(aws_client, "ledger-tools")
+    facts = {f["label"]: f["value"] for f in ledger["platforms"][0]["facts"]}
+    assert facts["Authentication"] == "AWS credentials (IAM, SigV4)"
+    assert facts["Resource policy"] == "Lets any AWS account in"
+    found = _findings(aws_client, "ledger-tools")
+    assert "any AWS account" in found["platform.no_authentication"]["title"]
+
+
+def test_gateways_aws_wont_list_leave_the_agents_read(aws_client, platform) -> None:
+    original = platform.gateways
+
+    def gateways(path: str) -> httpx.Response:
+        if path == "/gateways/":
+            return httpx.Response(
+                403,
+                headers={"x-amzn-ErrorType": "AccessDeniedException"},
+                json={"message": "not authorized to perform: bedrock-agentcore:ListGateways"},
+            )
+        return original(path)
+
+    platform.gateways = gateways  # type: ignore[method-assign]
+    resp = aws_client.post("/v1/platforms/aws/sync", headers=ADMIN)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["failed"] == 2  # Bedrock in eu-west-1, and the gateways here
+    assert _agent(aws_client, "concierge")["platform"] == "AgentCore harness"
+    status = {
+        s["source"]: s for s in aws_client.get("/v1/platforms", headers=ADMIN).json()["sources"]
+    }
+    assert "agentcore-gateways: " in status["aws"]["last_sync"]["message"]
+    assert "ListGateways" in status["aws"]["last_sync"]["message"]
+
+
 def test_an_agent_aws_wont_describe_is_kept_from_its_summary(aws_client, platform) -> None:
     platform.agents.append(
         {"agentId": "AGENT00003", "agentName": "vault-agent", "agentStatus": "PREPARED"}
@@ -696,10 +852,10 @@ def test_other_accounts_through_roles(settings, platform) -> None:
     inventory = connector.inventory()
     parts = {found.part for found in inventory.found}
     assert parts == {
-        f"{ACCOUNT}/us-east-1/bedrock-agents",
-        f"{ACCOUNT}/us-east-1/agentcore",
-        f"{OTHER}/us-east-1/bedrock-agents",
-        f"{OTHER}/us-east-1/agentcore",
+        f"{ACCOUNT}/us-east-1/{service}"
+        for service in ("bedrock-agents", "agentcore", "agentcore-gateways")
+    } | {f"{OTHER}/us-east-1/{service}" for service in ("bedrock-agents", "agentcore")} | {
+        f"{OTHER}/us-east-1/agentcore-gateways"
     }
     assume = next(
         r for r in platform.requests if r.url.host.startswith("sts.") and b"AssumeRole" in r.content

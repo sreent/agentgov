@@ -6,7 +6,9 @@ Read-only, as a service principal (OAuth machine-to-machine) or with a token:
 * **Model Serving agents**: serving endpoints whose task is an agent's (``agent/v1/chat``,
   ``agent/v2/chat``, ``agent/v1/responses``), with who may query them, what they serve,
   whether their requests and answers are kept (inference tables) and the names of their
-  environment variables.
+  environment variables. An endpoint that serves a Knowledge Assistant or a Supervisor
+  Agent (Agent Bricks, in Beta) is shown as one, with its instructions and, for a
+  supervisor, its subagents and tools.
 * **Agent Bricks agents**: Databricks Apps named ``agent-bricks-…``, where the Agent Bricks
   CLI deploys agents, with who may use them, the resources their service principal holds and
   the scopes they act for their users with.
@@ -177,9 +179,12 @@ class DatabricksConnector:
     # -- the agents ---------------------------------------------------------------
 
     def _serving(self, url: str, host: str) -> list[Found]:
+        built = self._bricks(url)
         found = []
         for summary in self._get(url, "/api/2.0/serving-endpoints").get("endpoints") or []:
-            if not isinstance(summary, dict) or summary.get("task") not in AGENT_TASKS:
+            if not isinstance(summary, dict):
+                continue
+            if summary.get("task") not in AGENT_TASKS and summary.get("name") not in built:
                 continue
             name = str(summary["name"])
             try:
@@ -189,8 +194,38 @@ class DatabricksConnector:
                     continue
                 raise
             acl = self._acl(url, f"/api/2.0/permissions/serving-endpoints/{endpoint.get('id')}")
-            found.append(serving_agent(endpoint, acl, host))
+            found.append(serving_agent(endpoint, acl, host, built=built.get(name)))
         return found
+
+    def _bricks(self, url: str) -> dict[str, Built]:
+        """The Knowledge Assistants and Supervisor Agents (Beta APIs), by the name of the
+        endpoint that serves each; none where the workspace doesn't offer them to AgentGov."""
+        built: dict[str, Built] = {}
+        for assistant in self._optional(
+            url, "/api/2.1/knowledge-assistants", "knowledge_assistants"
+        ):
+            if assistant.get("endpoint_name"):
+                built[str(assistant["endpoint_name"])] = Built("Knowledge Assistant", assistant, [])
+        for agent in self._optional(url, "/api/2.1/supervisor-agents", "supervisor_agents"):
+            if not agent.get("endpoint_name"):
+                continue
+            resource = str(agent.get("name") or "")
+            if not resource.startswith("supervisor-agents/"):
+                resource = (
+                    f"supervisor-agents/{agent.get('supervisor_agent_id') or agent.get('id')}"
+                )
+            tools = self._optional(url, f"/api/2.1/{quote(resource, safe='/')}/tools", "tools")
+            built[str(agent["endpoint_name"])] = Built("Supervisor Agent", agent, tools)
+        return built
+
+    def _optional(self, url: str, path: str, key: str) -> list[dict[str, Any]]:
+        """A list from an API the workspace may not offer, or not to AgentGov: empty then."""
+        try:
+            return list(self._pages(url, path, key, {"page_size": 100}))
+        except PlatformError as exc:
+            if exc.status in (400, 403, 404, 501):
+                return []
+            raise
 
     def _apps(self, url: str, host: str) -> list[Found]:
         found = []
@@ -292,8 +327,33 @@ def _who_fact(
     return _fact("Who may use it", ", ".join(named) or "Only its managers")
 
 
-def serving_agent(endpoint: dict[str, Any], acl: list[dict[str, Any]] | None, host: str) -> Found:
-    """An agent on Model Serving, with its endpoint's permissions (None when unread)."""
+class Built:
+    """An Agent Bricks agent an endpoint serves: what it is, as its API reports it, and (for a
+    supervisor) its tools."""
+
+    def __init__(self, kind: str, record: dict[str, Any], tools: list[dict[str, Any]]) -> None:
+        self.kind, self.record, self.tools = kind, record, tools
+
+
+def _brick_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    kind = str(tool.get("tool_type") or "tool")
+    return {
+        "name": str(tool.get("name") or tool.get("tool_id") or tool.get("id")),
+        "kind": kind.replace("_", " ").lower(),
+        "detail": tool.get("description") or None,
+        **({"tone": "warning"} if "connection" in kind.lower() else {}),
+    }
+
+
+def serving_agent(
+    endpoint: dict[str, Any],
+    acl: list[dict[str, Any]] | None,
+    host: str,
+    *,
+    built: Built | None = None,
+) -> Found:
+    """An agent on Model Serving, with its endpoint's permissions (None when unread) and,
+    where it serves one, the Knowledge Assistant or Supervisor Agent (``built``)."""
     name = str(endpoint["name"])
     config = endpoint.get("config") or {}
     served = [e for e in config.get("served_entities") or [] if isinstance(e, dict)]
@@ -330,10 +390,27 @@ def serving_agent(endpoint: dict[str, Any], acl: list[dict[str, Any]] | None, ho
                 {"variables": fixed},
             )
         )
+    if built and built.kind == "Supervisor Agent":
+        risks.append(
+            Risk(
+                "platform.risky_tool",
+                "medium",
+                f"{name} runs code its model writes",
+                "Every Supervisor Agent can run the code its model writes (Python, SQL or shell) "
+                "in a sandbox without internet access, reading the tables and volumes it is given "
+                "as tools, so a prompt injection can run code too.",
+                "Give it only the tables and volumes it needs, or confirm it needs to run code and "
+                "dismiss this finding.",
+                {"tools": ["code execution"]},
+            )
+        )
     tables = (endpoint.get("ai_gateway") or {}).get("inference_table_config") or {}
     logged = bool(tables.get("enabled"))
+    record = built.record if built else {}
     facts = _facts(
         _fact("Workspace", host, code=True),
+        _fact("Agent Bricks", built.kind if built else None),
+        _fact("State", record.get("state")),
         _fact("Task", endpoint.get("task"), code=True),
         _fact("State", (endpoint.get("state") or {}).get("ready")),
         _fact(
@@ -346,7 +423,7 @@ def serving_agent(endpoint: dict[str, Any], acl: list[dict[str, Any]] | None, ho
             ),
             code=True,
         ),
-        _fact("Created by", endpoint.get("creator")),
+        _fact("Created by", endpoint.get("creator") or record.get("creator")),
         _who_fact(acl, everyone, named),
         _fact(
             "Requests and answers kept",
@@ -356,19 +433,31 @@ def serving_agent(endpoint: dict[str, Any], acl: list[dict[str, Any]] | None, ho
         _fact("Environment variables", ", ".join(sorted(env))),
         _fact("From secrets", ", ".join(from_secrets)),
     )
+    tools = [_brick_tool(t) for t in built.tools] if built else []
+    if built and built.kind == "Supervisor Agent":
+        tools.append(
+            {
+                "name": "Code execution",
+                "kind": "built in",
+                "detail": "runs code its model writes, without internet access",
+                "tone": "warning",
+            }
+        )
     return Found(
         external_id=f"{host}/serving-endpoints/{endpoint.get('id') or name}",
-        name=name,
-        kind="Agent on Model Serving",
+        name=str(record.get("display_name") or name),
+        kind=built.kind if built else "Agent on Model Serving",
         part="",
-        description=endpoint.get("description"),
+        description=endpoint.get("description") or record.get("description"),
         details={
             "facts": facts,
             "task": endpoint.get("task"),
             "environment_variables": sorted(env),
+            **({"tools": tools} if tools else {}),
         },
         external_ids={"databricks_endpoint": str(endpoint.get("id") or name)},
         risks=risks,
+        instructions=record.get("instructions") or None,
         complete=acl is not None,
     )
 

@@ -1,17 +1,19 @@
-"""Agents on Google Cloud: Agent Runtime (formerly Vertex AI Agent Engine).
+"""Agents on Google Cloud: Agent Runtime (formerly Vertex AI Agent Engine) and Agent Registry.
 
 Read-only, with an access token from ``agentgov.platforms.google_auth``, in each
-configured project and region: each Agent Runtime agent (the API's ``reasoningEngines``)
-with the identity it runs as, how it reaches networks, the names of its environment
-variables, its encryption and memory, and who may use it (its IAM policy). See
-:func:`runtime_agent`.
+configured project:
 
-Gemini Enterprise's agents and Agent Platform's managed agents aren't read: Google's APIs
-list them only to the person who created them, so they can't give AgentGov an
-organisation's. An agent built with the ADK and added to Gemini Enterprise runs on Agent
-Runtime, where AgentGov reads it.
+* each Agent Runtime agent (the API's ``reasoningEngines``), in each region, with the
+  identity it runs as, how it reaches networks, the names of its environment variables,
+  its encryption and memory, and who may use it (its IAM policy): :func:`runtime_agent`;
+* Agent Registry's agents and MCP servers, in each region and ``global``: agents on Cloud
+  Run and GKE, Gemini Enterprise's agents (which its own API lists only to whoever created
+  them), agents registered by hand, and MCP servers, with where each runs and the identity
+  it runs as: :func:`registry_agent`. Google's own agents and MCP servers are left out, and
+  so are Agent Runtime's, read in full above.
 
-A part is a project's region (``contoso-agents/us-central1/agent-runtime``).
+A part is a project's service in a location (``contoso-agents/us-central1/agent-runtime``);
+one whose API the project hasn't turned on is skipped.
 """
 
 from __future__ import annotations
@@ -29,6 +31,18 @@ from agentgov.platforms.base import Found, Inventory, PlatformError, Risk
 from agentgov.platforms.google_auth import GoogleCredentials
 
 AGENT_RUNTIME = "agent-runtime"
+AGENT_REGISTRY = "agent-registry"
+REGISTRY = "https://agentregistry.googleapis.com/v1"
+# Agent Registry's attributes, by their keys' last part.
+ATTRIBUTE = "agentregistry.googleapis.com/system/"
+# What an agent in Agent Registry is, by what its ID (a URN) names.
+HOSTS = (
+    (":run:services:", "Cloud Run agent"),
+    (":run:jobs:", "Cloud Run job"),
+    (":container:clusters:", "GKE agent"),
+    (":discoveryengine:", "Gemini Enterprise agent"),
+    (":agentregistry:services:", "Agent registered in Agent Registry"),
+)
 MAX_PAGES = 50
 RETRIES = (0.5, 1.0, 2.0)
 SECRET_NAME = re.compile(r"(secret|passw(or)?d|token|api[_-]?key|private[_-]?key|credential)", re.I)
@@ -61,15 +75,24 @@ class GoogleConnector:
         self.credentials = GoogleCredentials(self.http, env=env)
         self.projects = settings.google_cloud_project_list()
         self.regions = settings.google_cloud_region_list()
+        self.kinds = settings.google_cloud_kind_list()
         self._sleep = sleep
 
     def inventory(self) -> Inventory:
         inventory = Inventory()
         for project in self.projects:
-            for region in self.regions:
-                part = f"{project}/{region}/{AGENT_RUNTIME}"
+            reads: list[tuple[str, str, Callable[[str, str], list[Found]]]] = []
+            if AGENT_RUNTIME in self.kinds:
+                reads += [(region, AGENT_RUNTIME, self._runtime) for region in self.regions]
+            if AGENT_REGISTRY in self.kinds:
+                locations = dict.fromkeys([*self.regions, "global"])
+                reads += [(location, AGENT_REGISTRY, self._registry) for location in locations]
+            for location, service, read in reads:
+                part = f"{project}/{location}/{service}"
                 try:
-                    found = self._runtime(project, region)
+                    found = read(project, location)
+                except _NotEnabled:
+                    continue  # the project doesn't use the service
                 except PlatformError as exc:
                     inventory.failed[part] = str(exc)
                     continue
@@ -99,6 +122,8 @@ class GoogleConnector:
             if (resp.status_code == 429 or resp.status_code >= 500) and pause is not None:
                 self._sleep(pause * (attempt + 1))
                 continue
+            if _reason(resp) == "SERVICE_DISABLED":
+                raise _NotEnabled(_error(resp), status=resp.status_code)
             raise PlatformError(_error(resp), status=resp.status_code)
         raise AssertionError("unreachable")
 
@@ -125,6 +150,23 @@ class GoogleConnector:
                 return None
             raise
 
+    # -- Agent Registry -------------------------------------------------------------
+
+    def _registry(self, project: str, location: str) -> list[Found]:
+        base = f"{REGISTRY}/projects/{project}/locations/{location}"
+        runtime = AGENT_RUNTIME in self.kinds
+        found = [
+            registry_agent(agent, project, location)
+            for agent in self._pages(f"{base}/agents", "agents")
+            if _kept(agent.get("agentId"), skip_runtime=runtime)
+        ]
+        found += [
+            registry_agent(server, project, location, mcp=True)
+            for server in self._pages(f"{base}/mcpServers", "mcpServers")
+            if _kept(server.get("mcpServerId"), skip_runtime=runtime)
+        ]
+        return found
+
     # -- Agent Runtime --------------------------------------------------------------
 
     def _runtime(self, project: str, region: str) -> list[Found]:
@@ -137,6 +179,23 @@ class GoogleConnector:
             )
             found.append(runtime_agent(engine, policy, project, region))
         return found
+
+
+class _NotEnabled(PlatformError):
+    """The project hasn't turned the service's API on: there is nothing of it to read."""
+
+
+def _reason(resp: httpx.Response) -> str | None:
+    """The reason Google's ErrorInfo gives for an error (SERVICE_DISABLED, ...)."""
+    try:
+        error = resp.json().get("error")
+    except (ValueError, AttributeError):
+        return None
+    details = error.get("details") if isinstance(error, dict) else None
+    for detail in details or []:
+        if isinstance(detail, dict) and detail.get("reason"):
+            return str(detail["reason"])
+    return None
 
 
 def _error(resp: httpx.Response) -> str:
@@ -343,4 +402,101 @@ def runtime_agent(
         risks=risks,
         # Without its IAM policy, who may use it is unknown: leave those findings as they were.
         complete=policy is not None,
+    )
+
+
+def _kept(urn: object, *, skip_runtime: bool) -> bool:
+    """Whether an Agent Registry entry is the organisation's to govern: not Google's own (a
+    URN published by googleapis.com rather than a project), and not an Agent Runtime agent
+    read in full from Agent Runtime."""
+    text = str(urn or "")
+    parts = text.split(":")
+    if text.startswith("urn:") and len(parts) > 2 and not parts[2].startswith("projects-"):
+        return False
+    return not (skip_runtime and ":aiplatform:reasoningEngines:" in text)
+
+
+def _attribute(entry: dict[str, Any], name: str, key: str) -> str | None:
+    value = (entry.get("attributes") or {}).get(ATTRIBUTE + name)
+    return str(value.get(key)) if isinstance(value, dict) and value.get(key) else None
+
+
+def registry_agent(
+    entry: dict[str, Any], project: str, location: str, *, mcp: bool = False
+) -> Found:
+    """An agent (or, with ``mcp``, an MCP server) as Agent Registry records it."""
+    name = str(entry["name"])
+    display = str(entry.get("displayName") or name.rsplit("/", 1)[-1])
+    urn = str(entry.get("mcpServerId" if mcp else "agentId") or "")
+    kind = (
+        "MCP server"
+        if mcp
+        else next((label for marker, label in HOSTS if marker in urn), "Agent in Agent Registry")
+    )
+    identity = _attribute(entry, "RuntimeIdentity", "principal")
+    risks = []
+    if identity and DEFAULT_ACCOUNT.search(identity):
+        risks.append(
+            Risk(
+                "platform.broad_identity",
+                "high",
+                f"{display} runs as a default service account",
+                f"It runs as {identity}, which Google grants Editor on the project unless your "
+                "organisation stops it, so whatever calls it can reach most of the project.",
+                "Give it an identity of its own with only the roles it needs.",
+                {"identity": identity},
+            )
+        )
+    interfaces = [
+        i
+        for protocol in entry.get("protocols") or []
+        if isinstance(protocol, dict)
+        for i in protocol.get("interfaces") or []
+        if isinstance(i, dict)
+    ] + [i for i in entry.get("interfaces") or [] if isinstance(i, dict)]
+    endpoints = sorted(
+        {
+            f"{u.scheme}://{u.hostname}"
+            for u in (urlsplit(str(i.get("url") or "")) for i in interfaces)
+            if u.hostname
+        }
+    )
+    protocols = ", ".join(
+        " ".join(
+            filter(None, [str(p.get("type") or "").replace("_AGENT", ""), p.get("protocolVersion")])
+        )
+        for p in entry.get("protocols") or []
+        if isinstance(p, dict) and p.get("type")
+    )
+    skills = [
+        str(s.get("name") or s.get("id"))
+        for s in entry.get("skills") or []
+        if isinstance(s, dict) and (s.get("name") or s.get("id"))
+    ]
+    tools = [
+        {"name": str(t.get("name")), "kind": "tool", "detail": t.get("description") or None}
+        for t in entry.get("tools") or []
+        if isinstance(t, dict) and t.get("name")
+    ]
+    facts = _facts(
+        _fact("Project", project, code=True),
+        _fact("Location", location),
+        _fact("Runs on", _attribute(entry, "RuntimeReference", "uri"), code=True),
+        _fact("Runs as", identity, **({"tone": "warning"} if risks else {})),
+        _fact("Framework", _attribute(entry, "Framework", "framework")),
+        _fact("Protocol", protocols),
+        _fact("Endpoints", ", ".join(endpoints), code=True),
+        _fact("Skills", ", ".join(skills)),
+        _fact("Version", entry.get("version")),
+        _fact("Changed", entry.get("updateTime")),
+    )
+    return Found(
+        external_id=name,
+        name=display,
+        kind=kind,
+        part="",
+        description=entry.get("description"),
+        details={"facts": facts, **({"tools": tools} if tools else {}), "urn": urn or None},
+        external_ids={"google_resource": name},
+        risks=risks,
     )

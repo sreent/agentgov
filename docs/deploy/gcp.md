@@ -308,15 +308,15 @@ hasn't seen.
 
 ## Agents built on Google Cloud
 
-AgentGov can read the Agent Runtime agents in your projects into its inventory ([other
-platforms](../other-platforms.md#google-cloud)). Give it a service account that may read them,
+AgentGov can read the Agent Runtime agents in your projects, and those in Agent Registry, into
+its inventory ([other platforms](../other-platforms.md#google-cloud)). Give it a service account that may read them,
 which its Kubernetes service account acts as through Workload Identity, then name the projects
 and regions to read:
 
 ```bash
 gcloud iam roles create agentgovAgentReader --project=$PROJECT \
   --title="AgentGov agent reader" \
-  --permissions=aiplatform.reasoningEngines.list,aiplatform.reasoningEngines.getIamPolicy,resourcemanager.projects.get
+  --permissions=aiplatform.reasoningEngines.list,aiplatform.reasoningEngines.getIamPolicy,agentregistry.agents.list,agentregistry.mcpServers.list,resourcemanager.projects.get
 gcloud iam service-accounts create agentgov-reader
 READER=agentgov-reader@$PROJECT.iam.gserviceaccount.com
 gcloud projects add-iam-policy-binding $PROJECT \

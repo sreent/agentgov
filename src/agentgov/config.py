@@ -278,8 +278,9 @@ class Settings:
 
     # Seconds between reads of each platform; 0 reads them only on demand.
     platform_sync_interval_seconds: int = 3600
-    # AWS: the regions to read Amazon Bedrock agents and AgentCore's harnesses and agent
-    # runtimes in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS isn't read).
+    # AWS: the regions to read Amazon Bedrock agents and AgentCore's harnesses, agent
+    # runtimes and gateways in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS
+    # isn't read).
     # AgentGov signs its requests with AWS credentials from the usual places:
     # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, IAM roles for service accounts or Pod
     # Identity on EKS, or the instance's role.
@@ -297,6 +298,11 @@ class Settings:
     google_cloud_projects: str = ""
     # The regions to read them in, comma-separated (us and eu for the multi-regions).
     google_cloud_regions: str = "us-central1"
+    # What to read in each project, comma-separated: agent-runtime (its agents, in each
+    # region) and agent-registry (Agent Registry's agents and MCP servers, in each region
+    # and global: agents on Cloud Run and GKE, Gemini Enterprise's, and those registered
+    # by hand).
+    google_cloud_read: str = "agent-runtime,agent-registry"
     # Salesforce: the org to read Agentforce agents in, by its My Domain URL, such as
     # https://contoso.my.salesforce.com (empty: Salesforce isn't read).
     salesforce_url: str | None = None
@@ -499,6 +505,11 @@ class Settings:
                 raise ValueError(
                     f"AGENTGOV_GOOGLE_CLOUD_REGIONS: {region!r} is not a Google Cloud region"
                 )
+        for kind in self.google_cloud_kind_list():
+            if kind not in ("agent-runtime", "agent-registry"):
+                raise ValueError(
+                    f"AGENTGOV_GOOGLE_CLOUD_READ: {kind!r} is not agent-runtime or agent-registry"
+                )
         if self.salesforce_url:
             if not SALESFORCE_URL.match(self.salesforce_url):
                 raise ValueError(
@@ -664,6 +675,9 @@ class Settings:
 
     def google_cloud_region_list(self) -> list[str]:
         return [r.strip() for r in self.google_cloud_regions.split(",") if r.strip()]
+
+    def google_cloud_kind_list(self) -> list[str]:
+        return [k.strip() for k in self.google_cloud_read.split(",") if k.strip()]
 
     def databricks_host_list(self) -> list[str]:
         return [h.strip().rstrip("/") for h in self.databricks_hosts.split(",") if h.strip()]

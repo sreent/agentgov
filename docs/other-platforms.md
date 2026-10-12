@@ -75,15 +75,21 @@ AgentGov reads, in each region and account you name:
 * **AgentCore agent runtimes**, agents and MCP servers you deploy yourself: their protocol,
   how they check callers, their resource policy, outbound network, the role they run as and
   their container. A runtime behind a harness is shown as the harness.
+* **AgentCore gateways**, the MCP servers AgentCore runs in front of tools: how they check
+  callers, their resource policy, policy engine, interceptors and web ACL, the role they run
+  as, the instructions they give agents, and their targets (their tools) with how the
+  gateway signs in to each. Like the runtimes that serve MCP, they are listed with the
+  agents, so their risky settings count the same way. Of a target's URL only the host is
+  kept, and nothing of its parameters or credentials.
 
-AgentCore gateways, AWS's Agent Registry and Amazon Quick's agents aren't read yet.
+AWS's Agent Registry and Amazon Quick's agents aren't read yet.
 
 | Check | Raised when |
 |---|---|
 | `platform.no_guardrail` | a Bedrock agent has no guardrail |
 | `platform.risky_tool` | an agent has computer use, a shell or a text editor (high), or a code interpreter or a browser (medium) |
-| `platform.weak_authentication` | a harness or runtime checks callers' tokens without allowed audiences or clients, so a token issued to another application gets in |
-| `platform.no_authentication` | a runtime that checks AWS credentials has a resource policy that lets any AWS principal in, with no condition |
+| `platform.weak_authentication` | a harness, runtime or gateway checks callers' tokens without allowed audiences or clients, so a token issued to another application gets in |
+| `platform.no_authentication` | a gateway has no inbound authorization (high: anyone who can reach it may call its tools), or a runtime or gateway that checks AWS credentials has a resource policy that lets any AWS principal in, with no condition |
 | `platform.plain_secret` | an environment variable whose name says it holds a secret (a password, token or key) has a value that isn't a reference to Secrets Manager or Parameter Store |
 
 ### Setting it up
@@ -103,6 +109,8 @@ AgentCore gateways, AWS's Agent Registry and Amazon Quick's agents aren't read y
            "bedrock:ListAgentAliases",
            "bedrock-agentcore:ListHarnesses", "bedrock-agentcore:GetHarness",
            "bedrock-agentcore:ListAgentRuntimes", "bedrock-agentcore:GetAgentRuntime",
+           "bedrock-agentcore:ListGateways", "bedrock-agentcore:GetGateway",
+           "bedrock-agentcore:ListGatewayTargets", "bedrock-agentcore:GetGatewayTarget",
            "bedrock-agentcore:GetResourcePolicy"
          ],
          "Resource": "*"
@@ -114,7 +122,8 @@ AgentCore gateways, AWS's Agent Registry and Amazon Quick's agents aren't read y
    AWS's `ReadOnlyAccess` covers the Bedrock agent actions but AgentCore has no read-only
    managed policy, so use this one. An agent encrypted with a key of yours also needs
    `kms:Decrypt` on that key; without it, AgentGov records the agent from what the list
-   shows and says what it couldn't read.
+   shows and says what it couldn't read. A policy without the gateway actions leaves the
+   agents read, and the Platforms page says the gateways couldn't be.
 2. Give the control plane the credentials, from wherever AWS's SDKs find them:
    `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; on EKS, IAM roles for service accounts or
    Pod Identity on its service account ([AWS](deploy/aws.md)); or an EC2 instance's role.
@@ -134,23 +143,32 @@ Platforms page.
 
 ## Google Cloud
 
-AgentGov reads the **Agent Runtime agents** (Agent Runtime was Vertex AI Agent Engine; its API
-calls them reasoning engines) in each project and region you name: the identity each runs as,
-how it reaches networks, the names of its environment variables and of those it takes from
-Secret Manager, its encryption key, memory bank and container, and who may use it, from its
-IAM policy.
+AgentGov reads, in each project you name:
 
-Gemini Enterprise's agents and Agent Platform's managed agents aren't read: Google's APIs list
-them only to the person who created them, so they can't give AgentGov an organisation's. An
-agent built with the ADK and added to Gemini Enterprise runs on Agent Runtime, where AgentGov
-reads it. Agent Registry, which also lists agents on Cloud Run and GKE, isn't read yet.
+* **Agent Runtime agents** (Agent Runtime was Vertex AI Agent Engine; its API calls them
+  reasoning engines), in each region you name: the identity each runs as, how it reaches
+  networks, the names of its environment variables and of those it takes from Secret
+  Manager, its encryption key, memory bank and container, and who may use it, from its IAM
+  policy.
+* **Agent Registry's agents and MCP servers**, in each region you name and `global`: agents on
+  Cloud Run and GKE, Gemini Enterprise's agents, agents registered by hand, and MCP servers,
+  with where each runs, the identity it runs as, its protocol, endpoints (their hosts) and
+  skills, and an MCP server's tools. Google's own agents and MCP servers (Google Workspace's,
+  say) are left out, and so is Agent Runtime's entry for each of its agents, read in full
+  above. Agent Registry has an agent on Cloud Run or GKE only when it was deployed to be
+  registered there.
+
+Gemini Enterprise's own API lists its agents only to the person who created each, so who an
+agent is shared with, and whether its app screens prompts with Model Armor, aren't read: Agent
+Registry gives what an agent is and where it runs. Agent Platform's managed agents aren't read
+either. A project that hasn't turned an API on is skipped for it.
 
 | Check | Raised when |
 |---|---|
-| `platform.no_authentication` | its IAM policy grants a role to `allUsers` or `allAuthenticatedUsers` |
-| `platform.shared_with_everyone` | its IAM policy grants a role to a whole domain |
-| `platform.broad_identity` | it runs as a default service account, Compute Engine's or App Engine's, which Google makes an editor of the project (high), or as the project's Agent Runtime service agent, which every agent without an identity of its own shares (medium) |
-| `platform.plain_secret` | an environment variable whose name says it holds a secret has a plain value rather than one from Secret Manager, or `GOOGLE_APPLICATION_CREDENTIALS` is set (a service account key shipped with the agent) |
+| `platform.no_authentication` | an Agent Runtime agent's IAM policy grants a role to `allUsers` or `allAuthenticatedUsers` |
+| `platform.shared_with_everyone` | an Agent Runtime agent's IAM policy grants a role to a whole domain |
+| `platform.broad_identity` | it runs as a default service account, Compute Engine's or App Engine's, which Google makes an editor of the project (high), or, on Agent Runtime, as the project's Agent Runtime service agent, which every agent without an identity of its own shares (medium) |
+| `platform.plain_secret` | an Agent Runtime agent's environment variable whose name says it holds a secret has a plain value rather than one from Secret Manager, or `GOOGLE_APPLICATION_CREDENTIALS` is set (a service account key shipped with the agent) |
 
 An agent whose IAM policy AgentGov may not read is shown as such, and its findings about who
 may use it are left as they were.
@@ -163,14 +181,15 @@ may use it are left as they were.
    ```bash
    gcloud iam roles create agentgovAgentReader --project=PROJECT \
      --title="AgentGov agent reader" \
-     --permissions=aiplatform.reasoningEngines.list,aiplatform.reasoningEngines.getIamPolicy,resourcemanager.projects.get
+     --permissions=aiplatform.reasoningEngines.list,aiplatform.reasoningEngines.getIamPolicy,agentregistry.agents.list,agentregistry.mcpServers.list,resourcemanager.projects.get
    gcloud projects add-iam-policy-binding PROJECT \
      --role=projects/PROJECT/roles/agentgovAgentReader --member=serviceAccount:READER
    ```
 
    Create it once in your organisation (`--organization`) instead to grant it in several
-   projects. Google's Vertex AI Viewer role (`roles/aiplatform.viewer`) can read them too, but
-   it reads much more of the project than AgentGov needs.
+   projects. Google's Vertex AI Viewer and Agent Registry API Viewer roles
+   (`roles/aiplatform.viewer`, `roles/agentregistry.viewer`) can read them too, but they read
+   more of the project than AgentGov needs.
 2. Give the control plane Google credentials, from where Google's libraries find them: on GKE,
    Workload Identity ([Google Cloud](deploy/gcp.md#agents-built-on-google-cloud)) or a VM's
    service account; elsewhere, the file `GOOGLE_APPLICATION_CREDENTIALS` names: a workload
@@ -184,6 +203,7 @@ may use it are left as they were.
    ```bash
    AGENTGOV_GOOGLE_CLOUD_PROJECTS=contoso-agents,contoso-labs
    AGENTGOV_GOOGLE_CLOUD_REGIONS=us-central1,europe-west4
+   AGENTGOV_GOOGLE_CLOUD_READ=agent-runtime,agent-registry   # leave out what you don't want
    ```
 
 AgentGov gets its tokens itself, without Google's client libraries.
@@ -236,23 +256,26 @@ AgentGov reads, in each workspace you name:
 
 * **Agents on Model Serving**: serving endpoints whose task is an agent's, with what they
   serve, who may query them, whether their requests and answers are kept in inference tables,
-  and the names of their environment variables.
+  and the names of their environment variables. An endpoint that serves a **Knowledge
+  Assistant** or a **Supervisor Agent** (Agent Bricks, whose APIs are in Beta) is shown as
+  one, with its instructions and, for a supervisor, its subagents and tools.
 * **Agent Bricks agents**: the Databricks Apps the Agent Bricks CLI deploys agents as (named
   `agent-bricks-…`), with who may use them, the service principal they run as and the
   resources it holds (their tools), and the scopes they act for their users with.
 * **Genie agents** (Genie spaces), with who may ask them questions, the tables they answer
   from, and their instructions.
 
-Knowledge Assistant and Supervisor Agent agents, and MCP services in Unity Catalog, aren't read
-yet.
+MCP services in Unity Catalog aren't read yet.
 
 | Check | Raised when |
 |---|---|
 | `platform.shared_with_everyone` | the workspace's `users` group, or the account's `account users`, may use the agent |
 | `platform.plain_secret` | an environment variable whose name says it holds a secret has its value in the agent's configuration, rather than from a secret scope (`{{secrets/scope/key}}`, or an app's `valueFrom`) |
+| `platform.risky_tool` | a Supervisor Agent: every one can run the code its model writes (in a sandbox without internet access, reading the tables and volumes it is given) |
 | `platform.broad_identity` | an agent on Model Serving calls Databricks with a fixed credential (`DATABRICKS_TOKEN` or `DATABRICKS_CLIENT_SECRET`), or an Agent Bricks agent's service principal may change, not only use, a resource (`CAN_MANAGE`, `IS_OWNER`, `MODIFY`, a secret scope's `WRITE` or `MANAGE`) |
 
-A Genie agent's instructions go through the instruction checks. An agent whose permissions
+Genie agents', Knowledge Assistants' and Supervisor Agents' instructions go through the
+instruction checks. An agent whose permissions
 AgentGov may not read is shown as such, and its findings about who may use it are left as
 they were.
 
