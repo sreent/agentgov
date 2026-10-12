@@ -14,6 +14,9 @@ service is skipped, and one that refuses is reported without holding up the rest
 * AgentCore gateways, the MCP servers AgentCore hosts in front of tools
   (:func:`agentcore_gateway`), with their targets: a part of their own, so that
   credentials allowed to read agents but not gateways leave the agents read.
+* Amazon Quick's agents, the chat agents people build in Amazon Quick (the
+  QuickSight API): their instructions, spaces, action connectors and who they are
+  shared with (:func:`quick_agent`); an account that doesn't use Quick is skipped.
 
 Secrets never leave AWS: of environment variables and remote MCP servers'
 headers AgentGov keeps the names, and of those servers' URLs the host.
@@ -38,6 +41,7 @@ from agentgov.platforms.base import Found, Inventory, PlatformError, Risk
 BEDROCK_AGENTS = "bedrock-agents"
 AGENTCORE = "agentcore"
 GATEWAYS = "agentcore-gateways"
+QUICK = "quick"
 # Each kind of list is paged this far at most.
 MAX_PAGES = 50
 # Throttled or failing requests are tried again after these pauses (seconds).
@@ -112,6 +116,7 @@ class AwsConnector:
                     (BEDROCK_AGENTS, _bedrock),
                     (AGENTCORE, _agentcore),
                     (GATEWAYS, _gateways),
+                    (QUICK, _quick),
                 ):
                     part = f"{account}/{region}/{service}"
                     try:
@@ -265,6 +270,72 @@ def _gateways(api: _Api, account: str, region: str, part: str) -> list[Found]:
         if why is None and gateway.get("authorizerType") == "AWS_IAM" and gateway.get("gatewayArn"):
             policy = api.resource_policy(*CONTROL, gateway["gatewayArn"])
         item = agentcore_gateway(gateway, targets, account, region, part, policy=policy)
+        found.append(_partial(item, why) if why else item)
+    return found
+
+
+QUICKSIGHT = ("quicksight", "quicksight")
+# Answers to ListAgents that mean the account doesn't use Amazon Quick in the region.
+NO_QUICK = ("UnsupportedUserEditionException", "PreconditionNotMetException", "ResourceNotFound")
+
+
+def _quick(api: _Api, account: str, region: str, part: str) -> list[Found]:
+    base = f"/accounts/{quote(account, safe='')}"
+    summaries: list[dict[str, Any]] = []
+    token = None
+    try:
+        for _ in range(MAX_PAGES):
+            params = {"max-results": 100, **({"next-token": token} if token else {})}
+            page = api.call(*QUICKSIGHT, "GET", f"{base}/agents", params=params)
+            summaries += [a for a in page.get("AgentSummaries") or [] if isinstance(a, dict)]
+            token = page.get("NextToken")
+            if not token:
+                break
+    except PlatformError as exc:
+        if exc.status == 404 or any(kind in str(exc) for kind in NO_QUICK):
+            raise _NotOffered(str(exc)) from exc
+        raise
+    connectors: dict[str, dict[str, Any] | None] = {}
+    found = []
+    for summary in summaries:
+        agent_id = quote(str(summary["AgentId"]), safe="")
+        why = None
+        try:
+            agent = {
+                **summary,
+                **(api.call(*QUICKSIGHT, "GET", f"{base}/agents/{agent_id}").get("Agent") or {}),
+            }
+        except PlatformError as exc:
+            if exc.status == 404:
+                continue
+            agent, why = dict(summary), _refused(exc)
+        permissions = None
+        try:
+            permissions = (
+                api.call(*QUICKSIGHT, "GET", f"{base}/agents/{agent_id}/permissions").get(
+                    "Permissions"
+                )
+                or []
+            )
+        except PlatformError as exc:
+            why = why or _refused(exc)
+        for arn in agent.get("ActionConnectors") or []:
+            if arn in connectors:
+                continue
+            connector_id = quote(str(arn).rsplit("/", 1)[-1], safe="")
+            try:
+                connectors[arn] = (
+                    api.call(*QUICKSIGHT, "GET", f"{base}/action-connectors/{connector_id}").get(
+                        "ActionConnector"
+                    )
+                    or {}
+                )
+            except PlatformError as exc:
+                connectors[arn] = None
+                if exc.status != 404:
+                    why = why or _refused(exc)
+        mine = {arn: connectors.get(arn) for arn in agent.get("ActionConnectors") or []}
+        item = quick_agent(agent, permissions, mine, account, region, part)
         found.append(_partial(item, why) if why else item)
     return found
 
@@ -979,4 +1050,157 @@ def agentcore_gateway(
         risks=risks,
         # What it tells the agents that use it, as an MCP server's instructions.
         instructions=mcp.get("instructions") or None,
+    )
+
+
+# How an Amazon Quick action connector signs in to the system it acts on, and whether that
+# one credential stands for everyone who uses the agent.
+QUICK_AUTH = {
+    "OAUTH2_AUTHORIZATION_CODE": ("as each user (OAuth)", False),
+    "OAUTH2_CLIENT_CREDENTIALS": ("with one shared OAuth client", True),
+    "API_KEY": ("with one shared API key", True),
+    "BASIC": ("with one shared user name and password", True),
+    "IAM": ("with an IAM role", True),
+    "NONE": ("with no authentication", False),
+}
+UPPER = {"CRM", "HTTP", "S3", "SAP", "HR", "AWS"}
+
+
+def _words(value: Any) -> str:
+    """An enum value in words: SALESFORCE_CRM is Salesforce CRM."""
+    return " ".join(w if w in UPPER else w.capitalize() for w in str(value or "").split("_") if w)
+
+
+def quick_agent(
+    agent: dict[str, Any],
+    permissions: list[dict[str, Any]] | None,
+    connectors: dict[str, dict[str, Any] | None],
+    account: str,
+    region: str,
+    part: str,
+) -> Found:
+    """An Amazon Quick agent (DescribeAgent over its ListAgents summary), with who it is shared
+    with (None when unread) and its action connectors (None for one that wasn't read)."""
+    name = str(agent.get("Name") or agent["AgentId"])
+    arn = agent.get("Arn") or f"arn:aws:quicksight:{region}:{account}:agent/{agent['AgentId']}"
+    principals = [str(p.get("Principal")) for p in permissions or [] if isinstance(p, dict)]
+    namespaces = sorted(p.rsplit("/", 1)[-1] for p in principals if ":namespace/" in p and "/" in p)
+    risks: list[Risk] = []
+    if namespaces:
+        risks.append(
+            Risk(
+                "platform.shared_with_everyone",
+                "medium",
+                f"{name} is shared with everyone in Amazon Quick",
+                "It is shared with whole namespaces, every user in them: "
+                + ", ".join(namespaces)
+                + ".",
+                "Share it with the users and groups that need it, or confirm everyone should "
+                "have it and dismiss this finding.",
+                {"namespaces": namespaces},
+            )
+        )
+    tools, shared = [], []
+    for connector_arn, connector in connectors.items():
+        if connector is None:
+            tools.append(
+                {
+                    "name": connector_arn.rsplit("/", 1)[-1],
+                    "kind": "Action connector",
+                    "detail": "AgentGov may not read it",
+                }
+            )
+            continue
+        auth = str((connector.get("AuthenticationConfig") or {}).get("AuthenticationType") or "")
+        how, one = QUICK_AUTH.get(auth, (auth.lower() or None, False))
+        label = str(connector.get("Name") or connector_arn.rsplit("/", 1)[-1])
+        if one:
+            shared.append(label)
+        actions = len(connector.get("EnabledActions") or [])
+        tools.append(
+            {
+                "name": label,
+                "kind": _words(connector.get("Type")) or "Action connector",
+                "detail": " · ".join(
+                    filter(
+                        None,
+                        [
+                            how,
+                            f"{actions} action{'s' if actions != 1 else ''}" if actions else None,
+                            "through a VPC connection"
+                            if connector.get("VpcConnectionArn")
+                            else None,
+                        ],
+                    )
+                ),
+                **({"tone": "warning"} if one or auth == "NONE" else {}),
+            }
+        )
+    if shared:
+        risks.append(
+            Risk(
+                "platform.maker_credentials",
+                "medium",
+                f"{name} acts with one shared credential",
+                "These action connectors sign in with one credential for everyone who uses the "
+                "agent, so its users act there with that credential's access, not their own: "
+                + ", ".join(sorted(shared))
+                + ".",
+                "Use connectors that sign in as each user (OAuth authorization code), or confirm "
+                "the shared access is intended and dismiss this finding.",
+                {"connectors": sorted(shared)},
+            )
+        )
+    prompt = agent.get("CustomPromptInterface") or {}
+    if permissions is None:
+        who = "AgentGov may not read who may use it"
+    elif namespaces:
+        who = "Everyone in " + ", ".join(namespaces)
+    else:
+        users = sum(1 for p in principals if ":user/" in p)
+        groups = sum(1 for p in principals if ":group/" in p)
+        who = (
+            ", ".join(
+                filter(
+                    None,
+                    [
+                        f"{users} user{'s' if users != 1 else ''}" if users else None,
+                        f"{groups} group{'s' if groups != 1 else ''}" if groups else None,
+                    ],
+                )
+            )
+            or "Only its owners"
+        )
+    facts = _facts(
+        _fact("Account", account, code=True),
+        _fact("Region", region),
+        _fact(
+            "Lifecycle",
+            {"PUBLISHED": "Published", "PREVIEW": "Preview"}.get(str(agent.get("AgentLifecycle"))),
+        ),
+        _fact("Status", agent.get("AgentStatus")),
+        _fact("Created by", agent.get("Creator")),
+        _fact("Shared with", who, **({"tone": "warning"} if namespaces else {})),
+        _fact("Spaces", len(agent.get("Spaces") or []) or None),
+        _fact("Changed", agent.get("UpdatedAt")),
+    )
+    instructions = "\n\n".join(
+        str(prompt[key]) for key in ("Identity", "CustomInstructions") if prompt.get(key)
+    )
+    return Found(
+        external_id=arn,
+        name=name,
+        kind="Amazon Quick agent",
+        part=part,
+        description=agent.get("Description"),
+        details={
+            "facts": facts,
+            "tools": tools,
+            "status": agent.get("AgentStatus"),
+            "region": region,
+            "account": account,
+        },
+        external_ids={"aws_arn": arn},
+        risks=risks,
+        instructions=instructions or None,
     )

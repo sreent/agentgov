@@ -58,6 +58,7 @@ the score.
 | `platform.broad_identity` | 15 | it runs as, or calls its platform with, an identity that may do far more than its job: a default or shared one, or one with broad permissions |
 | `platform.risky_tool` | 15 | its tools run code or work a computer, so a prompt injection acts too |
 | `platform.shared_with_everyone` | 10 | everyone in the organisation may use it |
+| `platform.maker_credentials` | 10 | its tools sign in to other systems with one shared credential, so its users act there with that credential's access rather than their own |
 | `platform.no_guardrail` | 10 | nothing filters what it is asked or what it answers |
 
 Each platform's section below says which of them it checks, and how.
@@ -81,8 +82,12 @@ AgentGov reads, in each region and account you name:
   gateway signs in to each. Like the runtimes that serve MCP, they are listed with the
   agents, so their risky settings count the same way. Of a target's URL only the host is
   kept, and nothing of its parameters or credentials.
+* **Amazon Quick's agents**, the chat agents people build in Amazon Quick: their instructions,
+  spaces, who they are shared with, and their action connectors (their tools) with how each
+  signs in to the system it acts on. An account that doesn't use Amazon Quick in a region is
+  skipped there.
 
-AWS's Agent Registry and Amazon Quick's agents aren't read yet.
+AWS's Agent Registry isn't read yet.
 
 | Check | Raised when |
 |---|---|
@@ -91,6 +96,8 @@ AWS's Agent Registry and Amazon Quick's agents aren't read yet.
 | `platform.weak_authentication` | a harness, runtime or gateway checks callers' tokens without allowed audiences or clients, so a token issued to another application gets in |
 | `platform.no_authentication` | a gateway has no inbound authorization (high: anyone who can reach it may call its tools), or a runtime or gateway that checks AWS credentials has a resource policy that lets any AWS principal in, with no condition |
 | `platform.plain_secret` | an environment variable whose name says it holds a secret (a password, token or key) has a value that isn't a reference to Secrets Manager or Parameter Store |
+| `platform.shared_with_everyone` | an Amazon Quick agent is shared with a whole namespace, every user in it |
+| `platform.maker_credentials` | an Amazon Quick agent's action connectors sign in with one credential for everyone (an API key, a user name and password, an OAuth client or an IAM role), so its users act with that credential's access rather than their own |
 
 ### Setting it up
 
@@ -111,7 +118,9 @@ AWS's Agent Registry and Amazon Quick's agents aren't read yet.
            "bedrock-agentcore:ListAgentRuntimes", "bedrock-agentcore:GetAgentRuntime",
            "bedrock-agentcore:ListGateways", "bedrock-agentcore:GetGateway",
            "bedrock-agentcore:ListGatewayTargets", "bedrock-agentcore:GetGatewayTarget",
-           "bedrock-agentcore:GetResourcePolicy"
+           "bedrock-agentcore:GetResourcePolicy",
+           "quicksight:ListAgents", "quicksight:DescribeAgent",
+           "quicksight:DescribeAgentPermissions", "quicksight:DescribeActionConnector"
          ],
          "Resource": "*"
        }
@@ -122,8 +131,8 @@ AWS's Agent Registry and Amazon Quick's agents aren't read yet.
    AWS's `ReadOnlyAccess` covers the Bedrock agent actions but AgentCore has no read-only
    managed policy, so use this one. An agent encrypted with a key of yours also needs
    `kms:Decrypt` on that key; without it, AgentGov records the agent from what the list
-   shows and says what it couldn't read. A policy without the gateway actions leaves the
-   agents read, and the Platforms page says the gateways couldn't be.
+   shows and says what it couldn't read. A policy without the gateway or Amazon Quick actions
+   leaves the other agents read, and the Platforms page says what couldn't be.
 2. Give the control plane the credentials, from wherever AWS's SDKs find them:
    `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; on EKS, IAM roles for service accounts or
    Pod Identity on its service account ([AWS](deploy/aws.md)); or an EC2 instance's role.

@@ -278,9 +278,9 @@ class Settings:
 
     # Seconds between reads of each platform; 0 reads them only on demand.
     platform_sync_interval_seconds: int = 3600
-    # AWS: the regions to read Amazon Bedrock agents and AgentCore's harnesses, agent
-    # runtimes and gateways in, comma-separated, such as us-east-1,eu-west-1 (empty: AWS
-    # isn't read).
+    # AWS: the regions to read Amazon Bedrock agents, AgentCore's harnesses, agent runtimes
+    # and gateways, and Amazon Quick's agents in, comma-separated, such as
+    # us-east-1,eu-west-1 (empty: AWS isn't read).
     # AgentGov signs its requests with AWS credentials from the usual places:
     # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, IAM roles for service accounts or Pod
     # Identity on EKS, or the instance's role.

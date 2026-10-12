@@ -659,9 +659,9 @@ CATALOG: tuple[Feature, ...] = (
         "aws",
         "AWS agents",
         "platforms",
-        "AgentGov reads the agents on AWS into the inventory (Amazon Bedrock agents, and "
-        "AgentCore's harnesses, agent runtimes and gateways), with their risky settings as "
-        "findings, on a schedule and on demand.",
+        "AgentGov reads the agents on AWS into the inventory (Amazon Bedrock agents, "
+        "AgentCore's harnesses, agent runtimes and gateways, and Amazon Quick's agents), with "
+        "their risky settings as findings, on a schedule and on demand.",
         SWITCH,
         ON,
         {
