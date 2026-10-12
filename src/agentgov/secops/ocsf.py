@@ -130,9 +130,14 @@ _ACTIVITY_CAPTIONS = {
 POSTURE_FINDINGS = "posture"
 
 
+# Calls seen in agents' own telemetry that went around the gateway: a tool used without a
+# grant, and a call straight to another agent's A2A URL.
+AROUND_THE_GATEWAY = {"telemetry.ungranted_tool_use", "telemetry.a2a_around_gateway"}
+
+
 def _class(entry: LedgerEntry) -> int:
     prefix = entry.type.split(".", 1)[0]
-    if prefix in ("decision", "approval") or entry.type == "telemetry.ungranted_tool_use":
+    if prefix in ("decision", "approval") or entry.type in AROUND_THE_GATEWAY:
         return API_ACTIVITY
     if prefix == "admin":
         return AUTHENTICATION
@@ -236,7 +241,9 @@ def _api_activity(entry: LedgerEntry, agent: Agent | None) -> dict[str, Any]:
     details = entry.details or {}
     kind = entry.type.split(".", 1)[0]
     model_call = entry.type.startswith("decision.model.")
-    agent_call = entry.type.startswith("decision.a2a.")
+    agent_call = (
+        entry.type.startswith("decision.a2a.") or entry.type == "telemetry.a2a_around_gateway"
+    )
     method = entry.action or ("chat" if model_call else "tools/call")
     # server/tool, or provider/model; a tool alone for in-process agents; the called agent.
     resource = entry.resource or ""
@@ -295,8 +302,8 @@ def _api_activity(entry: LedgerEntry, agent: Agent | None) -> dict[str, Any]:
     _delegation(event, entry, details)
     monitored = bool(details.get("monitored"))
     decision = entry.decision
-    if entry.type == "telemetry.ungranted_tool_use":
-        # Seen in the agent's own telemetry: it called the tool without the gateway.
+    if entry.type in AROUND_THE_GATEWAY:
+        # Seen in telemetry: a call that didn't go through the gateway.
         _control(event, ALLOWED, 15, alert=True)
         event["severity_id"] = MEDIUM
     elif kind == "approval":

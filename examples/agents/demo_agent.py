@@ -611,6 +611,74 @@ async def agent_to_agent(name: str, creds: dict[str, str]) -> None:
             report(status == 200, answer_of(reply)[1], expect_allowed=False)
         finally:
             admin("PATCH", blueprint, json={"agent_access": [BILLING]})
+    await asyncio.to_thread(around_the_gateway)
+
+
+def around_the_gateway() -> None:
+    """Calls straight to billing-agent's own URL don't pass the gateway, and AgentGov can't
+    stop them: billing-agent refuses them itself, checking the delegation the gateway gives
+    with each call. AgentGov looks for such calls, and tests whether an agent takes them."""
+    admin("PUT", "/v1/features/calls-around-gateway", json={"mode": "test"})
+    print("  calls-around-gateway set to test")
+    try:
+        admin("POST", "/v1/posture/scan")
+        around = admin("GET", f"/v1/agents/{BILLING}/a2a")["around_gateway"]
+        test = around.get("test") or {}
+        show(
+            "refused:",
+            test.get("state") == "refused" and around.get("protection") == "delegation",
+            f"AgentGov called {test.get('url')} itself, around the gateway: {test.get('detail')}",
+        )
+    finally:
+        admin("PUT", "/v1/features/calls-around-gateway", json={"mode": "watch"})
+        print("  calls-around-gateway set back to watch")
+    # Telemetry from a job that calls billing-agent at its own URL: recorded, and an issue
+    # for billing-agent's owners.
+    job = f"invoice-job-{secrets.token_hex(2)}"
+    span = {
+        "traceId": secrets.token_hex(16),
+        "spanId": secrets.token_hex(8),
+        "name": "POST",
+        "kind": 3,
+        "startTimeUnixNano": str(time.time_ns()),
+        "endTimeUnixNano": str(time.time_ns()),
+        "attributes": [
+            {"key": "http.request.method", "value": {"stringValue": "POST"}},
+            {"key": "url.full", "value": {"stringValue": "http://billing-agent:9600/"}},
+            {"key": "server.address", "value": {"stringValue": "billing-agent"}},
+            {"key": "server.port", "value": {"intValue": "9600"}},
+        ],
+    }
+    payload = {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [{"key": "service.name", "value": {"stringValue": job}}]
+                },
+                "scopeSpans": [
+                    {"scope": {"name": "opentelemetry.instrumentation.httpx"}, "spans": [span]}
+                ],
+            }
+        ]
+    }
+    httpx.post(f"{OTLP_HTTP}/v1/traces", json=payload, timeout=10).raise_for_status()
+    seen, _ = until(
+        lambda: [
+            f
+            for f in admin(
+                "GET",
+                "/v1/findings",
+                params={"type": "agent.a2a_called_around_gateway", "agent": BILLING},
+            )
+            if job in f["title"]
+        ],
+        timeout=30,
+    )
+    show(
+        "seen:" if seen else "not seen:",
+        bool(seen),
+        f"telemetry shows {job} calling {BILLING} at its own URL: an issue for its owners",
+    )
 
 
 async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:

@@ -167,6 +167,22 @@ def a2a_url(value: Any) -> str | None:
     return str(value).rstrip("/")
 
 
+# What stops calls to an agent that don't come through the gateway, as its owners say
+# (registry/reachability): the network lets only the gateway reach it, or the agent refuses
+# calls without the delegation the gateway gives with each one.
+A2A_PROTECTIONS = ("network", "delegation")
+
+
+def a2a_protection(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if value not in A2A_PROTECTIONS:
+        raise ValidationError(
+            f"a2a_protection is one of {', '.join(A2A_PROTECTIONS)}, or null (got {value!r})"
+        )
+    return str(value)
+
+
 def token_budget(value: Any) -> int | None:
     if value is None or value == "":
         return None

@@ -13,6 +13,9 @@ uses, so agents instrumented for it can report here unchanged.
   without going through the gateway, and raises a finding.
 * Agents that capture message content report their instructions
   (``gen_ai.system_instructions``), which are checked for unsafe content.
+* A client span that called an agent at its own A2A URL shows a call that went around
+  the gateway (registry/reachability): it is recorded and raises findings for both
+  agents' owners.
 """
 
 from __future__ import annotations
@@ -27,8 +30,15 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from agentgov import ledger
-from agentgov.models import ACTIVE
-from agentgov.registry import access_packages, discovery, features, findings, instructions
+from agentgov.models import ACTIVE, Agent
+from agentgov.registry import (
+    access_packages,
+    discovery,
+    features,
+    findings,
+    instructions,
+    reachability,
+)
 from agentgov.registry import agents as agents_svc
 from agentgov.registry.errors import ValidationError
 
@@ -150,18 +160,25 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
         "discovered": 0,
         "ungranted": 0,
         "instructions": 0,
+        "around_the_gateway": 0,
     }
     seen_agents: set[str] = set()
     reported: dict[str, str] = {}
     modes = features.modes(session)
+    # Where agents serve A2A, to see calls that went straight there.
+    served = reachability.endpoints(session, modes)
+    around: set[tuple[str | None, str, str]] = set()
     for resource, scope, span in iter_spans(payload):
         stats["spans"] += 1
         attrs = attrs_of(span.get("attributes"))
-        op = attrs.get("gen_ai.operation.name") or (span.get("name") or "").split(" ", 1)[0]
-        if op not in GENAI_OPERATIONS:
-            continue
         service = resource.get("service.name")
         if service in IGNORED_SERVICES:
+            continue
+        target = reachability.called(attrs, span, served) if served else None
+        if target is not None and _around_the_gateway(session, resource, span, target, around):
+            stats["around_the_gateway"] += 1
+        op = attrs.get("gen_ai.operation.name") or (span.get("name") or "").split(" ", 1)[0]
+        if op not in GENAI_OPERATIONS:
             continue
         stats["genai_spans"] += 1
         agent_id = attrs.get("gen_ai.agent.id") or resource.get("gen_ai.agent.id")
@@ -249,6 +266,80 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
             )
     stats["agents"] = len(seen_agents)
     return stats
+
+
+def _around_the_gateway(
+    session: Session,
+    resource: dict[str, Any],
+    span: dict[str, Any],
+    target: Agent,
+    seen: set[tuple[str | None, str, str]],
+) -> bool:
+    """A call straight to ``target``'s A2A URL, by the service that reported the span:
+    recorded once a trace, with a finding for the owners of the agent called and, when the
+    caller is a registered agent, of the caller."""
+    service = resource.get("service.name")
+    # The agent that reported the span (not gen_ai.agent.name on the span: on a call to
+    # another agent, that names the agent called).
+    caller = discovery.find(
+        session,
+        agent_id=resource.get("gen_ai.agent.id"),
+        name=resource.get("gen_ai.agent.name") or service,
+    )
+    if caller is not None and caller.id == target.id:
+        return False
+    key = reachability.caller_key(service, caller)
+    trace_id = _hex_id(span.get("traceId"))
+    if (trace_id, key, target.id) in seen:
+        return False
+    seen.add((trace_id, key, target.id))
+    name = reachability.caller_name(service, caller)
+    ledger.append(
+        session,
+        type="telemetry.a2a_around_gateway",
+        actor="system:otel",
+        agent=caller,
+        agent_name=None if caller is not None else name,
+        severity="warning",
+        action="a2a.call",
+        resource=target.name,
+        decision="observed",
+        reason=f"a call straight to {target.name}'s A2A URL, not through the gateway",
+        details={"called": target.id, "url": target.a2a_url},
+        trace_id=trace_id,
+    )
+    why = (
+        f"Telemetry shows {name} calling {target.name} at its own A2A URL ({target.a2a_url}), "
+        "not through the gateway: none of AgentGov's controls applied to the call."
+    )
+    findings.raise_finding(
+        session,
+        type=reachability.CALLED_AROUND,
+        severity="medium",
+        subject=f"{target.id}:{key}",
+        agent_id=target.id,
+        category=findings.THREAT,
+        title=f"{name} called {target.name} around the gateway",
+        description=why,
+        remediation="Let only the gateway reach the agent (a NetworkPolicy, for example), or "
+        "have it refuse calls without the delegation the gateway gives with each one "
+        "(docs/agent-to-agent.md#calls-around-the-gateway).",
+        details={"caller": key, "trace_id": trace_id},
+    )
+    if caller is not None:
+        findings.raise_finding(
+            session,
+            type=reachability.CALLS_AROUND,
+            severity="medium",
+            subject=f"{caller.id}:{target.id}",
+            agent_id=caller.id,
+            category=findings.THREAT,
+            title=f"{caller.name} calls {target.name} around the gateway",
+            description=why,
+            remediation=f"Call {target.name} through the gateway, at /a2a/{target.name}.",
+            details={"called": target.id, "trace_id": trace_id},
+        )
+    return True
 
 
 def decode_protobuf(body: bytes, signal: str = "traces") -> dict[str, Any]:

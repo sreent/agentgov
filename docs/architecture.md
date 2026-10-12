@@ -131,7 +131,8 @@ token: the caller, the person it acts for, and any delegation the caller carries
 processor checks the delegation, inspects the message, asks OPA
 (`data.agentgov.a2a.decision`), and answers go ahead or refuse. Going ahead, it gives the
 agent called a delegation of its own, a token signed with a key derived from the service
-token that names the chain of agents and the person at its head, and agentgateway passes
+token (whose public half the control plane publishes, for agents that check it) that names
+the chain of agents and the person at its head, and agentgateway passes
 it on in headers, over any the caller set. The agent called sends the delegation with
 the calls it makes for that work, and the processor puts the chain into policy and the
 ledger of each one. While `a2a-masking` is enforced, the message goes through the
@@ -208,8 +209,8 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | Agent → gateway | Keycloak-issued JWT, audience-bound to the gateway, 5-minute lifetime; for a person, a token the agent got by exchanging the person's (its subject is the person, the agent the client it was issued to) |
 | Gateway → MCP server | The agent's token is never forwarded (MCP spec: no token passthrough); servers are only reachable through the gateway |
 | Gateway → model provider | The provider's API key, which only the gateway (and its config sidecar) can read, from a file; the agent's token is never forwarded |
-| Gateway → agent serving A2A | The caller's token is never forwarded; the agent called gets a delegation and who handed it the work in headers AgentGov sets on every call it passes on, so only the gateway should reach agents' A2A endpoints (a NetworkPolicy in Kubernetes) |
-| Agent → agent (delegation) | A JWT for the agent called only, signed by the processors with a key derived from the service token (agents never see it), lasting an hour; checked on each call that carries it (signature, expiry, holder, and the same person as the caller's token) |
+| Gateway → agent serving A2A | The caller's token is never forwarded; the agent called gets a delegation and who handed it the work in headers AgentGov sets on every call it passes on. AgentGov doesn't own the network: only the gateway should reach agents' A2A endpoints (a NetworkPolicy in Kubernetes), or the agents refuse calls without a delegation; AgentGov looks for calls around the gateway and tells the agents' owners ([calls around the gateway](agent-to-agent.md#calls-around-the-gateway)) |
+| Agent → agent (delegation) | A JWT for the agent called only (its name and ID), signed by the processors (ES256) with a key derived from the service token, whose public half the control plane publishes (`/v1/delegations/jwks`), lasting an hour; checked by AgentGov on each call that carries it (signature, expiry, holder, and the same person as the caller's token), and by agents that check it, on the calls they take |
 | Gateway → processor | Mutual TLS: each shows a certificate from AgentGov's own authority ([production](production.md#mutual-tls-between-components)); fail-closed (`failureMode: failClosed`, or `deny` for external authorization) for tool calls (gRPC), model calls (the webhook), calls between agents (external authorization) and their answers (external processing, gRPC) |
 | Processor, control plane → OPA | Mutual TLS: OPA asks every caller for a certificate from AgentGov's authority |
 | Processor, control plane → Granite Guardian | Inside your network, like Presidio; they send it the text it judges, with its API key if it has one |

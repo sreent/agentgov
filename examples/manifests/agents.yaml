@@ -41,4 +41,7 @@ spec:
   environment: prod
   workload_identity: {issuer: demo-cluster, subject: "system:serviceaccount:agents:billing-agent"}
   a2a_url: http://billing-agent:9600
+  # It refuses calls without the delegation the gateway gives with each one, so calls that
+  # go around the gateway get nowhere (docs/agent-to-agent.md#calls-around-the-gateway).
+  a2a_protection: delegation
   status: active

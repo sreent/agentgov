@@ -41,6 +41,7 @@ from agentgov.registry import (
     microsoft_signals,
     platforms,
     posture,
+    reachability,
     rules,
 )
 from agentgov.registry import agents as agents_svc
@@ -355,11 +356,13 @@ class Runtime:
         as it takes, as the scheduled runs do)."""
         with self.coordination.job("posture-scan", wait=wait):
             with self.db.session() as session:
-                scanned = (
-                    posture.scan(session, self.settings)
-                    if features.is_on(session, "posture-checks")
-                    else None
-                )
+                scanning = features.is_on(session, "posture-checks")
+                urls = reachability.targets(session) if scanning else None
+            # Calls around the gateway, when the feature says "test": over the network, so
+            # outside any transaction (None: not tested this time).
+            tested = reachability.call_all(urls) if urls is not None else None
+            with self.db.session() as session:
+                scanned = posture.scan(session, self.settings, tested=tested) if scanning else None
             ruled = self.run_rules(wait=wait)
         return None if scanned is None else {**scanned, "rules": ruled}
 

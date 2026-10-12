@@ -927,6 +927,13 @@ AGENT_ACCESS = typer.Option(
     help="Agents it may call over A2A, by name or pattern such as billing-* (repeatable or "
     "comma-separated).",
 )
+A2A_PROTECTION = typer.Option(
+    None,
+    "--a2a-protection",
+    help="What stops calls to it that don't come through the gateway: network (only the "
+    "gateway can reach it) or delegation (it refuses calls without the delegation the "
+    "gateway gives with each one).",
+)
 
 
 def _a2a_fields(
@@ -935,12 +942,18 @@ def _a2a_fields(
     *,
     no_a2a: bool = False,
     no_agent_access: bool = False,
+    a2a_protection: str | None = None,
+    no_a2a_protection: bool = False,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {}
     if no_a2a:
         body["a2a_url"] = None
     elif a2a_url is not None:
         body["a2a_url"] = a2a_url
+    if no_a2a_protection:
+        body["a2a_protection"] = None
+    elif a2a_protection is not None:
+        body["a2a_protection"] = a2a_protection
     if no_agent_access:
         body["agent_access"] = []
     elif agent_access is not None:
@@ -982,6 +995,7 @@ def agents_create(
     workload_identity: str | None = WORKLOAD_IDENTITY,
     a2a_url: str | None = A2A_URL,
     agent_access: list[str] | None = AGENT_ACCESS,
+    a2a_protection: str | None = A2A_PROTECTION,
     approve: bool = typer.Option(False, "--approve", help="Activate it now (admins only)."),
 ) -> None:
     """Register an agent. It waits in pending review unless --approve is given."""
@@ -989,7 +1003,7 @@ def agents_create(
         _model_fields(model_access, token_budget, False)
         | _team_field(team)
         | _workload_identity(workload_identity)
-        | _a2a_fields(a2a_url, agent_access)
+        | _a2a_fields(a2a_url, agent_access, a2a_protection=a2a_protection)
         | _agent_fields(
             description=description,
             blueprint=blueprint,
@@ -1047,6 +1061,12 @@ def agents_update(
     no_agent_access: bool = typer.Option(
         False, "--no-agent-access", help="Only the agents its blueprint may call."
     ),
+    a2a_protection: str | None = A2A_PROTECTION,
+    no_a2a_protection: bool = typer.Option(
+        False,
+        "--no-a2a-protection",
+        help="Nothing is known to stop calls to it that don't come through the gateway.",
+    ),
     if_version: int | None = IF_VERSION,
 ) -> None:
     """Change an agent's details. Only the options you pass are changed."""
@@ -1054,7 +1074,14 @@ def agents_update(
         _model_fields(model_access, token_budget, no_token_budget)
         | _team_field(team)
         | _workload_identity(workload_identity, clear=no_workload_identity)
-        | _a2a_fields(a2a_url, agent_access, no_a2a=no_a2a, no_agent_access=no_agent_access)
+        | _a2a_fields(
+            a2a_url,
+            agent_access,
+            no_a2a=no_a2a,
+            no_agent_access=no_agent_access,
+            a2a_protection=a2a_protection,
+            no_a2a_protection=no_a2a_protection,
+        )
         | _agent_fields(
             description=description,
             blueprint=blueprint,
@@ -1090,6 +1117,25 @@ def agents_a2a(ref: str) -> None:
     if view["agent_access"]:
         typer.echo(f"  (grants: {', '.join(view['agent_access'])})")
     typer.echo(f"called by: {', '.join(view['called_by']) or 'no agent'}")
+    if view["serves"]:
+        around = view["around_gateway"]
+        says = AROUND_THE_GATEWAY.get(around["protection"] or "")
+        typer.echo(
+            f"calls around the gateway: stopped by {says}"
+            if says
+            else "calls around the gateway: its owners haven't said what stops them"
+        )
+        test = around["test"]
+        if test:
+            typer.echo(f"  tested {test['checked_at']}: {test['state']}, {test['detail']}")
+        elif around["mode"] != "test":
+            typer.echo(f"  not tested (calls-around-gateway is {around['mode']})")
+
+
+AROUND_THE_GATEWAY = {
+    "network": "the network (only the gateway can reach it)",
+    "delegation": "the agent (it refuses calls without the gateway's delegation)",
+}
 
 
 def _lifecycle(ref: str, action: str, reason: str | None) -> None:

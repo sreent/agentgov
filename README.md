@@ -169,7 +169,10 @@ the gateway. It shows each control in turn:
     is the call once the blueprint no longer grants it. The billing agent may read
     customers' contact details, and the agent that asked may not: the gateway masks them
     in the answer. With masking in messages enforced, an email in what the agent asks
-    reaches the billing agent whole, as it may have personal data.
+    reaches the billing agent whole, as it may have personal data. A call straight to the
+    billing agent's own URL, around the gateway, is refused by the billing agent itself:
+    it checks the delegation the gateway gives with each call, and AgentGov's test shows
+    it.
 13. **Kill switch**: blocking the agent takes effect everywhere within a second (with the
     chart's two control-plane replicas, whichever one took the block).
 14. **Own identities**: an agent with no client secret at all authenticates with its
@@ -288,7 +291,8 @@ what-if evaluation.
   ([acting for people](docs/acting-for-people.md)).
 * **Other agents**: an agent that serves A2A is called at `http://<gateway>/a2a/<agent>`
   with the caller's token. It passes the `X-AgentGov-Delegation` header it was given on
-  to the calls it makes for that work ([agent to agent](docs/agent-to-agent.md)).
+  to the calls it makes for that work, and can refuse calls without one, which didn't come
+  through the gateway ([agent to agent](docs/agent-to-agent.md#calls-around-the-gateway)).
 * **Developers' coding assistants**: GitHub Copilot reads the approved MCP servers from
   the MCP registry at `http://<control plane>/registry`, and `agentgov mcp scan --report`
   reports the ones developers set up ([developer tools](docs/developer-tools.md)).
@@ -344,7 +348,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID instead of a
   client secret
 * [Agent to agent](docs/agent-to-agent.md): calls between agents over A2A through the
-  gateway, who may call whom, and the chain of delegation in policy and the ledger
+  gateway, who may call whom, the chain of delegation in policy and the ledger, and calls
+  that go around the gateway
 * [Access packages](docs/access-packages.md): tools, models and agents an agent holds for a
   while once approved, with reminders, renewals and reviews
 * [Issues](docs/issues.md): findings sent to each agent's owner, sponsors and team, by email

@@ -104,8 +104,10 @@ CATALOG: tuple[Feature, ...] = (
         "gateway",
         "Agents that serve A2A (the Agent2Agent protocol) are published on agentgateway at "
         "/a2a/<agent>, where other agents call them with their AgentGov token. The controls "
-        "check every call, and the chain of agents, with the person they act for, goes "
-        "with it to every agent, tool and model further down.",
+        "check every call that comes through the gateway, and the chain of agents, with the "
+        "person they act for, goes with it to every agent, tool and model further down. A "
+        "call straight to an agent's own URL doesn't pass the gateway: AgentGov doesn't "
+        "see it (calls around the gateway, below, look for those).",
         SWITCH,
         ON,
         {
@@ -195,9 +197,10 @@ CATALOG: tuple[Feature, ...] = (
         "a2a-masking",
         "Masking in calls between agents",
         "controls",
-        "Personal data in the messages agents send each other is masked, unless the agent "
-        "called may have it (its pii-access label). Data protection finds it, and refuses "
-        "credentials in messages whatever this says.",
+        "Personal data in the messages agents send each other through the gateway is masked, "
+        "unless the agent called may have it (its pii-access label). Data protection finds "
+        "it, and refuses credentials in messages whatever this says. A message sent straight "
+        "to an agent's own URL doesn't pass the gateway, so nothing is masked in it.",
         CONTROL,
         MONITOR,
         {
@@ -325,6 +328,28 @@ CATALOG: tuple[Feature, ...] = (
             ON: "Unregistered agents appear as discovered.",
             OFF: "They aren't added; registered agents' activity is still recorded.",
         },
+    ),
+    Feature(
+        "calls-around-gateway",
+        "Calls around the gateway",
+        "detection",
+        "AgentGov checks the calls between agents that come through its gateway; it doesn't "
+        "own the network agents run on, so a call straight to an agent's own A2A URL skips "
+        "every control. AgentGov can't stop those (the network can, or the agent, by "
+        "refusing calls without the delegation the gateway gives with each one); it finds "
+        "them and tells the agents' owners.",
+        (OFF, "watch", "test"),
+        "watch",
+        {
+            "test": "As watch, and each posture scan also calls each agent's A2A URL itself, "
+            "without a delegation, as a call around the gateway would, and records what "
+            "happened: an agent that takes the call is an issue for its owners.",
+            "watch": "Telemetry that shows a call straight to an agent's A2A URL is recorded "
+            "and is an issue for both agents' owners, as is an agent whose owners haven't "
+            "said what stops such calls. AgentGov calls no agent itself.",
+            OFF: "Nothing is looked for. What agents' owners said is kept.",
+        },
+        needs="posture checks on, for the test",
     ),
     Feature(
         "posture-checks",

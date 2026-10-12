@@ -2056,7 +2056,16 @@ async function agentForm(a) {
     { type: 'section', label: 'Agent to agent' },
     {
       id: 'a2a_url', label: 'A2A endpoint', value: a?.a2a_url || '', placeholder: 'http://billing-agent:9600', mono: true,
-      hint: 'Where it serves A2A (its JSON-RPC endpoint), reachable only from the gateway. Other agents then call it at /a2a/<name> on the gateway, as their grants allow.',
+      hint: 'Where it serves A2A (its JSON-RPC endpoint). Other agents then call it at /a2a/<name> on the gateway, as their grants allow.',
+    },
+    {
+      id: 'a2a_protection', label: 'Calls around the gateway are stopped by', type: 'select', value: a?.a2a_protection || '',
+      options: [
+        { value: '', label: 'Nothing we know of' },
+        { value: 'network', label: 'The network: only the gateway can reach it' },
+        { value: 'delegation', label: "The agent: it refuses calls without the gateway's delegation" },
+      ],
+      hint: "AgentGov checks only the calls that come through its gateway. Say what stops calls straight to the A2A endpoint: AgentGov can test it, and tells the agent's owners when it doesn't.",
     },
     {
       id: 'agent_access', label: 'Extra agents it may call', value: (a?.agent_access || []).join(', '), placeholder: 'billing-agent, kb-*', mono: true,
@@ -2107,6 +2116,7 @@ async function agentForm(a) {
         daily_token_budget: parseBudget(v.daily_token_budget),
         agent_access: parseList(v.agent_access),
         a2a_url: orNull(v.a2a_url),
+        a2a_protection: v.a2a_protection || null,
         framework: orNull(v.framework),
         platform: orNull(v.platform),
         models: parseList(v.models),
@@ -2385,6 +2395,30 @@ function identityCard(a) {
   });
 }
 
+// Calls around the gateway: what its owners say stops calls straight to its A2A endpoint,
+// and what AgentGov found when it last called it itself.
+const AROUND_SAYS = {
+  network: 'The network: only the gateway can reach it',
+  delegation: "The agent: it refuses calls without the gateway's delegation",
+};
+const AROUND_FOUND = {
+  refused: ['good', 'shield-check', 'It refused the test call'],
+  accepted: ['critical', 'alert-circle', 'It took the test call'],
+  unreachable: [null, 'info', "AgentGov couldn't reach it"],
+  inconclusive: ['warning', 'triangle', 'Inconclusive'],
+};
+function aroundGateway(around) {
+  const says = AROUND_SAYS[around.protection];
+  const test = around.test;
+  const [tone, iconName, label] = test ? (AROUND_FOUND[test.state] || [null, 'info', test.state]) : [];
+  return h('div', { class: 'stack', style: 'gap:4px' },
+    says ? h('span', {}, `Stopped by ${says.charAt(0).toLowerCase()}${says.slice(1)}`)
+      : h('span', { class: 'muted' }, "Its owners haven't said what stops calls straight to it"),
+    test
+      ? h('div', {}, plainChip(label, { tone, iconName }), ' ', h('span', { class: 'muted small' }, `${test.detail}, `), timeEl(test.checked_at))
+      : h('span', { class: 'muted small' }, around.mode === 'test' ? 'Not tested yet: the next posture scan tests it.' : `Not tested (calls-around-gateway is ${around.mode}).`));
+}
+
 // Agent to agent: where other agents call it, whom it may call, and who may call it.
 function agentA2ACard(a, view) {
   if (view instanceof Error) {
@@ -2401,11 +2435,12 @@ function agentA2ACard(a, view) {
     ['May call', names(view.may_call)],
     view.agent_access.length ? ['Its grants', h('span', { class: 'chip-row' }, view.agent_access.map((p) => plainChip(p, { mono: true })))] : null,
     view.serves ? ['Called by', names(view.called_by)] : null,
+    view.serves ? ['Around the gateway', aroundGateway(view.around_gateway)] : null,
   ];
   const idle = !view.serves && !view.may_call.length && !view.agent_access.length;
   return card({
     title: 'Agent to agent',
-    sub: 'Calls between agents go through the gateway (A2A), where policy checks each one; the agent called gets who handed the work down, with the person at its head.',
+    sub: 'Calls between agents through the gateway (A2A) are checked by policy, one by one; the agent called gets who handed the work down, with the person at its head. Calls straight to an agent skip the gateway.',
     body: idle
       ? emptyState("It doesn't serve or call other agents", can('admin') ? 'Give it an A2A endpoint, or agents it may call, with Edit.' : null)
       : facts(rows),

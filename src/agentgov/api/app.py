@@ -41,6 +41,7 @@ from agentgov.api import (
 )
 from agentgov.api.auth import Principal, describe, signed_in
 from agentgov.config import Settings
+from agentgov.identity import chains
 from agentgov.registry.errors import RegistryError
 from agentgov.runtime import Runtime
 
@@ -123,6 +124,8 @@ def create_app(
             s.execute(text("SELECT 1"))
         return {"status": "ready", "version": __version__}
 
+    delegation_keys = chains.keys(settings.service_token)
+
     @app.get("/v1/info", tags=["health"])
     def info() -> dict[str, Any]:
         return {
@@ -144,7 +147,18 @@ def create_app(
                 "enabled": bool(settings.guardian_url),
                 "model": settings.guardian_model if settings.guardian_url else None,
             },
+            # Where agents find the keys to check the delegations AgentGov gives them.
+            "delegation_jwks": "/v1/delegations/jwks" if delegation_keys else None,
         }
+
+    @app.get("/v1/delegations/jwks", tags=["health"])
+    def delegation_jwks() -> Response:
+        """The public keys of the delegations AgentGov gives the agents it calls through the
+        gateway: an agent that checks the one each call carries refuses calls around the
+        gateway (docs/agent-to-agent.md#calls-around-the-gateway). No secret."""
+        return JSONResponse(
+            chains.jwks(delegation_keys), headers={"Cache-Control": "public, max-age=300"}
+        )
 
     @app.get("/v1/me", tags=["system"])
     def whoami(principal: Principal = Depends(signed_in)) -> dict[str, Any]:

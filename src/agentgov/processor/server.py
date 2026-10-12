@@ -180,7 +180,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         self.classifier = traffic_classifier
         self.features = FeatureModes(opa)
         # Signs and checks the delegations agents carry from agent to agent.
-        self.chain_key = chains.signing_key(settings.service_token)
+        self.chain_keys = chains.keys(settings.service_token)
         self._background: set[asyncio.Task[Any]] = set()
 
     # ------------------------------------------------------------------ helpers
@@ -260,7 +260,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         if not token:
             return None, None
         try:
-            chain = chains.verify(self.chain_key, token, holder=identity.get("agent_id"))
+            chain = chains.verify(self.chain_keys, token, holder=identity.get("agent_id"))
         except chains.ChainError as exc:
             return None, f"The call can't be accepted: {exc}"
         if not chains.same_person(person, chain.person):

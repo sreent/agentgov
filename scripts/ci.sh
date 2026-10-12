@@ -356,6 +356,10 @@ lint_chart() {
         -skip SecretStore,ClusterSecretStore "$cloud"manifests/*.yaml || rc=1
     fi
   done
+  # Examples applied beside AgentGov, such as the NetworkPolicy that lets only the gateway
+  # reach an agent (docs/agent-to-agent.md).
+  kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
+    examples/kubernetes/*.yaml || rc=1
   rm -rf "$out"
   return "$rc"
 }
@@ -628,6 +632,7 @@ spec:
             - {name: TOKEN_URL, value: "http://agentgov-keycloak:8080/realms/agentgov/protocol/openid-connect/token"}
             - {name: ASSERTION_AUDIENCE, value: "http://localhost:8180/realms/agentgov"}
             - {name: WORKLOAD_ISSUER, value: "http://workload-issuer:9200"}
+            - {name: DELEGATION_JWKS_URL, value: "http://agentgov-control-plane:8000/v1/delegations/jwks"}
 ---
 apiVersion: v1
 kind: Service

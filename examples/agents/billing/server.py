@@ -11,11 +11,16 @@ ledger then see who handed the work down, up to the person at the head of the ch
     GET  /.well-known/agent-card.json   its agent card
     POST /                              A2A JSON-RPC: SendMessage, GetTask
 
-Not for real use: it keeps tasks in memory, and it is reachable only through the gateway.
+It takes only calls that came through the gateway: each one AgentGov lets through carries
+the delegation, which it checks with AgentGov's public keys (DELEGATION_JWKS_URL), and a
+call around the gateway has none (docs/agent-to-agent.md#calls-around-the-gateway).
+
+Not for real use: it keeps tasks in memory.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -25,6 +30,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx2
+import jwt
 from mcp import Client, MCPError
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Implementation, TextContent
@@ -52,6 +58,10 @@ DELEGATION = "x-agentgov-delegation"
 CALLER = "x-agentgov-caller"
 ON_BEHALF_OF = "x-agentgov-on-behalf-of"
 CHAIN = "x-agentgov-chain"
+# AgentGov's public keys, to check the delegation each call carries. Unset, it takes any
+# call, as an agent that doesn't check does.
+JWKS_URL = os.environ.get("DELEGATION_JWKS_URL", "")
+_KEYS = jwt.PyJWKClient(JWKS_URL, cache_jwk_set=True, lifespan=300) if JWKS_URL else None
 
 CARD = {
     "name": NAME,
@@ -196,11 +206,43 @@ async def send_message(params: dict[str, Any], request: Request) -> dict[str, An
     return {"task": task}
 
 
-def rpc_error(rpc_id: Any, code: int, text: str) -> JSONResponse:
-    return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": text}})
+def rpc_error(rpc_id: Any, code: int, text: str, status: int = 200) -> JSONResponse:
+    return JSONResponse(
+        {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": text}},
+        status_code=status,
+    )
+
+
+def around_the_gateway(delegation: str | None) -> str | None:
+    """Why a call can't be taken, if it didn't come through AgentGov's gateway: the
+    delegation it carries, signed by AgentGov for this agent, says it did."""
+    if _KEYS is None:
+        return None
+    if not delegation:
+        return "it didn't come through AgentGov's gateway"
+    try:
+        key = _KEYS.get_signing_key_from_jwt(delegation).key
+        claims = jwt.decode(
+            delegation,
+            key,
+            algorithms=["ES256"],
+            audience=NAME,
+            issuer="agentgov",
+            leeway=30,
+            options={"require": ["exp", "iat"]},
+        )
+    except jwt.PyJWTError as exc:
+        return f"the delegation it carries isn't valid ({exc})"
+    # The gateway gives one with each call, moments before: an old one came another way.
+    if time.time() - claims["iat"] > 150:
+        return "the delegation it carries was given for an earlier call"
+    return None
 
 
 async def rpc(request: Request) -> JSONResponse:
+    refused = await asyncio.to_thread(around_the_gateway, request.headers.get(DELEGATION))
+    if refused:
+        return rpc_error(None, -32600, f"Refused: {refused}", status=401)
     try:
         body = await request.json()
     except ValueError:

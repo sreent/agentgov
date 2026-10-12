@@ -155,6 +155,11 @@ class Agent(Base):
     # gateway at /a2a/<name>; and the agents it may call, in addition to the blueprint's.
     a2a_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_access: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    # Calls around the gateway (registry/reachability): what stops calls that don't come
+    # through the gateway, as its owners say ("network" or "delegation"); and what AgentGov
+    # found when it last called its A2A URL itself, without a delegation.
+    a2a_protection: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    a2a_probe: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # Identifiers in other systems (OTel agent id, platform ids, fingerprints).
     external_ids: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source: Mapped[str] = mapped_column(String(64), default="registered")

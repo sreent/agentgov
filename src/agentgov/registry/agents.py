@@ -64,6 +64,7 @@ EDITABLE = (
     "daily_token_budget",
     "agent_card",
     "a2a_url",
+    "a2a_protection",
     "agent_access",
     "external_ids",
     "blueprint",
@@ -175,6 +176,14 @@ def a2a_view(session: Session, settings: Settings, agent: Agent) -> dict[str, An
         "agent_access": effective_agent_access(agent),
         "may_call": [a.name for a in others if may_call(agent, a)],
         "called_by": [a.name for a in others if may_call(a, agent)],
+        # Calls around the gateway (registry/reachability): whether they're looked for,
+        # what its owners say stops them, and what AgentGov found when it last called the
+        # agent's A2A URL itself.
+        "around_gateway": {
+            "mode": features.mode(session, "calls-around-gateway"),
+            "protection": agent.a2a_protection,
+            "test": agent.a2a_probe,
+        },
     }
 
 
@@ -207,6 +216,8 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
             value = validation.agent_access(value)
         elif key == "a2a_url":
             value = validation.a2a_url(value)
+        elif key == "a2a_protection":
+            value = validation.a2a_protection(value)
         elif key == "daily_token_budget":
             value = validation.token_budget(value)
         elif key == "risk_tier":
@@ -542,6 +553,8 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         # Agent to agent: where it serves A2A, its route on the gateway, and whom it calls.
         "a2a_url": agent.a2a_url,
         "a2a_route": a2a_route(agent),
+        "a2a_protection": agent.a2a_protection,
+        "a2a_test": agent.a2a_probe,
         "agent_access": agent.agent_access or [],
         "effective_agent_access": effective_agent_access(agent),
         "external_ids": agent.external_ids or {},

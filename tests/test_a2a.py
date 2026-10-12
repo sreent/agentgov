@@ -5,15 +5,26 @@ gateway's A2A routes, and the registry, ledger and OCSF events that go with them
 from __future__ import annotations
 
 import asyncio
+import base64
+import dataclasses
+import hashlib
+import hmac
+import http.server
 import json
+import threading
+import time
 from typing import Any
 
 import httpx
 import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from agentgov import cli
+from agentgov import a2a_auth, cli
+from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.gateway import render
 from agentgov.identity import chains
@@ -40,7 +51,7 @@ from tests.test_processor import (
 )
 
 SECRET = "test-service-token"
-KEY = chains.signing_key(SECRET)
+KEYS = chains.keys(SECRET)
 SETTINGS = Settings(service_token=SECRET)
 BILLING = {"id": "agt_2", "name": "billing-agent", "status": "active"}
 CALLER = {"x-agentgov-agent-id": "agt_1", "x-agentgov-client-id": "agent-bot"}
@@ -110,12 +121,24 @@ def ask(
     return asyncio.run(go()), cp
 
 
+def b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def hand_signed(claims: dict[str, Any], alg: str, secret: bytes | None) -> str:
+    """A JWT signed by hand, as a forger would: with an HMAC of ``secret``, or nothing."""
+    header = b64(json.dumps({"alg": alg, "typ": "JWT"}).encode())
+    unsigned = f"{header}.{b64(json.dumps(claims).encode())}"
+    signature = hmac.new(secret, unsigned.encode(), hashlib.sha256).digest() if secret else b""
+    return f"{unsigned}.{b64(signature)}"
+
+
 def delegation(audience: str = "agt_1", **kw: Any) -> tuple[str, chains.Chain]:
     links = kw.pop(
         "links",
         [chains.person_link(SAM), chains.link("agent", "agt_0", "frontdesk")],
     )
-    return chains.issue(KEY, links=links, audience=audience, person=kw.pop("person", SAM), **kw)
+    return chains.issue(KEYS, links=links, audience=audience, person=kw.pop("person", SAM), **kw)
 
 
 # ----------------------------------------------------------------------- chains
@@ -124,7 +147,7 @@ def delegation(audience: str = "agt_1", **kw: Any) -> tuple[str, chains.Chain]:
 class TestChains:
     def test_a_delegation_is_for_the_agent_it_was_given_to(self) -> None:
         token, chain = delegation()
-        got = chains.verify(KEY, token, holder="agt_1")
+        got = chains.verify(KEYS, token, holder="agt_1")
         assert got.uid == chain.uid and got.uid.startswith("dlg_")
         assert [x["name"] for x in got.links] == ["sam", "frontdesk"]
         assert got.person == {
@@ -135,7 +158,7 @@ class TestChains:
         }
         assert got.describe(chains.link("agent", "agt_1", "bot")) == "sam > frontdesk > bot"
         with pytest.raises(chains.ChainError, match="given to another agent"):
-            chains.verify(KEY, token, holder="agt_9")
+            chains.verify(KEYS, token, holder="agt_9")
 
     def test_forged_expired_and_unkeyed_delegations_are_refused(self) -> None:
         token, _ = delegation()
@@ -145,23 +168,76 @@ class TestChains:
             algorithm="HS256",
         )
         with pytest.raises(chains.ChainError, match="isn't one AgentGov gave"):
-            chains.verify(KEY, forged, holder="agt_1")
+            chains.verify(KEYS, forged, holder="agt_1")
         old, _ = delegation(now=1)
         with pytest.raises(chains.ChainError, match="expired"):
-            chains.verify(KEY, old, holder="agt_1")
+            chains.verify(KEYS, old, holder="agt_1")
         with pytest.raises(chains.ChainError, match="AGENTGOV_SERVICE_TOKEN"):
             chains.verify(None, token, holder="agt_1")
         with pytest.raises(chains.ChainError, match="not a registered agent"):
-            chains.verify(KEY, token, holder=None)
+            chains.verify(KEYS, token, holder=None)
         with pytest.raises(chains.ChainError, match="isn't one AgentGov gave"):
-            chains.verify(KEY, "garbage", holder="agt_1")
-        assert chains.signing_key(None) is None
+            chains.verify(KEYS, "garbage", holder="agt_1")
+        assert chains.keys(None) is None and chains.keys("") is None
+
+    def test_delegations_signed_with_another_key_or_none_are_refused(self) -> None:
+        token, _ = delegation()
+        claims = jwt.decode(token, options={"verify_signature": False})
+        another = ec.generate_private_key(ec.SECP256R1())
+        public = KEYS.public.public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        for bad in (
+            jwt.encode(claims, another, algorithm="ES256", headers={"kid": KEYS.kid}),
+            # AgentGov's public key as an HMAC secret, the old confusion of algorithms.
+            hand_signed(claims, "HS256", public),
+            hand_signed(claims, "none", None),
+            hand_signed(claims, "ES384", None),
+        ):
+            with pytest.raises(chains.ChainError, match="isn't one AgentGov gave"):
+                chains.verify(KEYS, bad, holder="agt_1")
+
+    def test_delegations_are_signed_with_a_key_agents_can_check(self) -> None:
+        token, _ = delegation()
+        header = jwt.get_unverified_header(token)
+        assert header["alg"] == "ES256" and header["kid"] == KEYS.kid
+        # Every processor with the service token signs with the same key; another, another.
+        assert chains.keys(SECRET).kid == KEYS.kid != chains.keys("another-token").kid
+        published = chains.jwks(KEYS)
+        [jwk] = published["keys"]
+        assert set(jwk) == {"crv", "kty", "x", "y", "kid", "alg", "use"}
+        assert (jwk["kty"], jwk["crv"], jwk["alg"], jwk["use"]) == ("EC", "P-256", "ES256", "sig")
+        # Its ID is its thumbprint (RFC 7638): the required members, in order, no spaces.
+        members = f'{{"crv":"P-256","kty":"EC","x":"{jwk["x"]}","y":"{jwk["y"]}"}}'
+        assert jwk["kid"] == b64(hashlib.sha256(members.encode()).digest())
+        # Any JWT library checks it with the published key; no secret is published.
+        key = jwt.PyJWKSet.from_dict(published)[jwk["kid"]].key
+        assert jwt.decode(token, key, algorithms=["ES256"], audience="agt_1")["iss"] == "agentgov"
+        assert "d" not in jwk
+        assert chains.jwks(None) == {"keys": []}
+
+    def test_delegations_signed_before_are_checked_until_they_expire(self) -> None:
+        now = int(time.time())
+        claims = {
+            "iss": "agentgov",
+            "aud": "agt_1",
+            "jti": "dlg_before",
+            "iat": now,
+            "exp": now + 60,
+            "chain": [chains.person_link(SAM)],
+        }
+        before = jwt.encode(claims, KEYS.legacy, algorithm="HS256")
+        assert chains.verify(KEYS, before, holder="agt_1").uid == "dlg_before"
+        expired = jwt.encode({**claims, "iat": 1, "exp": 2}, KEYS.legacy, algorithm="HS256")
+        with pytest.raises(chains.ChainError, match="expired"):
+            chains.verify(KEYS, expired, holder="agt_1")
+        assert KEYS.legacy == chains.signing_key(SECRET)
 
     def test_re_delegation_names_its_parent(self) -> None:
         first, chain = delegation()
-        _, second = chains.issue(KEY, links=chain.links, audience="agt_3", parent=chain.uid)
+        _, second = chains.issue(KEYS, links=chain.links, audience="agt_3", parent=chain.uid)
         assert second.parent == chain.uid
-        claims = jwt.decode(first, KEY, algorithms=["HS256"], audience="agt_1")
+        claims = jwt.decode(first, KEYS.public, algorithms=["ES256"], audience="agt_1")
         assert claims["iss"] == "agentgov" and claims["exp"] - claims["iat"] == chains.TTL_SECONDS
 
 
@@ -185,7 +261,7 @@ class TestA2AGuard:
             "chain": [],
             "detections": inp["detections"],
         }
-        given = chains.verify(KEY, resp.headers[chains.HEADER], holder="agt_2")
+        given = chains.verify(KEYS, resp.headers[chains.HEADER], holder="agt_2")
         assert [x["name"] for x in given.links] == ["bot"] and given.parent is None
         assert resp.headers[chains.CALLER_HEADER] == "bot"
         assert resp.headers[chains.PERSON_HEADER] == ""
@@ -218,7 +294,7 @@ class TestA2AGuard:
         assert inp["chain"] == [{"type": "person", "id": "u-1", "name": "sam"}]
         assert resp.headers[chains.PERSON_HEADER] == "sam"
         assert resp.headers[chains.CHAIN_HEADER] == "sam > bot"
-        given = chains.verify(KEY, resp.headers[chains.HEADER], holder="agt_2")
+        given = chains.verify(KEYS, resp.headers[chains.HEADER], holder="agt_2")
         assert given.person and given.person["username"] == "sam"
 
     def test_a_call_handed_down_carries_its_chain_on(self) -> None:
@@ -228,7 +304,7 @@ class TestA2AGuard:
         inp = opa.inputs[0][1]
         assert [x["name"] for x in inp["chain"]] == ["sam", "frontdesk"]
         assert inp["user"]["username"] == "sam"  # the chain's person
-        given = chains.verify(KEY, resp.headers[chains.HEADER], holder="agt_2")
+        given = chains.verify(KEYS, resp.headers[chains.HEADER], holder="agt_2")
         assert given.parent == incoming.uid
         assert resp.headers[chains.CHAIN_HEADER] == "sam > frontdesk > bot"
         assert cp.records[0]["delegation"]["parent_uid"] == incoming.uid
@@ -324,6 +400,166 @@ class TestA2AGuard:
         assert resp.status_code == 200
         assert resp.headers[chains.HEADER] == ""
         assert resp.headers[chains.CALLER_HEADER] == "bot"
+
+
+class TestAgentsTakeOnlyCallsThroughTheGateway:
+    """What an agent runs to refuse calls around the gateway (agentgov.a2a_auth), with the
+    delegation the gateway gives it and the keys the control plane publishes."""
+
+    def given(self) -> str:
+        resp, _ = ask(FakeOpa(allow))
+        return resp.headers[chains.HEADER]
+
+    def test_the_agent_called_knows_its_delegation_by_its_name_or_its_id(self) -> None:
+        token = self.given()
+        claims = jwt.decode(token, options={"verify_signature": False})
+        assert claims["aud"] == ["agt_2", "billing-agent"]
+        for name in ("billing-agent", "agt_2"):
+            got = a2a_auth.DelegationCheck(name, jwks=chains.jwks(KEYS))(token)
+            assert [x["name"] for x in got["chain"]] == ["bot"]
+        with pytest.raises(a2a_auth.DelegationRefused, match="isn't valid"):
+            a2a_auth.DelegationCheck("crm-agent", jwks=chains.jwks(KEYS))(token)
+
+    def test_calls_without_a_valid_delegation_are_refused(self) -> None:
+        check = a2a_auth.DelegationCheck("billing-agent", jwks=chains.jwks(KEYS))
+        now = int(time.time())
+        claims = {
+            "iss": "agentgov",
+            "aud": ["agt_2", "billing-agent"],
+            "jti": "dlg_1",
+            "iat": now,
+            "exp": now + 3600,
+            "chain": [],
+        }
+        another = chains.keys("another-token")
+        assert another is not None
+        refused = {
+            "carries no delegation": None,
+            "doesn't publish": jwt.encode(
+                claims, another.private, algorithm="ES256", headers={"kid": another.kid}
+            ),
+            # Signed as delegations were before: AgentGov checks those, agents needn't.
+            "isn't valid": jwt.encode(claims, KEYS.legacy, algorithm="HS256"),
+            "expired": jwt.encode(
+                {**claims, "iat": now - 7200, "exp": now - 3600},
+                KEYS.private,
+                algorithm="ES256",
+                headers={"kid": KEYS.kid},
+            ),
+        }
+        for reason, token in refused.items():
+            with pytest.raises(a2a_auth.DelegationRefused, match=reason):
+                check(token)
+        # The gateway gives one with each call: one given ten minutes ago came another way.
+        earlier = jwt.encode(
+            {**claims, "iat": now - 600}, KEYS.private, algorithm="ES256", headers={"kid": KEYS.kid}
+        )
+        with pytest.raises(a2a_auth.DelegationRefused, match="given for an earlier call"):
+            check(earlier)
+        lenient = a2a_auth.DelegationCheck("billing-agent", jwks=chains.jwks(KEYS), max_age=None)
+        assert lenient(earlier)["jti"] == "dlg_1"
+
+    def test_agentgovs_keys_are_read_once_and_kept(self) -> None:
+        reads: list[str] = []
+        published = {"body": json.dumps(chains.jwks(KEYS)).encode()}
+
+        class Keys(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                reads.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(published["body"])
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Keys)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_address[1]}/v1/delegations/jwks"
+        try:
+            check = a2a_auth.DelegationCheck("billing-agent", jwks_url=url)
+            token = self.given()
+            assert check(token)["iss"] == "agentgov" and check(token)
+            assert reads == ["/v1/delegations/jwks"]
+            # A key AgentGov doesn't publish: read again, but not for every such call.
+            another = chains.keys("another-token")
+            assert another is not None
+            forged = jwt.encode(
+                jwt.decode(token, options={"verify_signature": False}),
+                another.private,
+                algorithm="ES256",
+                headers={"kid": another.kid},
+            )
+            for _ in range(3):
+                with pytest.raises(a2a_auth.DelegationRefused, match="doesn't publish"):
+                    check(forged)
+            assert len(reads) == 1  # read moments ago: not again within the retry interval
+        finally:
+            server.shutdown()
+            server.server_close()
+        # AgentGov can't be reached: the keys read last still check its delegations.
+        assert check(token)["jti"]
+        unreachable = a2a_auth.DelegationCheck("billing-agent", jwks_url=url)
+        with pytest.raises(a2a_auth.DelegationRefused, match="keys can't be read"):
+            unreachable(token)
+
+    def test_the_middleware_refuses_calls_without_one_and_serves_the_card(self) -> None:
+        seen: list[Any] = []
+
+        async def agent_app(scope: Any, receive: Any, send: Any) -> None:
+            seen.append(scope.get("state", {}).get("agentgov_delegation"))
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        check = a2a_auth.DelegationCheck("billing-agent", jwks=chains.jwks(KEYS))
+        app = a2a_auth.RequireDelegation(agent_app, check=check, open_paths=("/healthz",))
+        token = self.given()
+
+        async def go() -> list[httpx.Response]:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://billing"
+            ) as client:
+                return [
+                    await client.post("/", json=SEND),
+                    await client.post("/", json=SEND, headers={chains.HEADER: "forged"}),
+                    await client.post("/", json=SEND, headers={chains.HEADER: token}),
+                    await client.get("/.well-known/agent-card.json"),
+                    await client.get("/healthz"),
+                ]
+
+        bare, forged, through, card, health = asyncio.run(go())
+        assert bare.status_code == forged.status_code == 401
+        assert bare.json()["error"]["code"] == a2a_auth.REFUSED == -32600
+        assert "didn't come through the gateway" in bare.json()["error"]["message"]
+        assert "isn't valid" in forged.json()["error"]["message"]
+        assert through.status_code == card.status_code == health.status_code == 200
+        assert seen[0]["aud"] == ["agt_2", "billing-agent"] and seen[1:] == [None, None]
+
+        sent: list[dict[str, Any]] = []
+
+        async def collect(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        socket = {"type": "websocket", "path": "/ws", "headers": []}
+        asyncio.run(app(socket, None, collect))  # type: ignore[arg-type]
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+        with pytest.raises(ValueError, match="name the agent"):
+            a2a_auth.RequireDelegation(agent_app)
+        with pytest.raises(ValueError, match="jwks_url or as jwks"):
+            a2a_auth.DelegationCheck("billing-agent")
+
+    def test_the_control_plane_publishes_the_keys_to_anyone(self, client, settings) -> None:
+        resp = client.get("/v1/delegations/jwks")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "public, max-age=300"
+        found = chains.keys(settings.service_token)
+        assert found is not None and resp.json() == chains.jwks(found)
+        assert client.get("/v1/info").json()["delegation_jwks"] == "/v1/delegations/jwks"
+        unsigned = create_app(dataclasses.replace(settings, service_token=None), background=False)
+        with TestClient(unsigned) as other:
+            assert other.get("/v1/delegations/jwks").json() == {"keys": []}
+            assert other.get("/v1/info").json()["delegation_jwks"] is None
 
 
 class TestChainsOnToolsAndModels:

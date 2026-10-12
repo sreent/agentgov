@@ -308,6 +308,8 @@ services:
       TOKEN_URL: http://keycloak:8080/realms/agentgov/protocol/openid-connect/token
       ASSERTION_AUDIENCE: http://localhost:8180/realms/agentgov
       WORKLOAD_ISSUER: http://workload-issuer:9200
+      # It takes only calls that come through the gateway, checked with AgentGov's keys.
+      DELEGATION_JWKS_URL: http://control-plane:8000/v1/delegations/jwks
 
   # Demo stand-in for the security team's tools: it receives OCSF events as a SIEM (OTLP,
   # Splunk's HTTP Event Collector) and alerts as Slack and Teams do, and shows them at

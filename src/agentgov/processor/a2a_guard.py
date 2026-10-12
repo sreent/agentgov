@@ -269,11 +269,12 @@ class A2AGuard:
         if agent is not None:
             links.append(chains.link("agent", agent.get("id"), agent.get("name")))
         token = ""
-        if agent is not None and called is not None and self.p.chain_key is not None:
+        if agent is not None and called is not None and self.p.chain_keys is not None:
+            # For the agent called, by its ID and its name: an agent checking it knows one.
             token, new = chains.issue(
-                self.p.chain_key,
+                self.p.chain_keys,
                 links=links,
-                audience=str(called["id"]),
+                audience=[str(called["id"]), str(called["name"])],
                 person=person,
                 parent=chain.uid if chain else None,
             )
