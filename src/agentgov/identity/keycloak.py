@@ -207,6 +207,8 @@ class KeycloakAdmin:
 
     def add_optional_scope(self, uuid: str, scope_uuid: str) -> None:
         resp = self._request("PUT", f"/clients/{uuid}/optional-client-scopes/{scope_uuid}")
+        if resp.status_code == 409:
+            return  # another control-plane replica added it meanwhile
         self._check(resp, "optional client scope add")
 
     def _check_providers(self, resp: httpx.Response, what: str) -> httpx.Response:
@@ -615,9 +617,17 @@ class IdentityReconciler:
             return
         if scope is None:
             representation = scope_representation(agent)
-            scope = {**representation, "id": self.admin.create_client_scope(representation)}
+            try:
+                scope = {**representation, "id": self.admin.create_client_scope(representation)}
+                log.info("created client scope %s for agent %s", name, agent.name)
+            except KeycloakConflict:
+                # Another control-plane replica made it meanwhile.
+                scope = next(
+                    (s for s in self.admin.list_client_scopes() if s.get("name") == name), None
+                )
+                if scope is None or not _managed(scope):
+                    raise
             scopes.by_name()[name] = scope
-            log.info("created client scope %s for agent %s", name, agent.name)
         for app_uuid, optional in scopes.apps():
             if name not in optional:
                 self.admin.add_optional_scope(app_uuid, scope["id"])

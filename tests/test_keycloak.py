@@ -26,6 +26,10 @@ class FakeKeycloak:
         self.discovery: dict[str, dict[str, Any]] = {}  # OpenID Connect issuers' documents
         self.tokens = 0
         self.create_conflict_once = False
+        # Another control-plane replica makes the next client scope, or adds the next
+        # optional scope, between our lookup and ours.
+        self.scope_conflict_once = False
+        self.link_conflict_once = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -61,6 +65,9 @@ class FakeKeycloak:
         if path == scopes and request.method == "POST":
             sid = str(uuid.uuid4())
             self.scopes[sid] = {**json.loads(request.content), "id": sid}
+            if self.scope_conflict_once:
+                self.scope_conflict_once = False
+                return httpx.Response(409, json={"errorMessage": "exists"})
             return httpx.Response(201, headers={"Location": f"http://kc{scopes}/{sid}"})
         if path.startswith(scopes + "/") and request.method == "DELETE":
             sid = path.rsplit("/", 1)[-1]
@@ -74,6 +81,9 @@ class FakeKeycloak:
             assigned = self.optional.setdefault(uid, set())
             if request.method == "PUT":
                 assigned.add(path.rsplit("/", 1)[-1])
+                if self.link_conflict_once:
+                    self.link_conflict_once = False
+                    return httpx.Response(409, json={"errorMessage": "exists"})
                 return httpx.Response(204)
             return httpx.Response(200, json=[self.scopes[sid] for sid in assigned])
         if path.endswith("/protocol-mappers/models") and request.method == "POST":
@@ -283,6 +293,16 @@ def test_clients_from_earlier_versions_get_the_new_mappers(rt, settings, keycloa
     client = keycloak.by_client_id("agent-bot")
     assert "agentgov-groups" in {m["name"] for m in client["protocolMappers"]}
     assert client["attributes"]["standard.token.exchange.enabled"] == "true"
+
+
+def test_another_replica_making_the_scope_meanwhile_is_tolerated(rt, settings, keycloak) -> None:
+    keycloak._store({"clientId": "chat"})
+    keycloak.scope_conflict_once = keycloak.link_conflict_once = True
+    reconciler = _people_reconciler(rt, settings, keycloak)
+    _agent(rt, settings)
+    assert reconciler.reconcile_all() == {"synced": 1, "failed": 0}
+    assert [s["name"] for s in keycloak.scopes.values()] == ["agent-bot"]
+    assert keycloak.optional_names("chat") == {"agent-bot"}
 
 
 def test_a_scope_agentgov_did_not_make_is_left_alone(rt, settings, keycloak) -> None:
