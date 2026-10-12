@@ -564,10 +564,17 @@ class Fetched:
         self.config: dict[str, Any] | None = None
 
 
-def sync_from_control_plane(client: httpx.Client, path: str, fetched: Fetched) -> bool:
+def sync_from_control_plane(
+    client: httpx.Client, path: str, fetched: Fetched, *, certificates: Any = None
+) -> bool:
     """Fetch the configuration from the control plane and write it to ``path``, with the
     key check, if that changes the file; returns whether the file was rewritten. The key
-    check runs on every call: a key file can appear without the configuration changing."""
+    check runs on every call: a key file can appear without the configuration changing.
+
+    With ``certificates`` (the gateway's agentgov.tls.Identity), the file also says which
+    certificate the gateway holds: agentgateway reads the files it calls the processor
+    with only as it loads its configuration, so a renewed certificate rewrites the file,
+    and agentgateway loads it, and them, again."""
     headers = {"If-None-Match": fetched.etag} if fetched.etag else {}
     resp = client.get("/v1/gateway/config", headers=headers)
     if resp.status_code != 304:
@@ -575,11 +582,20 @@ def sync_from_control_plane(client: httpx.Client, path: str, fetched: Fetched) -
         fetched.etag, fetched.config = resp.headers.get("ETag"), yaml.safe_load(resp.text)
     if fetched.config is None:
         return False
-    return write_if_changed(path, to_yaml(with_available_keys(fetched.config)))
+    text = to_yaml(with_available_keys(fetched.config))
+    if certificates is not None:
+        text += f"# The gateway's certificate: {certificates.fingerprint()[:16]}\n"
+    return write_if_changed(path, text)
 
 
 def keep_current(
-    client: httpx.Client, path: str, *, interval: float, once: bool, heartbeat: str | None = None
+    client: httpx.Client,
+    path: str,
+    *,
+    interval: float,
+    once: bool,
+    heartbeat: str | None = None,
+    certificates: Any = None,
 ) -> None:
     """Keep ``path`` current until stopped; with ``once``, return after the first write.
     Errors (the control plane starting, a network blip) are retried. Every round touches
@@ -590,7 +606,7 @@ def keep_current(
             with open(heartbeat, "a"):
                 os.utime(heartbeat)
         try:
-            changed = sync_from_control_plane(client, path, fetched)
+            changed = sync_from_control_plane(client, path, fetched, certificates=certificates)
         except httpx.HTTPError as exc:
             log.warning("could not fetch the gateway configuration: %s", exc)
         else:

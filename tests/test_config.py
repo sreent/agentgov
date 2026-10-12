@@ -50,6 +50,7 @@ def test_pii_thresholds() -> None:
         {"AGENTGOV_FEATURES": "least-privilege=sometimes"},
         {"AGENTGOV_FEATURES": "teleportation=on"},
         {"AGENTGOV_FEATURES": "discovery"},
+        {"AGENTGOV_TLS_RELOAD_SECONDS": "-1"},
     ],
 )
 def test_invalid_values(env) -> None:
@@ -65,3 +66,15 @@ def test_feature_pins() -> None:
 def test_settings_that_became_features_are_refused_with_directions() -> None:
     with pytest.raises(ValueError, match="AGENTGOV_FEATURES=unknown-callers=<mode>"):
         Settings.from_env({"AGENTGOV_UNKNOWN_AGENT_MODE": "monitor"})
+
+
+def test_one_certificate_watcher_per_directory(tmp_path) -> None:
+    """Every Settings.tls() of a component gives the same identity, which alone looks after
+    its renewals."""
+    from agentgov import tls
+
+    tls.issue(tls.make_authority(tmp_path / "ca"), tmp_path / "me", "agentgov-me", ["me"])
+    env = {"AGENTGOV_TLS_DIR": str(tmp_path / "me"), "AGENTGOV_TLS_RELOAD_SECONDS": "0"}
+    settings = Settings.from_env(env)
+    assert settings.tls() is settings.tls() is Settings.from_env(dict(env)).tls()
+    assert Settings.from_env({}).tls() is None

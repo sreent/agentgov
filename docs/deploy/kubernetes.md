@@ -102,8 +102,8 @@ The defaults are for evaluation. For an installation others use:
   [calls around the gateway](../agent-to-agent.md#calls-around-the-gateway)).
 * **Mutual TLS and signed bundles** are on by default (`internalTLS`, `bundleSigning`): the
   chart makes an authority, the components' certificates and the signing key on install
-  and keeps them, or cert-manager issues the certificates
-  ([production](../production.md)).
+  and keeps them, or cert-manager or SPIRE issues the certificates, which the components
+  take as they are renewed ([production](../production.md)).
 * **Two control-plane replicas or more** (`controlPlane.replicas`) for high availability:
   each part running several gets a PodDisruptionBudget.
 * **No demo users** (`keycloak.demoUsers=false`), which also leaves out the demo app
@@ -218,6 +218,8 @@ The chart always sets `AGENTGOV_OIDC_CLIENT_SECRET` from the Secret, so a value 
 | `controlPlane.ledgerArchive.enabled`, `.retentionDays`, `.existingClaim`, `.size`, `.storageClass`, `.accessMode` | off, 365, —, 20Gi, —, `ReadWriteOnce` | Keep the ledger's entries in the database for `retentionDays` (183 at least), then archive them to a volume, the chart's or yours ([evidence](../evidence.md#retention)). The chart's volume is kept when the release is uninstalled. Several replicas need `ReadWriteMany` |
 | `internalTLS.enabled` | `true` | Mutual TLS between AgentGov's components, with an authority and certificates the chart makes and keeps ([production](../production.md#mutual-tls-between-components)) |
 | `internalTLS.certManager.enabled`, `.issuerRef`, `.duration` | off, an authority of the release's own, `87600h` | cert-manager issues the components' certificates instead: from an authority it makes for the release, or from your Issuer in the release's namespace, a CA issuer that issues AgentGov's certificates only (not a ClusterIssuer) ([production](../production.md#mutual-tls-between-components)) |
+| `internalTLS.spire.enabled`, `.trustDomain`, `.className`, `.ttl` | off, `example.org`, `spire-server-spire`, SPIRE's | SPIRE issues the components' certificates instead, as X.509-SVIDs through the SPIFFE CSI driver, registered with ClusterSPIFFEIDs, and the components take only the callers they name, by their SPIFFE IDs ([production](../production.md#workload-identities-from-spire)) |
+| `internalTLS.reloadSeconds` | `60` | How often the components look for a renewed certificate ([production](../production.md#renewed-certificates)) |
 | `bundleSigning.enabled`, `.existingSecret`, `.algorithm` | on, generated, `RS256` | Signed OPA bundles: the chart's key and certificate, or a `kubernetes.io/tls` Secret of yours ([production](../production.md#signed-bundles)) |
 | `podDisruptionBudget.enabled` | `true` | A PodDisruptionBudget for each part running two or more replicas |
 | `features` | — | Features the deployment pins, such as `{least-privilege: monitor}` ([features](../features.md)); administrators choose the rest in the app |

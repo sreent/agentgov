@@ -13,7 +13,8 @@ x-agentgov-env: &agentgov-env
   AGENTGOV_SERVICE_TOKEN: ${AGENTGOV_SERVICE_TOKEN:-dev-service-token}
   AGENTGOV_OPA_URL: https://opa:8181
   # Each component's certificate, for mutual TLS with the others (docs/architecture.md):
-  # its own directory of the certs volume, at /tls.
+  # its own directory of the certs volume, at /tls. A renewed one (`agentgov
+  # internal-certs /certs --renew`) is taken within AGENTGOV_TLS_RELOAD_SECONDS (60).
   AGENTGOV_TLS_DIR: /tls
 
 services:
@@ -132,6 +133,8 @@ services:
       AGENTGOV_DESTINATION_SECRETS_DIR: /destination-secrets
       # The key it signs OPA's bundles with (OPA refuses one that doesn't verify).
       AGENTGOV_BUNDLE_SIGNING_KEY_FILE: /tls/bundle-signing/key.pem
+      # The callers its internal port takes, by the names in their certificates.
+      AGENTGOV_TLS_PEERS: processor,gateway,opa,otel-collector
     volumes:
       - ${AGENTGOV_DESTINATION_SECRETS_DIR:-./destination-secrets}:/destination-secrets:ro
       - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: control-plane}}
@@ -193,7 +196,7 @@ services:
     # Over mutual TLS: callers show a certificate from AgentGov's authority.
     command: ["run", "--server", "--addr=0.0.0.0:8181", "--config-file=/config/opa.yaml", "--log-level=info",
               "--tls-cert-file=/tls/tls.crt", "--tls-private-key-file=/tls/tls.key",
-              "--tls-ca-cert-file=/tls/ca.crt", "--authentication=tls",
+              "--tls-ca-cert-file=/tls/ca.crt", "--authentication=tls", "--tls-cert-refresh-period=1m",
               "--set-file=keys.agentgov.key=/tls/bundle.crt"]
     environment:
       <<: *agentgov-env
@@ -225,6 +228,8 @@ services:
       # IBM Granite Guardian's second opinion on traffic (docs/detection.md).
       AGENTGOV_GUARDIAN_URL: ${AGENTGOV_GUARDIAN_URL:-}
       AGENTGOV_GUARDIAN_API_KEY: ${AGENTGOV_GUARDIAN_API_KEY:-}
+      # Only agentgateway calls it.
+      AGENTGOV_TLS_PEERS: gateway
     volumes:
       - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: processor}}
     depends_on:

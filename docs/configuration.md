@@ -291,6 +291,8 @@ Copilot Studio asks AgentGov before each tool call its agents make, once a Power
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_TLS_DIR` | — | Where this component finds its certificate (tls.crt), its key (tls.key) and the certificate of the authority that issued every component's (ca.crt), as cert-manager writes them. Set, AgentGov's components talk over mutual TLS: each serves TLS on its internal ports and asks callers for a certificate from the same authority, and the control plane gives the service role only on its internal port. `agentgov internal-certs DIR` makes an authority and the certificates. |
+| `AGENTGOV_TLS_RELOAD_SECONDS` | `60.0` | Seconds between looks at those files for a renewed certificate (cert-manager's, or an X.509-SVID spiffe-helper writes from SPIRE): a new one serves the next connections, with no restart. 0 reads them once, at start. |
+| `AGENTGOV_TLS_PEERS` | empty | The callers this component's TLS listeners take, comma-separated: their SPIFFE IDs (the chart's: spiffe://example.org/ns/agentgov/agentgov/agentgov-gateway) or DNS names, exact or with a trailing * for a prefix. Empty: any certificate from the authority, which then must issue AgentGov's components' only; with SPIRE, which gives every workload one, list them. |
 | `AGENTGOV_INTERNAL_PORT` | `8443` | The control plane's port for AgentGov's other components, over mutual TLS. |
 | `AGENTGOV_GATEWAY_TLS_DIR` | `/tls` | Where agentgateway finds its tls.crt, tls.key and ca.crt, to call the processor over mutual TLS (the control plane writes it into the gateway's configuration). |
 

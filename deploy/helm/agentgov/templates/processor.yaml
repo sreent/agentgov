@@ -30,7 +30,12 @@ spec:
         {{- include "agentgov.podSecurity" . | nindent 8 }}
         runAsUser: 10001
         runAsGroup: 10001
+      {{- if and .Values.internalTLS.enabled .Values.internalTLS.spire.enabled }}
+      initContainers:
+        {{- include "agentgov.spireContainer" (list . false) | nindent 8 }}
+      {{- end }}
       containers:
+        {{- include "agentgov.spireContainer" (list . true) | nindent 8 }}
         - name: processor
           image: {{ include "agentgov.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -42,6 +47,7 @@ spec:
               containerPort: 8091
           env:
             {{- include "agentgov.commonEnv" . | nindent 12 }}
+            {{- include "agentgov.tlsPeersEnv" (list . (list "gateway")) | nindent 12 }}
             - name: AGENTGOV_CONTROL_PLANE_URL
               value: {{ include "agentgov.internalControlPlaneUrl" . | quote }}
             {{- if .Values.presidio.enabled }}

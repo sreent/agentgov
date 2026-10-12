@@ -34,7 +34,7 @@ classifiers = [
 ]
 dependencies = [
   "fastapi>=0.115",
-  "uvicorn[standard]>=0.30",
+  "uvicorn[standard]>=0.47",
   "pydantic>=2.7",
   "sqlalchemy>=2.0.30",
   # The database schema's migrations (agentgov/migrations).

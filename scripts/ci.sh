@@ -349,6 +349,14 @@ lint_chart() {
     >"$out/cert-manager.yaml" &&
     kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
       -schema-location default -schema-location "$CRDS_CATALOG" "$out/cert-manager.yaml" || rc=1
+  # SPIRE issuing them (ClusterSPIFFEIDs), against the schema in deploy/helm/schemas: the
+  # catalog has none for SPIRE's resources.
+  helm lint --strict "$CHART" --set internalTLS.spire.enabled=true >/dev/null &&
+    helm template agentgov "$CHART" --set internalTLS.spire.enabled=true >"$out/spire.yaml" &&
+    kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
+      -schema-location default \
+      -schema-location 'deploy/helm/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+      "$out/spire.yaml" || rc=1
   # The cloud guides' values (docs/deploy), and the manifests they apply beside the chart,
   # against the Kubernetes schemas and, for their custom resources, the CRDs catalog.
   local cloud
@@ -412,6 +420,53 @@ DEMO_DESTINATION_SECRETS=(
   --set destinationSecrets.values.governance-teams=http://demo-sink:9300/teams/workflows/governance
 )
 
+# Each component's certificate renewed, as cert-manager or SPIRE would: the components take
+# their new ones without a restart (AGENTGOV_TLS_RELOAD_SECONDS, OPA's
+# --tls-cert-refresh-period), and the gateway's rewrites agentgateway's configuration.
+renewed_certificates() {
+  local before after i
+  before=$("${COMPOSE[@]}" exec -T gateway-config tail -n 1 /gateway/config.yaml) || return 1
+  "${COMPOSE[@]}" run --rm --no-deps -T --entrypoint sh certs -c \
+    "agentgov internal-certs /certs --renew >/dev/null && chmod a+r /certs/*/tls.key" || return 1
+  echo "certificates renewed; waiting for the components to take them"
+  for i in $(seq 30); do
+    sleep 5
+    after=$("${COMPOSE[@]}" exec -T gateway-config tail -n 1 /gateway/config.yaml) || continue
+    [ "$after" != "$before" ] || continue
+    # Which certificate each one serves (shown a certificate each takes, the gateway's).
+    "${COMPOSE[@]}" run --rm --no-deps -T --entrypoint python certs - $((i * 5)) <<'EOF' && return 0
+import socket
+import ssl
+import sys
+from pathlib import Path
+
+from cryptography import x509
+
+stale = []
+for host, port, alpn in [("control-plane", 8443, []), ("processor", 50051, ["h2"]),
+                         ("processor", 8091, []), ("opa", 8181, [])]:
+    context = ssl.create_default_context(cafile="/certs/ca/ca.crt")
+    context.load_cert_chain("/certs/gateway/tls.crt", "/certs/gateway/tls.key")
+    context.set_alpn_protocols(alpn or ["http/1.1"])
+    try:
+        with socket.create_connection((host, port), timeout=5) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as conn:
+                served = x509.load_der_x509_certificate(conn.getpeercert(binary_form=True))
+    except OSError as exc:
+        stale.append(f"{host}:{port} ({exc})")
+        continue
+    held = x509.load_pem_x509_certificate(Path(f"/certs/{host}/tls.crt").read_bytes())
+    if served.serial_number != held.serial_number:
+        stale.append(f"{host}:{port}")
+print(f"not yet renewed: {', '.join(stale)}" if stale else
+      f"each serves its renewed certificate, within {sys.argv[1]} seconds")
+sys.exit(1 if stale else 0)
+EOF
+  done
+  echo "the components didn't take their renewed certificates"
+  return 1
+}
+
 end_to_end() {
   local port busy=() rc=0
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -432,7 +487,9 @@ end_to_end() {
     return 1
   fi
   export AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=dev-admin-token
+  # The demo runs on renewed certificates.
   agentgov apply -f examples/manifests &&
+    renewed_certificates &&
     python examples/agents/demo_agent.py &&
     agentgov ledger verify || rc=1
   [ "$rc" = 0 ] || e2e_logs

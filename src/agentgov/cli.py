@@ -678,11 +678,17 @@ def internal_certs(
         help="NAME, or NAME=HOST,HOST: a component and the names others reach it by "
         f"(default: {', '.join(COMPONENTS)}, each by its name).",
     ),
+    renew: bool = typer.Option(
+        False,
+        "--renew",
+        help="Give each component a new key and certificate from the same authority; they "
+        "take it without a restart (AGENTGOV_TLS_RELOAD_SECONDS).",
+    ),
 ) -> None:
     """Make AgentGov's own certificate authority, and a certificate for each component, for
     mutual TLS between them (AGENTGOV_TLS_DIR=<directory>/<name>). Each component's
     directory holds tls.crt, tls.key and ca.crt, as cert-manager writes them. What is
-    there already is kept."""
+    there already is kept, unless --renew."""
     from agentgov import tls
 
     authority = tls.make_authority(directory / "ca")
@@ -690,7 +696,11 @@ def internal_certs(
         name, _, hosts = spec.partition("=")
         names = [h for h in hosts.split(",") if h] or [name]
         folder = tls.issue(
-            authority, directory / name, f"agentgov-{name}", [*names, "localhost", "127.0.0.1"]
+            authority,
+            directory / name,
+            f"agentgov-{name}",
+            [*names, "localhost", "127.0.0.1"],
+            renew=renew,
         )
         typer.echo(f"{name}: {folder}")
 
@@ -762,7 +772,7 @@ def gateway_config(
         base_url=settings.control_plane_url,
         headers={"Authorization": f"Bearer {settings.service_token}"},
         timeout=10,
-        verify=identity.client_context() if identity else True,
+        transport=identity.transport() if identity else None,
     ) as client:
         keep_current(
             client,
@@ -770,6 +780,9 @@ def gateway_config(
             interval=interval,
             once=once,
             heartbeat=str(heartbeat) if heartbeat else None,
+            # The gateway's certificate (the same files as its own): a renewed one rewrites
+            # the file, so that agentgateway reads it again.
+            certificates=identity,
         )
 
 

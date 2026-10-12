@@ -9,6 +9,7 @@ development free of external dependencies.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import os
 import re
 from dataclasses import dataclass
@@ -332,6 +333,16 @@ class Settings:
     # authority, and the control plane gives the service role only on its internal port.
     # `agentgov internal-certs DIR` makes an authority and the certificates.
     tls_dir: str | None = None
+    # Seconds between looks at those files for a renewed certificate (cert-manager's, or an
+    # X.509-SVID spiffe-helper writes from SPIRE): a new one serves the next connections,
+    # with no restart. 0 reads them once, at start.
+    tls_reload_seconds: float = 60.0
+    # The callers this component's TLS listeners take, comma-separated: their SPIFFE IDs
+    # (the chart's: spiffe://example.org/ns/agentgov/agentgov/agentgov-gateway) or DNS
+    # names, exact or with a trailing * for a prefix. Empty: any certificate from the
+    # authority, which then must issue AgentGov's components' only; with SPIRE, which gives
+    # every workload one, list them.
+    tls_peers: str = ""
     # The control plane's port for AgentGov's other components, over mutual TLS.
     internal_port: int = 8443
     # Where agentgateway finds its tls.crt, tls.key and ca.crt, to call the processor
@@ -432,6 +443,8 @@ class Settings:
             raise ValueError("AGENTGOV_LEDGER_CHECKPOINT_HOURS must be 0 (on demand) or more")
         if self.authzen_url and not self.authzen_url.startswith(("https://", "http://")):
             raise ValueError("AGENTGOV_AUTHZEN_URL is the decision point's http(s) URL")
+        if self.tls_reload_seconds < 0:
+            raise ValueError("AGENTGOV_TLS_RELOAD_SECONDS is 0 (read once) or more")
         if self.authzen_timeout_seconds <= 0:
             raise ValueError("AGENTGOV_AUTHZEN_TIMEOUT_SECONDS must be more than 0")
         if not 30 <= self.assertion_lifetime_seconds <= 300:
@@ -475,10 +488,11 @@ class Settings:
         self.pii_thresholds()  # raises on malformed entries
 
     def tls(self) -> Any:
-        """This component's certificate for mutual TLS (agentgov.tls), or None without."""
-        from agentgov.tls import Identity
-
-        return Identity.from_dir(self.tls_dir) if self.tls_dir else None
+        """This component's certificate for mutual TLS (agentgov.tls), or None without: one
+        for each directory, which looks after its renewals."""
+        if not self.tls_dir:
+            return None
+        return _tls_identity(self.tls_dir, self.tls_peers, self.tls_reload_seconds)
 
     def feature_pins(self) -> dict[str, str]:
         from agentgov.registry.features import parse_pins, unmet
@@ -616,3 +630,10 @@ class Settings:
 
     def with_overrides(self, **overrides: Any) -> Settings:
         return dataclasses.replace(self, **overrides)
+
+
+@functools.lru_cache(maxsize=8)
+def _tls_identity(directory: str, peers: str, reload_seconds: float) -> Any:
+    from agentgov.tls import Identity, Peers
+
+    return Identity.from_dir(directory, peers=Peers.parse(peers), reload_seconds=reload_seconds)

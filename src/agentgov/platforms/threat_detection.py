@@ -180,7 +180,7 @@ class ThreatDetection:
         )
         identity = settings.tls()
         self._opa = opa_http or httpx.Client(
-            timeout=OPA_TIMEOUT_SECONDS, verify=identity.client_context() if identity else True
+            timeout=OPA_TIMEOUT_SECONDS, transport=identity.transport() if identity else None
         )
         self.agents = AgentLookup()
 

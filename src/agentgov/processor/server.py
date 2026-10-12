@@ -742,7 +742,9 @@ async def serve(settings: Settings) -> None:
     # Mutual TLS with the other components (agentgov.tls), when it has a certificate: OPA
     # and the control plane are called with it, and agentgateway must show its own.
     identity = settings.tls()
-    http = httpx.AsyncClient(timeout=5.0, verify=identity.client_context() if identity else True)
+    http = httpx.AsyncClient(
+        timeout=5.0, transport=identity.async_transport() if identity else None
+    )
     opa = OpaClient(settings.opa_url or "http://localhost:8181", http=http)
     control_plane = ControlPlaneClient(
         settings.control_plane_url, settings.service_token, http=http
@@ -762,7 +764,9 @@ async def serve(settings: Settings) -> None:
         options=[
             ("grpc.max_receive_message_length", 64 * 1024 * 1024),
             ("grpc.max_send_message_length", 64 * 1024 * 1024),
-        ]
+        ],
+        # With AGENTGOV_TLS_PEERS, only those callers (agentgateway's certificate).
+        interceptors=identity.grpc_interceptors() if identity else None,
     )
     # IBM Granite Guardian's second opinion on traffic, where it is configured.
     traffic_classifier = classifier.TrafficClassifier(settings) if settings.guardian_url else None

@@ -23,6 +23,7 @@ to rely on. [Deploying AgentGov](deploy/README.md) has the guides.
 | Helm | 3 (CI uses 3.19) |
 | PostgreSQL | 15 or later. Compose and the chart run 17 |
 | Keycloak | 26.6 or later. The bundled one is 26.8.0. SPIFFE identity issuers need its `spiffe` feature ([agents' own identities](agent-identity.md)) |
+| SPIRE | Optional, to issue the components' certificates (`internalTLS.spire`): with the SPIFFE CSI driver and SPIRE's controller manager, as the SPIFFE project's `spire` chart installs them. Checked with SPIRE 1.15.3 and spiffe-helper 0.12.2 ([production](production.md#workload-identities-from-spire)) |
 | Python | 3.11 to 3.13, for the `agentgov` command and the demo. The image has the command too: `docker run --rm IMAGE --help` |
 | Browser | A current Chrome, Edge, Firefox or Safari, for the admin UI |
 

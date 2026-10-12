@@ -38,7 +38,12 @@ spec:
         # The archive volume is the control plane's to write.
         fsGroup: 10001
         {{- end }}
+      {{- if and .Values.internalTLS.enabled .Values.internalTLS.spire.enabled }}
+      initContainers:
+        {{- include "agentgov.spireContainer" (list . false) | nindent 8 }}
+      {{- end }}
       containers:
+        {{- include "agentgov.spireContainer" (list . true) | nindent 8 }}
         - name: control-plane
           image: {{ include "agentgov.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -53,6 +58,7 @@ spec:
             {{- end }}
           env:
             {{- include "agentgov.commonEnv" . | nindent 12 }}
+            {{- include "agentgov.tlsPeersEnv" (list . (list "processor" "gateway" "opa" "otel-collector")) | nindent 12 }}
             - name: AGENTGOV_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: admin-token}

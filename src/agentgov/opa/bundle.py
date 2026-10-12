@@ -46,7 +46,10 @@ from agentgov.registry import agents as agents_svc
 log = logging.getLogger(__name__)
 
 BUNDLE_CONTENT_TYPE = "application/vnd.openpolicyagent.bundles"
-ROOTS = ["agentgov", "agentos", "registry", "system"]
+# What the bundle owns: OPA erases the policies under these as it activates one. system.log
+# and not all of system, where OPA can have an authorization policy of its own, from a file
+# (system.authz: the chart's, with SPIRE).
+ROOTS = ["agentgov", "agentos", "registry", "system/log"]
 # How long a bundle built is served without being built again, even with no change heard
 # of: a change a replica didn't hear about (it lost the database for a while) reaches the
 # OPA instances it serves within this.

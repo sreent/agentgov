@@ -76,10 +76,62 @@ https://{{ include "agentgov.name" (list . "control-plane") }}:8443
 {{- end -}}
 
 {{- define "agentgov.tlsVolume" -}}
-{{- if (index . 0).Values.internalTLS.enabled }}
+{{- $ctx := index . 0 }}
+{{- if $ctx.Values.internalTLS.enabled }}
+{{- if $ctx.Values.internalTLS.spire.enabled }}
+# Its X.509-SVID from SPIRE, as spiffe-helper writes it: tls.crt, tls.key and ca.crt.
+- name: tls
+  emptyDir: {medium: Memory, sizeLimit: 1Mi}
+- name: spiffe-workload-api
+  csi: {driver: {{ $ctx.Values.internalTLS.spire.csiDriver }}, readOnly: true}
+- name: spiffe-helper
+  configMap:
+    name: {{ printf "%s-spiffe-helper" (include "agentgov.fullname" $ctx) }}
+{{- else }}
 - name: tls
   secret:
     secretName: {{ include "agentgov.tlsSecret" . }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* With SPIRE, a component's SPIFFE ID. */}}
+{{- define "agentgov.spiffeId" -}}
+{{- $ctx := index . 0 -}}
+{{- printf "spiffe://%s/ns/%s/agentgov/%s" $ctx.Values.internalTLS.spire.trustDomain $ctx.Release.Namespace (include "agentgov.name" .) -}}
+{{- end -}}
+
+{{/* With SPIRE, which gives every workload an SVID, the callers a component's TLS
+listeners take: the components (list . "processor" ...) that call it. */}}
+{{- define "agentgov.tlsPeersEnv" -}}
+{{- $ctx := index . 0 -}}
+{{- if and $ctx.Values.internalTLS.enabled $ctx.Values.internalTLS.spire.enabled -}}
+{{- $ids := list -}}
+{{- range (index . 1) -}}
+{{- $ids = append $ids (include "agentgov.spiffeId" (list $ctx .)) -}}
+{{- end }}
+- name: AGENTGOV_TLS_PEERS
+  value: {{ join "," $ids | quote }}
+{{- end -}}
+{{- end -}}
+
+{{/* With SPIRE: spiffe-helper writes the pod's SVID into /tls before the component starts
+(an init container), and keeps it current beside it as SPIRE renews it. */}}
+{{- define "agentgov.spireContainer" -}}
+{{- $ctx := index . 0 -}}
+{{- $daemon := index . 1 -}}
+{{- if and $ctx.Values.internalTLS.enabled $ctx.Values.internalTLS.spire.enabled -}}
+- name: {{ ternary "spiffe-helper" "spiffe-helper-init" $daemon }}
+  image: {{ $ctx.Values.internalTLS.spire.helper.image }}
+  args: ["-config", "/config/{{ ternary "daemon" "once" $daemon }}.conf"]
+  resources:
+    {{- toYaml $ctx.Values.internalTLS.spire.helper.resources | nindent 4 }}
+  securityContext:
+    {{- include "agentgov.containerSecurity" $ctx | nindent 4 }}
+  volumeMounts:
+    - {name: tls, mountPath: /tls}
+    - {name: spiffe-workload-api, mountPath: /spiffe-workload-api, readOnly: true}
+    - {name: spiffe-helper, mountPath: /config, readOnly: true}
 {{- end }}
 {{- end -}}
 
@@ -136,6 +188,8 @@ capabilities:
 {{- if .Values.internalTLS.enabled }}
 - name: AGENTGOV_TLS_DIR
   value: /tls
+- name: AGENTGOV_TLS_RELOAD_SECONDS
+  value: {{ .Values.internalTLS.reloadSeconds | quote }}
 {{- end }}
 {{- end -}}
 

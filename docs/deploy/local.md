@@ -59,7 +59,9 @@ through the gateway. AgentGov's components talk to each other over mutual TLS
 ([production](../production.md#mutual-tls-between-components)): on its first start, the
 `certs` service makes the stack's own authority, a certificate for each component and the
 key that signs OPA's bundles, on the `certs` volume, and each component mounts only its
-own. To ask OPA yourself, use OPA's certificate for instance:
+own; `docker compose run --rm --entrypoint sh certs -c "agentgov internal-certs /certs
+--renew && chmod a+r /certs/*/tls.key"` renews them, and the components take theirs within
+a minute. To ask OPA yourself, use OPA's certificate for instance:
 `docker compose cp opa:/tls ./opa-tls`, then `curl --cacert opa-tls/ca.crt --cert
 opa-tls/tls.crt --key opa-tls/tls.key https://localhost:8181/v1/data`. The billing agent ([examples/agents/billing](../../examples/agents/billing/server.py))
 is the agent other agents call in the demo ([agent to agent](../agent-to-agent.md)). The

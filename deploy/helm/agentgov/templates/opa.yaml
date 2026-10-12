@@ -39,7 +39,12 @@ spec:
         {{- include "agentgov.podSecurity" . | nindent 8 }}
         runAsUser: 1000
         runAsGroup: 1000
+      {{- if and .Values.internalTLS.enabled .Values.internalTLS.spire.enabled }}
+      initContainers:
+        {{- include "agentgov.spireContainer" (list . false) | nindent 8 }}
+      {{- end }}
       containers:
+        {{- include "agentgov.spireContainer" (list . true) | nindent 8 }}
         - name: opa
           image: "{{ $v.image.repository }}:{{ $v.image.tag }}"
           imagePullPolicy: {{ $v.image.pullPolicy }}
@@ -61,8 +66,14 @@ spec:
             - --tls-private-key-file=/tls/tls.key
             - --tls-ca-cert-file=/tls/ca.crt
             - --authentication=tls
-            # A certificate cert-manager renews takes effect within a minute.
+            # A renewed certificate (cert-manager's, SPIRE's) takes effect within a minute.
             - --tls-cert-refresh-period=1m
+            {{- if .Values.internalTLS.spire.enabled }}
+            # SPIRE gives every workload a certificate: only the processor and the control
+            # plane, by their SPIFFE IDs (system.authz).
+            - --authorization=basic
+            - /authz/authz.rego
+            {{- end }}
             {{- end }}
           env:
             - name: POD_NAME
@@ -106,8 +117,16 @@ spec:
               readOnly: true
             {{- end }}
             {{- include "agentgov.tlsMount" . | nindent 12 }}
+            {{- if and .Values.internalTLS.enabled .Values.internalTLS.spire.enabled }}
+            - {name: authz, mountPath: /authz, readOnly: true}
+            {{- end }}
       volumes:
         {{- include "agentgov.tlsVolume" (list . "opa") | nindent 8 }}
+        {{- if and .Values.internalTLS.enabled .Values.internalTLS.spire.enabled }}
+        - name: authz
+          configMap:
+            name: {{ printf "%s-opa-authz" (include "agentgov.fullname" .) }}
+        {{- end }}
         {{- if .Values.bundleSigning.enabled }}
         # Only the certificate, out of the bundle-signing Secret.
         - name: bundle-signing

@@ -2,7 +2,86 @@
 {{- $root := . }}
 {{- $ns := .Release.Namespace }}
 {{- $parts := list "control-plane" "processor" "opa" "gateway" "otel-collector" }}
-{{- if .Values.internalTLS.certManager.enabled }}
+{{- if .Values.internalTLS.spire.enabled }}
+{{- $spire := .Values.internalTLS.spire }}
+{{- /* SPIRE: each component's pod gets an X.509-SVID of its own, with its Service's names,
+  from SPIRE's controller manager; spiffe-helper writes it where the component reads it. */}}
+{{- range $parts }}
+{{- $name := include "agentgov.name" (list $root .) }}
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ printf "%s-%s" $ns $name | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "agentgov.labels" (list $root .) | nindent 4 }}
+spec:
+  className: {{ $spire.className }}
+  spiffeIDTemplate: {{ include "agentgov.spiffeId" (list $root .) | quote }}
+  # spiffe-helper asks for this one, whatever else the pod is given.
+  hint: agentgov
+  {{- with $spire.ttl }}
+  ttl: {{ . }}
+  {{- end }}
+  namespaceSelector:
+    matchLabels: {kubernetes.io/metadata.name: {{ $ns }}}
+  podSelector:
+    matchLabels:
+      {{- include "agentgov.selector" (list $root .) | nindent 6 }}
+  dnsNameTemplates:
+    - {{ $name }}
+    - {{ $name }}.{{ $ns }}
+    - {{ $name }}.{{ $ns }}.svc
+    - {{ $name }}.{{ $ns }}.svc.cluster.local
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-spiffe-helper" (include "agentgov.fullname" .) }}
+  labels:
+    {{- include "agentgov.labels" (list . "secrets") | nindent 4 }}
+data:
+  {{- range $mode := list "once" "daemon" }}
+  {{ $mode }}.conf: |
+    agent_address = "/spiffe-workload-api/spire-agent.sock"
+    cert_dir = "/tls"
+    svid_file_name = "tls.crt"
+    svid_key_file_name = "tls.key"
+    svid_bundle_file_name = "ca.crt"
+    hint = "agentgov"
+    cert_file_mode = 0644
+    key_file_mode = 0600
+    daemon_mode = {{ eq $mode "daemon" }}
+  {{- end }}
+---
+# OPA takes only the processor and the control plane, by their SPIFFE IDs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-opa-authz" (include "agentgov.fullname" .) }}
+  labels:
+    {{- include "agentgov.labels" (list . "opa") | nindent 4 }}
+data:
+  authz.rego: |
+    package system.authz
+
+    import rego.v1
+
+    peers := {
+      {{- range list "processor" "control-plane" }}
+      {{ include "agentgov.spiffeId" (list $root .) | quote }},
+      {{- end }}
+    }
+
+    default allow := false
+
+    allow if {
+      some cert in input.client_certificates
+      some uri in cert.URIs
+      sprintf("%s://%s%s", [uri.Scheme, uri.Host, uri.Path]) in peers
+    }
+{{- else if .Values.internalTLS.certManager.enabled }}
 {{- $cm := .Values.internalTLS.certManager }}
 {{- $issuer := $cm.issuerRef }}
 {{- if eq $issuer.kind "ClusterIssuer" }}

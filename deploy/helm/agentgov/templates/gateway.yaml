@@ -33,6 +33,7 @@ spec:
         runAsUser: 65532
         runAsGroup: 65532
       initContainers:
+        {{- include "agentgov.spireContainer" (list . false) | nindent 8 }}
         # The first configuration, before the gateway starts.
         - name: config
           image: {{ $sync.image }}
@@ -74,7 +75,9 @@ spec:
             - {name: model-keys, mountPath: /model-keys, readOnly: true}
             # Its certificate for the processor (mutual TLS).
             {{- include "agentgov.tlsMount" . | nindent 12 }}
-        # Rewrites the file when tool servers change; agentgateway reloads it.
+        {{- include "agentgov.spireContainer" (list . true) | nindent 8 }}
+        # Rewrites the file when tool servers change, or its certificate is renewed;
+        # agentgateway reloads it.
         - name: config-sync
           image: {{ $sync.image }}
           imagePullPolicy: {{ $sync.pullPolicy }}
@@ -137,6 +140,8 @@ spec:
 {{- if .Values.internalTLS.enabled }}
 - name: AGENTGOV_TLS_DIR
   value: /tls
+- name: AGENTGOV_TLS_RELOAD_SECONDS
+  value: {{ .Values.internalTLS.reloadSeconds | quote }}
 {{- end }}
 - name: AGENTGOV_SERVICE_TOKEN
   valueFrom:
