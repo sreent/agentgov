@@ -707,6 +707,27 @@ def bundle_signing_key(
     typer.echo(f"key: {key}\ncertificate: {cert}")
 
 
+@app.command("transparency-key")
+def transparency_key(
+    directory: Path = typer.Argument(..., help="Where the key and its public half go."),
+    log: bool = typer.Option(
+        False, "--log", help="A key for a log of your own (rekor-tiles) instead."
+    ),
+) -> None:
+    """Make the key AgentGov signs the ledger's checkpoints with for a transparency log
+    (key.pem, for AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE: ECDSA P-256) and its public half
+    (public.pem, for those who check the entries); with --log, the key a log of your own
+    signs its checkpoints with (log.pem, for rekor-tiles' --signer-filepath: Ed25519) and
+    its public half (log.pub, for AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE). A key already there
+    is kept."""
+    from agentgov import transparency
+
+    key, public = (
+        transparency.generate_log_key(directory) if log else transparency.generate(directory)
+    )
+    typer.echo(f"key: {key}\npublic key: {public}")
+
+
 @app.command("gateway-config")
 def gateway_config(
     output: Path = typer.Option(
@@ -2110,7 +2131,13 @@ def ledger_checkpoints(limit: int = 20) -> None:
         row["archived"] = (
             f"{row['archived_from']}-{row['seq']} {row['archive']}" if row["archive"] else ""
         )
-    _table(rows, ["seq", "entry_ts", "stamped", "archived", "hash"])
+        log = row.get("log") or {}
+        row["logged"] = (
+            f"#{log['index']}" + ("" if log["checked"] else " (unchecked)")
+            if log.get("logged")
+            else (f"failed: {log['error']}" if log.get("error") else "")
+        )
+    _table(rows, ["seq", "entry_ts", "stamped", "logged", "archived", "hash"])
 
 
 @ledger_app.command("checkpoint")
@@ -2126,21 +2153,94 @@ def ledger_proof(
     seq: int,
     out: Path = typer.Option(Path("."), "--out", "-o", help="The directory to write to."),
 ) -> None:
-    """Write a checkpoint's statement and its time-stamp, to verify with OpenSSL."""
+    """Write a checkpoint's statement, its time-stamp, to verify with OpenSSL, and its
+    entry in the transparency log, to verify with cosign or agentgov ledger
+    verify-log-entry."""
     points = _call("GET", "/v1/ledger/checkpoints", params={"limit": 1000})
     point = next((p for p in points if p["seq"] == seq), None)
     if point is None:
         _fail(f"no checkpoint at entry {seq}: see agentgov ledger checkpoints")
+    out.mkdir(parents=True, exist_ok=True)
+    statement = out / f"checkpoint-{seq}.txt"
+    statement.write_text(point["statement"])
+    typer.echo(f"wrote {statement}")
+    wrote = False
     with _client() as client:
         resp = client.get(f"/v1/ledger/checkpoints/{seq}/timestamp")
-    if resp.status_code >= 400:
-        _fail(resp.json().get("detail", resp.text))
-    out.mkdir(parents=True, exist_ok=True)
-    statement, token = out / f"checkpoint-{seq}.txt", out / f"checkpoint-{seq}.tsr"
-    statement.write_text(point["statement"])
-    token.write_bytes(resp.content)
-    typer.echo(f"wrote {statement} and {token}; check them with:")
-    typer.echo(f"  openssl ts -verify -data {statement} -in {token} -CAfile TSA-CA.pem")
+        if resp.status_code < 400:
+            token = out / f"checkpoint-{seq}.tsr"
+            token.write_bytes(resp.content)
+            wrote = True
+            typer.echo(f"wrote {token}; check it with:")
+            typer.echo(f"  openssl ts -verify -data {statement} -in {token} -CAfile TSA-CA.pem")
+        if (point.get("log") or {}).get("logged"):
+            entry = client.get(f"/v1/ledger/checkpoints/{seq}/log-entry")
+            log = client.get("/v1/ledger/transparency-log")
+            if entry.status_code < 400 and log.status_code < 400:
+                bundle = out / f"checkpoint-{seq}.sigstore.json"
+                bundle.write_bytes(entry.content)
+                wrote = True
+                about = log.json()
+                key = out / "agentgov-rekor.pub"
+                if about.get("signer_key"):
+                    key.write_text(about["signer_key"])
+                typer.echo(f"wrote {bundle}; check it offline with:")
+                if about.get("trusted_root"):
+                    root = out / "rekor-trusted-root.json"
+                    root.write_text(json.dumps(about["trusted_root"], indent=2))
+                    (out / "rekor.pub").write_text(about["log_key"])
+                    typer.echo(
+                        f"  cosign verify-blob --key {key} --bundle {bundle} "
+                        f"--trusted-root {root} {statement}"
+                    )
+                typer.echo(
+                    f"  agentgov ledger verify-log-entry {statement} {bundle} "
+                    f"--log-key {out / 'rekor.pub'} --origin {about.get('origin')} --key {key}"
+                )
+    if not wrote:
+        _fail(f"checkpoint {seq} isn't time-stamped nor in a transparency log yet")
+
+
+@ledger_app.command("verify-log-entry")
+def ledger_verify_log_entry(
+    statement: Path = typer.Argument(..., help="The checkpoint's statement (checkpoint-N.txt)."),
+    bundle: Path = typer.Argument(..., help="Its entry, as a Sigstore bundle (.sigstore.json)."),
+    log_key: Path = typer.Option(..., "--log-key", help="The log's public key (PEM, Ed25519)."),
+    origin: str = typer.Option(..., "--origin", help="The log's name in its checkpoints."),
+    key: Path | None = typer.Option(
+        None, "--key", help="AgentGov's public key (PEM): the entry must be signed with it."
+    ),
+) -> None:
+    """Check, offline, that a transparency log holds a checkpoint: the log signed the
+    checkpoint the entry's proof leads to, and the entry is the statement, signed."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from agentgov import transparency
+
+    try:
+        found = json.loads(bundle.read_text())
+        [entry] = found["verificationMaterial"]["tlogEntries"]
+        signer = None
+        if key is not None:
+            signer = serialization.load_pem_public_key(key.read_bytes())
+            if not isinstance(signer, ec.EllipticCurvePublicKey):
+                _fail(f"{key} isn't an ECDSA public key")
+        checked = transparency.check(
+            entry,
+            statement.read_bytes(),
+            log_key=transparency.load_log_key(log_key),
+            origin=origin,
+            signer=signer,
+        )
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        _fail(f"can't read them: {exc}")
+    except transparency.TransparencyError as exc:
+        _fail(f"not verified: {exc}")
+    typer.echo(
+        f"verified: entry {checked.index} of {checked.origin}, in its tree of "
+        f"{checked.tree_size} (root {checked.root_hash})"
+    )
 
 
 @ledger_app.command("retention")

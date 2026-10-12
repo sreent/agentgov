@@ -66,7 +66,7 @@ them needs the AI administrator or Power Platform administrator role
 | **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second, whichever control-plane replica takes it; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tool servers and other agents), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; calls between agents (A2A 1.0) through the gateway, with who may call whom, and the chain of agents that handed work down, from the person at its head, in policy and the ledger; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
-| **Security** | PII redaction in tool results, prompts, and the messages and answers agents send each other, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, with a classifier's second opinion on the traffic, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger with checkpoints time-stamped by an authority (RFC 3161), retention with archives that verify offline, and compliance reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them; mutual TLS between AgentGov's components, and policy bundles OPA verifies before it uses them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), OCSF, OpenTelemetry |
+| **Security** | PII redaction in tool results, prompts, and the messages and answers agents send each other, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, with a classifier's second opinion on the traffic, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger with checkpoints time-stamped by an authority (RFC 3161) and published in a transparency log (Sigstore Rekor), retention with archives that verify offline, and compliance reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them; mutual TLS between AgentGov's components, and policy bundles OPA verifies before it uses them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), Sigstore Rekor (optional), OCSF, OpenTelemetry |
 
 Use only the parts you need. Every [feature](docs/features.md) but the gateway's handling of
 unknown callers can be turned off, and most controls at the gateway can run in monitor mode
@@ -195,8 +195,9 @@ the gateway. It shows each control in turn:
     the date; alice accepts the risk until a later one, and the rule leaves the agent be.
 20. **Evidence**: every decision is in a ledger whose hash chain verifies. An
     administrator keeps a checkpoint of it, which a time-stamping authority signs (the
-    sink stands in for one) and OpenSSL verifies; then the EU AI Act report and the
-    evidence pack.
+    sink stands in for one) and OpenSSL verifies, and which goes into a transparency log
+    (the stack's own Rekor), whose proof is checked offline; then the EU AI Act report and
+    the evidence pack.
 21. **Deeper detection**: a customer's notes ask the agent, in plain words, to wire money.
     The rules see data and let the result through; a classifier (the mock model stands in
     for IBM Granite Guardian) flags it in the background, and once the classifier is
@@ -319,6 +320,7 @@ what-if evaluation.
 | [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (optional) | — | MIT | In-process enforcement in agent frameworks |
 | [IBM Granite Guardian](https://huggingface.co/ibm-granite/granite-guardian-4.1-8b) (optional) | 4.1 8B | Apache-2.0 | Classifier for harmful or malicious agent instructions, and a second opinion on prompt injection and jailbreaks in the traffic |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) server (optional) | b11541 | MIT | Serves Granite Guardian on a CPU |
+| [rekor-tiles](https://github.com/sigstore/rekor-tiles) (optional) | 2.3.0 | Apache-2.0 | A transparency log of your own for the ledger's checkpoints (or Sigstore's public Rekor) |
 | AgentGov control plane and processor | this repository | Apache-2.0 | Registry, lifecycle, reconcilers, governance processor, ledger, UI, CLI |
 
 [Landscape](docs/landscape.md) explains why each project was chosen over the
@@ -356,8 +358,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   and in their chats, until someone takes them on
 * [Management rules](docs/management-rules.md): what to do about agents that meet some
   conditions for long enough, such as blocking agents nobody uses, after telling their people
-* [Evidence](docs/evidence.md): checkpoints time-stamped by an authority, retention with
-  archives, and compliance reports and an evidence pack for the EU AI Act, ISO/IEC 42001
+* [Evidence](docs/evidence.md): checkpoints time-stamped by an authority and published in a
+  transparency log, retention with archives, and compliance reports and an evidence pack for the EU AI Act, ISO/IEC 42001
   and the NIST AI RMF
 * [Agents on Microsoft 365 and Copilot Studio](docs/platforms.md): the agent catalog, the
   Copilot Studio inventory, the connector allowlist, and quarantining or blocking agents

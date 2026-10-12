@@ -133,6 +133,21 @@ class Settings:
     # An RFC 3161 time-stamping authority, such as https://freetsa.org/tsr. It signs each
     # checkpoint with its own time, which proves the chain existed then, unchanged since.
     ledger_tsa_url: str | None = None
+    # A transparency log, Sigstore's Rekor v2: its public shard (such as
+    # https://log2025-1.rekor.sigstore.dev) or a rekor-tiles of your own. Each checkpoint is
+    # signed with AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE and added to it, where anyone can
+    # see that it was published: AgentGov can't later show another checkpoint for the same
+    # entry without the log holding both. What the log publishes, for good, is the
+    # statement's SHA-256, the signature and AgentGov's public key.
+    ledger_rekor_url: str | None = None
+    # AgentGov's key for the log: an ECDSA P-256 private key (PEM). `agentgov
+    # transparency-key DIR` makes one.
+    ledger_rekor_signing_key_file: str | None = None
+    # The log's public key (PEM, Ed25519), to check each answer's proof that the log holds
+    # the entry. Unset, entries are kept unchecked.
+    ledger_rekor_log_key_file: str | None = None
+    # The log's name in its checkpoints (its origin). Unset: the URL's host name.
+    ledger_rekor_origin: str | None = None
     # Days AgentGov keeps the operational records whose history the ledger has: daily
     # activity and model usage, risk signals, notifications sent, decided approvals,
     # resolved findings, ended access assignments, and developers' MCP servers not
@@ -404,6 +419,14 @@ class Settings:
             raise ValueError("AGENTGOV_LEDGER_CHECKPOINT_HOURS must be 0 (on demand) or more")
         if self.ledger_tsa_url and not self.ledger_tsa_url.startswith(("https://", "http://")):
             raise ValueError("AGENTGOV_LEDGER_TSA_URL is the authority's http(s) URL")
+        if self.ledger_rekor_url:
+            if not self.ledger_rekor_url.startswith(("https://", "http://")):
+                raise ValueError("AGENTGOV_LEDGER_REKOR_URL is the log's http(s) URL")
+            if not self.ledger_rekor_signing_key_file:
+                raise ValueError(
+                    "AGENTGOV_LEDGER_REKOR_URL needs AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE: the "
+                    "key AgentGov signs checkpoints with for the log (agentgov transparency-key)"
+                )
         if self.data_retention_days < 0 or 0 < self.data_retention_days < DATA_MIN_DAYS:
             raise ValueError(
                 f"AGENTGOV_DATA_RETENTION_DAYS is 0 (keep everything) or at least {DATA_MIN_DAYS}"

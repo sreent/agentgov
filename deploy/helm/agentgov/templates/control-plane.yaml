@@ -123,6 +123,22 @@ spec:
             - name: AGENTGOV_LEDGER_ARCHIVE_DIR
               value: /ledger-archive
             {{- end }}
+            {{- with $v.transparencyLog }}
+            {{- if .url }}
+            - name: AGENTGOV_LEDGER_REKOR_URL
+              value: {{ .url | quote }}
+            - name: AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE
+              value: /transparency/key.pem
+            {{- if .logKey }}
+            - name: AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE
+              value: /transparency-log/log.pub
+            {{- end }}
+            {{- if .origin }}
+            - name: AGENTGOV_LEDGER_REKOR_ORIGIN
+              value: {{ .origin | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- range $key, $value := $v.env }}
             - name: {{ $key }}
               value: {{ $value | toString | quote }}
@@ -163,6 +179,16 @@ spec:
             - name: ledger-archive
               mountPath: /ledger-archive
             {{- end }}
+            {{- if $v.transparencyLog.url }}
+            - name: transparency
+              mountPath: /transparency
+              readOnly: true
+            {{- if $v.transparencyLog.logKey }}
+            - name: transparency-log
+              mountPath: /transparency-log
+              readOnly: true
+            {{- end }}
+            {{- end }}
             {{- with $v.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -187,6 +213,20 @@ spec:
         - name: ledger-archive
           persistentVolumeClaim:
             claimName: {{ $v.ledgerArchive.existingClaim | default (printf "%s-ledger-archive" $name) }}
+        {{- end }}
+        {{- if $v.transparencyLog.url }}
+        {{- if not $v.transparencyLog.signingKeySecret }}
+        {{- fail "controlPlane.transparencyLog.url needs signingKeySecret: a Secret with key.pem (agentgov transparency-key DIR makes one)" }}
+        {{- end }}
+        - name: transparency
+          secret:
+            secretName: {{ $v.transparencyLog.signingKeySecret }}
+            items: [{key: key.pem, path: key.pem}]
+        {{- if $v.transparencyLog.logKey }}
+        - name: transparency-log
+          configMap:
+            name: {{ $name }}-transparency-log
+        {{- end }}
         {{- end }}
         {{- with $v.extraVolumes }}
         {{- toYaml . | nindent 8 }}
@@ -231,4 +271,17 @@ spec:
   resources:
     requests:
       storage: {{ $v.ledgerArchive.size }}
+{{- end }}
+{{- if and .Values.controlPlane.transparencyLog.url .Values.controlPlane.transparencyLog.logKey }}
+---
+# The transparency log's public key, which checks its answers (no secret).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agentgov.name" (list . "control-plane") }}-transparency-log
+  labels:
+    {{- include "agentgov.labels" (list . "control-plane") | nindent 4 }}
+data:
+  log.pub: |
+    {{- .Values.controlPlane.transparencyLog.logKey | nindent 4 }}
 {{- end }}

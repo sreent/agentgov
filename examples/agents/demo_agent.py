@@ -1175,7 +1175,7 @@ def management_rules(name: str) -> None:
 
 
 def evidence(name: str) -> None:
-    step("20. Evidence: a hash-chained ledger, time-stamped from outside, for assessors")
+    step("20. Evidence: a hash-chained ledger, time-stamped and logged outside, for assessors")
     verify = admin("GET", "/v1/ledger/verify")
     show(
         "chain valid" if verify["valid"] else "chain BROKEN",
@@ -1208,6 +1208,8 @@ def evidence(name: str) -> None:
                 capture_output=True, text=True, check=False,
             )  # fmt: skip
         show("OpenSSL:", "Verification: OK" in checked.stdout, checked.stdout.strip())
+    if admin("GET", "/v1/info").get("transparency_log"):
+        transparency_log(point)
     # What AgentGov does towards the EU AI Act, and the evidence pack for assessors.
     report = admin("GET", "/v1/evidence/report", params={"framework": "eu-ai-act", "days": 1})
     controls = {c["id"]: c for c in report["controls"]}
@@ -1237,6 +1239,56 @@ def evidence(name: str) -> None:
             f"{person:<9} {entry.get('decision') or '':<17} "
             f"{(entry.get('reason') or '')[:50]}{RESET}"
         )
+
+
+def transparency_log(point: dict[str, Any]) -> None:
+    """The checkpoint is in a transparency log too (the stack's own rekor-tiles), which
+    anyone can check offline: the log signed a tree that holds it."""
+    from cryptography.hazmat.primitives import serialization
+
+    from agentgov import transparency
+
+    log = point.get("log") or {}
+    show(
+        "logged:",
+        bool(log.get("logged")) and log.get("checked") is True,
+        f"entry {log.get('index')} of the transparency log at {log.get('url')}"
+        + (f": {log['error']}" if log.get("error") else ", its proof checked"),
+    )
+    if not log.get("logged"):
+        return
+    about = admin("GET", "/v1/ledger/transparency-log")
+    bundle = admin("GET", f"/v1/ledger/checkpoints/{point['seq']}/log-entry")
+    [entry] = bundle["verificationMaterial"]["tlogEntries"]
+    try:
+        checked = transparency.check(
+            entry,
+            point["statement"].encode(),
+            log_key=serialization.load_pem_public_key(about["log_key"].encode()),
+            origin=about["origin"],
+            signer=serialization.load_pem_public_key(about["signer_key"].encode()),
+        )
+        show(
+            "offline:",
+            True,
+            f"{about['origin']} signed a tree of {checked.tree_size} entries that holds it",
+        )
+    except transparency.TransparencyError as exc:
+        show("offline:", False, str(exc))
+    if shutil.which("cosign"):
+        with tempfile.TemporaryDirectory() as work:
+            files = Path(work)
+            (files / "statement.txt").write_text(point["statement"])
+            (files / "bundle.json").write_text(json.dumps(bundle))
+            (files / "root.json").write_text(json.dumps(about["trusted_root"]))
+            (files / "agentgov.pub").write_text(about["signer_key"])
+            checked = subprocess.run(
+                ["cosign", "verify-blob", "--key", files / "agentgov.pub",
+                 "--bundle", files / "bundle.json", "--trusted-root", files / "root.json",
+                 files / "statement.txt"],
+                capture_output=True, text=True, check=False,
+            )  # fmt: skip
+        show("cosign:", checked.returncode == 0, (checked.stderr or checked.stdout).strip())
 
 
 async def deeper_detection() -> None:

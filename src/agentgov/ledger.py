@@ -321,6 +321,15 @@ def checkpoint_dict(point: LedgerCheckpoint) -> dict[str, Any]:
         "timestamped": point.timestamp is not None,
         "timestamped_at": ids.isoformat(point.timestamped_at),
         "timestamp_error": point.timestamp_error,
+        # Its entry in the transparency log, if it has one.
+        "log": {
+            "url": point.tlog_url,
+            "logged": point.tlog_entry is not None,
+            "index": point.tlog_index,
+            "logged_at": ids.isoformat(point.tlog_logged_at),
+            "checked": point.tlog_checked,
+            "error": point.tlog_error,
+        },
         "archive": point.archive,
         "archive_sha256": point.archive_sha256,
         "archived_from": point.archived_from,

@@ -324,7 +324,10 @@ lint_chart() {
       --set secrets.existingSecret=agentgov --set networkPolicy.enabled=true \
       --set controlPlane.ingress.enabled=true --set gateway.ingress.enabled=true \
       --set urls.controlPlane=https://agentgov.example.com \
-      --set urls.gateway=https://mcp.example.com >"$out/production.yaml" &&
+      --set urls.gateway=https://mcp.example.com \
+      --set controlPlane.transparencyLog.url=https://log2025-1.rekor.sigstore.dev \
+      --set controlPlane.transparencyLog.signingKeySecret=agentgov-rekor \
+      --set controlPlane.transparencyLog.logKey=placeholder >"$out/production.yaml" &&
     helm template agentgov "$CHART" --set postgresql.enabled=false \
       --set externalDatabase.existingSecret=agentgov-db \
       --set keycloak.externalDatabase.url=jdbc:postgresql://db.example.com:5432/keycloak \

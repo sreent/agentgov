@@ -32,6 +32,7 @@ come second: they report, but they don't enforce.
 | 11 | Detection | **Deeper detection** (done, [detection](detection.md)): IBM Granite Guardian's second opinion, next to the processor's rules, on tool results, on people's prompts to models and on the answers agents send each other, waited for where it is enforced and given in the background otherwise; and agents' answers to other agents checked as they stream back, with credentials and personal data masked and instructions aimed at the agent that asked withheld | IBM Granite Guardian, agentgateway's external processing |
 | 12 | Interoperability | **Masking in calls between agents** (done, [agent to agent](agent-to-agent.md#messages)): personal data in the messages agents send each other masked unless the agent called may have it, monitored before it is enforced | agentgateway's external processing |
 | 13 | Interoperability | **Calls around the gateway** (done, [agent to agent](agent-to-agent.md#calls-around-the-gateway)): what AgentGov can't stop, found and told to the agents' owners. Each agent's owners say what stops calls straight to its A2A URL; telemetry shows such calls, and an optional test calls each agent itself. Agents can refuse such calls themselves: the delegation the gateway gives with each call is signed with a key AgentGov publishes, checked with a few lines of Python or any JWT library; and a NetworkPolicy example lets only the gateway reach an agent | JSON Web Key Sets, Kubernetes NetworkPolicy |
+| 14 | Evidence | **Ledger checkpoints in a transparency log** (done, [evidence](evidence.md#a-transparency-log)): each checkpoint signed with AgentGov's key and added to Sigstore's public Rekor or a log of your own, its proof checked with the log's key and kept, and handed to assessors as Sigstore bundles that verify offline with cosign | Sigstore Rekor v2 (rekor-tiles) |
 
 ## Later
 
@@ -43,7 +44,6 @@ come second: they report, but they don't enforce.
 | Identity | **Enterprise-managed authorization for MCP**: accept and issue identity assertions (ID-JAG) for MCP servers outside the gateway, and let developers' MCP clients through the gateway with their own tokens | MCP enterprise-managed authorization, agentgateway's MCP authentication |
 | Registry | **More platform connectors**: import agents from cloud agent platforms and SaaS agent builders (AWS, Google, Salesforce, Databricks) the way [Microsoft 365 and Copilot Studio](platforms.md) are, when someone needs one | Platform APIs |
 | Registry | **Block platform agents from AgentGov**, once Microsoft's block API accepts an application rather than only a signed-in administrator | Microsoft Graph |
-| Evidence | **Ledger checkpoints in a transparency log** as well as time-stamped | Sigstore Rekor |
 | Policy | **AuthZEN interface** so the decision point can be swapped (for example to Cedar) without touching enforcement points | OpenID AuthZEN |
 
 ## Out of scope

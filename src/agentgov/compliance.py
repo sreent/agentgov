@@ -13,6 +13,7 @@ without access to AgentGov.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import zipfile
 from collections import Counter
@@ -25,7 +26,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agentgov import __version__, ids, ledger
+from agentgov import __version__, ids, ledger, transparency
 from agentgov.config import LEDGER_MIN_DAYS, Settings
 from agentgov.models import (
     ACTIVE,
@@ -771,6 +772,18 @@ checkpoints/*.txt, *.tsr   Each time-stamped checkpoint's statement and the time
                            authority's answer. Check one with:
                              openssl ts -verify -data checkpoints/N.txt -in checkpoints/N.tsr \\
                                -CAfile the-authority's-CA.pem
+checkpoints/*.sigstore.json
+                           Each checkpoint's entry in the transparency log (Sigstore Rekor),
+                           as a Sigstore bundle; transparency-log/ holds AgentGov's key
+                           (agentgov.pub), the log's (rekor.pub) and a trusted root with the
+                           log. Check one offline with:
+                             cosign verify-blob --key transparency-log/agentgov.pub \\
+                               --bundle checkpoints/N.sigstore.json \\
+                               --trusted-root transparency-log/trusted_root.json checkpoints/N.txt
+                           or: agentgov ledger verify-log-entry checkpoints/N.txt \\
+                               checkpoints/N.sigstore.json --log-key transparency-log/rekor.pub \\
+                               --origin <the log's name, in transparency-log/log.json> \\
+                               --key transparency-log/agentgov.pub
 inventory.json             The agents, with their owners, sponsors, teams, status and risk.
 manifests.yaml             The registry as code: blueprints, tool servers, policies, rules...
 features.json              Which of AgentGov's features are on, and how strictly.
@@ -802,13 +815,41 @@ def pack(session: Session, settings: Settings, days: int) -> SpooledTemporaryFil
             "checkpoints.json", json.dumps([ledger.checkpoint_dict(p) for p in points], indent=2)
         )
         for p in points:
-            if p.timestamp:
+            if p.timestamp or p.tlog_entry:
                 z.writestr(f"checkpoints/{p.seq}.txt", ledger.statement(p.seq, p.hash))
+            if p.timestamp:
                 z.writestr(f"checkpoints/{p.seq}.tsr", base64.b64decode(p.timestamp))
+            if p.tlog_entry:
+                with contextlib.suppress(transparency.TransparencyError):
+                    found = transparency.bundle(p.tlog_entry, ledger.statement(p.seq, p.hash))
+                    z.writestr(f"checkpoints/{p.seq}.sigstore.json", json.dumps(found, indent=2))
+        for name, content in _transparency_log(settings).items():
+            z.writestr(f"transparency-log/{name}", content)
         z.writestr("inventory.json", json.dumps([_agent(a) for a in f.agents], indent=2))
         z.writestr("manifests.yaml", manifests.dump(manifests.export(session)))
         z.writestr("features.json", json.dumps(f.modes, indent=2, sort_keys=True))
     out.seek(0)
+    return out
+
+
+def _transparency_log(settings: Settings) -> dict[str, str]:
+    """What checks the checkpoints' log entries offline: the log, AgentGov's public key,
+    the log's, and a trusted root with the log, for cosign."""
+    url = settings.ledger_rekor_url
+    if not url:
+        return {}
+    origin = settings.ledger_rekor_origin or transparency.origin_of(url)
+    out = {"log.json": json.dumps({"url": url, "origin": origin}, indent=2)}
+    with contextlib.suppress(transparency.TransparencyError):
+        key = transparency.load_signing_key(settings.ledger_rekor_signing_key_file or "")
+        out["agentgov.pub"] = transparency.public_pem(key).decode()
+    if settings.ledger_rekor_log_key_file:
+        with contextlib.suppress(transparency.TransparencyError):
+            log_key = transparency.load_log_key(settings.ledger_rekor_log_key_file)
+            out["rekor.pub"] = transparency.public_pem(log_key).decode()
+            out["trusted_root.json"] = json.dumps(
+                transparency.trusted_root(url, origin, log_key), indent=2
+            )
     return out
 
 

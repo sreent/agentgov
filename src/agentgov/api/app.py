@@ -149,6 +149,8 @@ def create_app(
             },
             # Where agents find the keys to check the delegations AgentGov gives them.
             "delegation_jwks": "/v1/delegations/jwks" if delegation_keys else None,
+            # The transparency log the ledger's checkpoints go into (docs/evidence.md).
+            "transparency_log": settings.ledger_rekor_url,
         }
 
     @app.get("/v1/delegations/jwks", tags=["health"])

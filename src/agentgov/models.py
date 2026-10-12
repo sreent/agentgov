@@ -27,7 +27,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agentgov.db import Base, UTCDateTime
@@ -856,6 +856,15 @@ class LedgerCheckpoint(Base):
     timestamp: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamped_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     timestamp_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Its entry in a transparency log (agentgov.transparency): the log's answer as it came
+    # (the entry, its index and the proof that the log holds it), whether that proof was
+    # checked with the log's key, and why there is none, if adding it failed.
+    tlog_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tlog_entry: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    tlog_index: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tlog_logged_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    tlog_checked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    tlog_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The archive of the entries since the previous archive, up to this one, and its
     # SHA-256; and when the entries left the database.
     archive: Mapped[str | None] = mapped_column(Text, nullable=True)

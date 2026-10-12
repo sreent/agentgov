@@ -94,6 +94,20 @@ controlPlane:
     # Several replicas need ReadWriteMany (a file share such as Azure Files, Filestore or
     # EFS): any of them may archive.
     accessMode: ReadWriteOnce
+  # Put the ledger's checkpoints in a transparency log too (docs/evidence.md): Sigstore's
+  # public Rekor, such as https://log2025-1.rekor.sigstore.dev, or a rekor-tiles of yours.
+  # AgentGov signs each checkpoint with its key, from a Secret (key.pem, ECDSA P-256:
+  # `agentgov transparency-key DIR` makes one), and checks the log's answers with the
+  # log's public key. Empty url: no log.
+  transparencyLog:
+    url: ""
+    # The Secret holding AgentGov's key, as key.pem.
+    signingKeySecret: ""
+    # The log's public key (PEM, Ed25519), for example with --set-file. Empty, the log's
+    # answers are kept unchecked.
+    logKey: ""
+    # The log's name in its checkpoints; empty: the URL's host name.
+    origin: ""
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}

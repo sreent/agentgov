@@ -103,6 +103,11 @@ services:
       # The authority that time-stamps the ledger's checkpoints (docs/evidence.md): the demo
       # sink stands in for one. A real one is, for example, https://freetsa.org/tsr.
       AGENTGOV_LEDGER_TSA_URL: ${AGENTGOV_LEDGER_TSA_URL:-http://demo-sink:9300/tsa}
+      # The transparency log the checkpoints go into: the stack's own (rekor, below), or
+      # Sigstore's public one, such as https://log2025-1.rekor.sigstore.dev, with its key.
+      AGENTGOV_LEDGER_REKOR_URL: ${AGENTGOV_LEDGER_REKOR_URL:-http://rekor:3000}
+      AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE: /tls/transparency/key.pem
+      AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE: ${AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE:-/tls/transparency/log.pub}
       # Features the deployment pins, e.g. "least-privilege=monitor" (docs/features.md).
       # Administrators choose the others on the Features page.
       AGENTGOV_FEATURES: ${AGENTGOV_FEATURES:-}
@@ -139,6 +144,8 @@ services:
         condition: service_healthy
       certs:
         condition: service_completed_successfully
+      rekor:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
       interval: 5s
@@ -157,9 +164,28 @@ services:
         agentgov internal-certs /certs
         && agentgov bundle-signing-key /certs/control-plane/bundle-signing
         && cp /certs/control-plane/bundle-signing/cert.pem /certs/opa/bundle.crt
+        && agentgov transparency-key /certs/control-plane/transparency
+        && agentgov transparency-key --log /certs/rekor
+        && cp /certs/rekor/log.pub /certs/control-plane/transparency/log.pub
+        && chown -R 65532:65532 /certs/rekor /rekor-data
         && chmod a+r /certs/*/tls.key /certs/control-plane/bundle-signing/key.pem
+        /certs/control-plane/transparency/key.pem
     volumes:
       - certs:/certs
+      - rekor-data:/rekor-data
+
+  # A transparency log of the stack's own, Sigstore's rekor-tiles (Rekor v2): the ledger's
+  # checkpoints go into it (docs/evidence.md). Its key is made by certs, on first start.
+  rekor:
+    image: ghcr.io/sigstore/rekor-tiles/posix:v2.3.0@sha256:a5ceeff41b2468f965f7259685a9553c6dbba6870108ffebfa6584df5ae22504
+    command: ["rekor-server", "serve", "--http-address=0.0.0.0", "--hostname=rekor",
+              "--storage-dir=/data", "--signer-filepath=/keys/log.pem", "--checkpoint-interval=2s"]
+    volumes:
+      - {type: volume, source: certs, target: /keys, read_only: true, volume: {subpath: rekor}}
+      - rekor-data:/data
+    depends_on:
+      certs:
+        condition: service_completed_successfully
 
   # Policy decision point: Rego library + registry data, served by the control plane.
   opa:
@@ -327,3 +353,4 @@ volumes:
   postgres-data:
   gateway-config:
   certs:
+  rekor-data:

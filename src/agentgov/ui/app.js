@@ -5212,7 +5212,8 @@ function checkpointsCard(kept, points) {
     type: 'button', class: 'btn btn--sm', 'data-focus-key': 'make-checkpoint',
     onclick: guarded(async () => {
       const point = await api('v1/ledger/checkpoints', { method: 'POST' });
-      toast(point.timestamped ? `Checkpoint at entry #${fmt(point.seq)}, time-stamped.` : `Checkpoint at entry #${fmt(point.seq)}.`);
+      const done = [point.timestamped ? 'time-stamped' : null, point.log?.logged ? 'in the transparency log' : null].filter(Boolean);
+      toast(`Checkpoint at entry #${fmt(point.seq)}${done.length ? `, ${done.join(' and ')}` : ''}.`);
       await refresh();
     }),
   }, icon('plus'), 'Make a checkpoint') : null;
@@ -5227,15 +5228,31 @@ function checkpointsCard(kept, points) {
     if (c.timestamp_error) return plainChip('Not time-stamped', { tone: 'warning', iconName: 'triangle', title: c.timestamp_error });
     return h('span', { class: 'muted' }, kept.tsa_url ? 'Waiting for its time-stamp' : 'Not time-stamped');
   };
+  // Its entry in the transparency log: where, whether its proof was checked, and the
+  // Sigstore bundle that checks it offline.
+  const logged = (c) => {
+    const log = c.log || {};
+    if (log.logged) {
+      const [tone, label] = log.checked === false ? ['warning', 'Logged, proof failed']
+        : log.checked ? ['good', `In the log, #${fmt(log.index)}`] : [null, `In the log, #${fmt(log.index)} (unchecked)`];
+      return h('span', {}, plainChip(label, { tone, iconName: log.checked === false ? 'triangle' : 'shield-check', title: log.error || log.url }), ' ',
+        h('button', {
+          type: 'button', class: 'btn btn--sm btn--ghost', 'data-focus-key': `bundle-${c.seq}`,
+          onclick: guarded(async () => { await saveDownload(`v1/ledger/checkpoints/${c.seq}/log-entry`, `checkpoint-${c.seq}.sigstore.json`); }),
+        }, icon('download'), 'Log entry'));
+    }
+    if (log.error) return plainChip('Not in the log', { tone: 'warning', iconName: 'triangle', title: log.error });
+    return kept.rekor_url ? h('span', { class: 'muted' }, 'Waiting for the log') : null;
+  };
   const line = (c) => h('li', { class: 'access-row' },
     h('div', { class: 'access-main' },
       h('div', { class: 'cell-title' }, `Entry #${fmt(c.seq)} `, h('code', { class: 'hash', title: c.hash }, shortHash(c.hash))),
       h('div', { class: 'cell-sub break' }, 'Kept ', timeEl(c.created_at),
         c.archive ? [' · entries ', fmt(c.archived_from), '–', fmt(c.seq), ' archived to ', h('code', {}, c.archive)] : '')),
-    h('div', {}, stamp(c)));
+    h('div', { class: 'stack', style: 'gap:4px' }, stamp(c), logged(c)));
   return card({
     title: 'Checkpoints and retention',
-    sub: 'Points of the chain kept for good, time-stamped by an authority when one is set; what leaves the database is archived first.',
+    sub: 'Points of the chain kept for good, time-stamped by an authority and added to a transparency log when they are set; what leaves the database is archived first.',
     actions: make ? [make] : null,
     body: [
       facts([
@@ -5243,6 +5260,7 @@ function checkpointsCard(kept, points) {
         ['Chain in the database', kept.chain_from ? `From the checkpoint at entry #${fmt(kept.chain_from)}` : 'From the genesis entry'],
         ['Checkpoints', kept.checkpoint_hours ? `Every ${plural(kept.checkpoint_hours, 'hour')}` : 'On demand'],
         ['Time-stamping authority', kept.tsa_url ? h('code', {}, kept.tsa_url) : h('span', { class: 'muted' }, 'None')],
+        ['Transparency log', kept.rekor_url ? h('code', {}, kept.rekor_url) : h('span', { class: 'muted' }, 'None')],
         ['Operational records', kept.data_retention_days ? `${plural(kept.data_retention_days, 'day')}` : 'Kept'],
       ]),
       points.length ? h('ul', { class: 'access-list', role: 'list' }, points.map(line)) : emptyState('No checkpoints yet', 'The first is kept within the hour.'),

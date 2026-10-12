@@ -190,7 +190,8 @@ take turns rather than deadlock. `GET /v1/ledger/verify` recomputes the chain an
 arrive and re-verifies the whole chain every five minutes. `GET /v1/ledger/export`
 streams the ledger as JSON Lines for offline verification
 (`agentgov ledger verify --file`). Every day the chain's head is kept as a checkpoint,
-which a time-stamping authority signs when one is set (RFC 3161); with a retention period,
+which a time-stamping authority signs when one is set (RFC 3161), and which goes into a
+transparency log (Sigstore Rekor) when one is set; with a retention period,
 older entries are archived, checked link by link, before they leave the database, and the
 chain there goes on from the checkpoint at their end ([evidence](evidence.md)).
 
