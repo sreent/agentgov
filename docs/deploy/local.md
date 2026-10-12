@@ -292,7 +292,10 @@ scripts/ci.sh --kind-only --keep
 ```
 
 It needs Docker on a host with cgroup v2, and fetches kind, kubectl and Helm into `.venv`.
-Afterwards, forward the ports to reach AgentGov in the cluster:
+With `--spire`, it installs SPIRE on the cluster first, from the SPIFFE project's charts,
+and SPIRE issues the components' certificates
+([production](../production.md#workload-identities-from-spire)). Afterwards, forward the
+ports to reach AgentGov in the cluster:
 
 ```bash
 export PATH="$PWD/.venv/bin:$PATH"

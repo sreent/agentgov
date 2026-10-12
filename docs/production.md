@@ -158,7 +158,7 @@ SPIRE's registration entries.
 |---|---|---|
 | `internalTLS.spire.enabled` | off | SPIRE issues the components' certificates |
 | `internalTLS.spire.trustDomain` | `example.org` | Your SPIRE's trust domain |
-| `internalTLS.spire.className` | `spire-server-spire` | The controller manager's class, so that it takes the chart's `ClusterSPIFFEID`s (`<namespace>-<release>` of SPIRE's chart) |
+| `internalTLS.spire.className` | `spire-mgmt-spire` | The controller manager's class, so that it takes the chart's `ClusterSPIFFEID`s: `<namespace>-<release>` of SPIRE's chart, `spire-mgmt-spire` as SPIRE's production install has it, `spire-server-spire` for its quick install |
 | `internalTLS.spire.csiDriver` | `csi.spiffe.io` | The SPIFFE CSI driver |
 | `internalTLS.spire.ttl` | SPIRE's | How long the components' SVIDs last |
 | `internalTLS.spire.helper.image`, `.resources` | `ghcr.io/spiffe/spiffe-helper:0.12.2` | spiffe-helper |
@@ -181,6 +181,12 @@ SPIRE signs SVIDs with an authority of its own, or under an upstream authority o
 (its `UpstreamAuthority` plugins), and spiffe-helper writes that root as `ca.crt`. An
 authority `agentgov internal-certs` makes can be SPIRE's upstream (SPIRE's `disk` plugin):
 it leaves room below it for SPIRE's intermediate.
+
+CI checks this on a real cluster: `scripts/ci.sh --kind --spire` installs SPIRE with its
+chart's quick install (namespace `spire-server`, so `className` `spire-server-spire`),
+then AgentGov with SVIDs that last six minutes, and runs the demo while SPIRE renews them;
+afterwards the control plane must be serving an SVID with its SPIFFE ID that SPIRE issued
+after it started ([kind](deploy/local.md#kubernetes-with-kind)).
 
 ## Signed bundles
 

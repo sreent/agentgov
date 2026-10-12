@@ -9,6 +9,8 @@
 #   scripts/ci.sh --e2e-only  only the end-to-end run
 #   scripts/ci.sh --kind      also install the Helm chart on a kind cluster and run the demo
 #   scripts/ci.sh --kind-only only that (e2e.yml)
+#   scripts/ci.sh --spire     --kind, with SPIRE on the cluster issuing the components'
+#                             certificates (e2e.yml, with --kind-only)
 #   scripts/ci.sh --quick     lint, Rego checks and tests; no Docker
 #   scripts/ci.sh --matrix    also run the tests on each Python 3.11-3.13 found
 #   scripts/ci.sh --postgres  also run the tests on PostgreSQL (a throwaway container)
@@ -38,16 +40,21 @@ AGENTGATEWAY_IMAGE=ghcr.io/agentgateway/agentgateway:v1.6.0
 # identity assertions in a test (tests/test_assertions.py).
 KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.0
 POSTGRES_IMAGE=postgres:17-alpine
+# SPIRE 1.15.3 for the kind run with --spire, from the SPIFFE project's charts.
+SPIRE_CHARTS=https://spiffe.github.io/helm-charts-hardened/
+SPIRE_CRDS_CHART_VERSION=0.6.1
+SPIRE_CHART_VERSION=0.30.3
 COMPOSE=(docker compose -p agentgov-ci -f deploy/compose/docker-compose.yml)
 E2E_PORTS=(8000 8080 8180 8181 4317 4318 9200 9300)
 
-lint=1 tests=1 chart=1 image=1 e2e=0 kind=0 matrix=0 postgres=0 keep=0 setup_only=0
+lint=1 tests=1 chart=1 image=1 e2e=0 kind=0 spire=0 matrix=0 postgres=0 keep=0 setup_only=0
 for arg in "$@"; do
   case "$arg" in
     --e2e) e2e=1 postgres=1 ;;
     --e2e-only) lint=0 tests=0 chart=0 image=0 e2e=1 ;;
     --kind) kind=1 ;;
     --kind-only) lint=0 tests=0 chart=0 image=0 kind=1 ;;
+    --spire) kind=1 spire=1 ;;
     --quick) chart=0 image=0 ;;
     --matrix) matrix=1 ;;
     --postgres) postgres=1 ;;
@@ -547,16 +554,71 @@ chart_on_docker() {
 # Compose run.
 KIND_CLUSTER=agentgov-ci
 KIND_NAMESPACE=agentgov
+# With --spire: SPIRE's quick install, as its chart's readme has it, whose controller
+# manager's class is <namespace>-<release>.
+SPIRE_NAMESPACE="spire-server"
 
 kind_logs() {
+  local namespace pod namespaces=("$KIND_NAMESPACE") stats=.status.stats
+  [ "$spire" = 0 ] || namespaces+=("$SPIRE_NAMESPACE")
   echo "${yellow}--- pods and their last 60 log lines ---${reset}"
-  kubectl -n "$KIND_NAMESPACE" get pods -o wide || true
-  kubectl -n "$KIND_NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
-  local pod
-  for pod in $(kubectl -n "$KIND_NAMESPACE" get pods -o name 2>/dev/null); do
-    echo "--- $pod"
-    kubectl -n "$KIND_NAMESPACE" logs "$pod" --all-containers --tail 60 || true
+  for namespace in "${namespaces[@]}"; do
+    kubectl -n "$namespace" get pods -o wide || true
+    kubectl -n "$namespace" get events --sort-by=.lastTimestamp | tail -30 || true
+    for pod in $(kubectl -n "$namespace" get pods -o name 2>/dev/null); do
+      echo "--- $namespace/$pod"
+      kubectl -n "$namespace" logs "$pod" --all-containers --tail 60 || true
+    done
   done
+  # What SPIRE's controller manager made of each ClusterSPIFFEID.
+  [ "$spire" = 0 ] || kubectl get clusterspiffeids -o custom-columns="NAME:.metadata.name,\
+PODS:$stats.podsSelected,ENTRIES:$stats.entriesToSet,FAILED:$stats.entryFailures" || true
+}
+
+# With --spire, after the demo: the control plane serves an X.509-SVID from SPIRE with its
+# SPIFFE ID, and one SPIRE issued after the control plane started, so renewed in place. The
+# run's SVIDs last minutes, so SPIRE renews them as the demo runs. The processor connects,
+# with its own SVID: the control plane takes it.
+spire_renewed() {
+  local started probe out='' i
+  local want="spiffe://example.org/ns/$KIND_NAMESPACE/agentgov/agentgov-control-plane"
+  probe=$(
+    cat <<'EOF'
+import socket
+import ssl
+import sys
+from datetime import datetime
+
+from cryptography import x509
+
+want, started = sys.argv[1], datetime.fromisoformat(sys.argv[2])
+context = ssl.create_default_context(cafile="/tls/ca.crt")
+context.load_cert_chain("/tls/tls.crt", "/tls/tls.key")
+with socket.create_connection(("agentgov-control-plane", 8443), timeout=5) as raw:
+    with context.wrap_socket(raw, server_hostname="agentgov-control-plane") as conn:
+        served = x509.load_der_x509_certificate(conn.getpeercert(binary_form=True))
+names = served.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+ids = names.get_values_for_type(x509.UniformResourceIdentifier)
+if ids != [want]:
+    print(f"the control plane's certificate names {ids}, not {want}")
+    sys.exit(2)
+if served.not_valid_before_utc <= started:
+    sys.exit(f"the control plane serves the SVID it started with, from {served.not_valid_before_utc}")
+print(f"the control plane serves {want}, an SVID from SPIRE renewed in place")
+EOF
+  )
+  started=$(kubectl -n "$KIND_NAMESPACE" get pods \
+    -l app.kubernetes.io/instance=agentgov,app.kubernetes.io/component=control-plane \
+    -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="control-plane")].state.running.startedAt}')
+  [ -n "$started" ] || { echo "the control plane isn't running" >&2; return 1; }
+  for i in $(seq 72); do
+    out=$(kubectl -n "$KIND_NAMESPACE" exec deploy/agentgov-processor -c processor -- \
+      python -c "$probe" "$want" "$started" 2>&1) && { echo "$out"; return 0; }
+    [ $? = 1 ] || break
+    sleep 5
+  done
+  echo "$out" >&2
+  return 1
 }
 
 # wait_port <port>: until something accepts connections on localhost:<port>.
@@ -579,6 +641,11 @@ kind_end_to_end() {
     --set guardian.url="$DEMO_GUARDIAN_URL"
     "${DEMO_DESTINATION_SECRETS[@]}"
   )
+  if [ "$spire" = 1 ]; then
+    # SVIDs that last minutes: SPIRE renews them as the demo runs.
+    values+=(--set internalTLS.spire.enabled=true --set internalTLS.spire.ttl=6m
+      --set internalTLS.spire.className="$SPIRE_NAMESPACE-spire")
+  fi
   setup_chart_tools && setup_kind_tools || return 1
   kind delete cluster --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
   build_demo_images || return 1
@@ -593,6 +660,14 @@ kind_end_to_end() {
       break
     fi
   done
+  if [ "$rc" = 0 ] && [ "$spire" = 1 ]; then
+    echo "installing SPIRE"
+    helm install spire-crds spire-crds --repo "$SPIRE_CHARTS" --version "$SPIRE_CRDS_CHART_VERSION" \
+      -n "$SPIRE_NAMESPACE" --create-namespace --wait &&
+      helm install spire spire --repo "$SPIRE_CHARTS" --version "$SPIRE_CHART_VERSION" \
+        -n "$SPIRE_NAMESPACE" --set spiffe-oidc-discovery-provider.enabled=false \
+        --wait --timeout 10m || rc=1
+  fi
   if [ "$rc" = 0 ]; then
     kubectl create namespace "$KIND_NAMESPACE" >/dev/null &&
       kubectl -n "$KIND_NAMESPACE" apply -f - >/dev/null <<'EOF' || rc=1
@@ -733,6 +808,9 @@ EOF
       agentgov ledger verify &&
       helm test agentgov -n "$KIND_NAMESPACE" || rc=1
   fi
+  if [ "$rc" = 0 ] && [ "$spire" = 1 ]; then
+    spire_renewed || rc=1
+  fi
   [ "$rc" = 0 ] || kind_logs
   [ ${#pids[@]} -eq 0 ] || kill "${pids[@]}" 2>/dev/null || true
   if [ "$keep" = 1 ]; then
@@ -797,9 +875,8 @@ if [ "$e2e" = 1 ]; then
 fi
 
 if [ "$kind" = 1 ]; then
-  if docker_ready; then run "Kubernetes (Helm chart on kind + demo + ledger)" kind_end_to_end; else
-    skip "Kubernetes (Helm chart on kind + demo + ledger)" "no Docker daemon"
-  fi
+  name="Kubernetes (Helm chart on kind$([ "$spire" = 0 ] || echo " with SPIRE") + demo + ledger)"
+  if docker_ready; then run "$name" kind_end_to_end; else skip "$name" "no Docker daemon"; fi
 fi
 
 heading "Summary"

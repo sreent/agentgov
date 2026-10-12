@@ -2,8 +2,9 @@
 # OTel Collector, control plane, processor, demo MCP server) and drives every
 # governance control with a real MCP client: with Docker Compose and from the Helm
 # chart's pods on Docker (scripts/ci.sh --e2e-only, as run locally), and from the
-# chart on a kind cluster (scripts/ci.sh --kind-only). Runs on main, on pull
-# requests that change code or the deployment, and on demand.
+# chart on a kind cluster (scripts/ci.sh --kind-only), with its own authority's
+# certificates and with SPIRE's (--spire). Runs on main, on pull requests that change
+# code or the deployment, and on demand.
 name: e2e
 
 on:
@@ -43,9 +44,14 @@ jobs:
       - run: scripts/ci.sh --e2e-only
 
   kubernetes:
-    name: Helm chart on kind, demo and ledger
+    name: Helm chart on kind${{ matrix.spire && ' with SPIRE' || '' }}, demo and ledger
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # The components' certificates from the chart's own authority, or from SPIRE.
+        spire: [false, true]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -53,4 +59,4 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - run: scripts/ci.sh --kind-only
+      - run: scripts/ci.sh --kind-only ${{ matrix.spire && '--spire' || '' }}

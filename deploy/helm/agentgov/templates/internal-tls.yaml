@@ -15,6 +15,8 @@ metadata:
   name: {{ printf "%s-%s" $ns $name | trunc 63 | trimSuffix "-" }}
   labels:
     {{- include "agentgov.labels" (list $root .) | nindent 4 }}
+    # A controller manager set to filterByClassName sees only the ones with its class here.
+    spire.spiffe.io/class-name: {{ $spire.className }}
 spec:
   className: {{ $spire.className }}
   spiffeIDTemplate: {{ include "agentgov.spiffeId" (list $root .) | quote }}

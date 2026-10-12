@@ -44,6 +44,8 @@ scripts/ci.sh             # ruff, the docs, opa fmt/check/test, pytest, the Helm
 scripts/ci.sh --e2e       # also: the demo and ledger verification against the Compose
                           # stack and against the Helm chart's pods run with Docker
 scripts/ci.sh --kind      # also: the Helm chart on a kind cluster, with the same demo
+scripts/ci.sh --spire     # --kind, with SPIRE on the cluster issuing the components'
+                          # certificates
 scripts/ci.sh --matrix    # also: the tests on each Python 3.11-3.13 installed
 scripts/ci.sh --postgres  # also: the tests on PostgreSQL, in a throwaway container
 ```
@@ -52,7 +54,7 @@ Run `--e2e` when you change the processor, the Rego library, the gateway configu
 the identity reconciler or the Helm chart. Its chart check runs the chart's pods with
 Docker (`scripts/chart-on-docker.py`), so it works wherever Docker does, including Claude
 Code's cloud sessions. `--kind` installs the chart on a real cluster; kind needs a Docker
-host with cgroup v2, and the `e2e` workflow runs it on GitHub. `--e2e` uses its own Compose
+host with cgroup v2, and the `e2e` workflow runs it on GitHub, with and without `--spire`. `--e2e` uses its own Compose
 project (`agentgov-ci`) and the stack's usual ports, so stop a running local stack first.
 
 The docs check fails on a link to a file or heading that doesn't exist, and on a setting

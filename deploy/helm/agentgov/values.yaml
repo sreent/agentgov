@@ -363,9 +363,10 @@ internalTLS:
     enabled: false
     # SPIRE's trust domain.
     trustDomain: example.org
-    # The class of SPIRE's controller manager: <SPIRE's namespace>-<SPIRE's release> by
-    # default (spire-server-spire, as SPIRE's install guide has it).
-    className: spire-server-spire
+    # The class of SPIRE's controller manager, which is <SPIRE's namespace>-<SPIRE's
+    # release> unless SPIRE's chart sets another: spire-mgmt-spire for SPIRE's production
+    # install, spire-server-spire for its quick install.
+    className: spire-mgmt-spire
     # The SPIFFE CSI driver.
     csiDriver: csi.spiffe.io
     # How long the SVIDs last, such as 4h (empty: SPIRE's default).
