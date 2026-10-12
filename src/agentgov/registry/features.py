@@ -675,8 +675,8 @@ CATALOG: tuple[Feature, ...] = (
         "Google Cloud agents",
         "platforms",
         "AgentGov reads the agents on Google Cloud into the inventory (Agent Runtime agents, "
-        "formerly Vertex AI Agent Engine), with their risky settings as findings, on a "
-        "schedule and on demand.",
+        "formerly Vertex AI Agent Engine, and Agent Registry's agents and MCP servers), with "
+        "their risky settings as findings, on a schedule and on demand.",
         SWITCH,
         ON,
         {

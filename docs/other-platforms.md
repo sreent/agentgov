@@ -143,23 +143,32 @@ Platforms page.
 
 ## Google Cloud
 
-AgentGov reads the **Agent Runtime agents** (Agent Runtime was Vertex AI Agent Engine; its API
-calls them reasoning engines) in each project and region you name: the identity each runs as,
-how it reaches networks, the names of its environment variables and of those it takes from
-Secret Manager, its encryption key, memory bank and container, and who may use it, from its
-IAM policy.
+AgentGov reads, in each project you name:
 
-Gemini Enterprise's agents and Agent Platform's managed agents aren't read: Google's APIs list
-them only to the person who created them, so they can't give AgentGov an organisation's. An
-agent built with the ADK and added to Gemini Enterprise runs on Agent Runtime, where AgentGov
-reads it. Agent Registry, which also lists agents on Cloud Run and GKE, isn't read yet.
+* **Agent Runtime agents** (Agent Runtime was Vertex AI Agent Engine; its API calls them
+  reasoning engines), in each region you name: the identity each runs as, how it reaches
+  networks, the names of its environment variables and of those it takes from Secret
+  Manager, its encryption key, memory bank and container, and who may use it, from its IAM
+  policy.
+* **Agent Registry's agents and MCP servers**, in each region you name and `global`: agents on
+  Cloud Run and GKE, Gemini Enterprise's agents, agents registered by hand, and MCP servers,
+  with where each runs, the identity it runs as, its protocol, endpoints (their hosts) and
+  skills, and an MCP server's tools. Google's own agents and MCP servers (Google Workspace's,
+  say) are left out, and so is Agent Runtime's entry for each of its agents, read in full
+  above. Agent Registry has an agent on Cloud Run or GKE only when it was deployed to be
+  registered there.
+
+Gemini Enterprise's own API lists its agents only to the person who created each, so who an
+agent is shared with, and whether its app screens prompts with Model Armor, aren't read: Agent
+Registry gives what an agent is and where it runs. Agent Platform's managed agents aren't read
+either. A project that hasn't turned an API on is skipped for it.
 
 | Check | Raised when |
 |---|---|
-| `platform.no_authentication` | its IAM policy grants a role to `allUsers` or `allAuthenticatedUsers` |
-| `platform.shared_with_everyone` | its IAM policy grants a role to a whole domain |
-| `platform.broad_identity` | it runs as a default service account, Compute Engine's or App Engine's, which Google makes an editor of the project (high), or as the project's Agent Runtime service agent, which every agent without an identity of its own shares (medium) |
-| `platform.plain_secret` | an environment variable whose name says it holds a secret has a plain value rather than one from Secret Manager, or `GOOGLE_APPLICATION_CREDENTIALS` is set (a service account key shipped with the agent) |
+| `platform.no_authentication` | an Agent Runtime agent's IAM policy grants a role to `allUsers` or `allAuthenticatedUsers` |
+| `platform.shared_with_everyone` | an Agent Runtime agent's IAM policy grants a role to a whole domain |
+| `platform.broad_identity` | it runs as a default service account, Compute Engine's or App Engine's, which Google makes an editor of the project (high), or, on Agent Runtime, as the project's Agent Runtime service agent, which every agent without an identity of its own shares (medium) |
+| `platform.plain_secret` | an Agent Runtime agent's environment variable whose name says it holds a secret has a plain value rather than one from Secret Manager, or `GOOGLE_APPLICATION_CREDENTIALS` is set (a service account key shipped with the agent) |
 
 An agent whose IAM policy AgentGov may not read is shown as such, and its findings about who
 may use it are left as they were.
@@ -172,14 +181,15 @@ may use it are left as they were.
    ```bash
    gcloud iam roles create agentgovAgentReader --project=PROJECT \
      --title="AgentGov agent reader" \
-     --permissions=aiplatform.reasoningEngines.list,aiplatform.reasoningEngines.getIamPolicy,resourcemanager.projects.get
+     --permissions=aiplatform.reasoningEngines.list,aiplatform.reasoningEngines.getIamPolicy,agentregistry.agents.list,agentregistry.mcpServers.list,resourcemanager.projects.get
    gcloud projects add-iam-policy-binding PROJECT \
      --role=projects/PROJECT/roles/agentgovAgentReader --member=serviceAccount:READER
    ```
 
    Create it once in your organisation (`--organization`) instead to grant it in several
-   projects. Google's Vertex AI Viewer role (`roles/aiplatform.viewer`) can read them too, but
-   it reads much more of the project than AgentGov needs.
+   projects. Google's Vertex AI Viewer and Agent Registry API Viewer roles
+   (`roles/aiplatform.viewer`, `roles/agentregistry.viewer`) can read them too, but they read
+   more of the project than AgentGov needs.
 2. Give the control plane Google credentials, from where Google's libraries find them: on GKE,
    Workload Identity ([Google Cloud](deploy/gcp.md#agents-built-on-google-cloud)) or a VM's
    service account; elsewhere, the file `GOOGLE_APPLICATION_CREDENTIALS` names: a workload
@@ -193,6 +203,7 @@ may use it are left as they were.
    ```bash
    AGENTGOV_GOOGLE_CLOUD_PROJECTS=contoso-agents,contoso-labs
    AGENTGOV_GOOGLE_CLOUD_REGIONS=us-central1,europe-west4
+   AGENTGOV_GOOGLE_CLOUD_READ=agent-runtime,agent-registry   # leave out what you don't want
    ```
 
 AgentGov gets its tokens itself, without Google's client libraries.

@@ -194,6 +194,8 @@ def test_unsupported_credentials(http, tmp_path) -> None:
 PROJECT = "contoso-agents"
 RUNTIME = "https://us-central1-aiplatform.googleapis.com/v1/projects/contoso-agents/locations"
 ENGINES = "projects/123456/locations/us-central1/reasoningEngines"
+REGISTRY_PARENT = "projects/contoso-agents/locations"
+REGISTRY = f"https://agentregistry.googleapis.com/v1/{REGISTRY_PARENT}"
 
 
 def engine(id_: str, display: str, spec: dict[str, Any], **extra: Any) -> dict[str, Any]:
@@ -266,6 +268,8 @@ class FakeGoogleCloud:
         if request.url.host == "metadata.google.internal":
             return httpx.Response(200, json={"access_token": "gke", "expires_in": 3600})
         assert request.headers["authorization"] == "Bearer gke"
+        if url.startswith(REGISTRY):
+            return self.registry(url.removeprefix(REGISTRY))
         if url == f"{RUNTIME}/us-central1/reasoningEngines":
             if request.url.params.get("pageToken") == "2":
                 return httpx.Response(200, json={"reasoningEngines": self.engines[2:]})
@@ -292,6 +296,107 @@ class FakeGoogleCloud:
                 return httpx.Response(403, json={"error": {"status": "PERMISSION_DENIED"}})
             return httpx.Response(200, json=self.policies[name])
         return httpx.Response(404, json={"error": {"message": f"no {url}"}})
+
+    def registry(self, path: str) -> httpx.Response:
+        """Agent Registry: a Cloud Run agent, an MCP server and Agent Runtime's own entry in
+        us-central1; Gemini Enterprise's agent and Google's own in global; europe-west4,
+        where the project hasn't turned the API on."""
+        project = "urn:agent:projects-123456:projects:123456:locations"
+        if path.startswith("/europe-west4/"):
+            return httpx.Response(
+                403,
+                json={
+                    "error": {
+                        "code": 403,
+                        "status": "PERMISSION_DENIED",
+                        "message": "Agent Registry API has not been used in project 123456",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                                "reason": "SERVICE_DISABLED",
+                            }
+                        ],
+                    }
+                },
+            )
+        lists: dict[str, Any] = {
+            "/us-central1/agents": {
+                "agents": [
+                    {
+                        "name": f"{REGISTRY_PARENT}/us-central1/agents/orders",
+                        "agentId": f"{project}:us-central1:run:services:orders-agent",
+                        "displayName": "Orders agent",
+                        "protocols": [
+                            {
+                                "type": "A2A_AGENT",
+                                "protocolVersion": "0.3",
+                                "interfaces": [
+                                    {"url": "https://orders-agent-abc.a.run.app/a2a?token=x"}
+                                ],
+                            }
+                        ],
+                        "skills": [{"id": "track", "name": "Track an order"}],
+                        "attributes": {
+                            "agentregistry.googleapis.com/system/RuntimeIdentity": {
+                                "principal": "principal://iam.googleapis.com/projects/-/"
+                                "serviceAccounts/123456-compute@developer.gserviceaccount.com"
+                            },
+                            "agentregistry.googleapis.com/system/RuntimeReference": {
+                                "uri": "//run.googleapis.com/projects/contoso-agents/locations/"
+                                "us-central1/services/orders-agent"
+                            },
+                        },
+                    },
+                    {
+                        # Agent Runtime's own entry: read in full from Agent Runtime.
+                        "name": f"{REGISTRY_PARENT}/us-central1/agents/trip",
+                        "agentId": f"{project}:us-central1:aiplatform:reasoningEngines:111",
+                        "displayName": "Trip planner",
+                    },
+                ]
+            },
+            "/us-central1/mcpServers": {
+                "mcpServers": [
+                    {
+                        "name": f"{REGISTRY_PARENT}/us-central1/mcpServers/crm",
+                        "mcpServerId": "urn:mcp:projects-123456:projects:123456:locations:"
+                        "us-central1:run:services:crm-mcp",
+                        "displayName": "CRM tools",
+                        "tools": [{"name": "find_customer", "description": "Look up a customer"}],
+                    }
+                ]
+            },
+            "/global/agents": {
+                "agents": [
+                    {
+                        "name": f"{REGISTRY_PARENT}/global/agents/workspace",
+                        "agentId": "urn:agent:googleapis.com:locations:global:workspaceagent:"
+                        "workspaceagent--a2a",
+                        "displayName": "Google Workspace",
+                    },
+                    {
+                        "name": f"{REGISTRY_PARENT}/global/agents/ge-helpdesk",
+                        "agentId": f"{project}:global:discoveryengine:collections:"
+                        "default_collection:engines:contoso:assistants:default_assistant:"
+                        "agents:helpdesk",
+                        "displayName": "Helpdesk",
+                        "description": "Answers IT questions",
+                    },
+                ]
+            },
+            "/global/mcpServers": {
+                "mcpServers": [
+                    {
+                        "name": f"{REGISTRY_PARENT}/global/mcpServers/bigquery",
+                        "mcpServerId": "urn:mcp:googleapis.com:locations:global:bigquery",
+                        "displayName": "BigQuery",
+                    }
+                ]
+            },
+        }
+        if path in lists:
+            return httpx.Response(200, json=lists[path])
+        return httpx.Response(404, json={"error": {"message": f"no {path}"}})
 
 
 @pytest.fixture
@@ -340,7 +445,9 @@ def test_agents_on_google_cloud_are_read_into_the_registry(google_client, cloud)
     resp = google_client.post("/v1/platforms/google-cloud/sync", headers=ADMIN)
     assert resp.status_code == 200, resp.text
     counts = resp.json()
-    assert (counts["created"], counts["updated"], counts["failed"]) == (3, 0, 1)
+    # Three on Agent Runtime, and from Agent Registry a Cloud Run agent, an MCP server and
+    # Gemini Enterprise's agent; europe-west4's registry is skipped (the API is off there).
+    assert (counts["created"], counts["updated"], counts["failed"]) == (6, 0, 1)
 
     trip = _agent(google_client, "trip-planner")
     assert trip["source"] == "platform:google-cloud"
@@ -402,6 +509,37 @@ def test_a_fixed_setting_resolves_and_an_unread_policy_keeps_its_finding(
     assert shared["verified"] is False
 
 
+def test_agent_registry(google_client, cloud) -> None:
+    assert google_client.post("/v1/platforms/google-cloud/sync", headers=ADMIN).status_code == 200
+
+    orders = _agent(google_client, "orders-agent")
+    assert orders["platform"] == "Cloud Run agent"
+    facts = _facts(orders["platforms"][0])
+    assert facts["Protocol"] == "A2A 0.3"
+    # Of an endpoint only its scheme and host are kept.
+    assert facts["Endpoints"] == "https://orders-agent-abc.a.run.app"
+    assert facts["Skills"] == "Track an order"
+    assert facts["Runs on"].startswith("//run.googleapis.com/")
+    found = _findings(google_client, "orders-agent")
+    assert found["platform.broad_identity"]["severity"] == "high"
+
+    crm = _agent(google_client, "crm-tools")
+    assert crm["platform"] == "MCP server"
+    assert [t["name"] for t in crm["platforms"][0]["tools"]] == ["find_customer"]
+
+    helpdesk = _agent(google_client, "helpdesk")
+    assert helpdesk["platform"] == "Gemini Enterprise agent"
+    # Google's own agents and MCP servers aren't the organisation's to govern; Agent
+    # Runtime's entry is the agent already read from Agent Runtime.
+    names = {a["name"] for a in google_client.get("/v1/agents", headers=ADMIN).json()}
+    assert not {"google-workspace", "bigquery"} & names
+    assert len([n for n in names if n.startswith("trip-planner")]) == 1
+    status = {
+        s["source"]: s for s in google_client.get("/v1/platforms", headers=ADMIN).json()["sources"]
+    }
+    assert "agent-registry" not in status["google-cloud"]["last_sync"]["message"]
+
+
 def test_runtime_hosts() -> None:
     from agentgov.platforms.google import runtime_host
 
@@ -416,3 +554,5 @@ def test_google_settings_are_checked() -> None:
         Settings.from_env({"AGENTGOV_GOOGLE_CLOUD_PROJECTS": "Contoso Agents"})
     with pytest.raises(ValueError, match="not a Google Cloud region"):
         Settings.from_env({"AGENTGOV_GOOGLE_CLOUD_REGIONS": "us-central"})
+    with pytest.raises(ValueError, match="AGENTGOV_GOOGLE_CLOUD_READ"):
+        Settings.from_env({"AGENTGOV_GOOGLE_CLOUD_READ": "agent-runtime,gemini"})
