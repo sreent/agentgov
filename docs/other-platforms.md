@@ -75,15 +75,21 @@ AgentGov reads, in each region and account you name:
 * **AgentCore agent runtimes**, agents and MCP servers you deploy yourself: their protocol,
   how they check callers, their resource policy, outbound network, the role they run as and
   their container. A runtime behind a harness is shown as the harness.
+* **AgentCore gateways**, the MCP servers AgentCore runs in front of tools: how they check
+  callers, their resource policy, policy engine, interceptors and web ACL, the role they run
+  as, the instructions they give agents, and their targets (their tools) with how the
+  gateway signs in to each. Like the runtimes that serve MCP, they are listed with the
+  agents, so their risky settings count the same way. Of a target's URL only the host is
+  kept, and nothing of its parameters or credentials.
 
-AgentCore gateways, AWS's Agent Registry and Amazon Quick's agents aren't read yet.
+AWS's Agent Registry and Amazon Quick's agents aren't read yet.
 
 | Check | Raised when |
 |---|---|
 | `platform.no_guardrail` | a Bedrock agent has no guardrail |
 | `platform.risky_tool` | an agent has computer use, a shell or a text editor (high), or a code interpreter or a browser (medium) |
-| `platform.weak_authentication` | a harness or runtime checks callers' tokens without allowed audiences or clients, so a token issued to another application gets in |
-| `platform.no_authentication` | a runtime that checks AWS credentials has a resource policy that lets any AWS principal in, with no condition |
+| `platform.weak_authentication` | a harness, runtime or gateway checks callers' tokens without allowed audiences or clients, so a token issued to another application gets in |
+| `platform.no_authentication` | a gateway has no inbound authorization (high: anyone who can reach it may call its tools), or a runtime or gateway that checks AWS credentials has a resource policy that lets any AWS principal in, with no condition |
 | `platform.plain_secret` | an environment variable whose name says it holds a secret (a password, token or key) has a value that isn't a reference to Secrets Manager or Parameter Store |
 
 ### Setting it up
@@ -103,6 +109,8 @@ AgentCore gateways, AWS's Agent Registry and Amazon Quick's agents aren't read y
            "bedrock:ListAgentAliases",
            "bedrock-agentcore:ListHarnesses", "bedrock-agentcore:GetHarness",
            "bedrock-agentcore:ListAgentRuntimes", "bedrock-agentcore:GetAgentRuntime",
+           "bedrock-agentcore:ListGateways", "bedrock-agentcore:GetGateway",
+           "bedrock-agentcore:ListGatewayTargets", "bedrock-agentcore:GetGatewayTarget",
            "bedrock-agentcore:GetResourcePolicy"
          ],
          "Resource": "*"
@@ -114,7 +122,8 @@ AgentCore gateways, AWS's Agent Registry and Amazon Quick's agents aren't read y
    AWS's `ReadOnlyAccess` covers the Bedrock agent actions but AgentCore has no read-only
    managed policy, so use this one. An agent encrypted with a key of yours also needs
    `kms:Decrypt` on that key; without it, AgentGov records the agent from what the list
-   shows and says what it couldn't read.
+   shows and says what it couldn't read. A policy without the gateway actions leaves the
+   agents read, and the Platforms page says the gateways couldn't be.
 2. Give the control plane the credentials, from wherever AWS's SDKs find them:
    `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; on EKS, IAM roles for service accounts or
    Pod Identity on its service account ([AWS](deploy/aws.md)); or an EC2 instance's role.

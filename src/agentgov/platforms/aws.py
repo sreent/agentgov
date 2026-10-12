@@ -1,4 +1,4 @@
-"""Agents on AWS: Amazon Bedrock agents and Amazon Bedrock AgentCore's harnesses and runtimes.
+"""Agents on AWS: Amazon Bedrock agents, and AgentCore's harnesses, runtimes and gateways.
 
 Read-only, with SigV4-signed requests (``agentgov.platforms.aws_auth``), in each
 configured region of each account AgentGov can reach: its own credentials' and
@@ -11,6 +11,9 @@ service is skipped, and one that refuses is reported without holding up the rest
   aliases (:func:`bedrock_agent`).
 * AgentCore: managed harnesses (:func:`harness`), and the agent runtimes that
   don't back one (:func:`agent_runtime`), with each runtime's resource policy.
+* AgentCore gateways, the MCP servers AgentCore hosts in front of tools
+  (:func:`agentcore_gateway`), with their targets: a part of their own, so that
+  credentials allowed to read agents but not gateways leave the agents read.
 
 Secrets never leave AWS: of environment variables and remote MCP servers'
 headers AgentGov keeps the names, and of those servers' URLs the host.
@@ -34,6 +37,7 @@ from agentgov.platforms.base import Found, Inventory, PlatformError, Risk
 
 BEDROCK_AGENTS = "bedrock-agents"
 AGENTCORE = "agentcore"
+GATEWAYS = "agentcore-gateways"
 # Each kind of list is paged this far at most.
 MAX_PAGES = 50
 # Throttled or failing requests are tried again after these pauses (seconds).
@@ -104,7 +108,11 @@ class AwsConnector:
                 continue
             for region in self.regions:
                 api = _Api(self, session, region)
-                for service, read in ((BEDROCK_AGENTS, _bedrock), (AGENTCORE, _agentcore)):
+                for service, read in (
+                    (BEDROCK_AGENTS, _bedrock),
+                    (AGENTCORE, _agentcore),
+                    (GATEWAYS, _gateways),
+                ):
                     part = f"{account}/{region}/{service}"
                     try:
                         inventory.found += read(api, account, region, part)
@@ -225,6 +233,38 @@ def _agentcore(api: _Api, account: str, region: str, part: str) -> list[Found]:
         if why is None and runtime.get("agentRuntimeArn") and not _jwt(runtime):
             policy = api.resource_policy(*CONTROL, runtime["agentRuntimeArn"])
         item = agent_runtime(runtime, account, region, part, policy=policy)
+        found.append(_partial(item, why) if why else item)
+    return found
+
+
+def _gateways(api: _Api, account: str, region: str, part: str) -> list[Found]:
+    found = []
+    for summary in api.pages(*CONTROL, "GET", "/gateways/", "items", query=True):
+        gateway_id = quote(str(summary["gatewayId"]), safe="")
+        why = None
+        targets: list[dict[str, Any]] = []
+        try:
+            gateway = {**summary, **api.call(*CONTROL, "GET", f"/gateways/{gateway_id}/")}
+        except PlatformError as exc:
+            if exc.status == 404:
+                continue  # deleted since it was listed
+            gateway, why = dict(summary), _refused(exc)
+        if why is None:
+            try:
+                for target in api.pages(
+                    *CONTROL, "GET", f"/gateways/{gateway_id}/targets/", "items", query=True
+                ):
+                    target_id = quote(str(target["targetId"]), safe="")
+                    path = f"/gateways/{gateway_id}/targets/{target_id}/"
+                    targets.append({**target, **api.call(*CONTROL, "GET", path)})
+            except PlatformError as exc:
+                if exc.status == 404:
+                    continue
+                why = _refused(exc)
+        policy = None
+        if why is None and gateway.get("authorizerType") == "AWS_IAM" and gateway.get("gatewayArn"):
+            policy = api.resource_policy(*CONTROL, gateway["gatewayArn"])
+        item = agentcore_gateway(gateway, targets, account, region, part, policy=policy)
         found.append(_partial(item, why) if why else item)
     return found
 
@@ -749,4 +789,194 @@ def agent_runtime(
         },
         external_ids={"aws_arn": arn},
         risks=risks + _secret_risk(name, variables),
+    )
+
+
+# What a gateway's target is, by where its configuration says it sends calls.
+TARGETS = {
+    ("mcp", "lambda"): "Lambda function",
+    ("mcp", "openApiSchema"): "OpenAPI",
+    ("mcp", "smithyModel"): "Smithy model",
+    ("mcp", "mcpServer"): "MCP server",
+    ("mcp", "apiGateway"): "API Gateway",
+    ("mcp", "connector"): "Connector",
+    ("http", "agentcoreRuntime"): "AgentCore runtime",
+    ("http", "passthrough"): "Passthrough",
+    ("http", "connector"): "HTTP connector",
+    ("inference", "provider"): "Model provider",
+    ("inference", "connector"): "Model connector",
+}
+# How a gateway signs in to a target.
+OUTBOUND = {
+    "GATEWAY_IAM_ROLE": "as the gateway's role",
+    "OAUTH": "with OAuth",
+    "API_KEY": "with an API key",
+    "CALLER_IAM_CREDENTIALS": "as the caller (AWS credentials)",
+    "JWT_PASSTHROUGH": "with the caller's token",
+}
+
+
+def _host(url: Any) -> str | None:
+    """A URL's scheme and host: its path or query may carry credentials."""
+    parts = urlsplit(str(url or ""))
+    return f"{parts.scheme}://{parts.hostname}" if parts.hostname else None
+
+
+def _target(target: dict[str, Any]) -> dict[str, Any]:
+    """One gateway target as a tool: what it is, where it sends calls and how it signs in."""
+    config = target.get("targetConfiguration") or {}
+    kind, spec = target.get("targetType") or "Target", {}
+    for (family, key), label in TARGETS.items():
+        if isinstance((config.get(family) or {}).get(key), dict):
+            kind, spec = label, config[family][key]
+            break
+    where = (
+        spec.get("lambdaArn")
+        or spec.get("arn")
+        or _host(spec.get("endpoint"))
+        or ("/".join(filter(None, [spec.get("restApiId"), spec.get("stage")])) or None)
+        or (spec.get("source") or {}).get("connectorId")
+        or ((spec.get("s3") or {}).get("uri"))
+    )
+    if kind == "Passthrough" and spec.get("protocolType"):
+        kind = f"Passthrough ({spec['protocolType']})"
+    providers = [
+        str(c.get("credentialProviderType"))
+        for c in target.get("credentialProviderConfigurations") or []
+        if isinstance(c, dict)
+    ]
+    signs = ", ".join(OUTBOUND.get(p, p) for p in providers) or "with no authorization"
+    status = target.get("status")
+    detail = " · ".join(
+        filter(None, [where, signs, None if status in (None, "READY") else str(status)])
+    )
+    return {
+        "name": str(target.get("name") or target.get("targetId")),
+        "kind": kind,
+        "detail": detail,
+        **({"tone": "warning"} if not providers else {}),
+    }
+
+
+def agentcore_gateway(
+    gateway: dict[str, Any],
+    targets: list[dict[str, Any]],
+    account: str,
+    region: str,
+    part: str,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> Found:
+    """An AgentCore gateway: an MCP server in front of its targets (GetGateway over its
+    ListGateways summary, and GetGatewayTarget for each target). Its resource ``policy``:
+    ``{}`` for none, None when it wasn't read."""
+    name = str(gateway.get("name") or gateway["gatewayId"])
+    arn = gateway.get("gatewayArn") or (
+        f"arn:aws:bedrock-agentcore:{region}:{account}:gateway/{gateway['gatewayId']}"
+    )
+    authorizer = str(gateway.get("authorizerType") or "")
+    jwt = _jwt(gateway)
+    risks: list[Risk] = []
+    policy_fact = None
+    if authorizer == "NONE":
+        authentication = _fact("Authentication", "None: anyone who can reach it", tone="serious")
+        risks.append(
+            Risk(
+                "platform.no_authentication",
+                "high",
+                f"{name} lets anyone call its tools",
+                "It has no inbound authorization, so anyone who can reach "
+                f"{_host(gateway.get('gatewayUrl')) or 'its URL'} may list and call its tools, "
+                "which reach its targets with the gateway's own credentials.",
+                "Give it a JWT authorizer or AWS IAM authorization: AWS advises against gateways "
+                "without one beyond testing.",
+            )
+        )
+    elif jwt or authorizer in ("CUSTOM_JWT", "AUTHENTICATE_ONLY"):
+        authentication, auth_risks = _authentication(name, jwt)
+        risks += auth_risks
+        if authorizer == "AUTHENTICATE_ONLY" and authentication:
+            authentication["value"] += ", passed on to its targets"
+    else:
+        authentication, _ = _authentication(name, {})
+        if policy and _open_to_anyone(policy):
+            policy_fact = _fact("Resource policy", "Lets any AWS account in", tone="serious")
+            risks.append(
+                Risk(
+                    "platform.no_authentication",
+                    "high",
+                    f"{name} lets any AWS account call its tools",
+                    "Its resource policy allows any AWS principal, with no condition narrowing it "
+                    "to your organisation or accounts: anyone with AWS credentials may call it.",
+                    "Name the accounts or principals that may invoke it in its resource policy, "
+                    "or add a condition such as aws:PrincipalOrgID.",
+                )
+            )
+        elif policy == {}:
+            policy_fact = _fact("Resource policy", "None")
+        else:
+            policy_fact = _fact(
+                "Resource policy",
+                "Narrows who may invoke it" if policy else "AgentGov may not read it",
+            )
+    engine = gateway.get("policyEngineConfiguration") or {}
+    waf = gateway.get("wafConfiguration") or {}
+    mcp = (gateway.get("protocolConfiguration") or {}).get("mcp") or {}
+    facts = _facts(
+        _fact("Account", account, code=True),
+        _fact("Region", region),
+        _fact("Status", gateway.get("status")),
+        _fact("URL", gateway.get("gatewayUrl"), code=True),
+        authentication,
+        policy_fact,
+        _fact(
+            "Policy engine",
+            {"ENFORCE": "Decides each tool call", "LOG_ONLY": "Logs only, decides nothing"}.get(
+                str(engine.get("mode")), "None"
+            ),
+            **({"tone": "warning"} if engine.get("mode") == "LOG_ONLY" else {}),
+        ),
+        _fact("Interceptors", len(gateway.get("interceptorConfigurations") or []) or None),
+        _fact(
+            "Errors",
+            "Detailed (DEBUG): callers see the gateway's internals"
+            if gateway.get("exceptionLevel") == "DEBUG"
+            else None,
+            tone="warning",
+        ),
+        _fact(
+            "Web ACL",
+            None
+            if not gateway.get("webAclArn")
+            else (
+                "Lets calls through when it fails"
+                if waf.get("failureMode") == "FAIL_OPEN"
+                else "Stops calls when it fails"
+            ),
+            **({"tone": "warning"} if waf.get("failureMode") == "FAIL_OPEN" else {}),
+        ),
+        _fact("Runs as", gateway.get("roleArn"), code=True),
+        _fact("Tool search", "Semantic" if mcp.get("searchType") == "SEMANTIC" else None),
+        _fact("Encryption key", gateway.get("kmsKeyArn"), code=True),
+        _fact("Changed", gateway.get("updatedAt")),
+    )
+    return Found(
+        external_id=arn,
+        name=name,
+        kind="AgentCore gateway (MCP server)",
+        part=part,
+        description=gateway.get("description"),
+        details={
+            "facts": facts,
+            "tools": [_target(t) for t in targets],
+            "status": gateway.get("status"),
+            "authentication": authorizer.lower() or None,
+            "role": gateway.get("roleArn"),
+            "region": region,
+            "account": account,
+        },
+        external_ids={"aws_arn": arn},
+        risks=risks,
+        # What it tells the agents that use it, as an MCP server's instructions.
+        instructions=mcp.get("instructions") or None,
     )
