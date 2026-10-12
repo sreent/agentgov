@@ -45,3 +45,19 @@ spec:
   # go around the gateway get nowhere (docs/agent-to-agent.md#calls-around-the-gateway).
   a2a_protection: delegation
   status: active
+---
+# Developers' MCP clients (VS Code, Claude Code, Cursor...), which reach the gateway's tool
+# servers with the developer's own token once developer-sign-in is on
+# (docs/developer-tools.md#signing-in-at-the-gateway). A public client: developers sign in
+# to it from their MCP client, which receives the sign-in on their machine.
+apiVersion: agentgov/v1alpha1
+kind: Agent
+metadata:
+  name: coding-assistant
+spec:
+  description: Developers' MCP clients, acting for the developer signed in.
+  blueprint: coding-assistants
+  owner: developer-experience
+  sponsors: [alice@example.com]
+  client_type: public
+  status: active

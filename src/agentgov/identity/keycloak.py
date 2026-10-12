@@ -19,6 +19,13 @@ with a token from its identity issuer for its subject (Keycloak's federated clie
 authentication), and each identity issuer is an identity provider in the realm
 (``agentgov.registry.identity_issuers``).
 
+A **public client** (``client_type`` public) is one people sign in to on their own
+machines, such as a developer's MCP client: the authorization code flow with PKCE, back to
+its redirect URIs (by default the machine itself, at any port), and no secret, service
+account or token exchange. Its tokens are the person's, with the agent's claims, and say
+the person signed in to it (``agentgov_sign_in``), which ``agentgov.identity.people``
+records as how the agent came to act for them.
+
 The reconciler is level-triggered: it compares each agent's lifecycle state
 with its Keycloak client and converges them, so a missed notification or a
 Keycloak outage only delays convergence.
@@ -41,7 +48,7 @@ from agentgov import ids
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.models import ACTIVE, DISCOVERED, Agent, IdentityIssuer
-from agentgov.registry import features, identity_issuers
+from agentgov.registry import features, identity_issuers, validation
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +59,10 @@ EXCHANGE = "standard.token.exchange.enabled"
 FEDERATED = "federated-jwt"
 FEDERATED_ISSUER = "jwt.credential.issuer"
 FEDERATED_SUBJECT = "jwt.credential.sub"
+# A public client: PKCE, and the claim that says a person signed in to it.
+PKCE = "pkce.code.challenge.method"
+SIGN_IN_MAPPER = "agentgov-sign-in"
+SIGN_IN_CLAIM = "agentgov_sign_in"
 
 
 class KeycloakError(RuntimeError):
@@ -160,6 +171,11 @@ class KeycloakAdmin:
             "protocol mapper create",
         )
 
+    def delete_protocol_mapper(self, uuid: str, mapper_id: str) -> None:
+        resp = self._request("DELETE", f"/clients/{uuid}/protocol-mappers/models/{mapper_id}")
+        if resp.status_code not in (204, 404):
+            self._check(resp, "protocol mapper delete")
+
     def list_client_scopes(self) -> list[dict[str, Any]]:
         return self._check(self._request("GET", "/client-scopes"), "client scope list").json()
 
@@ -228,10 +244,48 @@ def acts_for_people(agent: Agent) -> bool:
     return agent.blueprint is None or agent.blueprint.acts_for != "itself"
 
 
+def is_public(agent: Agent) -> bool:
+    """Whether people sign in to the agent's client on their own machines."""
+    return agent.client_type == validation.PUBLIC
+
+
+def exchanges(agent: Agent) -> bool:
+    """Whether the agent exchanges people's tokens for its own: it acts for people, with
+    a confidential client (a public one has the person's own token)."""
+    return acts_for_people(agent) and not is_public(agent)
+
+
+def redirect_uris(agent: Agent) -> list[str]:
+    """Where a sign-in to a public client may return."""
+    if not is_public(agent):
+        return []
+    return list(agent.redirect_uris or validation.LOOPBACK_REDIRECTS)
+
+
+def sign_in_mapper() -> dict[str, Any]:
+    """The claim that says a person signed in to the agent's client themselves."""
+    return {
+        "name": SIGN_IN_MAPPER,
+        "protocol": "openid-connect",
+        "protocolMapper": "oidc-hardcoded-claim-mapper",
+        "consentRequired": False,
+        "config": {
+            "claim.name": SIGN_IN_CLAIM,
+            "claim.value": "true",
+            "jsonType.label": "boolean",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "introspection.token.claim": "true",
+        },
+    }
+
+
 def client_representation(agent: Agent, settings: Settings) -> dict[str, Any]:
+    public = is_public(agent)
     authenticator = "client-secret"
     federated: dict[str, str] = {}
-    if agent.workload_issuer:
+    if agent.workload_issuer and not public:
         # No secret: a token from its issuer for its subject authenticates the client.
         authenticator = FEDERATED
         federated = {
@@ -244,24 +298,30 @@ def client_representation(agent: Agent, settings: Settings) -> dict[str, Any]:
         "description": (agent.description or "")[:255],
         "enabled": agent.status == ACTIVE,
         "protocol": "openid-connect",
-        "publicClient": False,
+        # Tokens for itself, with its secret or workload identity; or, a public client,
+        # people sign in to it (the authorization code flow, with PKCE).
+        "publicClient": public,
         "bearerOnly": False,
-        "serviceAccountsEnabled": True,
-        "standardFlowEnabled": False,
+        "serviceAccountsEnabled": not public,
+        "standardFlowEnabled": public,
         "implicitFlowEnabled": False,
         "directAccessGrantsEnabled": False,
         "frontchannelLogout": False,
         "clientAuthenticatorType": authenticator,
+        "redirectUris": redirect_uris(agent),
+        "webOrigins": ["+"] if public else [],
         "attributes": {
             "agentgov.agent_id": agent.id,
             "agentgov.managed": "true",
             "access.token.lifespan": str(TOKEN_LIFESPAN_SECONDS),
             "client_credentials.use_refresh_token": "false",
             # Exchanging a person's token for a token of its own, on their behalf.
-            EXCHANGE: "true" if acts_for_people(agent) else "false",
+            EXCHANGE: "true" if exchanges(agent) else "false",
+            PKCE: "S256" if public else "",
             **federated,
         },
-        "protocolMappers": [
+        "protocolMappers": ([sign_in_mapper()] if public else [])
+        + [
             {
                 "name": "agentgov-agent-id",
                 "protocol": "openid-connect",
@@ -498,6 +558,10 @@ class IdentityReconciler:
                 or attributes.get("agentgov.agent_id") != agent.id
                 or attributes.get(EXCHANGE, "false") != desired["attributes"][EXCHANGE]
                 or authenticator != desired["clientAuthenticatorType"]
+                or bool(existing.get("publicClient")) != desired["publicClient"]
+                or bool(existing.get("standardFlowEnabled")) != desired["standardFlowEnabled"]
+                or sorted(existing.get("redirectUris") or []) != sorted(desired["redirectUris"])
+                or attributes.get(PKCE, "") != desired["attributes"][PKCE]
                 or any(
                     attributes.get(k) != desired["attributes"][k]
                     for k in (FEDERATED_ISSUER, FEDERATED_SUBJECT)
@@ -516,15 +580,22 @@ class IdentityReconciler:
                 log.info(
                     "updated Keycloak client %s (enabled=%s)", agent.client_id, desired["enabled"]
                 )
-                if authenticator != desired["clientAuthenticatorType"]:
-                    # Going to its workload identity, or back from it to a secret, no
-                    # secret from before authenticates it again.
+                if not desired["publicClient"] and (
+                    authenticator != desired["clientAuthenticatorType"]
+                    or existing.get("publicClient")
+                ):
+                    # Going to its workload identity, back from it to a secret, or from a
+                    # public client: no secret from before authenticates it again.
                     self.admin.regenerate_secret(existing["id"])
-            # Clients made by earlier versions lack the mappers added since.
-            present = {m.get("name") for m in existing.get("protocolMappers") or []}
+            # Clients made by earlier versions lack the mappers added since; and a client
+            # that is no longer public no longer says people signed in to it.
+            present = {m.get("name"): m for m in existing.get("protocolMappers") or []}
             for mapper in desired["protocolMappers"]:
                 if mapper["name"] not in present:
                     self.admin.add_protocol_mapper(existing["id"], mapper)
+            stale = present.get(SIGN_IN_MAPPER)
+            if stale is not None and not desired["publicClient"] and stale.get("id"):
+                self.admin.delete_protocol_mapper(existing["id"], stale["id"])
         if agent.idp_client_uuid:
             self._sync_people_scope(agent, scopes)
         agent.identity_synced_at = ids.utcnow()
@@ -536,11 +607,11 @@ class IdentityReconciler:
         scope = scopes.by_name().get(name)
         if scope is not None and not _managed(scope):
             raise KeycloakError(f"client scope {name} exists, and AgentGov didn't make it")
-        if not acts_for_people(agent):
+        if not exchanges(agent):
             if scope is not None:
                 self.admin.delete_client_scope(scope["id"])
                 del scopes.by_name()[name]
-                log.info("removed client scope %s: %s acts only for itself", name, agent.name)
+                log.info("removed client scope %s: %s exchanges no tokens", name, agent.name)
             return
         if scope is None:
             representation = scope_representation(agent)
@@ -614,15 +685,27 @@ class IdentityReconciler:
                     log.warning("identity sync failed for %s: %s", agent.name, exc)
         return {"synced": synced, "failed": failed}
 
-    def credentials(self, agent: Agent, *, rotate: bool = False) -> dict[str, str]:
-        """Return the agent's client credentials (rotating the secret if asked), or, for an
-        agent with a workload identity, how it authenticates without a secret."""
+    def credentials(self, agent: Agent, *, rotate: bool = False) -> dict[str, Any]:
+        """Return the agent's client credentials (rotating the secret if asked); for an
+        agent with a workload identity, how it authenticates without a secret; and for a
+        public client, where people sign in to it."""
         if agent.status != ACTIVE:
             raise KeycloakError("credentials are only issued to active agents")
         self.sync(agent)
         if not agent.idp_client_uuid:
             raise KeycloakError("the agent has no identity yet")
         endpoint = f"{self.admin.base_url}/realms/{self.admin.realm}/protocol/openid-connect/token"
+        if is_public(agent):
+            if rotate:
+                raise KeycloakError("a public client has no secret to rotate: people sign in to it")
+            return {
+                "client_id": agent.client_id or "",
+                "method": "sign-in",
+                "issuer": self.settings.keycloak_issuer
+                or f"{self.admin.base_url}/realms/{self.admin.realm}",
+                "redirect_uris": redirect_uris(agent),
+                "token_endpoint": endpoint,
+            }
         if agent.workload_issuer:
             if rotate:
                 raise KeycloakError(

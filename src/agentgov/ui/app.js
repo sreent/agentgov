@@ -1999,19 +1999,34 @@ async function agentForm(a) {
   ]);
   const editing = Boolean(a);
   const identity = a?.workload_identity;
-  // How it authenticates: offered once there's an issuer to choose.
-  const authentication = issuers.length || identity ? [
+  // Who gets its tokens: the agent itself, or people who sign in to it (a public client);
+  // and how the agent authenticates, offered once there's an issuer to choose.
+  const authentication = [
     { type: 'section', label: 'Authentication' },
     {
-      id: 'workload_issuer', label: 'Authenticates with', type: 'select', value: identity?.issuer || '',
+      id: 'client_type', label: 'Its tokens are for', type: 'select', value: a?.client_type || 'service',
       options: [
-        { value: '', label: 'A client secret' },
-        ...issuers.map((i) => ({ value: i.name, label: `Its own identity from ${i.name} (${issuerKind(i.kind)}${i.status === 'blocked' ? ', blocked' : ''})` })),
+        { value: 'service', label: 'The agent itself (a confidential client)' },
+        { value: 'public', label: "People who sign in to it on their machines, such as developers' MCP clients (a public client)" },
       ],
-      hint: 'An identity it already has, such as a Kubernetes service account, needs no secret to store or rotate.',
+      hint: 'A public client has no secret: people sign in to it, and it acts for them with their own token.',
     },
-    { id: 'workload_subject', label: 'Subject', mono: true, value: identity?.subject || '', hint: 'Its subject at the issuer: the sub claim of its tokens there.' },
-  ] : [];
+    {
+      id: 'redirect_uris', label: 'Sign-ins return to', mono: true, value: (a?.redirect_uris || []).join(', '), placeholder: 'http://127.0.0.1/*, http://localhost/*',
+      hint: 'Where its sign-in may return, separated by commas, with * only at the end. Empty: the machine itself, at any port, where MCP clients such as VS Code and Claude Code listen for it.',
+    },
+    ...(issuers.length || identity ? [
+      {
+        id: 'workload_issuer', label: 'Authenticates with', type: 'select', value: identity?.issuer || '',
+        options: [
+          { value: '', label: 'A client secret' },
+          ...issuers.map((i) => ({ value: i.name, label: `Its own identity from ${i.name} (${issuerKind(i.kind)}${i.status === 'blocked' ? ', blocked' : ''})` })),
+        ],
+        hint: 'An identity it already has, such as a Kubernetes service account, needs no secret to store or rotate.',
+      },
+      { id: 'workload_subject', label: 'Subject', mono: true, value: identity?.subject || '', hint: 'Its subject at the issuer: the sub claim of its tokens there.' },
+    ] : []),
+  ];
   const tiers = RISK_TIERS.map((t) => ({ value: t, label: humanize(t) }));
   const fields = [
     editing ? null : {
@@ -2087,10 +2102,14 @@ async function agentForm(a) {
       : 'Approved agents get their own OAuth client in Keycloak and can call the tools they are granted.',
     iconName: editing ? 'edit' : 'agents', confirm: editing ? 'Save changes' : 'Register agent', fields,
     onReady: (controls) => {
-      if (!controls.workload_issuer) return;
       const subject = controls.workload_subject;
       const show = () => {
-        const issuer = issuers.find((i) => i.name === controls.workload_issuer.value);
+        // A public client has no identity of its own: people sign in to it.
+        const isPublic = controls.client_type.value === 'public';
+        controls.redirect_uris.closest('.field').hidden = !isPublic;
+        if (!controls.workload_issuer) return;
+        controls.workload_issuer.closest('.field').hidden = isPublic;
+        const issuer = isPublic ? null : issuers.find((i) => i.name === controls.workload_issuer.value);
         subject.closest('.field').hidden = !issuer;
         if (!issuer) return;
         subject.placeholder = ISSUER_KINDS[issuer.kind]?.[1] || '';
@@ -2099,11 +2118,13 @@ async function agentForm(a) {
         const entra = a?.external_ids?.entra_agent_id;
         if (isEntra(issuer) && entra && !subject.value) subject.value = entra;
       };
-      controls.workload_issuer.addEventListener('change', show);
+      controls.client_type.addEventListener('change', show);
+      controls.workload_issuer?.addEventListener('change', show);
       show();
     },
     submit: async (v) => {
-      if (v.workload_issuer && !v.workload_subject) throw new Error('Give its subject at the issuer, or choose a client secret.');
+      const isPublic = v.client_type === 'public';
+      if (!isPublic && v.workload_issuer && !v.workload_subject) throw new Error('Give its subject at the issuer, or choose a client secret.');
       const body = {
         description: v.description,
         owner: orNull(v.owner),
@@ -2121,9 +2142,11 @@ async function agentForm(a) {
         platform: orNull(v.platform),
         models: parseList(v.models),
         labels: parseLabels(v.labels),
+        client_type: v.client_type,
+        redirect_uris: isPublic ? parseList(v.redirect_uris) : [],
       };
       if ('workload_issuer' in v) {
-        body.workload_identity = v.workload_issuer ? { issuer: v.workload_issuer, subject: v.workload_subject } : null;
+        body.workload_identity = v.workload_issuer && !isPublic ? { issuer: v.workload_issuer, subject: v.workload_subject } : null;
       }
       // Left unchanged, the tier follows the blueprint (as the API does).
       if (v.risk_tier && v.risk_tier !== a?.risk_tier) body.risk_tier = v.risk_tier;
@@ -2191,6 +2214,30 @@ async function agentSignIn(a) {
       ]),
       h('pre', { class: 'kv-pre', tabindex: '0' }, request),
     ],
+  });
+}
+
+/** Where people sign in to a public client, as their MCP clients find it. */
+async function publicSignIn(a) {
+  let creds;
+  try {
+    creds = await api(`v1/agents/${encodeURIComponent(a.id)}/credentials`, { method: 'POST', body: {} });
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+    return;
+  }
+  await ask({
+    title: `How people sign in to ${a.name}`,
+    text: "Their MCP client finds where to sign in from the gateway, once Developers sign in at the gateway is on, and asks them for this client ID if it can't register itself. They sign in in their browser, and the client acts for them with their own token, which the gateway takes for this agent and for them.",
+    iconName: 'key', confirm: 'Done', cancel: null, wide: true,
+    extra: facts([
+      ['Client ID', copyable(creds.client_id, 'client ID')],
+      ['Issuer', copyable(creds.issuer, 'issuer')],
+      ['Sign-ins return to', h('span', { class: 'mono' }, (creds.redirect_uris || []).join(', '))],
+      ['Authorization endpoint', copyable(creds.authorization_endpoint, 'authorization endpoint')],
+      ['Token endpoint', copyable(creds.token_endpoint, 'token endpoint')],
+      ['Gateway audience', copyable(creds.audience, 'gateway audience')],
+    ]),
   });
 }
 
@@ -2362,6 +2409,10 @@ function identityCard(a) {
   if (credentialActions && workload) {
     credentialActions = [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'show-sign-in', onclick: guarded(() => agentSignIn(a)) }, icon('key'), 'How it authenticates')];
   }
+  const isPublic = a.client_type === 'public';
+  if (credentialActions && isPublic) {
+    credentialActions = [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'show-sign-in', onclick: guarded(() => publicSignIn(a)) }, icon('key'), 'How people sign in')];
+  }
   const platform = platformOf(a);
   let noClient = a.status === 'discovered' ? 'Not issued (unmanaged)' : 'Not issued';
   if (platform) noClient = "Not needed: it doesn't use the gateway";
@@ -2374,9 +2425,12 @@ function identityCard(a) {
       facts([
         platform ? null : ['Provider', humanize(id.provider || 'none')],
         ['Client ID', id.client_id ? copyable(id.client_id, 'client ID') : h('span', { class: 'muted' }, noClient)],
-        platform ? null : ['Authenticates with', workload
-          ? ['Its own identity from ', h('a', { href: '#/access' }, workload.issuer)]
-          : 'A client secret'],
+        platform ? null : ['Authenticates with', isPublic
+          ? 'Nothing of its own: people sign in to it (a public client)'
+          : workload
+            ? ['Its own identity from ', h('a', { href: '#/access' }, workload.issuer)]
+            : 'A client secret'],
+        isPublic ? ['Sign-ins return to', h('span', { class: 'mono' }, (a.redirect_uris.length ? a.redirect_uris : ['http://127.0.0.1/*', 'http://localhost/*']).join(', '))] : null,
         workload ? ['Subject', copyable(workload.subject, 'subject')] : null,
         platform ? null : ['Synced', id.synced_at ? timeEl(id.synced_at) : h('span', { class: 'muted' }, 'Not synced yet')],
         ['Agent ID', copyable(a.id, 'agent ID')],
@@ -6596,17 +6650,42 @@ const SIGHTING_STATUS = {
 };
 
 async function renderDevelopers() {
-  const [registry, sightings, features] = await Promise.all([
-    api('v1/mcp/registry'), api('v1/mcp/sightings'), featureModes().catch(() => ({})),
+  const [registry, sightings, features, agentList] = await Promise.all([
+    api('v1/mcp/registry'), api('v1/mcp/sightings'), featureModes().catch(() => ({})), api('v1/agents').catch(() => []),
   ]);
   return h('div', { class: 'page' },
     pageHead({
       title: 'Developer tools',
-      sub: "Which MCP servers developers' MCP clients may use, served as an MCP registry for GitHub Copilot and VS Code, and which ones developers have set up on their machines.",
+      sub: "Which MCP servers developers' MCP clients may use, served as an MCP registry for GitHub Copilot and VS Code, how developers sign in to the ones on the gateway, and which ones developers have set up on their machines.",
       actions: [refreshButton()],
     }),
     registryCard(registry),
+    signInCard(agentList.filter((a) => a.client_type === 'public'), features),
     sightingsCard(sightings, features));
+}
+
+/** Developers' MCP clients on the gateway, with their own tokens: the public clients they sign in to. */
+function signInCard(clients, features) {
+  const on = features['developer-sign-in'] === 'on';
+  return card({
+    title: 'Signing in at the gateway',
+    sub: "Developers' MCP clients reach the tool servers on the gateway with the developer's own token: the gateway tells them where to sign in, and they sign in to an agent registered as a public client, which acts for them.",
+    flush: Boolean(clients.length),
+    body: [
+      on ? null : callout('info', 'power', h('span', {}, h('strong', {}, 'Off: '),
+        "the gateway doesn't tell MCP clients where to sign in. Turn on ", h('code', {}, 'developer-sign-in'), ' on the ', h('a', { href: '#/features' }, 'Features'), ' page.')),
+      clients.length
+        ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+          h('caption', { class: 'sr-only' }, 'Agents developers sign in to'),
+          h('thead', {}, h('tr', {}, ['Agent', 'Client ID', 'Sign-ins return to', 'Status'].map((c) => h('th', { scope: 'col' }, c)))),
+          h('tbody', {}, clients.map((a) => h('tr', {},
+            h('td', { 'data-label': 'Agent' }, h('a', { href: agentHref(a.id) }, a.name), a.blueprint ? h('div', { class: 'cell-sub' }, a.blueprint) : null),
+            h('td', { 'data-label': 'Client ID' }, copyable(a.identity.client_id, 'client ID')),
+            h('td', { 'data-label': 'Sign-ins return to' }, h('code', { class: 'break' }, (a.redirect_uris.length ? a.redirect_uris : ['http://127.0.0.1/*', 'http://localhost/*']).join(', '))),
+            h('td', { 'data-label': 'Status' }, humanize(a.status)))))))
+        : emptyState('No agent for developers to sign in to', "Register an agent whose tokens are for people who sign in to it (a public client), with a blueprint whose agents act for people."),
+    ],
+  });
 }
 
 function registryCard(registry) {

@@ -105,6 +105,11 @@ sequenceDiagram
   call through and its decision says what it would have done, which the ledger records
   as a warning. The bundle carries the modes (`data.registry.features`), and the
   processor reads them from OPA, so a change reaches every gateway within seconds.
+* A developer's MCP client takes the same path with the developer's own token, once they
+  have signed in to an agent registered as a public client: with the `developer-sign-in`
+  feature, the route checks tokens with agentgateway's MCP authentication, which also
+  serves the server's OAuth protected resource metadata and answers a call without a
+  token with where to sign in ([developer tools](developer-tools.md#signing-in-at-the-gateway)).
 
 ## The path of a model call
 

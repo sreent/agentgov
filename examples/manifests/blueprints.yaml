@@ -69,3 +69,19 @@ spec:
     - server: crm
       tools: [get_customer]
   acts_for: either
+---
+apiVersion: agentgov/v1alpha1
+kind: Blueprint
+metadata:
+  name: coding-assistants
+spec:
+  description: Developers' MCP clients on their machines, acting for the developer signed in.
+  risk_tier: medium
+  attestation_days: 90
+  permissions:
+    - server: crm
+      tools: [search_customers, get_customer]
+  # Only for people (they sign in to its agents: docs/developer-tools.md), and only for
+  # developers.
+  acts_for: people
+  people_groups: [developers]

@@ -111,6 +111,39 @@ def test_monitor_mode_relaxes_authentication() -> None:
     assert routes(config)["mcp-crm"]["policies"]["jwtAuth"]["mode"] == "optional"
 
 
+def test_developers_are_told_where_to_sign_in() -> None:
+    config = render(servers(), SETTINGS, {"developer-sign-in": "on"})
+    crm = routes(config)["mcp-crm"]
+    policies = crm["policies"]
+    assert "jwtAuth" not in policies  # the same check, in mcpAuthentication
+    auth = policies["mcpAuthentication"]
+    assert auth["mode"] == "strict"
+    assert auth["issuer"] == "http://localhost:8180/realms/agentgov"
+    assert auth["audiences"] == ["agentgov-gateway"]
+    assert auth["resourceMetadata"] == {
+        "bearerMethodsSupported": ["header"],
+        "resource": "http://localhost:8080/mcp/crm",
+    }
+    # Its metadata is served where the route matches it.
+    assert crm["matches"] == [
+        {"path": {"exact": "/mcp/crm"}},
+        {"path": {"exact": "/.well-known/oauth-protected-resource/mcp/crm"}},
+    ]
+    assert "WWW-Authenticate" in policies["cors"]["exposeHeaders"]
+    # Whether the person signed in to the agent's client themselves.
+    processor = policies["mcpGuardrails"]["processors"][0]
+    assert processor["metadata"]["sign_in"] == "jwt.agentgov_sign_in"
+    # Callers without a token are let through while unknown callers are monitored.
+    monitored = render(
+        servers(), SETTINGS, {"developer-sign-in": "on", "unknown-callers": "monitor"}
+    )
+    assert routes(monitored)["mcp-crm"]["policies"]["mcpAuthentication"]["mode"] == "optional"
+    # Off, by default: agents' tokens only, and nothing said about signing in.
+    plain = routes(render(servers(), SETTINGS))["mcp-crm"]
+    assert "mcpAuthentication" not in plain["policies"] and len(plain["matches"]) == 1
+    assert "WWW-Authenticate" not in plain["policies"]["cors"]["exposeHeaders"]
+
+
 def test_mcp_gateway_off_publishes_no_tool_servers() -> None:
     config = render(servers(), SETTINGS, {"mcp-gateway": "off"})
     assert list(routes(config)) == ["agentgov-health"]
@@ -222,19 +255,22 @@ def a2a_agents() -> list[Agent]:
 @pytest.mark.skipif(not _docker_ready(), reason=f"docker or {IMAGE} not available")
 def test_agentgateway_accepts_generated_config(tmp_path: Path) -> None:
     # Messages masked too: the A2A route's external processing at its fullest.
+    # And developers told where to sign in: mcpAuthentication on the tool servers' routes.
     config = render(
         servers(),
         SETTINGS,
-        {"a2a-masking": "enforce"},
+        {"a2a-masking": "enforce", "developer-sign-in": "on"},
         providers=providers("/cfg/keys"),
         agents=a2a_agents(),
     )
     routes = {r["name"]: r for r in config["binds"][0]["listeners"][0]["routes"]}
     options = routes["a2a-billing-agent"]["policies"]["extProc"]["processingOptions"]
     assert options["requestBodyMode"] == "fullDuplexStreamed"
+    assert "mcpAuthentication" in routes["mcp-crm"]["policies"]
     for route in config["binds"][0]["listeners"][0]["routes"]:
-        if "jwtAuth" in route.get("policies", {}):
-            route["policies"]["jwtAuth"]["jwks"] = JWKS
+        for kind in ("jwtAuth", "mcpAuthentication"):
+            if kind in route.get("policies", {}):
+                route["policies"][kind]["jwks"] = JWKS
     (tmp_path / "config.yaml").write_text(to_yaml(config))
     (tmp_path / "keys").mkdir()
     for name in ("openai", "groq", "vllm", "claude"):

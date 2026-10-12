@@ -104,6 +104,7 @@ supported.
 | Subject is the agent's own service account (`service-account-<client ID>` in Keycloak) | no one: it acts on its own | — |
 | Subject is a person, and an `act` claim names the agent | the person, who delegated to the agent | `delegation` |
 | Subject is a person, without `act` | the person, whose app handed their token to the agent | `exchange` |
+| Subject is a person, and `agentgov_sign_in` is true | the person, who signed in to the agent themselves: a public client on their machine, such as a developer's MCP client ([developer tools](developer-tools.md#signing-in-at-the-gateway)) | `sign-in` |
 
 Whichever it is, the agent is the client the token was issued to (its `agent_id` claim
 and `azp`), so its own grants, risk and status apply as always.
@@ -152,7 +153,7 @@ alike:
   "email": "sam@example.com",
   "groups": ["/support"],
   "roles": ["default-roles-agentgov"],    // the person's realm roles
-  "via": "exchange",                      // or "delegation"
+  "via": "exchange",                      // or "delegation", or "sign-in"
   "actor": "agent-support-bot"            // with delegation: the client delegated to
 }
 ```

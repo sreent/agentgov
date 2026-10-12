@@ -84,6 +84,7 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 |---|---|---|
 | `mcp-registry` | **off**, on | Serves the tool servers listed for developers as an MCP registry at `<control plane>/registry`, which GitHub Copilot and VS Code read to offer developers only approved MCP servers ([developer tools](developer-tools.md)). Its readers have no credentials, so the registry is served without them: it is off until you turn it on |
 | `mcp-discovery` | off, **on** | Takes reports of the MCP servers set up on developers' machines (`agentgov mcp scan --report`), compares them with the approved tool servers, and raises findings for those that aren't approved, that skip the gateway or that are blocked. Off, reports are refused; findings already raised stay until resolved |
+| `developer-sign-in` | **off**, on | Developers' MCP clients reach the tool servers on the gateway with the developer's own token: each tool server's route serves its OAuth protected resource metadata, which names Keycloak, and answers a call without a token with a pointer to it, so that the client signs the developer in to an agent registered as a public client ([developer tools](developer-tools.md#signing-in-at-the-gateway)). Off, the gateway takes the same tokens but doesn't say where to sign in. Needs `AGENTGOV_KEYCLOAK_ISSUER` and `AGENTGOV_KEYCLOAK_JWKS_URL` |
 
 ### Identity
 
@@ -144,8 +145,8 @@ organisation policies' denials always apply.
 * **The governance processor** reads the modes from OPA at most five seconds old. It
   doesn't inspect what an off control would look at, and it records `monitored` with
   each decision.
-* **The gateway's configuration** follows `mcp-gateway`, `model-gateway`, `a2a-gateway` and
-  `unknown-callers` when the control plane rewrites it.
+* **The gateway's configuration** follows `mcp-gateway`, `model-gateway`, `a2a-gateway`,
+  `unknown-callers` and `developer-sign-in` when the control plane rewrites it.
 * **The control plane** checks the modes when it acts: discovery, posture scans,
   instruction checks, registration, the automatic block, the Microsoft connections, and
   what it sends the security team's tools and lets their `secops` role do.

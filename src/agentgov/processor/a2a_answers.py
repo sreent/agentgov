@@ -112,6 +112,7 @@ def _person(meta: dict[str, str]) -> dict[str, Any] | None:
             "groups": _json(meta.get("groups")),
             "roles": _json(meta.get("roles")),
             "act": _json(meta.get("act")),
+            "sign_in": _json(meta.get("sign_in")),
         }
     )
 

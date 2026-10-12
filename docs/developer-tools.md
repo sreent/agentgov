@@ -4,8 +4,10 @@ Developers give their coding assistants MCP servers too: GitHub Copilot in VS Co
 other editors, Claude, Cursor, Codex. AgentGov keeps one list of approved MCP servers for
 agents and for developers, and serves the developers' part in the format their MCP
 clients read: an **MCP registry**. GitHub Copilot can then offer developers only those
-servers. AgentGov also finds out which MCP servers developers have actually set up, and
-raises a finding for each one that isn't approved.
+servers. Developers' MCP clients can reach the servers on the gateway with the developer's
+own token, which they sign in for as the MCP specification has them do, so the gateway's
+controls check their calls too. AgentGov also finds out which MCP servers developers have
+actually set up, and raises a finding for each one that isn't approved.
 
 ## Listing servers for developers
 
@@ -74,6 +76,67 @@ set it). Store the file in your enterprise's
 `.github-private` repository, or deploy it to developers' machines with your device
 management ([GitHub's documentation](https://docs.github.com/en/enterprise-cloud@latest/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-enterprise-allowlist)).
 
+## Signing in at the gateway
+
+An MCP client calls a server on the gateway, `<gateway>/mcp/<server>`, with a token
+for the gateway, as agents do. Developers' MCP clients get one by signing the developer
+in, as the MCP specification's authorization has them do: the gateway answers a call
+without a token with where to sign in, and the client signs the developer in to Keycloak
+in their browser (OAuth 2.1, with PKCE). The gateway then takes the developer's token, and
+the processor checks each call with the controls agents' calls get, with the developer
+as the person the agent acts for.
+
+1. **Register an agent for developers' MCP clients**, whose tokens are for the people who
+   sign in to it: a *public client* (`client_type: public`). Give it a blueprint whose
+   agents act for people (`acts_for: people`), such as developers (`people_groups:
+   [developers]`), and that grants the tools they may call. One agent can stand for every
+   MCP client, or one for each (VS Code, Claude Code, Cursor), to tell them apart in the
+   ledger and grant them differently.
+2. **Turn on the `developer-sign-in` [feature](features.md).** Each tool server's route on
+   the gateway then serves its OAuth protected resource metadata (RFC 9728) at
+   `<gateway>/.well-known/oauth-protected-resource/mcp/<server>`, which names Keycloak,
+   and answers a call without a token `401` with a pointer to it.
+3. **Developers add the server's address on the gateway** to their MCP client, as the MCP
+   registry lists it. On their first call, the client finds where to sign in and opens
+   their browser. Keycloak doesn't let MCP clients register themselves, so when the client
+   asks for a client ID, developers give the agent's (`agent-<name>`: the Developer tools
+   page lists it). The sign-in returns to the client on their machine.
+
+| Field | Meaning |
+|---|---|
+| `client_type` | `service` (the default): the agent gets tokens for itself, with a client secret or its workload identity, and exchanges people's tokens to act for them; `public`: people sign in to it, and it acts for them with their own token. It has no secret, no workload identity and no service account |
+| `redirect_uris` | Where a sign-in to a public client may return, with `*` only at the end. By default the developer's machine at any port, `http://127.0.0.1/*` and `http://localhost/*`, where MCP clients such as VS Code and Claude Code listen for it. Add the others your MCP clients use, such as `https://vscode.dev/redirect` for VS Code for the Web. Plain `http` only to the machine itself |
+
+| | How |
+|---|---|
+| Admin UI | **Agents** → **Register agent** or **Edit**, *Authentication*: its tokens are for people who sign in to it; the agent's **How people sign in**. **Developer tools** lists the agents developers sign in to |
+| CLI | `agentgov agents create coding-assistant --blueprint coding-assistants --sponsor alice@example.com --client-type public`; `--redirect-uri` (repeatable), and `--default-redirect-uris` on `agents update`; `agentgov agents credentials coding-assistant` says where people sign in |
+| API | `client_type` and `redirect_uris` in `POST /v1/agents` and `PATCH /v1/agents/{id}`; `POST /v1/agents/{id}/credentials` says where people sign in, without a secret |
+| Manifests | The same fields in an `Agent`'s spec ([example](../examples/manifests/agents.yaml)) |
+
+AgentGov makes the agent's Keycloak client a public one: the authorization code flow with
+PKCE (`S256`), its redirect URIs, and none of the client credentials grant, the password
+grant or token exchange. Its tokens carry the agent's claims, as other agents' do, and
+say that the person signed in to it (`agentgov_sign_in`). The ledger records the call
+for the agent and the developer, and how the agent came to act for them: `via: sign-in`
+([acting for people](acting-for-people.md#telling-the-agent-from-the-person)).
+
+The route checks the token as it checks agents' (the issuer, the gateway's audience, the
+signature), with agentgateway's MCP authentication instead of its plain JWT
+authentication. With the feature off, the gateway takes the same tokens, but doesn't
+tell MCP clients where to sign in.
+
+Things to know:
+
+* Keycloak must be reachable from developers' machines at `AGENTGOV_KEYCLOAK_ISSUER`, the
+  issuer the gateway checks tokens against.
+* The metadata names the server's address at `AGENTGOV_GATEWAY_PUBLIC_URL`. MCP clients
+  check that it is the address they called, so developers use that address.
+* While `unknown-callers` is monitored, the gateway lets a call without a token through,
+  as it does any caller's, so MCP clients aren't asked to sign in.
+* MCP clients that register themselves with the authorization server (dynamic client
+  registration) can't with Keycloak's defaults: they ask for a client ID instead.
+
 ## The MCP servers developers set up
 
 `agentgov mcp scan` lists the MCP servers set up on the machine it runs on: user-wide,
@@ -120,11 +183,9 @@ reports.
 
 ## Limits
 
-* Developers' clients reach a server through the gateway with an agent's token, which
-  coding assistants don't hold. Agents [act for people](acting-for-people.md) with a
-  token they get for the person, but the gateway doesn't take people's own tokens from
-  their MCP clients yet (see the [roadmap](roadmap.md)): list for developers the servers
-  they reach directly, and packages.
+* Developers' MCP clients reach the servers on the gateway once developers sign in, but
+  the servers developers reach directly, and those they run on their machines, are
+  outside the gateway: AgentGov lists them and finds them, but doesn't check their calls.
 * Copilot's registry enforcement matches servers by name, and GitHub notes that editing
   configuration files can get around it. The managed-settings allowlist matches by URL
   and command.

@@ -78,6 +78,7 @@ comes with five demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (default
 | `sofia` | `agentgov-secops` | The security team: see everything, and triage, contain or decide as far as the hand-off to [security operations](../secops.md) allows |
 | `audrey` | `agentgov-auditor` | See everything, change nothing |
 | `sam` | none (group `support`) | A person agents act for: signs in to the demo app `agentgov-demo-chat`, and to AgentGov to decide the approval requests sent to them, while `approvals-by-person` is on ([acting for people](../acting-for-people.md)) |
+| `dana` | none (group `developers`) | A developer: signs in from an MCP client to the `coding-assistant` agent, which acts for them at the gateway ([developer tools](../developer-tools.md#signing-in-at-the-gateway)) |
 
 People without an `agentgov-*` role are turned away, unless the `approvals-by-person`
 feature is on: then they see only the approval requests sent to them. Sign-ins, sign-outs

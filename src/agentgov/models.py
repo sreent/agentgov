@@ -169,6 +169,15 @@ class Agent(Base):
     workload_issuer: Mapped[str | None] = mapped_column(String(64), nullable=True)
     workload_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
+    # Its client in the identity provider: "service", a confidential client that gets
+    # tokens for itself (and exchanges people's); or "public", one people sign in to on
+    # their own machines, such as a developer's MCP client, which acts for them only. A
+    # public client's redirect URIs are where the sign-in may return (none: the loopback
+    # addresses, at any port).
+    client_type: Mapped[str] = mapped_column(
+        String(16), default="service", server_default="service"
+    )
+    redirect_uris: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
     # Identity provider binding (Keycloak clientId and internal id).
     client_id: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
     idp_client_uuid: Mapped[str | None] = mapped_column(String(64), nullable=True)

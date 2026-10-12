@@ -63,7 +63,7 @@ them needs the AI administrator or Power Platform administrator role
 | Agent 365 pillar | What AgentGov does | Built on |
 |---|---|---|
 | **Registry** | Inventory with owners, sponsors and teams; IT-approved blueprints; lifecycle (request → approve → block → delete → restore); sponsor attestation; risk scores; posture findings, sent as issues to each agent's owner, sponsors and team until someone takes them on; management rules that act on inactive, ownerless or long-blocked agents after telling their people; shadow-agent discovery; Microsoft 365, Copilot Studio and Entra Agent ID agents with a connector allowlist; approved MCP servers as an MCP registry for GitHub Copilot and VS Code, and the MCP servers developers set up on their machines | AgentGov control plane |
-| **Access control** | A separate OAuth client per agent with 5-minute tokens; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second, whichever control-plane replica takes it; single sign-on and roles for the people who govern agents | Keycloak, OPA |
+| **Access control** | A separate OAuth client per agent with 5-minute tokens, and developers' MCP clients signed in at the gateway with the developer's own token; policy on every tool call, model call and call to another agent using live registry context; the models each blueprint allows, with daily token budgets; access packages that grant more for a while once approved, and Microsoft Entra's access packages for agents' identities; risk-based blocking; a kill switch that applies within a second, whichever control-plane replica takes it; single sign-on and roles for the people who govern agents | Keycloak, OPA |
 | **Visualization** | Overview dashboard, agent map (people → agents → tool servers and other agents), activity, findings, model usage and cost per agent; trace exploration | Admin UI, OpenTelemetry, Langfuse (optional) |
 | **Interoperability** | A governed MCP gateway (MCP 2026-07-28); per-agent tool lists; any MCP client or framework; a model gateway for OpenAI, Anthropic, Gemini and OpenAI-compatible models, whose API keys agents never hold; calls between agents (A2A 1.0) through the gateway, with who may call whom, and the chain of agents that handed work down, from the person at its head, in policy and the ledger; in-process enforcement through the same policies | agentgateway, Agent Governance Toolkit (optional) |
 | **Security** | PII redaction in tool results, prompts, and the messages and answers agents send each other, secret blocking, prompt-injection, jailbreak and tool-poisoning defences, with a classifier's second opinion on the traffic, definition-drift detection, human approval for destructive tools, checks on agents' instructions for harmful or malicious content, hash-chained evidence ledger with checkpoints time-stamped by an authority (RFC 3161) and published in a transparency log (Sigstore Rekor), retention with archives that verify offline, and compliance reports for the EU AI Act, ISO/IEC 42001 and the NIST AI RMF with an evidence pack for assessors; the ledger to SIEMs as OCSF events, alerts in Teams and Slack, and the security team's tools triaging, containing or deciding as far as you let them; mutual TLS between AgentGov's components, and policy bundles OPA verifies before it uses them | Presidio, OPA, AgentGov processor, Granite Guardian (optional), Sigstore Rekor (optional), OCSF, OpenTelemetry |
@@ -205,6 +205,11 @@ the gateway. It shows each control in turn:
 22. **AuthZEN**: another enforcement point asks AgentGov's policies, in the standard way,
     whether the billing agent may call two tools: one it was granted, and one it wasn't
     ([AuthZEN](docs/policies.md#authzen)).
+23. **Developers sign in at the gateway**: an MCP client that calls a tool server on the
+    gateway without a token is told where to sign in. dana, a developer, signs in to the
+    coding-assistant agent in a browser, as an MCP client has developers do, and calls the
+    CRM with dana's own token: the ledger names dana and the agent. sam, who isn't a
+    developer, is refused ([developer tools](docs/developer-tools.md#signing-in-at-the-gateway)).
 
 Then look around:
 
@@ -348,7 +353,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Model calls](docs/models.md): model providers, which agents may call which models,
   usage, cost and token budgets
 * [Developer tools](docs/developer-tools.md): an MCP registry for GitHub Copilot and VS
-  Code, and the MCP servers developers set up on their machines
+  Code, developers' MCP clients signing in at the gateway, and the MCP servers developers
+  set up on their machines
 * [Acting for people](docs/acting-for-people.md): agents that act for a person, whom each
   may act for, the person in policy and the ledger, and approvals sent to the person
 * [Agents' own identities](docs/agent-identity.md): agents that authenticate with a

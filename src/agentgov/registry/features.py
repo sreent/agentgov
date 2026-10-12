@@ -430,6 +430,26 @@ CATALOG: tuple[Feature, ...] = (
         needs="the control plane reachable from developers' machines",
     ),
     Feature(
+        "developer-sign-in",
+        "Developers sign in at the gateway",
+        "developers",
+        "Developers' MCP clients (VS Code, Claude Code, Cursor...) reach the tool servers on "
+        "the gateway with the developer's own token: each server's route tells them where "
+        "to sign in (OAuth protected resource metadata), and they sign in to an agent "
+        "registered as a public client, which acts for them. The controls check their calls "
+        "as they check agents', with the developer as the person the agent acts for.",
+        SWITCH,
+        OFF,
+        {
+            ON: "Each tool server's route serves its metadata at "
+            "/.well-known/oauth-protected-resource/mcp/<server>, and answers a call without "
+            "a token with a pointer to it (while unknown callers are refused).",
+            OFF: "The gateway takes the same tokens but doesn't say where to sign in.",
+        },
+        needs="Keycloak reachable from developers' machines, and an agent with client_type "
+        "public for their MCP clients",
+    ),
+    Feature(
         "mcp-discovery",
         "Developers' MCP servers",
         "developers",
@@ -693,6 +713,15 @@ def unmet(key: str, mode: str, settings: Settings) -> str | None:
         return (
             "AgentGov answers AuthZEN with OPA's decisions: set AGENTGOV_OPA_URL where the "
             "control plane runs"
+        )
+    if (
+        key == "developer-sign-in"
+        and mode != OFF
+        and not (settings.keycloak_issuer and settings.keycloak_jwks_url)
+    ):
+        return (
+            "developers sign in to Keycloak, whose tokens the gateway checks: set "
+            "AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL"
         )
     if key == "traffic-classifier" and mode != OFF and not settings.guardian_url:
         return (

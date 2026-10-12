@@ -8,7 +8,10 @@ Token Exchange, RFC 8693), whose subject is the person:
 * with **delegation**, the person consented to the agent acting for them, and the
   token names the agent in its ``act`` claim;
 * with a plain **exchange**, the person's token was issued for the agent (the agent's
-  client is in its audience), so an app the person signed in to handed it to the agent.
+  client is in its audience), so an app the person signed in to handed it to the agent;
+* with a **sign-in**, the person signed in to the agent's client themselves: a public
+  client on their machine, such as a developer's MCP client, whose tokens say so
+  (``agentgov_sign_in``, ``agentgov.identity.keycloak``).
 
 Keycloak names a client's service account ``service-account-<client id>``, which is
 how a token the agent got for itself is told from one it got for a person without
@@ -26,6 +29,7 @@ from typing import Any
 SERVICE_ACCOUNT_PREFIX = "service-account-"
 DELEGATION = "delegation"
 EXCHANGE = "exchange"
+SIGN_IN = "sign-in"
 
 
 def _names(value: Any) -> list[str]:
@@ -37,10 +41,10 @@ def _names(value: Any) -> list[str]:
 def person_of(claims: dict[str, Any]) -> dict[str, Any] | None:
     """The person the agent acts for, or None when it acts on its own.
 
-    ``claims`` holds ``subject``, ``username``, ``email``, ``groups``, ``roles`` and
-    ``act``, as the gateway passes them. The person is ``{"id", "username", "email",
-    "groups", "roles", "via", "actor"}``: ``via`` says how the agent got their token,
-    ``actor`` (with delegation) the client the person delegated to."""
+    ``claims`` holds ``subject``, ``username``, ``email``, ``groups``, ``roles``, ``act``
+    and ``sign_in``, as the gateway passes them. The person is ``{"id", "username",
+    "email", "groups", "roles", "via", "actor"}``: ``via`` says how the agent got their
+    token, ``actor`` (with delegation) the client the person delegated to."""
     subject = claims.get("subject")
     if not subject:
         return None
@@ -48,10 +52,12 @@ def person_of(claims: dict[str, Any]) -> dict[str, Any] | None:
     username = claims.get("username")
     if isinstance(act, dict) and act:
         via = DELEGATION
-    elif username and not str(username).startswith(SERVICE_ACCOUNT_PREFIX):
+    elif username and str(username).startswith(SERVICE_ACCOUNT_PREFIX):
+        return None  # the agent's own service account
+    elif claims.get("sign_in") in (True, "true"):
+        via = SIGN_IN
+    elif username or claims.get("email"):  # service accounts have no email address
         via = EXCHANGE
-    elif not username and claims.get("email"):
-        via = EXCHANGE  # service accounts have no email address
     else:
         return None
     person: dict[str, Any] = {

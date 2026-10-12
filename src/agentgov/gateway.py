@@ -4,7 +4,13 @@ Every registered MCP server becomes a route ``/mcp/<server>`` (while the
 mcp-gateway feature is on) with three policies, all enforced by agentgateway:
 
 * ``jwtAuth``       - the caller must present a Keycloak-issued agent token
-                      for the gateway audience.
+                      for the gateway audience. With the developer-sign-in feature,
+                      ``mcpAuthentication`` instead, which checks the token the same way
+                      and tells MCP clients where to sign in: the route also serves its
+                      OAuth protected resource metadata (RFC 9728) at
+                      ``/.well-known/oauth-protected-resource/mcp/<server>``, which names
+                      Keycloak, and a call without a token is answered 401 with a pointer
+                      to it, so that developers' MCP clients sign in to a public client.
 * ``mcpGuardrails`` - every tool call, tool result and tools/list response is
                       sent to the governance processor (agentgateway's ExtMcp
                       gRPC protocol), which consults OPA and Presidio. Failure
@@ -106,6 +112,9 @@ GUARDED_METHODS = {
 # When the agent acts for a person, the token's subject is the person: their name,
 # email address, groups and realm roles come with it, and "act" names the agent if
 # the person delegated to it (agentgov.identity.people).
+# Where a protected resource's OAuth metadata is (RFC 9728), before the resource's path.
+RESOURCE_METADATA = "/.well-known/oauth-protected-resource"
+
 IDENTITY_METADATA = {
     "client_id": "jwt.azp",
     "agent_id": "jwt.agent_id",
@@ -116,6 +125,7 @@ IDENTITY_METADATA = {
     "groups": "jwt.groups",
     "roles": "jwt.realm_access.roles",
     "act": "jwt.act",
+    "sign_in": "jwt.agentgov_sign_in",
     "request": "mcpGuardrails",
 }
 
@@ -128,6 +138,7 @@ PERSON_HEADERS = {
     "x-agentgov-groups": "toJson(jwt.groups)",
     "x-agentgov-roles": "toJson(jwt.realm_access.roles)",
     "x-agentgov-act": "toJson(jwt.act)",
+    "x-agentgov-sign-in": "toJson(jwt.agentgov_sign_in)",
 }
 
 
@@ -175,12 +186,23 @@ def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict
             ]
         },
     }
+    matches = [{"path": {"exact": f"/mcp/{ts.name}"}}]
     auth = _jwt_auth(settings, modes)
-    if auth:
+    if auth and modes["developer-sign-in"] == features.ON:
+        # The same check, and where to sign in for MCP clients that have no token: the
+        # metadata, at the route's well-known path (served only where the route matches
+        # it), names Keycloak; its resource is the server's address on the gateway.
+        metadata: dict[str, Any] = {"bearerMethodsSupported": ["header"]}
+        if settings.gateway_public_url:
+            metadata["resource"] = f"{settings.gateway_public_url.rstrip('/')}/mcp/{ts.name}"
+        policies["mcpAuthentication"] = {**auth, "resourceMetadata": metadata}
+        policies["cors"]["exposeHeaders"].append("WWW-Authenticate")
+        matches.append({"path": {"exact": f"{RESOURCE_METADATA}/mcp/{ts.name}"}})
+    elif auth:
         policies["jwtAuth"] = auth
     return {
         "name": f"mcp-{ts.name}",
-        "matches": [{"path": {"exact": f"/mcp/{ts.name}"}}],
+        "matches": matches,
         "policies": policies,
         "backends": [{"mcp": {"targets": [{"name": ts.name, "mcp": {"host": ts.url}}]}}],
     }
@@ -321,6 +343,7 @@ def _answer_checks(agent: Agent, settings: Settings, modes: dict[str, str]) -> d
                 "groups": claim("groups", as_json=True),
                 "roles": claim("realm_access.roles", as_json=True),
                 "act": claim("act", as_json=True),
+                "sign_in": claim("agentgov_sign_in", as_json=True),
                 "traceparent": (
                     '"traceparent" in request.headers ? request.headers["traceparent"] : ""'
                 ),

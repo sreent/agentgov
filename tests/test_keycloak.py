@@ -78,8 +78,15 @@ class FakeKeycloak:
             return httpx.Response(200, json=[self.scopes[sid] for sid in assigned])
         if path.endswith("/protocol-mappers/models") and request.method == "POST":
             uid = path.removeprefix(base + "/").split("/")[0]
-            self.clients[uid].setdefault("protocolMappers", []).append(json.loads(request.content))
+            mapper = {**json.loads(request.content), "id": str(uuid.uuid4())}
+            self.clients[uid].setdefault("protocolMappers", []).append(mapper)
             return httpx.Response(201)
+        if "/protocol-mappers/models/" in path and request.method == "DELETE":
+            uid = path.removeprefix(base + "/").split("/")[0]
+            mid = path.rsplit("/", 1)[-1]
+            mappers = self.clients[uid].get("protocolMappers") or []
+            self.clients[uid]["protocolMappers"] = [m for m in mappers if m.get("id") != mid]
+            return httpx.Response(204)
         if path == base and request.method == "GET":
             wanted = request.url.params.get("clientId")
             return httpx.Response(
@@ -109,7 +116,8 @@ class FakeKeycloak:
 
     def _store(self, rep: dict[str, Any]) -> str:
         uid = str(uuid.uuid4())
-        self.clients[uid] = {**rep, "id": uid}
+        mappers = [{**m, "id": str(uuid.uuid4())} for m in rep.get("protocolMappers") or []]
+        self.clients[uid] = {**rep, "id": uid, "protocolMappers": mappers}
         self.secrets[uid] = uuid.uuid4().hex
         return uid
 
@@ -294,6 +302,78 @@ def test_deleting_an_agent_removes_its_scope(rt, settings, keycloak) -> None:
     with rt.db.session() as s:
         reconciler.delete(agents.get(s, "bot"))
     assert keycloak.clients == {} and keycloak.scopes == {}
+
+
+# ---------------------------------------------------------------- public clients
+
+
+def _public(rt, settings, **data):
+    with rt.db.session() as s:
+        blueprints.create(
+            s, {"name": "assistants", "require_sponsor": False, "acts_for": "people"}, actor="t"
+        )
+        spec = {"name": "vscode", "blueprint": "assistants", "client_type": "public", **data}
+        return agents.register(s, settings, spec, actor="t", approve=True).id
+
+
+def test_people_sign_in_to_a_public_client(rt, settings, keycloak) -> None:
+    keycloak._store({"clientId": "chat"})
+    reconciler = _people_reconciler(rt, settings, keycloak)
+    agent_id = _public(rt, settings)
+    assert reconciler.reconcile_all() == {"synced": 1, "failed": 0}
+    client = keycloak.by_client_id("agent-vscode")
+    assert client["publicClient"] is True
+    assert client["standardFlowEnabled"] is True
+    assert client["serviceAccountsEnabled"] is False
+    assert client["directAccessGrantsEnabled"] is False
+    # Back to the machine itself, at any port, and with PKCE.
+    assert client["redirectUris"] == ["http://127.0.0.1/*", "http://localhost/*"]
+    assert client["attributes"]["pkce.code.challenge.method"] == "S256"
+    # The person's own token: nothing to exchange, so no scope for people's apps.
+    assert client["attributes"]["standard.token.exchange.enabled"] == "false"
+    assert keycloak.scope("agent-vscode") is None
+    mappers = {m["name"]: m["config"] for m in client["protocolMappers"]}
+    assert mappers["agentgov-agent-id"]["claim.value"] == agent_id
+    assert mappers["agentgov-gateway-audience"]["included.custom.audience"] == "agentgov-gateway"
+    assert mappers["agentgov-sign-in"]["claim.name"] == "agentgov_sign_in"
+    assert mappers["agentgov-sign-in"]["jsonType.label"] == "boolean"
+    with rt.db.session() as s:
+        creds = reconciler.credentials(agents.get(s, "vscode"))
+        assert creds["method"] == "sign-in" and "client_secret" not in creds
+        assert creds["redirect_uris"] == ["http://127.0.0.1/*", "http://localhost/*"]
+        with pytest.raises(KeycloakError, match="no secret to rotate"):
+            reconciler.credentials(agents.get(s, "vscode"), rotate=True)
+
+
+def test_a_client_turns_public_and_back(rt, settings, keycloak) -> None:
+    keycloak._store({"clientId": "chat"})
+    reconciler = _people_reconciler(rt, settings, keycloak)
+    _agent(rt, settings)
+    reconciler.reconcile_all()
+    assert keycloak.scope("agent-bot") is not None
+    uris = ["http://127.0.0.1/callback", "https://vscode.dev/redirect"]
+    with rt.db.session() as s:
+        changes = {"client_type": "public", "redirect_uris": uris}
+        agents.update(s, agents.get(s, "bot"), changes, actor="t")
+    reconciler.reconcile_all()
+    client = keycloak.by_client_id("agent-bot")
+    assert client["publicClient"] is True and client["serviceAccountsEnabled"] is False
+    assert client["redirectUris"] == uris
+    assert "agentgov-sign-in" in {m["name"] for m in client["protocolMappers"]}
+    assert keycloak.scope("agent-bot") is None
+    reconciler.reconcile_all()  # converged
+    before = keycloak.secrets[client["id"]]
+    with rt.db.session() as s:
+        changes = {"client_type": "service", "redirect_uris": []}
+        agents.update(s, agents.get(s, "bot"), changes, actor="t")
+    reconciler.reconcile_all()
+    client = keycloak.by_client_id("agent-bot")
+    assert client["publicClient"] is False and client["serviceAccountsEnabled"] is True
+    assert client["standardFlowEnabled"] is False and client["redirectUris"] == []
+    # Its tokens are its own again, with a new secret, and don't say anyone signed in.
+    assert keycloak.secrets[client["id"]] != before
+    assert "agentgov-sign-in" not in {m["name"] for m in client["protocolMappers"]}
+    assert keycloak.scope("agent-bot") is not None
 
 
 # ------------------------------------------------------------- workload identity
@@ -501,4 +581,21 @@ def test_the_api_says_what_token_authenticates_an_agent(settings, keycloak) -> N
         assert "assertion_type" not in plain
         rotate = client.post("/v1/agents/pod/credentials", json={"rotate": True}, headers=ADMIN)
         assert rotate.status_code == 409 and "no secret to rotate" in rotate.json()["detail"]
+        # A public client: where people sign in to it. Nothing secret, nothing recorded.
+        with rt.db.session() as s:
+            data = {"name": "vscode", "blueprint": "bp", "client_type": "public"}
+            agents.register(s, settings, data, actor="t", approve=True)
+        before = client.get("/v1/ledger", params={"type": "agent.credentials_read"}, headers=ADMIN)
+        vscode = creds("vscode")
+        assert vscode["method"] == "sign-in" and "client_secret" not in vscode
+        assert vscode["issuer"] == "https://id.example.com/realms/agentgov"
+        assert vscode["authorization_endpoint"] == (
+            "https://id.example.com/realms/agentgov/protocol/openid-connect/auth"
+        )
+        assert vscode["token_endpoint"] == token_endpoint
+        assert vscode["audience"] == "agentgov-gateway"
+        after = client.get("/v1/ledger", params={"type": "agent.credentials_read"}, headers=ADMIN)
+        assert len(after.json()) == len(before.json())
+        rotate = client.post("/v1/agents/vscode/credentials", json={"rotate": True}, headers=ADMIN)
+        assert rotate.status_code == 409 and "public client" in rotate.json()["detail"]
     rt.db.dispose()

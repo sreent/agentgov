@@ -183,6 +183,47 @@ def a2a_protection(value: Any) -> str | None:
     return str(value)
 
 
+# An agent's client in the identity provider (identity/keycloak): "service", confidential,
+# with tokens for itself; or "public", one people sign in to on their own machines, such as
+# a developer's MCP client, which acts for them only.
+SERVICE, PUBLIC = "service", "public"
+CLIENT_TYPES = (SERVICE, PUBLIC)
+# Where a public client's sign-in may return when it names none: the machine itself, at any
+# port (Keycloak lets loopback addresses take any port), as MCP clients such as VS Code and
+# Claude Code listen for it.
+LOOPBACK_REDIRECTS = ["http://127.0.0.1/*", "http://localhost/*"]
+_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def client_type(value: Any) -> str:
+    if value is None or value == "":
+        return SERVICE
+    if value not in CLIENT_TYPES:
+        raise ValidationError(f"client_type is one of {', '.join(CLIENT_TYPES)} (got {value!r})")
+    return str(value)
+
+
+def redirect_uris(value: Any) -> list[str]:
+    """A public client's redirect URIs, as Keycloak takes them: "*" only at the end, and
+    plain http only to the machine itself (OAuth for native apps, RFC 8252)."""
+    uris = string_list(value, "redirect_uris")
+    for uri in uris:
+        parts = urlsplit(uri)
+        if "*" in uri[:-1] or not parts.scheme or parts.fragment:
+            raise ValidationError(
+                f"redirect_uris: {uri!r} isn't one: a URL, without a fragment, with * only "
+                "at its end"
+            )
+        if parts.scheme in ("http", "https") and not parts.hostname:
+            raise ValidationError(f"redirect_uris: {uri!r} names no host")
+        if parts.scheme == "http" and parts.hostname not in _LOOPBACK:
+            raise ValidationError(
+                f"redirect_uris: {uri!r} is plain http to another machine: use https, or "
+                "127.0.0.1 or localhost"
+            )
+    return uris
+
+
 def token_budget(value: Any) -> int | None:
     if value is None or value == "":
         return None

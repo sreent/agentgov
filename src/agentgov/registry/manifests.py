@@ -375,6 +375,8 @@ def export(session: Session) -> list[dict[str, Any]]:
             continue
         d = agents.to_dict(agent)
         spec = {k: d[k] for k in agents.EDITABLE if k in d and d[k] not in (None, [], {})}
+        if spec.get("client_type") == "service":
+            del spec["client_type"]  # the default
         if d["workload_identity"]:
             spec["workload_identity"] = d["workload_identity"]
         spec["status"] = agent.status

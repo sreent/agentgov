@@ -982,6 +982,34 @@ def _a2a_fields(
     return body
 
 
+CLIENT_TYPE = typer.Option(
+    None,
+    "--client-type",
+    help="service (the default): it gets tokens for itself, with a secret or its workload "
+    "identity; or public: people sign in to it on their own machines, such as developers' "
+    "MCP clients, and it acts for them.",
+)
+REDIRECT_URI = typer.Option(
+    None,
+    "--redirect-uri",
+    help="Where a sign-in to a public client may return (repeatable; * only at the end). By "
+    "default, the machine itself at any port: http://127.0.0.1/* and http://localhost/*.",
+)
+
+
+def _client_fields(
+    client_type: str | None, redirect_uris: list[str] | None, *, default_redirects: bool = False
+) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if client_type is not None:
+        body["client_type"] = client_type
+    if default_redirects:
+        body["redirect_uris"] = []
+    elif redirect_uris is not None:
+        body["redirect_uris"] = _split(redirect_uris)
+    return body
+
+
 def _workload_identity(value: str | None, *, clear: bool = False) -> dict[str, Any]:
     if clear:
         return {"workload_identity": None}
@@ -1017,6 +1045,8 @@ def agents_create(
     a2a_url: str | None = A2A_URL,
     agent_access: list[str] | None = AGENT_ACCESS,
     a2a_protection: str | None = A2A_PROTECTION,
+    client_type: str | None = CLIENT_TYPE,
+    redirect_uri: list[str] | None = REDIRECT_URI,
     approve: bool = typer.Option(False, "--approve", help="Activate it now (admins only)."),
 ) -> None:
     """Register an agent. It waits in pending review unless --approve is given."""
@@ -1024,6 +1054,7 @@ def agents_create(
         _model_fields(model_access, token_budget, False)
         | _team_field(team)
         | _workload_identity(workload_identity)
+        | _client_fields(client_type, redirect_uri)
         | _a2a_fields(a2a_url, agent_access, a2a_protection=a2a_protection)
         | _agent_fields(
             description=description,
@@ -1088,6 +1119,15 @@ def agents_update(
         "--no-a2a-protection",
         help="Nothing is known to stop calls to it that don't come through the gateway.",
     ),
+    client_type: str | None = CLIENT_TYPE,
+    redirect_uri: list[str] | None = typer.Option(
+        None, "--redirect-uri", help="Where a sign-in to it may return (replace them)."
+    ),
+    default_redirect_uris: bool = typer.Option(
+        False,
+        "--default-redirect-uris",
+        help="Back to the machine itself, at any port.",
+    ),
     if_version: int | None = IF_VERSION,
 ) -> None:
     """Change an agent's details. Only the options you pass are changed."""
@@ -1095,6 +1135,7 @@ def agents_update(
         _model_fields(model_access, token_budget, no_token_budget)
         | _team_field(team)
         | _workload_identity(workload_identity, clear=no_workload_identity)
+        | _client_fields(client_type, redirect_uri, default_redirects=default_redirect_uris)
         | _a2a_fields(
             a2a_url,
             agent_access,
@@ -1263,8 +1304,9 @@ def agents_attest(
 
 @agents_app.command("credentials")
 def agents_credentials(ref: str, rotate: bool = False) -> None:
-    """Print the agent's OAuth client credentials (--rotate issues a new secret), or, for an
-    agent with a workload identity, how it authenticates without a secret."""
+    """Print the agent's OAuth client credentials (--rotate issues a new secret); for an
+    agent with a workload identity, how it authenticates without a secret; and for a public
+    client, where people sign in to it."""
     _print(_call("POST", f"/v1/agents/{ref}/credentials", json={"rotate": rotate}))
 
 

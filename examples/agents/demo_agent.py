@@ -26,14 +26,18 @@ teams responsible for agents get their issues in their own channels
 (examples/secops/sink stands in for all of them). A management rule tells the agent's
 people before it would act. And the ledger gets a checkpoint, time-stamped by an
 authority (the sink stands in for one too) and checked with OpenSSL, next to a compliance
-report and the evidence pack for assessors. Last, a classifier gives a second opinion
-on a tool result the rules let through (examples/models/mock stands in for IBM Granite
-Guardian, where the stack is started with AGENTGOV_GUARDIAN_URL pointing at it).
+report and the evidence pack for assessors. A classifier gives a second opinion on a tool
+result the rules let through (examples/models/mock stands in for IBM Granite Guardian,
+where the stack is started with AGENTGOV_GUARDIAN_URL pointing at it). Last, developers'
+MCP clients sign in at the gateway: dana, a developer, signs in in a browser as an MCP
+client has them do, and calls a tool with their own token.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import html
 import io
 import json
@@ -49,6 +53,7 @@ import zipfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import httpx2
@@ -89,6 +94,10 @@ A2A_ROUTE = f"/a2a/{BILLING}"
 # How soon a block must stop the agent's calls (it takes well under a second; this leaves
 # room for a busy machine).
 KILL_SWITCH_SECONDS = 5
+# The agent developers' MCP clients sign in to (agents.yaml), and where an MCP client on a
+# developer's machine listens for the sign-in to come back (VS Code's port).
+DEVELOPERS_AGENT = "coding-assistant"
+LOOPBACK = "http://127.0.0.1:33418/"
 
 BOLD, DIM, GREEN, RED, YELLOW, RESET = (
     "\033[1m",
@@ -1387,6 +1396,129 @@ def authzen_decision_point() -> None:
         admin("PUT", "/v1/features/authzen-decision-point", json={"mode": "off"})
 
 
+def told_where_to_sign_in(timeout: float = 60) -> str | None:
+    """What an MCP client gets for a call without a token, once the gateway has its new
+    configuration: 401, and where the server's metadata says to sign in."""
+    hello = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "an MCP client", "version": "1.0.0"},
+        },
+    }
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        resp = httpx.post(
+            f"{GATEWAY}/mcp/crm",
+            json=hello,
+            headers={"Accept": "application/json, text/event-stream"},
+            timeout=10,
+        )
+        found = re.search(r'resource_metadata="([^"]+)"', resp.headers.get("www-authenticate", ""))
+        if resp.status_code == 401 and found:
+            return found.group(1)
+        time.sleep(1)
+    return None
+
+
+def browser_sign_in(person: str, creds: dict[str, Any], resource: str) -> str:
+    """The person signs in to a public client in their browser, as an MCP client has them
+    do: the authorization code flow with PKCE, for the server it wants (its resource), back
+    to the client on their machine, which then gets their token."""
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+    browser = httpx.Client(timeout=30)
+    try:
+        page = browser.get(
+            creds["authorization_endpoint"],
+            params={
+                "response_type": "code",
+                "client_id": creds["client_id"],
+                "redirect_uri": LOOPBACK,
+                "code_challenge": challenge.rstrip(b"=").decode(),
+                "code_challenge_method": "S256",
+                "state": secrets.token_urlsafe(8),
+                "resource": resource,
+            },
+        )
+        # Keycloak marks its cookies Secure, which browsers send to http://localhost anyway.
+        for cookie in browser.cookies.jar:
+            cookie.secure = False
+        form = re.search(r'<form[^>]*action="([^"]+)"', page.text)
+        if form is None:
+            raise SystemExit(f"no sign-in form at {creds['authorization_endpoint']}")
+        back = browser.post(
+            html.unescape(form.group(1)), data={"username": person, "password": DEMO_PASSWORD}
+        )
+    finally:
+        browser.close()
+    code = parse_qs(urlsplit(back.headers.get("location", "")).query).get("code")
+    if not code:
+        raise SystemExit(f"{person} could not sign in to {creds['client_id']} ({back.status_code})")
+    token = httpx.post(
+        creds["token_endpoint"],
+        data={
+            "grant_type": "authorization_code",
+            "code": code[0],
+            "redirect_uri": LOOPBACK,
+            "client_id": creds["client_id"],
+            "code_verifier": verifier,
+            "resource": resource,
+        },
+        timeout=30,
+    )
+    token.raise_for_status()
+    return str(token.json()["access_token"])
+
+
+async def developer_sign_in() -> None:
+    step("23. Developers sign in at the gateway: their MCP clients, with their own tokens")
+    admin("PUT", "/v1/features/developer-sign-in", json={"mode": "on"})
+    try:
+        where = told_where_to_sign_in()
+        show("told:", where is not None, f"a call without a token gets 401, and {where}")
+        if where is None:
+            return
+        metadata = httpx.get(where, timeout=10).json()
+        servers = metadata.get("authorization_servers") or []
+        show(
+            "metadata:",
+            bool(servers) and str(metadata.get("resource", "")).endswith("/mcp/crm"),
+            f"{metadata.get('resource')}: sign in at {', '.join(servers)}",
+        )
+        creds = admin("POST", f"/v1/agents/{DEVELOPERS_AGENT}/credentials", json={})
+        # dana is a developer; sam isn't, and the blueprint's agents act only for developers.
+        for person, developer in (("dana", True), ("sam", False)):
+            token = browser_sign_in(person, creds, metadata["resource"])
+            print(f"  {person} signed in to {creds['client_id']}; the MCP client has their token")
+            headers = {"Authorization": f"Bearer {token}"}
+            timeout = httpx2.Timeout(30.0, read=60.0)
+            async with (
+                httpx2.AsyncClient(headers=headers, timeout=timeout) as http,
+                Client(
+                    streamable_http_client(f"{GATEWAY}/mcp/crm", http_client=http),
+                    client_info=Implementation(name="vscode", version="1.0.0"),
+                ) as client,
+            ):
+                allowed, payload = await call(client, "get_customer", {"customer_id": "c-001"})
+                report(allowed, payload, expect_allowed=developer)
+            entry = ledger_entry({"agent": DEVELOPERS_AGENT, "user": person})
+            user = ((entry or {}).get("details") or {}).get("user") or {}
+            show(
+                "recorded:" if entry else "not recorded",
+                entry is not None and user.get("via") == "sign-in",
+                f"{entry['type']} {entry['resource']} for {entry['on_behalf_of']}, who signed "
+                f"in to {DEVELOPERS_AGENT} (via {user.get('via')})"
+                if entry
+                else "",
+            )
+    finally:
+        admin("PUT", "/v1/features/developer-sign-in", json={"mode": "off"})
+
+
 def main() -> None:
     wait_for_gateway("/mcp/crm", MODEL_ROUTE, A2A_ROUTE)
     step("1. Registration: a new agent is requested, approved and given an identity")
@@ -1403,6 +1535,7 @@ def main() -> None:
         evidence(name)
         asyncio.run(deeper_detection())
         authzen_decision_point()
+        asyncio.run(developer_sign_in())
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")
         print(f"{DIM}Open {CONTROL_PLANE}/ui for the admin view.{RESET}")
