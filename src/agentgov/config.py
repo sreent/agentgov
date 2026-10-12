@@ -41,6 +41,10 @@ _SERVICE_LINK = re.compile(r"^(?:tcp|udp|sctp)://[^/\s]+:\d+$")
 # An AWS region (us-east-1, us-gov-west-1) and an IAM role's ARN.
 AWS_REGION = re.compile(r"^[a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\d{1,2}$")
 AWS_ROLE = re.compile(r"^arn:aws(?:-[a-z]+)*:iam::\d{12}:role/[\w+=,.@/-]{1,512}$")
+# A Google Cloud project ID (6-30 characters; a domain-scoped one has a prefix), and a region
+# (us-central1) or multi-region (us, eu).
+GOOGLE_PROJECT = re.compile(r"^(?:[a-z0-9.-]+:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+GOOGLE_REGION = re.compile(r"^(?:[a-z]+-[a-z]+\d{1,2}|us|eu)$")
 # Microsoft Entra ID's issuer: https://login.microsoftonline.com/<tenant>/v2.0
 ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
@@ -280,6 +284,14 @@ class Settings:
     aws_role_arns: str = ""
     # The external ID those roles' trust policies ask for, if any.
     aws_external_id: str | None = None
+    # Google Cloud: the projects to read Agent Runtime (formerly Vertex AI Agent Engine)
+    # agents in, comma-separated project IDs (empty: Google Cloud isn't read). AgentGov gets
+    # its tokens where Google's libraries do: the file GOOGLE_APPLICATION_CREDENTIALS names (a
+    # workload identity federation configuration, or a service account key), gcloud's
+    # application default credentials, or the metadata server (Workload Identity on GKE).
+    google_cloud_projects: str = ""
+    # The regions to read them in, comma-separated (us and eu for the multi-regions).
+    google_cloud_regions: str = "us-central1"
 
     # --- Classifier, optional (docs/detection.md) ---------------------------------
     # IBM Granite Guardian behind an OpenAI-compatible API (vLLM, llama.cpp,
@@ -451,6 +463,14 @@ class Settings:
                 raise ValueError(f"AGENTGOV_AWS_ROLE_ARNS: {arn!r} is not an IAM role's ARN")
         if self.aws_role_arn_list() and not self.aws_region_list():
             raise ValueError("AGENTGOV_AWS_ROLE_ARNS needs AGENTGOV_AWS_REGIONS")
+        for project in self.google_cloud_project_list():
+            if not GOOGLE_PROJECT.match(project):
+                raise ValueError(f"AGENTGOV_GOOGLE_CLOUD_PROJECTS: {project!r} is not a project ID")
+        for region in self.google_cloud_region_list():
+            if not GOOGLE_REGION.match(region):
+                raise ValueError(
+                    f"AGENTGOV_GOOGLE_CLOUD_REGIONS: {region!r} is not a Google Cloud region"
+                )
         if self.classifier_timeout_seconds <= 0 or self.classifier_concurrency < 1:
             raise ValueError(
                 "AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS must be positive and "
@@ -578,6 +598,12 @@ class Settings:
 
     def aws_role_arn_list(self) -> list[str]:
         return [r.strip() for r in self.aws_role_arns.split(",") if r.strip()]
+
+    def google_cloud_project_list(self) -> list[str]:
+        return [p.strip() for p in self.google_cloud_projects.split(",") if p.strip()]
+
+    def google_cloud_region_list(self) -> list[str]:
+        return [r.strip() for r in self.google_cloud_regions.split(",") if r.strip()]
 
     def m365_types(self) -> set[str]:
         types = {t.strip().lower() for t in self.m365_package_types.split(",") if t.strip()}

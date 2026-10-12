@@ -181,12 +181,16 @@ def mark_unverified(
     types: set[str],
     verified: bool = False,
     subjects: set[str] | None = None,
+    present_keys: set[str] | None = None,
 ) -> int:
     """The check behind these findings couldn't run (a sync failed): their open findings
     may or may not still hold, so they stay open, marked unverified, until it runs again
-    (``verified=True``, when it does). ``subjects`` as for :func:`resolve_absent`."""
+    (``verified=True``, when it does). ``subjects`` as for :func:`resolve_absent`; findings
+    in ``present_keys`` were found again by a check that ran in part, so they still hold."""
     count = 0
     for finding in session.scalars(_open(types, subjects)):
+        if present_keys and finding.key in present_keys:
+            continue
         if finding.verified != verified:
             finding.verified = verified
             count += 1

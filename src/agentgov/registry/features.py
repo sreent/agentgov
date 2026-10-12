@@ -671,6 +671,21 @@ CATALOG: tuple[Feature, ...] = (
         needs="AGENTGOV_AWS_REGIONS, and AWS credentials allowed to read them",
     ),
     Feature(
+        "google-cloud",
+        "Google Cloud agents",
+        "platforms",
+        "AgentGov reads the agents on Google Cloud into the inventory (Agent Runtime agents, "
+        "formerly Vertex AI Agent Engine), with their risky settings as findings, on a "
+        "schedule and on demand.",
+        SWITCH,
+        ON,
+        {
+            ON: "Read where AgentGov has Google credentials and projects to read.",
+            OFF: "Not read, even where it could be.",
+        },
+        needs="AGENTGOV_GOOGLE_CLOUD_PROJECTS, and Google credentials allowed to read them",
+    ),
+    Feature(
         "security-operations",
         "Hand-off to security operations",
         "secops",

@@ -13,24 +13,25 @@ keeps running: stop it in its platform's console as well.
 | Platform | What AgentGov reads | Set up |
 |---|---|---|
 | AWS | Amazon Bedrock agents, AgentCore harnesses and AgentCore agent runtimes | [AWS](#aws) |
+| Google Cloud | Agent Runtime agents (formerly Vertex AI Agent Engine) | [Google Cloud](#google-cloud) |
 
 Each platform is read where its settings are set, when the control plane starts and every
 hour after that (`AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS`; `0` reads only on demand). Admins
 can read one at any time with **Sync now** on the Platforms page or `agentgov platforms sync
-aws`. Each has a switch on the [Features](features.md) page (on by default) that stops it
+aws` (or `google-cloud`). Each has a switch on the [Features](features.md) page (on by default) that stops it
 being read, even where it could be.
 
 ## What AgentGov does with each agent
 
 Each agent the platform reports becomes a registry agent with the source `platform:<platform>`
 (`platform:aws`), its platform's name for what it is (an Amazon Bedrock agent), and a card on
-its page with what the platform reports: its settings, its tools and a link to it in the
-platform's console. It starts as `discovered`, with an "agent to review" finding: adopt it to
-give it an owner, sponsors and periodic attestation, like any other agent. AgentGov issues
-these agents no gateway credentials and doesn't apply blueprints to them, because they never
-call the gateway.
+its page with what the platform reports: its settings and its tools. It starts as
+`discovered`, with an "agent to review" finding: adopt it to give it an owner, sponsors and
+periodic attestation, like any other agent. AgentGov issues these agents no gateway
+credentials and doesn't apply blueprints to them, because they never call the gateway.
 
-AgentGov reads each platform in parts (an AWS account's region). Agents gone from a part
+AgentGov reads each platform in parts (an AWS account's region, a Google Cloud project's
+region). Agents gone from a part
 it read in full stay in the registry, marked as gone, so their history is kept: delete them
 when you no longer need the record. A part that can't be read (its region refuses, say) is
 named on the Platforms page; its agents are left as the last sync saw them, and their findings
@@ -129,13 +130,69 @@ AgentGov signs its requests itself (Signature Version 4), without the AWS SDK. A
 doesn't offer Bedrock agents or AgentCore is skipped; one that refuses is named on the
 Platforms page.
 
+## Google Cloud
+
+AgentGov reads the **Agent Runtime agents** (Agent Runtime was Vertex AI Agent Engine; its API
+calls them reasoning engines) in each project and region you name: the identity each runs as,
+how it reaches networks, the names of its environment variables and of those it takes from
+Secret Manager, its encryption key, memory bank and container, and who may use it, from its
+IAM policy.
+
+Gemini Enterprise's agents and Agent Platform's managed agents aren't read: Google's APIs list
+them only to the person who created them, so they can't give AgentGov an organisation's. An
+agent built with the ADK and added to Gemini Enterprise runs on Agent Runtime, where AgentGov
+reads it. Agent Registry, which also lists agents on Cloud Run and GKE, isn't read yet.
+
+| Check | Raised when |
+|---|---|
+| `platform.no_authentication` | its IAM policy grants a role to `allUsers` or `allAuthenticatedUsers` |
+| `platform.shared_with_everyone` | its IAM policy grants a role to a whole domain |
+| `platform.broad_identity` | it runs as a default service account, Compute Engine's or App Engine's, which Google makes an editor of the project (high), or as the project's Agent Runtime service agent, which every agent without an identity of its own shares (medium) |
+| `platform.plain_secret` | an environment variable whose name says it holds a secret has a plain value rather than one from Secret Manager, or `GOOGLE_APPLICATION_CREDENTIALS` is set (a service account key shipped with the agent) |
+
+An agent whose IAM policy AgentGov may not read is shown as such, and its findings about who
+may use it are left as they were.
+
+### Setting it up
+
+1. Give AgentGov's identity a role that may read the agents, in each project. Make one with
+   only what it needs:
+
+   ```bash
+   gcloud iam roles create agentgovAgentReader --project=PROJECT \
+     --title="AgentGov agent reader" \
+     --permissions=aiplatform.reasoningEngines.list,aiplatform.reasoningEngines.getIamPolicy,resourcemanager.projects.get
+   gcloud projects add-iam-policy-binding PROJECT \
+     --role=projects/PROJECT/roles/agentgovAgentReader --member=serviceAccount:READER
+   ```
+
+   Create it once in your organisation (`--organization`) instead to grant it in several
+   projects. Google's Vertex AI Viewer role (`roles/aiplatform.viewer`) can read them too, but
+   it reads much more of the project than AgentGov needs.
+2. Give the control plane Google credentials, from where Google's libraries find them: on GKE,
+   Workload Identity ([Google Cloud](deploy/gcp.md#agents-built-on-google-cloud)) or a VM's
+   service account; elsewhere, the file `GOOGLE_APPLICATION_CREDENTIALS` names: a workload
+   identity federation configuration, which trades the identity AgentGov runs with (on AWS,
+   Azure or any OpenID Connect provider) for Google's without a key, or a service account key,
+   which many organisations don't allow. To try it on your machine as yourself, sign in with
+   `gcloud auth application-default login`.
+3. Name the projects to read, and the regions their agents are in (`us` and `eu` for the
+   multi-regions):
+
+   ```bash
+   AGENTGOV_GOOGLE_CLOUD_PROJECTS=contoso-agents,contoso-labs
+   AGENTGOV_GOOGLE_CLOUD_REGIONS=us-central1,europe-west4
+   ```
+
+AgentGov gets its tokens itself, without Google's client libraries.
+
 ## Doing it from the CLI or the API
 
 | Task | Admin UI | CLI | API |
 |---|---|---|---|
 | See each platform and its last sync | Platforms > Other platforms | `agentgov platforms status` | `GET /v1/platforms` |
-| Read a platform now | Platforms > Other platforms > **Sync now** | `agentgov platforms sync aws` | `POST /v1/platforms/aws/sync` |
-| List one platform's agents | Platforms > *n agents* | `agentgov agents list --source platform:aws` | `GET /v1/agents?source=platform:aws` |
+| Read a platform now | Platforms > Other platforms > **Sync now** | `agentgov platforms sync google-cloud` | `POST /v1/platforms/google-cloud/sync` |
+| List one platform's agents | Platforms > *n agents* | `agentgov agents list --source platform:google-cloud` | `GET /v1/agents?source=platform:google-cloud` |
 | What the platform reports about one agent | Agent page | `agentgov agents get REF` | `platforms` in `GET /v1/agents/{ref}` |
 
 Auditors and approvers can see everything here; reading a platform on demand needs an admin.

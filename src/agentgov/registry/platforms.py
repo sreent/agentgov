@@ -720,7 +720,9 @@ def record_inventory(
         subjects=checked,
         clean=2,  # one odd answer from the platform doesn't close and reopen them
     )
-    findings.mark_unverified(session, types=INVENTORY_FINDINGS, subjects=unread)
+    findings.mark_unverified(
+        session, types=INVENTORY_FINDINGS, subjects=unread, present_keys=present
+    )
     counts["findings"] = len(present)
     if inventory.failed:
         counts["failed"] = len(inventory.failed)

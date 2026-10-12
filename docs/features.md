@@ -123,7 +123,8 @@ Turning one off stops it even where it is configured.
 
 | Feature | Modes | What it does |
 |---|---|---|
-| `aws` | off, **on** | Reads the agents on AWS into the inventory: Amazon Bedrock agents and AgentCore agent runtimes, with their risky settings as findings |
+| `aws` | off, **on** | Reads the agents on AWS into the inventory: Amazon Bedrock agents and AgentCore's harnesses and agent runtimes, with their risky settings as findings |
+| `google-cloud` | off, **on** | Reads the agents on Google Cloud into the inventory: Agent Runtime agents (formerly Vertex AI Agent Engine), with their risky settings as findings |
 
 ### Security operations
 

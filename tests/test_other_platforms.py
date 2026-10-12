@@ -197,4 +197,6 @@ def test_only_configured_and_turned_on_platforms_sync(client, connector) -> None
     status = {s["source"]: s for s in client.get("/v1/platforms", headers=ADMIN).json()["sources"]}
     assert status["aws"]["configured"] is True and status["aws"]["turned_on"] is True
     assert "AGENTGOV_AWS_REGIONS" in status["aws"]["needs"]
-    assert "google-cloud" not in status  # no connector for it yet
+    assert status["google-cloud"]["configured"] is False
+    assert "AGENTGOV_GOOGLE_CLOUD_PROJECTS" in status["google-cloud"]["needs"]
+    assert "salesforce" not in status  # no connector for it yet
