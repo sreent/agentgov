@@ -264,6 +264,7 @@ class Runtime:
         self.coordination.start()
         if self.identity is not None:
             self.identity.start(
+                full_every=self.settings.identity_full_sync_seconds,
                 leading=lambda: self.coordination.leading,
                 exclusive=lambda: self.coordination.job("identity"),
             )

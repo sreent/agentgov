@@ -33,6 +33,8 @@ Keycloak outage only delays convergence.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -514,6 +516,17 @@ class _Scopes:
         return self._apps
 
 
+def identity_digest(agent: Agent, settings: Settings) -> str:
+    """What the agent's Keycloak client, and its client scope offered to the people's apps,
+    should be, in short: a pass that isn't full syncs the agents whose digest changed."""
+    wanted = {
+        "client": client_representation(agent, settings),
+        "exchanges": exchanges(agent),
+        "people_apps": sorted(settings.people_apps()),
+    }
+    return hashlib.sha256(json.dumps(wanted, sort_keys=True, default=str).encode()).hexdigest()
+
+
 class IdentityReconciler:
     def __init__(self, db: Database, settings: Settings, admin: KeycloakAdmin) -> None:
         self.db = db
@@ -539,6 +552,7 @@ class IdentityReconciler:
             if agent.status != ACTIVE:
                 # No credentials are minted until the agent is first approved.
                 agent.identity_error = None
+                agent.identity_digest = identity_digest(agent, self.settings)
                 return
             try:
                 agent.idp_client_uuid = self.admin.create_client(
@@ -602,6 +616,7 @@ class IdentityReconciler:
             self._sync_people_scope(agent, scopes)
         agent.identity_synced_at = ids.utcnow()
         agent.identity_error = None
+        agent.identity_digest = identity_digest(agent, self.settings)
 
     def _sync_people_scope(self, agent: Agent, scopes: _Scopes) -> None:
         """The agent's client scope, offered to the people's apps, while it acts for people."""
@@ -676,7 +691,11 @@ class IdentityReconciler:
                 self.admin.delete_identity_provider(alias)
                 log.info("removed identity provider %s: its issuer is gone", alias)
 
-    def reconcile_all(self) -> dict[str, int]:
+    def reconcile_all(self, *, full: bool = True) -> dict[str, int]:
+        """Converge Keycloak with the registry: the identity providers, then the agents'
+        clients. A full pass syncs every agent, which also repairs what was changed in
+        Keycloak itself; otherwise only those whose clients should change since they were
+        last synced (their identity_digest), or whose last sync failed."""
         synced = failed = 0
         scopes = _Scopes(self.admin, self.settings.people_apps())
         with self.db.session() as session:
@@ -685,9 +704,15 @@ class IdentityReconciler:
                 self.sync_issuers(session)
             except (KeycloakError, httpx.HTTPError) as exc:
                 log.warning("identity issuers: %s", exc)
-            found = session.scalars(
-                select(Agent.id).where(Agent.status != DISCOVERED).order_by(Agent.id)
-            ).all()
+            found = [
+                agent.id
+                for agent in session.scalars(
+                    select(Agent).where(Agent.status != DISCOVERED).order_by(Agent.id)
+                ).unique()
+                if full
+                or agent.identity_error
+                or agent.identity_digest != identity_digest(agent, self.settings)
+            ]
         # Each agent in a transaction of its own: Keycloak takes its time to answer, and
         # the jobs that update many agents at once (the posture scan's risk scores) neither
         # wait for a pass over all of them nor deadlock with it.
@@ -767,21 +792,30 @@ class IdentityReconciler:
         self,
         interval: float = 60.0,
         *,
+        full_every: float = 0.0,
         leading: Callable[[], bool] | None = None,
         exclusive: Callable[[], AbstractContextManager[Any]] | None = None,
     ) -> None:
-        """Reconcile every agent when triggered and every ``interval`` seconds; with
-        ``leading``, only while this replica leads, and inside ``exclusive`` (one run at a
-        time across replicas)."""
+        """Reconcile when triggered and every ``interval`` seconds: every agent at first,
+        then every ``full_every`` seconds (0: each time), and between, only the agents whose
+        clients should change. With ``leading``, only while this replica leads, and inside
+        ``exclusive`` (one run at a time across replicas)."""
 
         def run() -> None:
+            last_full: float | None = None  # this replica's, while it leads
             while not self._stop.is_set():
                 if leading is None or leading():
+                    now = time.monotonic()
+                    full = last_full is None or full_every <= 0 or now - last_full >= full_every
                     try:
                         with exclusive() if exclusive is not None else nullcontext():
-                            self.reconcile_all()
+                            self.reconcile_all(full=full)
+                        if full:
+                            last_full = now
                     except Exception:  # keep the worker alive across DB/IdP hiccups
                         log.exception("identity reconciliation failed")
+                else:
+                    last_full = None  # leading again, it starts with a full pass
                 self._wake.wait(timeout=interval)
                 self._wake.clear()
 

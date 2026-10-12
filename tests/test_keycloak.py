@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
+from collections import Counter
 from typing import Any
 
 import httpx
@@ -619,3 +621,108 @@ def test_the_api_says_what_token_authenticates_an_agent(settings, keycloak) -> N
         rotate = client.post("/v1/agents/vscode/credentials", json={"rotate": True}, headers=ADMIN)
         assert rotate.status_code == 409 and "public client" in rotate.json()["detail"]
     rt.db.dispose()
+
+
+# ------------------------------------------------------ passes that sync what changed
+
+
+def _counted(keycloak: FakeKeycloak) -> tuple[KeycloakAdmin, Counter[str]]:
+    """An admin client to ``keycloak`` that counts the clients it looks up."""
+    looked_up: Counter[str] = Counter()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        client_id = request.url.params.get("clientId")
+        if request.method == "GET" and client_id:
+            looked_up[client_id] += 1
+        return keycloak.handler(request)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    admin = KeycloakAdmin("http://kc", "agentgov", "agentgov-control-plane", "secret", http=http)
+    return admin, looked_up
+
+
+def test_a_pass_syncs_only_the_agents_whose_clients_should_change(rt, settings, keycloak) -> None:
+    admin, looked_up = _counted(keycloak)
+    reconciler = IdentityReconciler(rt.db, settings.with_overrides(people_app_clients=""), admin)
+    with rt.db.session() as s:
+        blueprints.create(s, {"name": "bp", "require_sponsor": False}, actor="t")
+        for name in ("one", "two"):
+            agents.register(s, settings, {"name": name, "blueprint": "bp"}, actor="t", approve=True)
+    assert reconciler.reconcile_all(full=False) == {"synced": 2, "failed": 0}  # new ones
+    looked_up.clear()
+    assert reconciler.reconcile_all(full=False) == {"synced": 0, "failed": 0}
+    assert not looked_up  # Keycloak isn't asked about either
+    with rt.db.session() as s:
+        agents.update(s, agents.get(s, "one"), {"description": "Answers tickets"}, actor="t")
+    assert reconciler.reconcile_all(full=False) == {"synced": 1, "failed": 0}
+    assert set(looked_up) == {"agent-one"}
+    assert keycloak.by_client_id("agent-one")["description"] == "Answers tickets"
+    # A change to their blueprint changes both clients: they may act for people no more.
+    with rt.db.session() as s:
+        blueprints.update(s, blueprints.get(s, "bp"), {"acts_for": "itself"}, actor="t")
+    assert reconciler.reconcile_all(full=False) == {"synced": 2, "failed": 0}
+    attributes = keycloak.by_client_id("agent-two")["attributes"]
+    assert attributes["standard.token.exchange.enabled"] == "false"
+
+
+def test_a_full_pass_repairs_what_was_changed_in_keycloak(
+    rt, settings, keycloak, reconciler
+) -> None:
+    _agent(rt, settings)
+    reconciler.reconcile_all(full=False)
+    keycloak.clients.clear()  # someone deleted the client in Keycloak itself
+    assert reconciler.reconcile_all(full=False) == {"synced": 0, "failed": 0}
+    assert keycloak.clients == {}
+    assert reconciler.reconcile_all(full=True) == {"synced": 1, "failed": 0}
+    assert keycloak.by_client_id("agent-bot")["enabled"] is True
+
+
+def test_a_sync_that_failed_is_tried_again(rt, settings, keycloak) -> None:
+    down = {"now": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if down["now"]:
+            raise httpx.ConnectError("connection refused")
+        return keycloak.handler(request)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    reconciler = IdentityReconciler(
+        rt.db, settings, KeycloakAdmin("http://kc", "agentgov", "cp", "s", http=http)
+    )
+    _agent(rt, settings)
+    assert reconciler.reconcile_all(full=False) == {"synced": 0, "failed": 1}
+    down["now"] = False
+    assert reconciler.reconcile_all(full=False) == {"synced": 1, "failed": 0}
+    with rt.db.session() as s:
+        assert agents.get(s, "bot").identity_error is None
+
+
+def test_the_worker_syncs_every_agent_first_then_what_changed(
+    settings, reconciler, monkeypatch
+) -> None:
+    passes: list[bool] = []
+
+    def reconcile_all(*, full: bool = True) -> dict[str, int]:
+        passes.append(full)
+        return {"synced": 0, "failed": 0}
+
+    def until(check: Any) -> bool:
+        deadline = time.monotonic() + 10
+        while not check() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return bool(check())
+
+    monkeypatch.setattr(reconciler, "reconcile_all", reconcile_all)
+    leading = {"now": True}
+    reconciler.start(interval=0.01, full_every=3600, leading=lambda: leading["now"])
+    try:
+        assert until(lambda: len(passes) >= 3)
+        leading["now"] = False
+        time.sleep(0.1)
+        before = len(passes)
+        leading["now"] = True
+        assert until(lambda: len(passes) > before)
+    finally:
+        reconciler.stop()
+    assert passes[:3] == [True, False, False]
+    assert passes[before] is True  # leading again, it starts with every agent

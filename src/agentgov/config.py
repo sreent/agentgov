@@ -168,6 +168,10 @@ class Settings:
     keycloak_issuer: str | None = None
     # JWKS URL the gateway uses to validate agent tokens.
     keycloak_jwks_url: str | None = None
+    # Seconds between passes that sync every agent with Keycloak, which also repair what
+    # was changed in Keycloak itself. The passes between, every minute and after each
+    # change, sync only the agents whose clients should change. 0: every pass is full.
+    identity_full_sync_seconds: int = 900
     # Audience every agent token carries; the gateway requires it.
     gateway_audience: str = "agentgov-gateway"
     # Keycloak clients of the apps people sign in to and use agents from (comma-separated
@@ -443,6 +447,8 @@ class Settings:
             raise ValueError("AGENTGOV_LEDGER_CHECKPOINT_HOURS must be 0 (on demand) or more")
         if self.authzen_url and not self.authzen_url.startswith(("https://", "http://")):
             raise ValueError("AGENTGOV_AUTHZEN_URL is the decision point's http(s) URL")
+        if self.identity_full_sync_seconds < 0:
+            raise ValueError("AGENTGOV_IDENTITY_FULL_SYNC_SECONDS is 0 (every pass) or more")
         if self.tls_reload_seconds < 0:
             raise ValueError("AGENTGOV_TLS_RELOAD_SECONDS is 0 (read once) or more")
         if self.authzen_timeout_seconds <= 0:

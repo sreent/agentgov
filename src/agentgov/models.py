@@ -183,6 +183,9 @@ class Agent(Base):
     idp_client_uuid: Mapped[str | None] = mapped_column(String(64), nullable=True)
     identity_synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     identity_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What its Keycloak client and client scope were last synced to be, in short: a pass
+    # that isn't full syncs only the agents whose digest has changed since.
+    identity_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     attested_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     attested_by: Mapped[str | None] = mapped_column(String(200), nullable=True)

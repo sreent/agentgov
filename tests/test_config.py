@@ -51,6 +51,7 @@ def test_pii_thresholds() -> None:
         {"AGENTGOV_FEATURES": "teleportation=on"},
         {"AGENTGOV_FEATURES": "discovery"},
         {"AGENTGOV_TLS_RELOAD_SECONDS": "-1"},
+        {"AGENTGOV_IDENTITY_FULL_SYNC_SECONDS": "-1"},
     ],
 )
 def test_invalid_values(env) -> None:
