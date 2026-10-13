@@ -2244,6 +2244,61 @@ def findings_accept(
     _done("finding", f["id"], f"risk accepted until {f['accepted_until']}")
 
 
+@findings_app.command("not-mine")
+def findings_not_mine(
+    finding_id: str,
+    reason: str = typer.Option(..., help="Why it isn't yours: whose it is, if you know."),
+) -> None:
+    """Say an issue isn't yours: it goes on to the next people responsible for it at once."""
+    out = _call(
+        "POST", f"/v1/findings/{quote(finding_id)}/not-mine", json={"reason": reason}
+    )  # fmt: skip
+    went = ", ".join(out["went_to"])
+    _done(
+        "finding", out["id"], f"passed on to {went}" if went else "recorded; it stays where it is"
+    )
+
+
+@findings_app.command("ask-exception")
+def findings_ask_exception(
+    finding_id: str,
+    reason: str = typer.Option(..., help="Why its risk is acceptable, for now."),
+    until: str = typer.Option(
+        ..., help="Until when: a date (2026-12-31), a time, or a number of days. A year at most."
+    ),
+) -> None:
+    """Ask an approver to accept an issue's risk until a date. It stays with you meanwhile."""
+    when: str | int = int(until) if until.isdigit() else until
+    f = _call(
+        "POST",
+        f"/v1/findings/{quote(finding_id)}/exception",
+        json={"reason": reason, "until": when},
+    )
+    _done("finding", f["id"], "exception asked for: an approver decides")
+
+
+@findings_app.command("decline-exception")
+def findings_decline_exception(
+    finding_id: str, reason: str = typer.Option(..., help="Why not.")
+) -> None:
+    """Turn down a request to accept an issue's risk: it stays with whoever asked."""
+    f = _call(
+        "POST", f"/v1/findings/{quote(finding_id)}/exception/decline", json={"reason": reason}
+    )
+    _done("finding", f["id"], "exception declined")
+
+
+@findings_app.command("recheck")
+def findings_recheck(finding_id: str) -> None:
+    """Say you fixed what an issue is about: AgentGov checks it again now, where it can."""
+    out = _call("POST", f"/v1/findings/{quote(finding_id)}/recheck", timeout=LONG_TIMEOUT)
+    outcome = "gone: resolved" if out["fixed"] else "still there"
+    note = f" ({out['note']})" if out.get("note") else ""
+    _done("finding", out["finding"]["id"], f"checked again ({out['checked']}), {outcome}{note}")
+    if not out["fixed"]:
+        raise typer.Exit(1)
+
+
 def _finding_action(finding_id: str, action: str) -> None:
     f = _call("POST", f"/v1/findings/{finding_id}/{action}")
     _done("finding", f["id"], f["status"])

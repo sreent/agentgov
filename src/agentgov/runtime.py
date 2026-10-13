@@ -18,7 +18,7 @@ from agentgov.gateway import GatewayConfigWriter
 from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
-from agentgov.models import LedgerCheckpoint
+from agentgov.models import Agent, LedgerCheckpoint
 from agentgov.notify import Notifier
 from agentgov.opa.bundle import BundleServer
 from agentgov.opa.signing import Signer
@@ -47,6 +47,7 @@ from agentgov.registry import (
     rules,
 )
 from agentgov.registry import agents as agents_svc
+from agentgov.registry.errors import Conflict, InvalidTransition
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
 from agentgov.secops.delivery import Delivery
 
@@ -374,6 +375,83 @@ class Runtime:
             ruled = self.run_rules(wait=wait)
         return None if scanned is None else {**scanned, "rules": ruled}
 
+    # -- someone says they fixed what an issue is about ---------------------------------
+
+    def _how_checked(self, type_: str, source: str | None) -> tuple[str | None, str | None]:
+        """How AgentGov checks a finding of ``type_`` again on demand, about an agent on
+        ``source`` (None: AgentGov's own): the check, or None and why it can't."""
+        if source == "copilot-studio" and type_ in platforms.FINDING_TYPES:
+            return "posture", (
+                "AgentGov checks what the last Copilot Studio import or sync says: import or "
+                "sync again to see a fix made in Copilot Studio."
+            )
+        if type_ in posture.POSTURE_TYPES or type_ == platforms.TO_REVIEW:
+            return "posture", None
+        if type_ == "agent.high_risk":
+            return "risk", None
+        if type_ == instructions.FINDING:
+            return "instructions", None
+        if type_ in platforms.INVENTORY_FINDINGS and source in self.platforms:
+            return "platform", None
+        for key, types in platforms.SYNCED_FINDINGS.items():
+            if type_ in types and key != "copilot-studio" and self.m365 is not None:
+                return f"microsoft:{key}", None
+        return None, (
+            "AgentGov can't check this kind of finding again on demand: it resolves itself "
+            "when what raised it is gone, or an approver resolves it."
+        )
+
+    def recheck(self, finding_id: str, *, actor: str) -> dict[str, Any]:
+        """Check an open finding again now, as far as AgentGov can, because someone says
+        they fixed it: whether it is gone, how it was checked, and what else to know."""
+        with self.db.session() as session:
+            finding = findings.get(session, finding_id)
+            if finding.status != "open":
+                raise InvalidTransition(
+                    f"finding is {finding.status}: only open findings are checked again"
+                )
+            agent_id = finding.agent_id
+            agent = session.get(Agent, agent_id) if agent_id else None
+            source = (agent.source or "").removeprefix("platform:") if agent else None
+            source = source if agent is not None and agent.on_platform else None
+            how, note = self._how_checked(finding.type, source)
+        if how is None:
+            raise Conflict(note or "")
+        if how == "posture":
+            if self.run_posture_scan(wait=JOB_WAIT_SECONDS) is None:
+                raise Conflict("posture checks are off: turn them on in Features first")
+        elif how == "platform":
+            assert source is not None
+            self.sync_platform(source, actor=actor, wait=JOB_WAIT_SECONDS, clean=1)
+        elif how.startswith("microsoft:"):
+            key = how.split(":", 1)[1]
+            outcome = self.sync_microsoft([key], actor=actor, wait=JOB_WAIT_SECONDS)[key]
+            if outcome.get("off") or "lacks_permission" in outcome:
+                raise Conflict(f"AgentGov can't read {key} now: it is off, or lacks a permission")
+            if "error" in outcome:
+                raise PlatformError(outcome["error"])
+        else:
+            with self.db.session() as session:
+                agent = session.get(Agent, agent_id)
+                if how == "risk":
+                    agents_svc.refresh_risk(session, self.settings, agent)
+                else:
+                    instructions.rescan(
+                        session, agent, actor=actor, classify=self.guardian is not None
+                    )
+        with self.db.session() as session:
+            finding = findings.get(session, finding_id)
+            fixed = finding.status != "open"
+            findings.record(
+                session, finding, "fix_claimed", actor, severity="info", checked=how, fixed=fixed
+            )
+            return {
+                "fixed": fixed,
+                "checked": how,
+                "note": note,
+                "finding": findings.to_dict(finding),
+            }
+
     def run_rules(self, *, wait: float | None = None) -> dict[str, Any]:
         """A round of the management rules (docs/management-rules.md)."""
         with self.coordination.job("rules", wait=wait), self.db.session() as session:
@@ -657,10 +735,11 @@ class Runtime:
     # -- AgentGov's connectors to other platforms -------------------------------------
 
     def sync_platform(
-        self, source: str, *, actor: str | None = None, wait: float | None = None
+        self, source: str, *, actor: str | None = None, wait: float | None = None, clean: int = 2
     ) -> dict[str, int]:
         """Read one platform's agents into the registry; returns the counts. One run per
-        platform at a time, on one replica."""
+        platform at a time, on one replica. ``clean``: syncs in a row that must find a
+        finding gone before it resolves (one, when someone says they fixed it)."""
         connector = self.platforms.get(source)
         if connector is None:
             raise PlatformError(f"{platforms.SOURCES.get(source, source)} is not configured")
@@ -673,7 +752,12 @@ class Runtime:
                 raise
             with self.db.session() as session, platforms.first_sync(session, source):
                 counts = platforms.record_inventory(
-                    session, source, inventory, actor=actor, classify=self.guardian is not None
+                    session,
+                    source,
+                    inventory,
+                    actor=actor,
+                    classify=self.guardian is not None,
+                    clean=clean,
                 )
                 platforms.refresh_risk(session, self.settings)
                 return counts

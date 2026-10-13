@@ -40,6 +40,9 @@ from agentgov.registry.errors import Forbidden, InvalidTransition, ValidationErr
 OWNER, SPONSORS, TEAM = "owner", "sponsors", "team"
 LEVELS = (OWNER, SPONSORS, TEAM)
 SYSTEM = "system:issues"
+# Someone it reached asks for its risk to be accepted (docs/issues.md#answering-an-issue):
+# who, why and until when, in the finding's details until an approver decides.
+ASKED = "exception_request"
 # The longest a risk can be accepted for: then someone decides again.
 MAX_ACCEPT = timedelta(days=365)
 EMAIL = "email"
@@ -305,6 +308,96 @@ def acknowledge(session: Session, finding: Finding, *, actor: str) -> Finding:
     return finding
 
 
+def _why(value: Any, what: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValidationError(f"say {what} (reason)")
+    if len(text) > 1000:
+        raise ValidationError("reason is 1000 characters at most")
+    return text
+
+
+def at_current_step(session: Session, finding: Finding, name: str) -> bool:
+    """Whether the person ``name`` is among the people and teams the issue is with now."""
+    key = (name or "").lower()
+    for level, people in chain(session, finding):
+        if level != finding.level:
+            continue
+        for person in people:
+            if person.kind == "person" and person.name.lower() == key:
+                return True
+            if key in {e.lower() for e in (*person.emails, *person.members)}:
+                return True
+    return False
+
+
+def decline(
+    session: Session,
+    settings: Settings,
+    finding: Finding,
+    *,
+    actor: str,
+    name: str,
+    reason: Any,
+) -> list[str]:
+    """Someone it is with says it isn't theirs, and why: it goes on to the next step of its
+    chain at once, which hears why. At the last step, it stays there. Returns whom it went
+    to (none when it stayed)."""
+    lock(session, finding)
+    if finding.status != "open":
+        raise InvalidTransition(f"finding is {finding.status}: only open findings are declined")
+    why = _why(reason, "why it isn't yours")
+    here = at_current_step(session, finding, name)
+    findings.record(session, finding, "declined", actor, severity="info", why=why, by=name)
+    steps = chain(session, finding)
+    step = _next(steps, finding.level) if here else None
+    if step is None:
+        return []
+    finding.acknowledged_at = None
+    finding.acknowledged_by = None
+    _give(session, settings, finding, step, steps, ids.utcnow(), escalated=True)
+    return list(finding.assignees or [])
+
+
+def ask_exception(
+    session: Session, finding: Finding, *, actor: str, name: str, reason: Any, until: Any
+) -> Finding:
+    """Someone it reached asks for its risk to be accepted until a date, and why: an approver
+    decides (accept, or decline_exception). Meanwhile it stays with them, acknowledged."""
+    lock(session, finding)
+    if finding.status != "open":
+        raise InvalidTransition(f"finding is {finding.status}: only open findings take this")
+    why = _why(reason, "why its risk is acceptable")
+    end = parse_until(until)
+    now = ids.utcnow()
+    finding.details = {
+        **(finding.details or {}),
+        ASKED: {"by": name, "reason": why, "until": ids.isoformat(end), "at": ids.isoformat(now)},
+    }
+    if finding.acknowledged_at is None:
+        finding.acknowledged_at, finding.acknowledged_by = now, actor
+        finding.escalate_at = None
+    findings.record(
+        session, finding, "exception_requested", actor, why=why, until=ids.isoformat(end)
+    )
+    return finding
+
+
+def decline_exception(session: Session, finding: Finding, *, actor: str, reason: Any) -> Finding:
+    """An approver turns down a request to accept its risk, saying why: it stays with
+    whoever asked, to fix."""
+    lock(session, finding)
+    asked = (finding.details or {}).get(ASKED)
+    if not asked:
+        raise InvalidTransition("nobody asked for its risk to be accepted")
+    why = _why(reason, "why not")
+    finding.details = {k: v for k, v in (finding.details or {}).items() if k != ASKED}
+    findings.record(
+        session, finding, "exception_declined", actor, why=why, asked_by=asked.get("by")
+    )
+    return finding
+
+
 def parse_until(value: Any, now: datetime | None = None) -> datetime:
     """An accepted risk's end: an ISO 8601 date or time, or a number of days from now."""
     now = now or ids.utcnow()
@@ -383,6 +476,8 @@ def accept(
     finding.accepted_reason = reason
     finding.status = "accepted"
     finding.escalate_at = None
+    # Whoever asked for it has their answer.
+    finding.details = {k: v for k, v in (finding.details or {}).items() if k != ASKED}
     findings.record(
         session,
         finding,

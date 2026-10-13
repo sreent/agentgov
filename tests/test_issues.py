@@ -422,7 +422,7 @@ class TestSending:
         assert notifier.run() == {"sent": 1, "failed": 0}
         (request,) = posted
         assert str(request.url) == "https://hooks.slack.example/T/B/x"
-        assert b"Acknowledge in AgentGov" in request.content
+        assert b"Answer in AgentGov" in request.content
 
     def test_nothing_is_sent_while_issues_are_off(self, client, agent) -> None:
         rt = _rt(client)

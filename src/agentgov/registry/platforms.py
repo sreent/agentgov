@@ -696,10 +696,12 @@ def record_inventory(
     *,
     actor: str | None = None,
     classify: bool = False,
+    clean: int = 2,
 ) -> dict[str, int]:
     """Store what a connector read from ``source``: each agent, with its risky settings
     as findings. Agents gone from a part read in full are marked gone; a part that
-    couldn't be read leaves its agents and their findings as they were, unverified."""
+    couldn't be read leaves its agents and their findings as they were, unverified.
+    ``clean``: syncs in a row that must find a finding gone before it resolves."""
     counts = {"created": 0, "updated": 0, "skipped": 0}
     seen: set[str] = set()
     present: set[str] = set()
@@ -778,7 +780,7 @@ def record_inventory(
         present_keys=present,
         actor=SYSTEM_ACTOR,
         subjects=checked,
-        clean=2,  # one odd answer from the platform doesn't close and reopen them
+        clean=clean,  # by default, one odd answer from the platform doesn't close and reopen them
     )
     by_reason: dict[str, set[str]] = {}
     for agent_id, why in unread.items():

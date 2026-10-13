@@ -29,6 +29,7 @@ from agentgov.models import (
 )
 from agentgov.opa import WHAT_IF
 from agentgov.opa.bundle import opa_status
+from agentgov.platforms.base import PlatformError
 from agentgov.registry import (
     access_packages,
     agents,
@@ -152,12 +153,14 @@ def list_findings(
     severity: str | None = None,
     type: str | None = None,
     agent: str | None = None,
+    asked: bool = False,
     limit: int = 500,
     offset: int = 0,
     _: Principal = Depends(read),
 ) -> list[dict[str, Any]]:
     """The findings, newest first, a page at a time (``limit``, at most 2000, from
-    ``offset``); ``X-Total-Count`` says how many there are in all."""
+    ``offset``); ``X-Total-Count`` says how many there are in all. ``asked``: only those
+    whose people ask for their risk to be accepted."""
     if not 1 <= limit <= MAX_FINDINGS_PAGE or offset < 0:
         raise ValidationError(f"limit is 1 to {MAX_FINDINGS_PAGE}, and offset 0 or more")
     with _rt(request).db.session() as s:
@@ -170,6 +173,8 @@ def list_findings(
             conditions.append(Finding.type == type)
         if agent:
             conditions.append(Finding.agent_id == agents.get(s, agent).id)
+        if asked:
+            conditions.append(Finding.details[issues.ASKED].is_not(None))
         total = s.scalar(select(func.count()).select_from(Finding).where(*conditions))
         response.headers["X-Total-Count"] = str(total or 0)
         stmt = (
@@ -265,6 +270,100 @@ def accept_finding(
         return findings.to_dict(accepted)
 
 
+# ------------------------------------------------- answers from the people it reached
+
+
+def _theirs(session: Any, finding: Any, principal: Principal, what: str) -> None:
+    if not issues.may_act(session, finding, principal.name):
+        raise HTTPException(403, f"the people it went to {what}")
+
+
+@router.post("/findings/{finding_id}/not-mine", tags=["findings"])
+def decline_finding(
+    request: Request,
+    finding_id: str,
+    body: dict[str, Any] = Body(default={}),
+    principal: Principal = Depends(signed_in),
+) -> dict[str, Any]:
+    """Say an issue isn't yours, and why (``reason``): it goes on to the next people
+    responsible for it at once, who hear why (``went_to``)."""
+    rt = _rt(request)
+    with rt.db.session() as s:
+        finding = findings.get(s, finding_id)
+        _theirs(s, finding, principal, "say it isn't theirs")
+        went_to = issues.decline(
+            s,
+            rt.settings,
+            finding,
+            actor=principal.actor,
+            name=principal.name,
+            reason=body.get("reason"),
+        )
+        return {**findings.to_dict(finding), "went_to": went_to}
+
+
+@router.post("/findings/{finding_id}/exception", tags=["findings"])
+def ask_for_exception(
+    request: Request,
+    finding_id: str,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(signed_in),
+) -> dict[str, Any]:
+    """Ask an approver to accept an issue's risk until a date (``until``: a date, a time or
+    a number of days), saying why (``reason``). It stays with you meanwhile."""
+    unknown = sorted(set(body) - {"reason", "until"})
+    if unknown:
+        raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
+    with _rt(request).db.session() as s:
+        finding = findings.get(s, finding_id)
+        _theirs(s, finding, principal, "ask for an exception")
+        asked = issues.ask_exception(
+            s,
+            finding,
+            actor=principal.actor,
+            name=principal.name,
+            reason=body.get("reason"),
+            until=body.get("until"),
+        )
+        return findings.to_dict(asked)
+
+
+@router.post("/findings/{finding_id}/exception/decline", tags=["findings"])
+def decline_exception(
+    request: Request,
+    finding_id: str,
+    body: dict[str, Any] = Body(default={}),
+    principal: Principal = Depends(require("approver", "secops")),
+) -> dict[str, Any]:
+    """Turn down a request to accept an issue's risk, saying why (``reason``): it stays
+    with whoever asked, to fix."""
+    with _rt(request).db.session() as s:
+        handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
+        finding = findings.get(s, finding_id)
+        declined = issues.decline_exception(
+            s, finding, actor=principal.actor, reason=body.get("reason")
+        )
+        return findings.to_dict(declined)
+
+
+@router.post("/findings/{finding_id}/recheck", tags=["findings"])
+def recheck_finding(
+    request: Request, finding_id: str, principal: Principal = Depends(signed_in)
+) -> dict[str, Any]:
+    """Say you fixed what an issue is about: AgentGov checks it again now, as far as it can
+    (``checked``), and says whether it is gone (``fixed``). For the people it reached,
+    approvers and administrators."""
+    rt = _rt(request)
+    with rt.db.session() as s:
+        finding = findings.get(s, finding_id)
+        if not _triages(s, principal):
+            _theirs(s, finding, principal, "ask for it to be checked again")
+    try:
+        return rt.recheck(finding_id, actor=principal.actor)
+    except PlatformError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
 @router.post("/findings/{finding_id}/{action}", tags=["findings"])
 def finding_action(
     request: Request,
@@ -274,7 +373,11 @@ def finding_action(
 ) -> dict[str, Any]:
     status = {"resolve": "resolved", "dismiss": "dismissed", "reopen": "open"}.get(action)
     if status is None:
-        raise HTTPException(404, "action must be resolve, dismiss, reopen, acknowledge or accept")
+        raise HTTPException(
+            404,
+            "action must be resolve, dismiss, reopen, acknowledge, accept, not-mine, exception "
+            "or recheck",
+        )
     with _rt(request).db.session() as s:
         # The security team's tools, as far as the hand-off lets them.
         handoff.check(s, principal, handoff.TRIAGE, also=("approver",))

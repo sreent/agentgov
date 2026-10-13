@@ -101,6 +101,9 @@ them and sends what is due every `AGENTGOV_ISSUES_INTERVAL_SECONDS` (60).
 |---|---|---|
 | Acknowledge | The people it reached so far (team members included), approvers and administrators, and the `secops` role from the triage level on | It goes no further up its chain. The people after them aren't told |
 | Fix the cause | Whoever can | The next check (the posture scan, or the next sync of the system it came from) resolves it |
+| Say it isn't yours, and why | The people it reached | It goes on to the next step of its chain at once (see [Answering an issue](#answering-an-issue)) |
+| Ask for an exception | The people it reached | An approver decides whether to accept its risk until the date asked for |
+| Say you fixed it | The people it reached, approvers and administrators | AgentGov checks it again now, where it can, and resolves it if it is gone |
 | Accept the risk | Approvers and administrators, and the `secops` role from triage on | It goes to nobody until the date chosen, at most a year away, and opens again then if it still holds. A reason is required |
 | Resolve, dismiss | The same | As for any finding. Dismiss is for findings that are wrong: to live with a real one, accept its risk |
 | Reopen | The same | It starts its chain over |
@@ -115,9 +118,32 @@ chain over, from the first step.
 
 | Where | How |
 |---|---|
-| Admin UI | **Findings**: who each issue is with, **Acknowledge** and **Accept risk**, the **Yours** filter, and a page per finding with its chain, its messages and its history. People without a role see **Your issues** |
-| CLI | `agentgov findings list --mine`, `agentgov findings get ID`, `agentgov findings acknowledge ID`, `agentgov findings accept ID --reason "…" --until 2026-12-31` (or `--until 90`, in days) |
-| API | `GET /v1/me/issues`, `GET /v1/findings/{id}`, `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` with `{"reason": "…", "until": "2026-12-31"}` |
+| Admin UI | **Findings**: who each issue is with, **Acknowledge** and **Accept risk**, the **Yours** and **Exceptions asked** filters, and a page per finding with its chain, its messages and its history, where the people it reached also say **Not mine**, **Ask for an exception** or **I fixed it**. People without a role see **Your issues** |
+| CLI | `agentgov findings list --mine`, `agentgov findings get ID`, `agentgov findings acknowledge ID`, `agentgov findings accept ID --reason "…" --until 2026-12-31` (or `--until 90`, in days), `agentgov findings not-mine ID --reason "…"`, `agentgov findings ask-exception ID --reason "…" --until 90`, `agentgov findings decline-exception ID --reason "…"`, `agentgov findings recheck ID` |
+| API | `GET /v1/me/issues`, `GET /v1/findings/{id}`, `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` with `{"reason": "…", "until": "2026-12-31"}`, `POST /v1/findings/{id}/not-mine` with `{"reason": "…"}`, `POST /v1/findings/{id}/exception` with `{"reason": "…", "until": 90}`, `POST /v1/findings/{id}/exception/decline`, `POST /v1/findings/{id}/recheck`, and `GET /v1/findings?asked=true` for the exceptions asked for |
+
+### Answering an issue
+
+The people an issue reaches aren't always the right ones, and can't always fix it at once.
+On its page (the link in each email and chat message), besides acknowledging it, they can:
+
+* **Say it isn't theirs.** They say why, for instance whose it is. It goes on to the next
+  step of its chain at once, rather than when its time runs out, and the people there see
+  why in its history. At the last step it stays there. Someone it reached at an earlier step
+  can say so too: it is recorded, and the issue stays where it is.
+* **Ask for an exception.** They say why its risk is acceptable for now, and until when (a
+  year at most). The issue stays with them, acknowledged, and is listed under **Exceptions
+  asked** for approvers, who accept its risk (with what was asked, or changed) or decline,
+  saying why; declined, it stays with whoever asked, to fix. The people accountable for the
+  agent can't accept its risks themselves.
+* **Say they fixed it.** AgentGov checks it again at once where it can: with a posture
+  scan, by reading the agent's platform again (one clean read is enough when someone asks,
+  where a scheduled sync takes two), with its Microsoft connection, by computing the agent's
+  risk again, or by checking its instructions again. If it is gone, it is resolved;
+  otherwise it stays open and says so. A Copilot Studio agent's findings come from the last
+  import or sync, so a fix made in Copilot Studio shows after the next one. Threats and
+  findings from other systems can't be checked on demand: they resolve themselves, or an
+  approver resolves them.
 
 ## People without an AgentGov role
 
@@ -144,9 +170,9 @@ before it sends it, so none goes twice while the lead moves. The finding's page 
 messages and how each went.
 
 An email's subject reads `[AgentGov] Medium issue about agent support-bot: …`. It says why
-it came (as the agent's owner, one of its sponsors, or the team it escalates to) and links to
-the issue in AgentGov. A chat gets a card with the same, and an **Acknowledge in AgentGov**
-button.
+it came (as the agent's owner, one of its sponsors, or the team it escalates to), what its
+people can do there, and links to the issue in AgentGov. A chat gets a card with the same,
+and an **Answer in AgentGov** button.
 
 Emails go through your mail server: `AGENTGOV_SMTP_URL` (`smtps://host:465`, or
 `smtp://host:587` with STARTTLS, which AgentGov uses whenever the server offers it),
@@ -244,6 +270,9 @@ findings aren't affected: they close when their check finds their cause gone.
 | `finding.assigned` | It went to the first step of its chain |
 | `finding.escalated` (warning) | Nobody acknowledged it in time: it went to the next step |
 | `finding.acknowledged` | Someone took it on |
+| `finding.declined` | Someone it reached said it isn't theirs, and why |
+| `finding.exception_requested`, `finding.exception_declined` | Someone asked for its risk to be accepted; an approver declined |
+| `finding.fix_claimed` | Someone said they fixed it: how AgentGov checked it, and whether it was gone |
 | `finding.accepted` (warning) | Its risk was accepted, with the date and the reason |
 | `finding.reopened` | Raised again, reopened by hand, or its accepted risk ran out |
 | `finding.resolved` | Its cause is gone, or, a threat, it hasn't happened for a while |

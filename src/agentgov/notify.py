@@ -213,8 +213,9 @@ class Notifier:
         if item.remediation:
             lines += [f"What to do: {item.remediation}", ""]
         lines += [
-            f"You get this as {_who(item.level)}. Acknowledge it in AgentGov, or it goes on to "
-            "the next people responsible for it:",
+            f"You get this as {_who(item.level)}. In AgentGov, acknowledge it, or it goes on "
+            "to the next people responsible for it. There too: say it isn't yours, ask for an "
+            "exception, or say you fixed it, and AgentGov checks it again:",
             self._link(item.finding_id),
         ]
         message.set_content("\n".join(lines))
@@ -268,6 +269,6 @@ class Notifier:
                 severity=item.severity,
                 facts=facts,
                 link=self._link(item.finding_id),
-                link_label="Acknowledge in AgentGov",
+                link_label="Answer in AgentGov",
             ),
         )

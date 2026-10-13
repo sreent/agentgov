@@ -3688,7 +3688,7 @@ async function approveTool(ts, t) {
 /* ---------------------------------------------------------------- findings */
 
 const FINDING_STATUS = [
-  ['open', 'Open'], ['mine', 'Yours'], ['accepted', 'Risk accepted'], ['resolved', 'Resolved'], ['dismissed', 'Dismissed'], ['all', 'All'],
+  ['open', 'Open'], ['mine', 'Yours'], ['asked', 'Exceptions asked'], ['accepted', 'Risk accepted'], ['resolved', 'Resolved'], ['dismissed', 'Dismissed'], ['all', 'All'],
 ];
 const LEVEL_WORDS = { owner: 'its owner', sponsors: 'its sponsors', team: 'its team' };
 const FINDING_DONE = { resolve: 'Resolved', dismiss: 'Dismissed', reopen: 'Reopened', acknowledge: 'Acknowledged' };
@@ -3709,7 +3709,7 @@ function findingTabs(current) {
 
 async function renderFindings({ params }) {
   const person = isPerson();
-  const statuses = person ? FINDING_STATUS.filter(([k]) => !['mine', 'dismissed'].includes(k)) : FINDING_STATUS;
+  const statuses = person ? FINDING_STATUS.filter(([k]) => !['mine', 'asked', 'dismissed'].includes(k)) : FINDING_STATUS;
   const state = {
     status: statuses.some(([k]) => k === params.get('status')) ? params.get('status') : 'open',
     severity: params.get('severity') || '',
@@ -3722,6 +3722,7 @@ async function renderFindings({ params }) {
   const PAGE = 500;
   const source = (status, offset) => (person ? `v1/me/issues?status=${encodeURIComponent(status)}`
     : status === 'mine' ? 'v1/me/issues?status=open'
+    : status === 'asked' ? `v1/findings?status=open&asked=true&limit=${PAGE}&offset=${offset}`
     : `v1/findings?status=${encodeURIComponent(status)}&limit=${PAGE}&offset=${offset}${state.type ? `&type=${encodeURIComponent(state.type)}` : ''}`);
   async function fetchPage(status, offset = 0) {
     const res = await api(source(status, offset), { raw: true });
@@ -3775,9 +3776,9 @@ async function renderFindings({ params }) {
 
   async function act(f, action, rows) {
     try {
-      if (action === 'accept') {
-        if (!await acceptRisk(f)) return;
-      } else {
+      const answered = await answerIssue(f, action);
+      if (answered === false) return;
+      if (answered === null) {
         await api(`v1/findings/${encodeURIComponent(f.id)}/${action}`, { method: 'POST' });
         toast(`${FINDING_DONE[action]}: ${f.title}`);
       }
@@ -3820,12 +3821,14 @@ async function renderFindings({ params }) {
       .filter((f) => !state.severity || f.severity === state.severity)
       .sort((x, y) => SEVERITY_ORDER.indexOf(x.severity) - SEVERITY_ORDER.indexOf(y.severity) || String(y.last_seen).localeCompare(String(x.last_seen)));
     const word = person || state.status === 'mine' ? 'issue' : 'finding';
-    const which = ['all', 'mine'].includes(state.status) ? '' : `${statusMeta('finding', state.status)[2].toLowerCase()} `;
+    const which = ['all', 'mine', 'asked'].includes(state.status) ? '' : `${statusMeta('finding', state.status)[2].toLowerCase()} `;
+    // An exception asked for is counted as such.
+    const many = (n) => (state.status === 'asked' ? plural(n, 'exception asked for', 'exceptions asked for') : plural(n, `${which}${word}`));
     // Counted among those loaded: say so when there are more.
     const capped = total > list.length;
-    countEl.textContent = !capped ? plural(rows.length, `${which}${word}`)
-      : rows.length === list.length ? `The newest ${fmt(list.length)} of ${plural(total, `${which}${word}`)}`
-        : `${plural(rows.length, `${which}${word}`)} among the newest ${fmt(list.length)} of ${fmt(total)}`;
+    countEl.textContent = !capped ? many(rows.length)
+      : rows.length === list.length ? `The newest ${fmt(list.length)} of ${many(total)}`
+        : `${many(rows.length)} among the newest ${fmt(list.length)} of ${fmt(total)}`;
     more.hidden = !capped;
     more.textContent = `Show ${fmt(Math.min(PAGE, total - list.length))} more`;
     const yours = person || state.status === 'mine';
@@ -3895,6 +3898,16 @@ function findingActions(f, act, { yours = false, detail = false } = {}) {
     if (f.level && !f.acknowledged_at && (triage || yours)) {
       buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('acknowledge') }, icon('user-check'), 'Acknowledge'));
     }
+    // The people it reached answer it: on its page, all the ways they can.
+    if (yours && detail && f.level) {
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('not-mine') }, icon('arrow'), 'Not mine'));
+    }
+    if (yours && detail && !f.details?.exception_request) {
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('exception') }, icon('shield-check'), 'Ask for an exception'));
+    }
+    if (yours || triage) {
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm', title: 'Say you fixed it: AgentGov checks it again now, where it can', onclick: () => act('recheck') }, icon('refresh'), 'I fixed it'));
+    }
     if (triage) {
       buttons.push(
         h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('accept') }, icon('shield-check'), 'Accept risk'),
@@ -3908,13 +3921,15 @@ function findingActions(f, act, { yours = false, detail = false } = {}) {
 }
 
 async function acceptRisk(f) {
-  const later = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
+  // An exception its people asked for: what they asked, to agree to or change.
+  const asked = f.details?.exception_request;
+  const later = asked?.until?.slice(0, 10) || new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
   const done = await ask({
     title: 'Accept the risk?',
     text: `${f.title}. It goes to nobody until the date you choose, then opens again if it still holds. A year at most: then someone decides again.`,
     iconName: 'shield-check', confirm: 'Accept risk',
     fields: [
-      { id: 'reason', label: 'Why it is acceptable', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with the finding.' },
+      { id: 'reason', label: 'Why it is acceptable', type: 'textarea', required: true, value: asked?.reason || null, hint: 'Recorded in the evidence ledger, and shown with the finding.' },
       { id: 'until', label: 'Until', required: true, value: later, mono: true, hint: 'A date (YYYY-MM-DD), or a number of days.' },
     ],
     submit: (v) => api(`v1/findings/${encodeURIComponent(f.id)}/accept`, {
@@ -3923,6 +3938,69 @@ async function acceptRisk(f) {
   });
   if (done) toast(`Risk accepted until ${done.accepted_until.slice(0, 10)}: ${f.title}`);
   return done;
+}
+
+// The answers that take a few words first: accepting the risk, saying an issue isn't
+// yours, asking for an exception, declining one, and saying you fixed it. Resolves to
+// whether something was done, or null for the other actions.
+async function answerIssue(f, action) {
+  const path = `v1/findings/${encodeURIComponent(f.id)}`;
+  if (action === 'accept') return Boolean(await acceptRisk(f));
+  if (action === 'not-mine') {
+    const done = await ask({
+      title: 'Not yours?',
+      text: `${f.title}. It goes on to the next people responsible for it at once, and they see why.`,
+      iconName: 'arrow', confirm: 'Pass it on',
+      fields: [{ id: 'reason', label: 'Why it isn\'t yours', type: 'textarea', required: true, hint: 'Whose it is, if you know. Recorded in the evidence ledger.' }],
+      submit: (v) => api(`${path}/not-mine`, { method: 'POST', body: { reason: v.reason } }),
+    });
+    if (done) toast(done.went_to?.length ? `Passed on to ${done.went_to.join(', ')}.` : 'Recorded. Nobody comes after you in its chain, so it stays where it is.');
+    return Boolean(done);
+  }
+  if (action === 'exception') {
+    const later = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
+    const done = await ask({
+      title: 'Ask for an exception?',
+      text: `${f.title}. An approver decides whether its risk is acceptable until the date you ask for. It stays with you meanwhile.`,
+      iconName: 'shield-check', confirm: 'Ask',
+      fields: [
+        { id: 'reason', label: 'Why its risk is acceptable', type: 'textarea', required: true, hint: 'What makes it safe enough for now, and what you will do by then.' },
+        { id: 'until', label: 'Until', required: true, value: later, mono: true, hint: 'A date (YYYY-MM-DD), or a number of days: a year at most.' },
+      ],
+      submit: (v) => api(`${path}/exception`, { method: 'POST', body: { reason: v.reason, until: /^\d+$/.test(v.until) ? Number(v.until) : v.until } }),
+    });
+    if (done) toast('Asked. An approver decides.');
+    return Boolean(done);
+  }
+  if (action === 'decline-exception') {
+    const done = await ask({
+      title: 'Decline the exception?',
+      text: `${f.title}. It stays with whoever asked, to fix.`,
+      iconName: 'x', confirm: 'Decline',
+      fields: [{ id: 'reason', label: 'Why not', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with the finding.' }],
+      submit: (v) => api(`${path}/exception/decline`, { method: 'POST', body: { reason: v.reason } }),
+    });
+    if (done) toast('Declined.');
+    return Boolean(done);
+  }
+  if (action === 'recheck') {
+    const out = await api(`${path}/recheck`, { method: 'POST' });
+    toast(out.fixed ? `Checked again, and it is gone: ${f.title}` : `Checked again, and it is still there.${out.note ? ` ${out.note}` : ''}`,
+      out.fixed ? undefined : { tone: 'critical' });
+    return true;
+  }
+  return null;
+}
+
+// Someone it reached asks for its risk to be accepted: approvers decide here.
+function exceptionAsked(f, act) {
+  const asked = f.details?.exception_request;
+  if (!asked || f.status !== 'open') return null;
+  return callout('warning', 'shield-check', h('div', { class: 'stack', style: 'gap:8px' },
+    h('span', {}, h('strong', {}, `${asked.by} asks for its risk to be accepted until ${String(asked.until).slice(0, 10)}: `), asked.reason),
+    mayTriage() ? h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => act('accept') }, icon('shield-check'), 'Accept the risk'),
+      h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('decline-exception') }, icon('x'), 'Decline')) : null));
 }
 
 function findingCard(f, agentsById, act, { yours = false } = {}) {
@@ -3936,6 +4014,7 @@ function findingCard(f, agentsById, act, { yours = false } = {}) {
       h('div', { class: 'finding-top' }, chip('severity', f.severity), plainChip(humanize(f.category)),
         f.status !== 'open' ? chip('finding', f.status) : null,
         f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle', title: `${cap(f.unverified_reason || 'the sync that checks it failed')}: it may no longer hold.` }) : null,
+        f.status === 'open' && f.details?.exception_request ? plainChip('Exception asked', { tone: 'warning', iconName: 'shield-check', title: `${f.details.exception_request.by}: ${f.details.exception_request.reason}` }) : null,
         h('span', { class: 'ledger-type muted' }, f.type)),
       h('h3', { id: headingId, class: 'break' }, f.title),
       f.description ? h('p', { class: 'finding-desc small' }, f.description) : null,
@@ -3958,9 +4037,9 @@ async function renderFinding({ match }) {
   const f = await api(`v1/findings/${encodeURIComponent(id)}`);
   const person = isPerson();
   const act = guarded(async (action) => {
-    if (action === 'accept') {
-      if (!await acceptRisk(f)) return;
-    } else {
+    const answered = await answerIssue(f, action);
+    if (answered === false) return;
+    if (answered === null) {
       await api(`v1/findings/${encodeURIComponent(f.id)}/${action}`, { method: 'POST' });
       toast(`${FINDING_DONE[action]}: ${f.title}`);
     }
@@ -3976,6 +4055,7 @@ async function renderFinding({ match }) {
       f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle' }) : null),
     f.verified === false ? callout('warning', 'triangle', h('span', {}, h('strong', {}, 'Unverified: '),
       `${f.unverified_reason || 'the latest sync that checks it failed'}, so it may no longer hold. It stays open until its check runs again.`)) : null,
+    exceptionAsked(f, act),
     card({
       title: 'What it is',
       body: h('div', { class: 'stack' },
