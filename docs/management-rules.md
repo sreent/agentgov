@@ -177,7 +177,9 @@ monitored:
 
 * `inactive-agents` blocks agents nobody has used for 90 days, two weeks after telling
   their people.
-* `ownerless-agents` gives agents left without an owner to the AI governance team.
+* `ownerless-agents` blocks active agents left without an owner, two weeks after telling
+  their sponsors and team (Agent 365's example rule blocks ownerless agents too). To give
+  them to a team instead, change its action to `assign_owner` with `params: {owner: TEAM}`.
 * `stale-registrations` deletes registrations nobody approved within 30 days.
 * `expired-access` revokes access packages a week after they expired, unless renewed.
 

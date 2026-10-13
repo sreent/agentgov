@@ -18,13 +18,14 @@ kind: ManagementRule
 metadata:
   name: ownerless-agents
 spec:
-  description: Agents left without an owner go to the AI governance team
+  description: Block agents left without an owner, two weeks after telling their sponsors and team
+  # Nobody answers for an agent without an owner. To give such agents to a team instead,
+  # use action: assign_owner with params: {owner: ai-governance}. Agents on other platforms
+  # are told about rather than blocked: block them in the platform's admin center.
   conditions:
     missing: [owner]
-    status: [pending, active]
-  action: assign_owner
-  params:
-    owner: ai-governance
+    status: [active]
+  action: block
   after_days: 14
 ---
 apiVersion: agentgov/v1alpha1
