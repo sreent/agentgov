@@ -115,6 +115,9 @@ runtimes), `agentcore-gateways`, `quick` and `agent-registry`, all by default.
 | `platform.shared_with_everyone` | an Amazon Quick agent is shared with a whole namespace, every user in it |
 | `platform.maker_credentials` | an Amazon Quick agent's action connectors sign in with one credential for everyone (an API key, a user name and password, an OAuth client or an IAM role), so its users act with that credential's access rather than their own |
 
+A runtime or gateway whose resource policy AgentGov may not read is shown as read in part, and
+its findings about who may call it stay as they were, unverified, rather than close.
+
 ### Setting it up
 
 1. Give AgentGov AWS credentials that may read the agents. In each account, a role (or user)

@@ -160,6 +160,11 @@ def _refused(exc: PlatformError) -> str | None:
     raise exc
 
 
+# A resource policy AgentGov may not read: who may call the resource is unknown, so the
+# findings about it stay as they were rather than close.
+UNREAD_POLICY = "its resource policy, which says who may call it, couldn't be read"
+
+
 def _partial(found: Found, why: str) -> Found:
     found.complete = False
     found.details["facts"].append({"label": "Not read in full", "value": why, "tone": "warning"})
@@ -253,6 +258,8 @@ def _agentcore(api: _Api, account: str, region: str, part: str) -> list[Found]:
         policy = None
         if why is None and runtime.get("agentRuntimeArn") and not _jwt(runtime):
             policy = api.resource_policy(*CONTROL, runtime["agentRuntimeArn"])
+            if policy is None:
+                why = UNREAD_POLICY
         item = agent_runtime(runtime, account, region, part, policy=policy)
         found.append(_partial(item, why) if why else item)
     return found
@@ -285,6 +292,8 @@ def _gateways(api: _Api, account: str, region: str, part: str) -> list[Found]:
         policy = None
         if why is None and gateway.get("authorizerType") == "AWS_IAM" and gateway.get("gatewayArn"):
             policy = api.resource_policy(*CONTROL, gateway["gatewayArn"])
+            if policy is None:
+                why = UNREAD_POLICY
         item = agentcore_gateway(gateway, targets, account, region, part, policy=policy)
         found.append(_partial(item, why) if why else item)
     return found

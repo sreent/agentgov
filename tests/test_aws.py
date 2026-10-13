@@ -291,6 +291,7 @@ class FakePlatform:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.throttle = 0
+        self.policies_refused = False
         self.agents = [
             {"agentId": "AGENT00001", "agentName": "support-agent", "agentStatus": "PREPARED"},
             {"agentId": "AGENT00002", "agentName": "triage-agent", "agentStatus": "PREPARED"},
@@ -542,6 +543,12 @@ class FakePlatform:
         if path.startswith("/resourcepolicy/"):
             # The ARN, percent-encoded in the path (and signed encoded once more).
             assert "%3A" in request.url.raw_path.decode()
+            if self.policies_refused:
+                return httpx.Response(
+                    403,
+                    headers={"x-amzn-ErrorType": "AccessDeniedException"},
+                    json={"message": "not authorized to perform GetResourcePolicy"},
+                )
             policy = {
                 "Version": "2012-10-17",
                 "Statement": [
@@ -1268,6 +1275,25 @@ def test_an_agent_aws_wont_describe_is_kept_from_its_summary(aws_client, platfor
     assert "kms:Decrypt" in facts["Not read in full"]
     # The rest of the region was read.
     assert _agent(aws_client, "support-agent")["platform"] == "Amazon Bedrock agent"
+
+
+def test_a_resource_policy_aws_wont_show_leaves_its_findings_open(aws_client, platform) -> None:
+    sync = "/v1/platforms/aws/sync"
+    assert aws_client.post(sync, headers=ADMIN).status_code == 200
+    for name in ("ledger-api", "ledger-tools"):
+        assert "platform.no_authentication" in _findings(aws_client, name)
+
+    platform.policies_refused = True
+    for _ in range(3):  # more than the clean checks that close a finding
+        assert aws_client.post(sync, headers=ADMIN).status_code == 200
+    for name in ("ledger-api", "ledger-tools"):
+        [view] = _agent(aws_client, name)["platforms"]
+        facts = {f["label"]: f["value"] for f in view["facts"]}
+        assert facts["Resource policy"] == "AgentGov may not read it"
+        assert "resource policy" in facts["Not read in full"]
+        # Who may call it is unknown: the finding stays, unverified, rather than close.
+        found = _findings(aws_client, name)["platform.no_authentication"]
+        assert found["verified"] is False
 
 
 def test_throttled_requests_are_tried_again(aws_client, platform) -> None:
