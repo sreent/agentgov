@@ -47,6 +47,8 @@ TRANSITIONS: dict[str, tuple[frozenset[str], str]] = {
     "adopt": (frozenset({DISCOVERED}), PENDING),
 }
 ACTIVATING = {"approve", "unblock"}
+# What an agent's risk counts that an edit can change.
+RISKY_FIELDS = {"owner", "sponsors", "risk_tier", "blueprint", "permissions"}
 
 EDITABLE = (
     "description",
@@ -373,6 +375,7 @@ def update(
     *,
     actor: str,
     version: int | None = None,
+    reason: str | None = None,
 ) -> list[str]:
     start_edit(session, agent, version, f"agent {agent.name}")
     if agent.status == DELETED:
@@ -385,6 +388,7 @@ def update(
             type="agent.updated",
             actor=actor,
             agent=agent,
+            reason=reason,
             details={"changed": changed},
         )
         mark_changed(session, "agents")

@@ -303,6 +303,23 @@ then high) starts its chain over, from its first step: they are told again, and 
 had acknowledged it acknowledges it again (`finding.severity_raised`). Its severity
 settling back, or rising again only as far as they were told, tells nobody again.
 
+## Many at once
+
+On **Findings**, tick findings, or all of those shown, or, with **Group by agent**, all of
+those about an agent, and act on them together: **Acknowledge**, **Resolve**, **Accept
+risk…** and **Dismiss…** (one reason, and one date, for all of them) and **Reopen**. Each is
+done on its own: one that can't be is left as it was, and AgentGov lists those left, with
+why. Accepting the risk of one about an agent you sponsor is left, for instance: someone
+else signs that off. The people an issue reached acknowledge theirs this way too; approvers,
+administrators and the `secops` role (from triage on) do the rest. **Download CSV** gives
+the findings shown as a spreadsheet: who each is with, how often it was seen, who closed it.
+
+| Where | How |
+|---|---|
+| Admin UI | **Findings**: the boxes on findings and on agents' groups, the bar above them, **Group by agent**, **Download CSV** |
+| CLI | Name several: `agentgov findings dismiss ID ID --reason "A red-team exercise"`, and the same for `acknowledge`, `resolve`, `accept` and `reopen`. `agentgov findings list -q` prints only IDs, `--csv` every column |
+| API | `POST /v1/findings/bulk` with `{"action": "dismiss", "findings": [...], "reason": "…", "until": 30}`: up to 500 a call. It answers with those `done`, and those `left`, each with `why` |
+
 ## In the ledger
 
 | Entry | When |

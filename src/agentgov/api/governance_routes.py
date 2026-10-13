@@ -34,6 +34,7 @@ from agentgov.registry import (
     access_packages,
     agents,
     approvals,
+    bulk,
     discovery,
     finding_types,
     findings,
@@ -362,6 +363,39 @@ def recheck_finding(
         return rt.recheck(finding_id, actor=principal.actor)
     except PlatformError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/findings/bulk", tags=["findings"])
+def bulk_findings(
+    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(signed_in)
+) -> dict[str, Any]:
+    """Do one thing to many ``findings`` (their IDs) at once: ``action`` is acknowledge,
+    resolve, reopen, dismiss (``reason``; ``until``, for a while) or accept (``reason`` and
+    ``until``). Each on its own: those it can't do are ``left``, each with why. The people
+    an issue reached acknowledge theirs; approvers and the secops role (from triage on)
+    do the rest."""
+    unknown = sorted(set(body) - {"action", "findings", "reason", "until"})
+    if unknown:
+        raise ValidationError(
+            f"unknown field(s) {', '.join(unknown)}: send action, findings, reason and until"
+        )
+    action = str(body.get("action") or "")
+    with _rt(request).db.session() as s:
+        triages = _triages(s, principal)
+        if action in bulk.FINDING_ACTIONS and action != "acknowledge":
+            if not principal.roles & {"admin", "approver", "secops"}:
+                raise HTTPException(403, f"role {principal.role!r} may not do this")
+            handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
+        return bulk.findings(
+            s,
+            body.get("findings"),
+            action,
+            actor=principal.actor,
+            by=principal.name,
+            reason=body.get("reason"),
+            until=body.get("until"),
+            may=None if triages else (lambda f: issues.may_act(s, f, principal.name)),
+        )
 
 
 @router.post("/findings/{finding_id}/dismiss", tags=["findings"])

@@ -864,6 +864,7 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .dialog-section { font-size: var(--fs-sm); font-weight: 650; color: var(--ink-2); border-top: 1px solid var(--line); padding-top: 12px; margin-top: 2px; }
 .apply-results { list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-sm); max-height: 50vh; overflow-y: auto; }
 .apply-results li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; justify-content: space-between; }
+.apply-results li.left-group { flex-direction: column; align-items: flex-start; gap: 2px; }
 /* A control's exceptions, under its mode. */
 .exceptions { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 8px; }
 .exception-list { list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); }
@@ -923,3 +924,38 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .start-step[data-done="true"] strong { color: var(--ink-2, inherit); font-weight: 500; }
 .start-step[aria-current="step"] strong { color: var(--ink); }
 .start-how { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+
+/* Lists: sorting by a column, and choosing rows for an action on many at once. */
+.th-sort {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; cursor: pointer;
+  font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit;
+}
+.th-sort:hover { color: var(--ink); }
+.th-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.th-sort .ico { width: 12px; height: 12px; transition: transform 0.15s; }
+.th-sort .sort-none { opacity: 0; }
+.th-sort:hover .sort-none, .th-sort:focus-visible .sort-none { opacity: 0.45; transform: rotate(90deg); }
+.th-sort .sort-up { transform: rotate(-90deg); }
+.th-sort .sort-down { transform: rotate(90deg); }
+table.data th.select-cell, table.data td.select-cell { width: 1%; padding-right: 0; }
+.select-cell input, .finding-choose input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); cursor: pointer; }
+.select-hit { display: block; cursor: pointer; }
+table.data tbody tr.is-chosen td { background: var(--accent-soft); }
+.bulk-bar {
+  display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
+  padding: 8px 12px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--accent-soft);
+  position: sticky; top: 12px; z-index: 5;
+}
+.bulk-bar--idle { border-color: var(--line); background: var(--surface); position: static; }
+.bulk-bar .check { align-items: center; }
+.bulk-bar .check input { margin: 0; }
+.bulk-count { font-size: var(--fs-sm); }
+@media (max-width: 900px) { .bulk-bar { top: 64px; } }
+/* The table's header chooses them all on a wide screen; a narrow one has no header. */
+@media (min-width: 681px) { .bulk-bar--narrow { display: none; } }
+@media (max-width: 680px) { table.rtable tbody tr.is-chosen { background: var(--accent-soft); } }
+.finding-choose { align-self: center; }
+.finding-group { display: flex; flex-direction: column; gap: 10px; }
+.finding-group + .finding-group { margin-top: 12px; }
+.finding-group-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.finding-group-title { font-size: var(--fs-md); }

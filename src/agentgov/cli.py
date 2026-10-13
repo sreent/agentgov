@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import csv
 import hashlib
 import html
 import http.server
@@ -219,8 +220,64 @@ def _table(rows: list[dict[str, Any]], columns: list[str]) -> None:
         typer.echo("  ".join(cell(row, c).ljust(widths[c]) for c in columns).rstrip())
 
 
+# A cell a spreadsheet would take for a formula (names and descriptions come from the
+# platforms): kept as text.
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv(rows: list[dict[str, Any]], columns: list[str]) -> None:
+    """The rows as CSV, for a spreadsheet: a header, then a line each."""
+    out = csv.writer(sys.stdout, lineterminator="\n")
+    out.writerow(columns)
+    for row in rows:
+        cells = []
+        for column in columns:
+            value = row.get(column)
+            text = (
+                ""
+                if value is None
+                else "; ".join(map(str, value))
+                if isinstance(value, list)
+                else str(value)
+            )
+            cells.append(f"'{text}" if text.startswith(FORMULA_START) else text)
+        out.writerow(cells)
+
+
 def _done(kind: str, name: str, outcome: str) -> None:
     typer.echo(f"{kind}/{name}: {outcome}")
+
+
+# The control plane takes this many agents or findings a call: more are sent in turns.
+AT_ONCE = 500
+
+
+def _at_once(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/{kind}s/bulk with every one named, in turns, the answers put together."""
+    out: dict[str, Any] = {"done": [], "left": []}
+    names = body[f"{kind}s"]
+    for start in range(0, len(names), AT_ONCE):
+        part = _call(
+            "POST", f"/v1/{kind}s/bulk", json={**body, f"{kind}s": names[start : start + AT_ONCE]}
+        )
+        out["done"] += part["done"]
+        out["left"] += part["left"]
+    return out
+
+
+def _many(
+    kind: str, out: dict[str, Any], outcome: str | None = None, note: str | None = None
+) -> None:
+    """What one call did to many agents or findings: each done, then each left as it was,
+    and why. Fails if it left any."""
+    for row in out["done"]:
+        _done(kind, row[kind], outcome or row["status"])
+    if note:
+        typer.echo(note, err=True)
+    for row in out["left"]:
+        typer.echo(f"{kind}/{row[kind]}: left as it was: {row['why']}", err=True)
+    if out["left"]:
+        raise typer.Exit(1)
 
 
 def _confirm(question: str, yes: bool) -> None:
@@ -882,6 +939,28 @@ def replicas() -> None:
 # -------------------------------------------------------------------- agents
 
 
+AS_CSV = typer.Option(False, "--csv", help="As CSV, with more columns: for a spreadsheet.")
+REASON = typer.Option(None, help="Recorded in the evidence ledger.")
+AGENT_REFS = typer.Argument(..., help="The agents, by name or ID: one, or several at once.")
+AGENT_CSV = [
+    "name",
+    "id",
+    "status",
+    "risk_level",
+    "risk_score",
+    "owner",
+    "sponsors",
+    "team",
+    "blueprint",
+    "source",
+    "environment",
+    "maker",
+    "created_at",
+    "last_seen_at",
+    "description",
+]
+
+
 @agents_app.command("list")
 def agents_list(
     status: str | None = None,
@@ -890,9 +969,25 @@ def agents_list(
         help="registered, discovered:<how>, or platform:<platform> (microsoft-365, "
         "copilot-studio, aws, google-cloud, salesforce, databricks, microsoft-foundry).",
     ),
+    risk: str | None = typer.Option(None, help="Only those at this risk level."),
+    as_csv: bool = AS_CSV,
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Only their names, one a line: to give other commands."
+    ),
 ) -> None:
     """List agents (all but deleted ones, unless --status is given)."""
-    rows = _call("GET", "/v1/agents", params=_given(status=status, source=source))
+    rows = _call("GET", "/v1/agents", params=_given(status=status, source=source, risk_level=risk))
+    if quiet:
+        for r in rows:
+            typer.echo(r["name"])
+        return
+    if as_csv:
+        for r in rows:
+            r["risk_level"], r["risk_score"] = r["risk"]["level"], r["risk"]["score"]
+            maker = r.get("maker") or {}
+            r["maker"] = maker.get("email") or maker.get("name") or maker.get("entra_id")
+        _csv(rows, AGENT_CSV)
+        return
     for r in rows:
         r["risk"] = f"{r['risk']['level']} ({r['risk']['score']})"
     _table(rows, ["name", "status", "blueprint", "owner", "risk", "last_seen_at"])
@@ -1117,15 +1212,26 @@ def agents_create(
     _done("agent", agent["name"], agent["status"])
 
 
+# What an edit to several agents at once may change (and --add-sponsor, --remove-sponsor).
+EDITS_AT_ONCE = {"owner", "team", "sponsors", "blueprint", "environment", "risk_tier"}
+
+
 @agents_app.command("update")
 def agents_update(
-    ref: str,
+    refs: list[str] = AGENT_REFS,
     description: str | None = DESCRIPTION,
     blueprint: str | None = AGENT_BLUEPRINT,
     owner: str | None = OWNER,
     sponsor: list[str] | None = typer.Option(
         None, "--sponsor", help="Sponsors (replace the current ones; repeatable)."
     ),
+    add_sponsor: list[str] | None = typer.Option(
+        None, "--add-sponsor", help="Add a sponsor to each one's own (repeatable)."
+    ),
+    remove_sponsor: list[str] | None = typer.Option(
+        None, "--remove-sponsor", help="Take a sponsor from each one's own (repeatable)."
+    ),
+    reason: str | None = REASON,
     team: str | None = TEAM,
     environment: str | None = ENVIRONMENT,
     framework: str | None = None,
@@ -1201,9 +1307,33 @@ def agents_update(
             risk_tier=risk_tier,
         )
     )
+    if len(refs) > 1 or add_sponsor or remove_sponsor or reason:
+        # Several at once, each on its own: who is accountable for them, and how they are
+        # governed.
+        if if_version is not None:
+            _fail(
+                "--if-version goes with one agent, without --add-sponsor, --remove-sponsor or "
+                "--reason"
+            )
+        other = sorted(set(body) - EDITS_AT_ONCE)
+        if other:
+            _fail(
+                "several agents at once, or with --add-sponsor, --remove-sponsor or --reason, "
+                "take --owner, --team, --sponsor, --blueprint, --environment and --risk-tier: "
+                f"change {', '.join(other)} one agent at a time"
+            )
+        if add_sponsor:
+            body["add_sponsors"] = _split(add_sponsor)
+        if remove_sponsor:
+            body["remove_sponsors"] = _split(remove_sponsor)
+        if not body:
+            _fail("nothing to change: pass at least one option (see --help)")
+        out = _at_once("agent", _given(action="update", agents=refs, fields=body, reason=reason))
+        _many("agent", out, "updated")
+        return
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    agent = _call("PATCH", f"/v1/agents/{ref}", json=body, **_if_version(if_version))
+    agent = _call("PATCH", f"/v1/agents/{refs[0]}", json=body, **_if_version(if_version))
     _done("agent", agent["name"], "updated")
 
 
@@ -1243,18 +1373,30 @@ AROUND_THE_GATEWAY = {
 }
 
 
-def _lifecycle(ref: str, action: str, reason: str | None) -> None:
-    agent = _call("POST", f"/v1/agents/{ref}/{action}", json={"reason": reason} if reason else {})
-    _done("agent", agent["name"], agent["status"])
-
-
-REASON = typer.Option(None, help="Recorded in the evidence ledger.")
+def _lifecycle(refs: str | list[str], action: str, reason: str | None) -> None:
+    """One agent, or several at once: each on its own, those it can't do left as they are."""
+    names = [refs] if isinstance(refs, str) else list(refs)
+    if len(names) == 1:
+        agent = _call(
+            "POST", f"/v1/agents/{names[0]}/{action}", json={"reason": reason} if reason else {}
+        )
+        _done("agent", agent["name"], agent["status"])
+        return
+    out = _at_once("agent", _given(action=action, agents=names, reason=reason))
+    elsewhere = sorted({row["platform"] for row in out["done"] if row.get("platform")})
+    note = (
+        f"Those on {', '.join(elsewhere)} still run there: this changed AgentGov, not "
+        f"{'it' if len(elsewhere) == 1 else 'them'}."
+        if elsewhere and action in ("block", "delete")
+        else None
+    )
+    _many("agent", out, note=note)
 
 
 @agents_app.command("approve")
-def agents_approve(ref: str, reason: str | None = REASON) -> None:
-    """Approve a pending agent: it becomes active (needs a sponsor)."""
-    _lifecycle(ref, "approve", reason)
+def agents_approve(refs: list[str] = AGENT_REFS, reason: str | None = REASON) -> None:
+    """Approve pending agents: each becomes active (needs a sponsor)."""
+    _lifecycle(refs, "approve", reason)
 
 
 IN_PLATFORM = typer.Option(
@@ -1267,24 +1409,30 @@ IN_PLATFORM = typer.Option(
 
 @agents_app.command("block")
 def agents_block(
-    ref: str,
+    refs: list[str] = AGENT_REFS,
     reason: str = typer.Option("blocked from CLI", help="Why."),
     in_platform: bool = IN_PLATFORM,
 ) -> None:
-    """Kill switch: block the agent everywhere (identity, gateway, in-process OPA)."""
+    """Kill switch: block agents everywhere (identity, gateway, in-process OPA)."""
+    if in_platform and len(refs) > 1:
+        _fail("--in-platform blocks one agent at a time")
     # AgentGov first, then the platform: if the platform refuses, AgentGov has still blocked it.
-    _lifecycle(ref, "block", reason)
+    _lifecycle(refs, "block", reason)
     if in_platform:
-        _platform_block(ref, blocked=True)
+        _platform_block(refs[0], blocked=True)
 
 
 @agents_app.command("unblock")
-def agents_unblock(ref: str, reason: str | None = REASON, in_platform: bool = IN_PLATFORM) -> None:
-    """Unblock an agent: its calls are evaluated against policy again."""
+def agents_unblock(
+    refs: list[str] = AGENT_REFS, reason: str | None = REASON, in_platform: bool = IN_PLATFORM
+) -> None:
+    """Unblock agents: their calls are evaluated against policy again."""
+    if in_platform and len(refs) > 1:
+        _fail("--in-platform unblocks one agent at a time")
     # AgentGov first: if it refuses (an agent needs a sponsor), the platform keeps it blocked.
-    _lifecycle(ref, "unblock", reason)
+    _lifecycle(refs, "unblock", reason)
     if in_platform:
-        _platform_block(ref, blocked=False)
+        _platform_block(refs[0], blocked=False)
 
 
 def _platform_block(ref: str, *, blocked: bool) -> None:
@@ -1307,15 +1455,15 @@ def agents_platform_unblock(ref: str) -> None:
 
 
 @agents_app.command("delete")
-def agents_delete(ref: str, reason: str | None = REASON) -> None:
-    """Delete an agent (soft: it can be restored, or purged for good)."""
-    _lifecycle(ref, "delete", reason)
+def agents_delete(refs: list[str] = AGENT_REFS, reason: str | None = REASON) -> None:
+    """Delete agents (soft: they can be restored, or purged for good)."""
+    _lifecycle(refs, "delete", reason)
 
 
 @agents_app.command("restore")
-def agents_restore(ref: str, reason: str | None = REASON) -> None:
-    """Restore a deleted agent; it comes back pending review."""
-    _lifecycle(ref, "restore", reason)
+def agents_restore(refs: list[str] = AGENT_REFS, reason: str | None = REASON) -> None:
+    """Restore deleted agents; they come back pending review."""
+    _lifecycle(refs, "restore", reason)
 
 
 @agents_app.command("adopt")
@@ -2139,6 +2287,26 @@ def _with(f: dict[str, Any]) -> str:
 FINDING_TYPE = typer.Option(None, "--type", help="Only findings of this type.")
 FINDING_SEVERITY = typer.Option(None, help="Only findings of this severity.")
 FINDING_LIMIT = typer.Option(500, help="At most this many, newest first (up to 2000).")
+FINDING_QUIET = typer.Option(
+    False, "--quiet", "-q", help="Only their IDs, one a line: to give other commands."
+)
+FINDING_CSV = [
+    "id",
+    "severity",
+    "status",
+    "category",
+    "type",
+    "title",
+    "agent_id",
+    "subject",
+    "with",
+    "verified",
+    "occurrences",
+    "first_seen",
+    "last_seen",
+    "resolved_by",
+    "accepted_until",
+]
 
 
 def _list_findings(
@@ -2147,6 +2315,8 @@ def _list_findings(
     type_: str | None = None,
     severity: str | None = None,
     limit: int = 500,
+    as_csv: bool = False,
+    quiet: bool = False,
 ) -> None:
     if mine:
         rows = _call("GET", "/v1/me/issues", params={"status": status})
@@ -2155,9 +2325,16 @@ def _list_findings(
         rows = _call("GET", "/v1/findings", params={k: v for k, v in params.items() if v})
     for row in rows:
         row["with"] = _with(row)
-        if row.get("verified") is False:
-            row["status"] = f"{row['status']} (unverified)"
-    _table(rows, ["id", "severity", "status", "type", "with", "title"])
+    if quiet:
+        for row in rows:
+            typer.echo(row["id"])
+    elif as_csv:
+        _csv(rows, FINDING_CSV)
+    else:
+        for row in rows:
+            if row.get("verified") is False:
+                row["status"] = f"{row['status']} (unverified)"
+        _table(rows, ["id", "severity", "status", "type", "with", "title"])
     if not mine and len(rows) == limit:
         typer.echo(
             f"The newest {limit}: there may be more. Narrow them with --type or --severity, "
@@ -2174,9 +2351,11 @@ def findings_main(
     type_: str | None = FINDING_TYPE,
     severity: str | None = FINDING_SEVERITY,
     limit: int = FINDING_LIMIT,
+    as_csv: bool = AS_CSV,
+    quiet: bool = FINDING_QUIET,
 ) -> None:
     if ctx.invoked_subcommand is None:
-        _list_findings(status, mine, type_, severity, limit)
+        _list_findings(status, mine, type_, severity, limit, as_csv, quiet)
 
 
 @findings_app.command("list")
@@ -2186,9 +2365,11 @@ def findings_list(
     type_: str | None = FINDING_TYPE,
     severity: str | None = FINDING_SEVERITY,
     limit: int = FINDING_LIMIT,
+    as_csv: bool = AS_CSV,
+    quiet: bool = FINDING_QUIET,
 ) -> None:
     """List findings, newest first."""
-    _list_findings(status, mine, type_, severity, limit)
+    _list_findings(status, mine, type_, severity, limit, as_csv, quiet)
 
 
 @findings_app.command("get")
@@ -2220,26 +2401,40 @@ def findings_get(finding_id: str) -> None:
         _table(f["notifications"], ["level", "channel", "recipient", "status", "attempts"])
 
 
+FINDING_IDS = typer.Argument(..., help="The findings' IDs: one, or several at once.")
+
+
+def _findings_at_once(ids: list[str], action: str, **body: Any) -> None:
+    """Several findings at once: each on its own, those it can't do left as they are."""
+    _many("finding", _at_once("finding", _given(action=action, findings=ids, **body)))
+
+
 @findings_app.command("acknowledge")
-def findings_acknowledge(finding_id: str) -> None:
-    """Take an issue on: it goes no further up its chain."""
-    f = _call("POST", f"/v1/findings/{quote(finding_id)}/acknowledge")
+def findings_acknowledge(finding_ids: list[str] = FINDING_IDS) -> None:
+    """Take issues on: they go no further up their chains."""
+    if len(finding_ids) > 1:
+        return _findings_at_once(finding_ids, "acknowledge")
+    f = _call("POST", f"/v1/findings/{quote(finding_ids[0])}/acknowledge")
     _done("finding", f["id"], f"acknowledged by {f['acknowledged_by']}")
 
 
 @findings_app.command("accept")
 def findings_accept(
-    finding_id: str,
+    finding_ids: list[str] = FINDING_IDS,
     reason: str = typer.Option(..., help="Why the risk is acceptable."),
     until: str = typer.Option(
         ...,
         help="Until when: a date (2026-12-31), a time, or a number of days (90). A year at most.",
     ),
 ) -> None:
-    """Accept a finding's risk until a date: it opens again then if it still holds."""
+    """Accept findings' risk until a date: each opens again then if it still holds."""
     when: str | int = int(until) if until.isdigit() else until
+    if len(finding_ids) > 1:
+        return _findings_at_once(finding_ids, "accept", reason=reason, until=when)
     f = _call(
-        "POST", f"/v1/findings/{quote(finding_id)}/accept", json={"reason": reason, "until": when}
+        "POST",
+        f"/v1/findings/{quote(finding_ids[0])}/accept",
+        json={"reason": reason, "until": when},
     )
     _done("finding", f["id"], f"risk accepted until {f['accepted_until']}")
 
@@ -2299,37 +2494,41 @@ def findings_recheck(finding_id: str) -> None:
         raise typer.Exit(1)
 
 
-def _finding_action(finding_id: str, action: str) -> None:
-    f = _call("POST", f"/v1/findings/{finding_id}/{action}")
+def _finding_action(finding_ids: list[str], action: str) -> None:
+    if len(finding_ids) > 1:
+        return _findings_at_once(finding_ids, action)
+    f = _call("POST", f"/v1/findings/{quote(finding_ids[0])}/{action}")
     _done("finding", f["id"], f["status"])
 
 
 @findings_app.command("resolve")
-def findings_resolve(finding_id: str) -> None:
-    """Mark a finding as resolved."""
-    _finding_action(finding_id, "resolve")
+def findings_resolve(finding_ids: list[str] = FINDING_IDS) -> None:
+    """Mark findings as resolved."""
+    _finding_action(finding_ids, "resolve")
 
 
 @findings_app.command("dismiss")
 def findings_dismiss(
-    finding_id: str,
+    finding_ids: list[str] = FINDING_IDS,
     reason: str = typer.Option(..., help="Why it is wrong."),
     until: str | None = typer.Option(
         None, help="Open it again then if it still holds: a date, a time, or a number of days."
     ),
 ) -> None:
-    """Dismiss a finding that is wrong (to accept a risk, use accept)."""
+    """Dismiss findings that are wrong (to accept a risk, use accept)."""
     body: dict[str, Any] = {"reason": reason}
     if until:
         body["until"] = int(until) if until.isdigit() else until
-    f = _call("POST", f"/v1/findings/{quote(finding_id)}/dismiss", json=body)
+    if len(finding_ids) > 1:
+        return _findings_at_once(finding_ids, "dismiss", **body)
+    f = _call("POST", f"/v1/findings/{quote(finding_ids[0])}/dismiss", json=body)
     _done("finding", f["id"], f["status"])
 
 
 @findings_app.command("reopen")
-def findings_reopen(finding_id: str) -> None:
-    """Reopen a resolved, dismissed or accepted finding."""
-    _finding_action(finding_id, "reopen")
+def findings_reopen(finding_ids: list[str] = FINDING_IDS) -> None:
+    """Reopen resolved, dismissed or accepted findings."""
+    _finding_action(finding_ids, "reopen")
 
 
 @findings_app.command("types")

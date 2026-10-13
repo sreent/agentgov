@@ -1692,6 +1692,94 @@ const AGENT_STATUS_FILTERS = [
   ['discovered', 'Discovered'], ['deleted', 'Deleted'],
 ];
 
+// How the agents table sorts: by a column, or by "-" and a column the other way round.
+const AGENT_SORTS = {
+  name: (a) => a.name,
+  status: (a) => AGENT_STATUS_FILTERS.findIndex(([k]) => k === a.status),
+  risk: (a) => a.risk?.score ?? 0,
+  owner: (a) => a.owner || '',
+  blueprint: (a) => a.blueprint || platformOf(a) || '',
+  last_seen: (a) => a.last_seen_at || '',
+};
+// The columns whose first sort puts the most first: the riskiest, the most recently seen.
+const SORTS_DOWN = new Set(['risk', 'last_seen']);
+const RISK_FILTERS = [['', 'Any risk'], ['elevated', 'High or critical'], ['critical', 'Critical'], ['high', 'High'], ['medium', 'Medium'], ['low', 'Low']];
+const WHERE_WORDS = { registered: 'Registered in AgentGov', discovered: 'Discovered at runtime' };
+
+// Rows in the order a sort names, those without a value last either way; ties by name.
+function sortRows(rows, sort, keys) {
+  const down = sort.startsWith('-');
+  const get = keys[sort.replace(/^-/, '')] || keys.name;
+  const blank = (v) => v === '' || v == null;
+  return [...rows].sort((x, y) => {
+    const a = get(x);
+    const b = get(y);
+    if (blank(a) !== blank(b)) return blank(a) ? 1 : -1;
+    const c = typeof a === 'number' && typeof b === 'number' ? a - b
+      : String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+    return (down ? -c : c) || String(x.name).localeCompare(String(y.name));
+  });
+}
+
+// The next sort when a column's header is pressed: the other way round if it sorts by it.
+function nextSort(sort, key) {
+  if (sort === key) return `-${key}`;
+  if (sort === `-${key}`) return key;
+  return SORTS_DOWN.has(key) ? `-${key}` : key;
+}
+
+// Where an agent is, for the filter: on a platform, registered here, or discovered at runtime.
+function agentWhere(a) {
+  const source = a.source || 'registered';
+  return source.startsWith('discovered:') ? 'discovered' : source;
+}
+
+// Re-render part of a page, keeping the focus on the control that had it.
+function keepFocus(render) {
+  const key = document.activeElement?.closest?.('[data-focus-key]')?.dataset.focusKey;
+  render();
+  if (key) document.querySelector(`#main [data-focus-key="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
+}
+
+// A spreadsheet's file of what a page shows: a header, then a line each. A cell a spreadsheet
+// would take for a formula (names and titles come from the platforms) is kept as text.
+function csvCell(value) {
+  let text = value == null ? '' : Array.isArray(value) ? value.join('; ') : String(value);
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function saveCsv(name, columns, rows) {
+  const lines = [columns.map(([label]) => csvCell(label)).join(','),
+    ...rows.map((row) => columns.map(([, get]) => csvCell(get(row))).join(','))];
+  // A byte-order mark, so spreadsheets read it as UTF-8.
+  const blob = new Blob([`﻿${lines.join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = h('a', { href: url, download: `${name}-${fileStamp()}.csv`, hidden: true });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+const AGENT_CSV = [
+  ['Name', (a) => a.name],
+  ['Status', (a) => a.status],
+  ['Risk', (a) => a.risk?.level],
+  ['Risk score', (a) => a.risk?.score],
+  ['Owner', (a) => a.owner],
+  ['Sponsors', (a) => a.sponsors],
+  ['Team', (a) => a.team],
+  ['Blueprint', (a) => a.blueprint],
+  ['Where', (a) => WHERE_WORDS[agentWhere(a)] || PLATFORM_SOURCES[a.source] || a.source],
+  ['Environment', (a) => a.environment],
+  ['Named by its platform', (a) => a.maker?.email || a.maker?.name || ''],
+  ['Registered', (a) => a.created_at],
+  ['Last seen', (a) => a.last_seen_at],
+  ['Description', (a) => a.description],
+  ['ID', (a) => a.id],
+];
+
 async function renderAgents({ params }) {
   const state = {
     status: params.get('status') || 'all',
@@ -1699,22 +1787,47 @@ async function renderAgents({ params }) {
     risk: params.get('risk') || '',
     source: params.get('source') || '',
     q: params.get('q') || '',
+    sort: params.get('sort') || 'name',
   };
   const load = (q) => api(`v1/agents?include_deleted=true${q ? `&q=${encodeURIComponent(q)}` : ''}`);
   let agents = await load(state.q);
+  // Those chosen for an action on many at once, by ID: only ever among those shown.
+  const selected = new Set();
+  const selecting = can('admin') || can('contain');
+  let shown = [];
 
   const tableHost = h('div', {});
   const countEl = h('p', { class: 'result-count', 'aria-live': 'polite' });
   const chipHost = h('div', { class: 'seg', role: 'group', 'aria-label': 'Filter by status' });
-  const extraHost = h('div', { class: 'chip-row' });
   const adoptHost = h('div', {});
+  const bulkHost = h('div', {});
   const search = h('input', {
     type: 'search', id: 'agent-search', placeholder: 'Search names and descriptions', value: state.q,
     'data-focus-key': 'agent-search', autocomplete: 'off',
   });
+  const filter = (id, label) => {
+    const control = h('select', { id, 'data-focus-key': id });
+    return [control, h('div', { class: 'field', style: 'flex:0 1 220px' }, h('label', { for: id, class: 'sr-only' }, label), control)];
+  };
+  const [whereSelect, whereField] = filter('agent-where', 'Where it runs');
+  const [riskSelect, riskField] = filter('agent-risk', 'Risk');
+  const [ownerSelect, ownerField] = filter('agent-owner', 'Owner');
+  const csvButton = h('button', {
+    type: 'button', class: 'btn btn--sm btn--ghost', 'data-focus-key': 'agents-csv',
+    title: 'The agents shown, as a spreadsheet', onclick: () => saveCsv('agentgov-agents', AGENT_CSV, shown),
+  }, icon('download'), 'Download CSV');
 
   function sync() {
-    setHashQuiet('/agents', { status: state.status === 'all' ? '' : state.status, owner: state.owner, risk: state.risk, source: state.source, q: state.q });
+    setHashQuiet('/agents', {
+      status: state.status === 'all' ? '' : state.status, owner: state.owner, risk: state.risk,
+      source: state.source, q: state.q, sort: state.sort === 'name' ? '' : state.sort,
+    });
+  }
+
+  // A filter's choices; the one chosen stays among them even when nothing matches it now.
+  function fill(control, choices, current, labelOf = (v) => v) {
+    const all = current && !choices.some(([v]) => v === current) ? [...choices, [current, labelOf(current)]] : choices;
+    control.replaceChildren(...all.map(([value, label]) => h('option', { value, selected: value === current }, label)));
   }
 
   function apply() {
@@ -1724,28 +1837,49 @@ async function renderAgents({ params }) {
       const n = key === 'all' ? live : counts[key] || 0;
       return h('button', {
         type: 'button', class: 'seg-btn', 'aria-pressed': String(state.status === key), 'data-focus-key': `status-${key}`,
-        onclick: () => { state.status = key; apply(); sync(); },
+        onclick: () => { state.status = key; keepFocus(apply); sync(); },
       }, label, h('span', { class: 'count' }, fmt(n)));
     }));
-    const extras = [];
-    if (state.owner === 'none') extras.push(['Without an owner', () => { state.owner = ''; }]);
-    if (state.risk === 'elevated') extras.push(['High or critical risk', () => { state.risk = ''; }]);
-    if (state.source) extras.push([`Runs on ${PLATFORM_SOURCES[state.source] || state.source}`, () => { state.source = ''; }]);
-    extraHost.replaceChildren(...extras.map(([label, clear]) => h('span', { class: 'active-filter' }, label,
-      h('button', { type: 'button', 'aria-label': `Remove filter: ${label}`, onclick: () => { clear(); apply(); sync(); search.focus(); } }, icon('x')))));
+    const inStatus = agents.filter((a) => (state.status === 'all' ? a.status !== 'deleted' : a.status === state.status));
+    const whereLabel = (w) => WHERE_WORDS[w] || PLATFORM_SOURCES[w] || w;
+    const wheres = countBy(inStatus, agentWhere);
+    fill(whereSelect, [['', 'Anywhere'], ...Object.keys(wheres).sort((x, y) => whereLabel(x).localeCompare(whereLabel(y)))
+      .map((w) => [w, `${whereLabel(w)} (${fmt(wheres[w])})`])], state.source, whereLabel);
+    fill(riskSelect, RISK_FILTERS, state.risk);
+    const owners = countBy(inStatus.filter((a) => a.owner), 'owner');
+    fill(ownerSelect, [['', 'Any owner'], ['none', 'Without an owner'],
+      ...Object.keys(owners).sort((x, y) => x.localeCompare(y)).map((o) => [o, `${o} (${fmt(owners[o])})`])], state.owner);
 
-    let rows = agents.filter((a) => (state.status === 'all' ? a.status !== 'deleted' : a.status === state.status));
+    let rows = inStatus;
     if (state.owner === 'none') rows = rows.filter((a) => !a.owner && (a.status !== 'discovered' || isPlatformAgent(a)));
+    else if (state.owner) rows = rows.filter((a) => a.owner === state.owner);
     if (state.risk === 'elevated') rows = rows.filter((a) => ['high', 'critical'].includes(a.risk?.level));
-    if (state.source) rows = rows.filter((a) => a.source === state.source);
+    else if (state.risk) rows = rows.filter((a) => (a.risk?.level || 'low') === state.risk);
+    if (state.source) rows = rows.filter((a) => agentWhere(a) === state.source);
+    rows = sortRows(rows, state.sort, AGENT_SORTS);
+    shown = rows;
+    for (const id of [...selected]) if (!rows.some((a) => a.id === id)) selected.delete(id);
     countEl.textContent = plural(rows.length, 'agent');
+    csvButton.disabled = !rows.length;
     const adoptable = rows.filter((a) => a.status === 'discovered');
-    adoptHost.replaceChildren(can('admin') && adoptable.length > 1
+    adoptHost.replaceChildren(can('admin') && adoptable.length > 1 && !selected.size
       ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'adopt-many', onclick: guarded(() => adoptMany(adoptable)) },
         icon('user-check'), `Adopt ${plural(adoptable.length, 'agent')}…`)
       : '');
-    tableHost.replaceChildren(rows.length ? agentsTable(rows) : emptyState('No agents match these filters',
-      state.q ? `Nothing matches "${state.q}".` : 'Try another status.',
+    const onSelect = (ids, on) => {
+      for (const id of ids) { if (on) selected.add(id); else selected.delete(id); }
+      keepFocus(apply);
+    };
+    bulkHost.replaceChildren(selecting && rows.length
+      ? agentBulkBar(rows, selected, onSelect, () => { selected.clear(); keepFocus(apply); })
+      : '');
+    tableHost.replaceChildren(rows.length ? agentsTable(rows, {
+      sort: state.sort,
+      onSort: (key) => { state.sort = nextSort(state.sort, key); keepFocus(apply); sync(); },
+      selected: selecting ? selected : null,
+      onSelect,
+    }) : emptyState('No agents match these filters',
+      state.q ? `Nothing matches "${state.q}".` : 'Try another status, or clear the filters.',
       h('button', {
         type: 'button', class: 'btn btn--sm',
         onclick: async () => {
@@ -1756,6 +1890,10 @@ async function renderAgents({ params }) {
           sync();
         },
       }, 'Clear filters')));
+  }
+
+  for (const [control, key] of [[whereSelect, 'source'], [riskSelect, 'risk'], [ownerSelect, 'owner']]) {
+    control.addEventListener('change', () => { state[key] = control.value; keepFocus(apply); sync(); });
   }
 
   let timer = null;
@@ -1789,8 +1927,169 @@ async function renderAgents({ params }) {
     }),
     h('div', { class: 'filters' },
       h('div', { class: 'field' }, h('label', { for: 'agent-search', class: 'sr-only' }, 'Search agents'), search),
-      chipHost, extraHost, countEl, adoptHost),
+      chipHost),
+    h('div', { class: 'filters' }, whereField, riskField, ownerField, countEl, adoptHost, csvButton),
+    bulkHost,
     h('section', { class: 'card', 'aria-label': 'Agent list' }, tableHost));
+}
+
+// The control plane takes 500 at a time: more are sent in turns, and the answers put together.
+const AT_ONCE = 500;
+async function inTurns(path, body, key) {
+  const out = { done: [], left: [] };
+  for (let i = 0; i < body[key].length; i += AT_ONCE) {
+    const part = await api(path, { method: 'POST', body: { ...body, [key]: body[key].slice(i, i + AT_ONCE) } });
+    out.done.push(...part.done);
+    out.left.push(...part.left);
+  }
+  return out;
+}
+
+// What an action on many at once did: a word when all were done; otherwise those left as
+// they were, and why.
+async function manyDone(result, verb, noun) {
+  const done = result.done?.length || 0;
+  const left = result.left || [];
+  if (!left.length) {
+    toast(`${verb} ${plural(done, noun)}.`);
+    return;
+  }
+  // Those left for the same reason, together: often all of them.
+  const byWhy = new Map();
+  for (const x of left) {
+    const why = cap(x.why);
+    if (!byWhy.has(why)) byWhy.set(why, []);
+    byWhy.get(why).push(x.title || x[noun]);
+  }
+  await ask({
+    title: done ? `${verb} ${fmt(done)} of ${plural(done + left.length, noun)}` : `No ${noun} was ${verb.toLowerCase()}`,
+    text: `${left.length === 1 ? 'This one was' : `These ${fmt(left.length)} were`} left as ${left.length === 1 ? 'it was' : 'they were'}:`,
+    iconName: done ? 'info' : 'alert-circle', confirm: 'OK', cancel: null, wide: true,
+    extra: h('ul', { class: 'apply-results', role: 'list' }, [...byWhy].map(([why, names]) => h('li', { class: 'left-group' },
+      h('strong', {}, names.length > 1 ? `${why} (${fmt(names.length)})` : why),
+      h('span', { class: 'muted break' }, names.join(', '))))),
+  });
+}
+
+const AGENTS_AT_ONCE = {
+  approve: { verb: 'Approved', text: 'Each becomes active and can call the tools its blueprint and grants allow. Each needs a sponsor at least: those without one stay pending.' },
+  block: { verb: 'Blocked', text: 'This is the kill switch. The gateway refuses every call from them as soon as OPA loads the updated policy bundle, usually within seconds. You can unblock them later.' },
+  unblock: { verb: 'Unblocked', text: 'Calls from them will be evaluated against policy again.' },
+  delete: { verb: 'Deleted', text: 'They leave the inventory and policy denies all of their calls. Deleted agents can be restored.' },
+  restore: { verb: 'Restored', text: 'They come back as pending review. Approve them to make them active again.' },
+};
+
+// The actions on the agents chosen: each offered when it fits some of them, and done to those.
+// With none chosen, on a narrow screen (where the table has no header), a box to choose all.
+function agentBulkBar(rows, selected, onSelect, clear) {
+  const chosen = rows.filter((a) => selected.has(a.id));
+  if (!chosen.length) {
+    return h('div', { class: 'bulk-bar bulk-bar--idle bulk-bar--narrow' },
+      h('label', { class: 'check' }, h('input', {
+        type: 'checkbox', 'data-focus-key': 'choose-all-narrow', onchange: (e) => onSelect(rows.map((a) => a.id), e.target.checked),
+      }), `Choose all ${plural(rows.length, 'agent')} shown`));
+  }
+  const admin = can('admin');
+  const contain = admin || can('contain');
+  const fits = (action) => chosen.filter((a) => (ACTIONS_BY_STATUS[a.status] || []).includes(action));
+  const buttons = [];
+  const offer = (action, label, iconName, cls = '') => {
+    const n = fits(action).length;
+    if (!n) return;
+    buttons.push(h('button', {
+      type: 'button', class: `btn btn--sm ${cls}`, 'data-focus-key': `many-${action}`,
+      onclick: guarded(() => agentsAtOnce(chosen, action)),
+    }, icon(iconName), n === chosen.length ? label : `${label} ${fmt(n)}`));
+  };
+  if (admin) offer('approve', 'Approve', 'check', 'btn--primary');
+  if (admin) offer('adopt', 'Adopt', 'user-check');
+  if (admin && chosen.some((a) => a.status !== 'deleted')) {
+    buttons.push(h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'many-edit', onclick: guarded(() => agentsAtOnce(chosen, 'edit')) },
+      icon('edit'), 'Edit…'));
+  }
+  if (contain) offer('block', 'Block', 'power', 'btn--danger');
+  if (contain) offer('unblock', 'Unblock', 'undo');
+  if (admin) offer('delete', 'Delete', 'trash', 'btn--danger-quiet');
+  if (admin) offer('restore', 'Restore', 'undo');
+  return h('div', { class: 'bulk-bar', role: 'region', 'aria-label': 'Chosen agents' },
+    h('strong', { class: 'bulk-count', 'aria-live': 'polite' }, `${plural(chosen.length, 'agent')} chosen`),
+    h('div', { class: 'btn-row' }, buttons),
+    h('button', { type: 'button', class: 'btn btn--sm btn--ghost', 'data-focus-key': 'choose-none', onclick: clear }, icon('x'), 'Clear'));
+}
+
+// Names, in a list that scrolls when there are many.
+function nameList(names) {
+  return h('ul', { class: 'adopt-list', role: 'list' }, names.map((n) => h('li', { class: 'break' }, n)));
+}
+
+async function agentsAtOnce(chosen, action) {
+  const fits = chosen.filter((a) => (ACTIONS_BY_STATUS[a.status] || []).includes(action));
+  if (action === 'adopt') return adoptMany(fits);
+  if (action === 'edit') return editMany(chosen.filter((a) => a.status !== 'deleted'));
+  const spec = LIFECYCLE[action];
+  const verb = spec.label.replace(' (kill switch)', '');
+  let text = AGENTS_AT_ONCE[action].text;
+  const elsewhere = [...new Set(fits.map(platformOf).filter(Boolean))];
+  const onPlatforms = fits.filter(platformOf).length;
+  if (onPlatforms && ['block', 'unblock', 'delete'].includes(action)) {
+    text += ` ${onPlatforms === fits.length ? 'They run' : `${fmt(onPlatforms)} of them run`} on ${elsewhere.join(', ')}: this changes AgentGov's registry, not ${elsewhere.length > 1 ? 'those platforms' : elsewhere[0]}.`;
+    if (action === 'block') text += ` Block them there too.`;
+  }
+  if (fits.length < chosen.length) {
+    text += ` ${plural(chosen.length - fits.length, 'other agent')} chosen ${chosen.length - fits.length === 1 ? 'isn\'t' : 'aren\'t'} in a state for it, and ${chosen.length - fits.length === 1 ? 'stays as it is' : 'stay as they are'}.`;
+  }
+  const result = await ask({
+    title: `${verb} ${plural(fits.length, 'agent')}?`,
+    text, tone: spec.tone, iconName: spec.icon, confirm: `${verb} ${plural(fits.length, 'agent')}`, busy: 'Working…',
+    extra: nameList(fits.map((a) => a.name)),
+    fields: [{ id: 'reason', label: 'Reason', type: 'textarea', hint: 'Recorded in the evidence ledger, for each of them.' }],
+    submit: (v) => inTurns('v1/agents/bulk', { action, agents: fits.map((a) => a.id), ...(v.reason ? { reason: v.reason } : {}) }, 'agents'),
+  });
+  if (!result) return;
+  await manyDone(result, AGENTS_AT_ONCE[action].verb, 'agent');
+  refreshBadges();
+  await refresh();
+}
+
+// Change several agents' owner, team, sponsors or blueprint at once: only what is filled in.
+async function editMany(chosen) {
+  const [teamList, blueprints] = await Promise.all([api('v1/teams').catch(() => []), api('v1/blueprints').catch(() => [])]);
+  const KEEP = '__keep';
+  const result = await ask({
+    title: `Edit ${plural(chosen.length, 'agent')}`,
+    text: 'Only what you fill in changes: the rest of each agent stays as it is.',
+    iconName: 'edit', confirm: 'Save', busy: 'Saving…', wide: true,
+    extra: nameList(chosen.map((a) => a.name)),
+    fields: [
+      { id: 'owner', label: 'Owner', placeholder: 'A team or a person', hint: 'Accountable for each of them.' },
+      { id: 'team', label: 'Team', type: 'select', value: KEEP, options: [
+        { value: KEEP, label: 'Leave each one\'s as it is' }, { value: '', label: 'None: their blueprint\'s' },
+        ...teamList.map((t) => ({ value: t.name, label: t.name }))] },
+      { type: 'row', fields: [
+        { id: 'add', label: 'Add sponsors', placeholder: 'dana@example.com', hint: 'Separate people with commas.' },
+        { id: 'remove', label: 'Remove sponsors', placeholder: 'alice@example.com', hint: 'Someone who left, say.' },
+      ] },
+      { id: 'blueprint', label: 'Blueprint', type: 'select', value: KEEP, options: [
+        { value: KEEP, label: 'Leave each one\'s as it is' }, { value: '', label: 'No blueprint' },
+        ...blueprints.map((b) => ({ value: b.name, label: `${b.name} (${b.risk_tier} risk tier)` }))] },
+      { id: 'reason', label: 'Reason', type: 'textarea', hint: 'Recorded in the evidence ledger, for each of them.' },
+    ],
+    submit: (v) => {
+      const fields = {};
+      if (v.owner) fields.owner = v.owner;
+      if (v.team !== KEEP) fields.team = v.team || null;
+      const add = parseList(v.add);
+      const remove = parseList(v.remove);
+      if (add.length) fields.add_sponsors = add;
+      if (remove.length) fields.remove_sponsors = remove;
+      if (v.blueprint !== KEEP) fields.blueprint = v.blueprint || null;
+      if (!Object.keys(fields).length) throw new Error('Fill in what to change.');
+      return inTurns('v1/agents/bulk', { action: 'update', agents: chosen.map((a) => a.id), fields, ...(v.reason ? { reason: v.reason } : {}) }, 'agents');
+    },
+  });
+  if (!result) return;
+  await manyDone(result, 'Updated', 'agent');
+  await refresh();
 }
 
 // Adopt several discovered agents at once: each with its maker on its platform as owner and
@@ -1836,12 +2135,39 @@ async function adoptMany(candidates) {
   await refresh();
 }
 
-function agentsTable(rows) {
+const AGENT_COLUMNS = [['name', 'Agent'], ['status', 'Status'], ['risk', 'Risk'], ['owner', 'Owner'], ['blueprint', 'Blueprint'], ['last_seen', 'Last seen']];
+
+// The agents table: sorted by the header pressed (onSort); with ``selected``, a box on each
+// row to choose it for an action on many at once (onSelect(ids, chosen)).
+function agentsTable(rows, { sort = 'name', onSort = null, selected = null, onSelect = null } = {}) {
+  const head = [];
+  if (selected) {
+    const all = rows.every((a) => selected.has(a.id));
+    const box = h('input', {
+      type: 'checkbox', checked: all, 'data-focus-key': 'choose-all', 'aria-label': `Choose all ${plural(rows.length, 'agent')} shown`,
+      onchange: (e) => onSelect(rows.map((a) => a.id), e.target.checked),
+    });
+    box.indeterminate = !all && rows.some((a) => selected.has(a.id));
+    head.push(h('th', { scope: 'col', class: 'select-cell' }, box));
+  }
+  for (const [key, label] of AGENT_COLUMNS) {
+    if (!onSort) { head.push(h('th', { scope: 'col' }, label)); continue; }
+    const current = sort.replace(/^-/, '') === key;
+    const down = sort.startsWith('-');
+    head.push(h('th', { scope: 'col', 'aria-sort': current ? (down ? 'descending' : 'ascending') : null },
+      h('button', { type: 'button', class: 'th-sort', 'data-focus-key': `sort-${key}`, onclick: () => onSort(key) },
+        label, icon('chevron', { cls: current ? (down ? 'sort-down' : 'sort-up') : 'sort-none' }))));
+  }
   const table = h('table', { class: 'data rtable' },
-    h('thead', {}, h('tr', {}, ['Agent', 'Status', 'Risk', 'Owner', 'Blueprint', 'Last seen'].map((t) => h('th', { scope: 'col' }, t)))),
+    h('thead', {}, h('tr', {}, head)),
     h('tbody', {}, rows.map((a) => {
       const href = agentHref(a.id);
-      const tr = h('tr', { class: 'is-link' },
+      const tr = h('tr', { class: ['is-link', selected?.has(a.id) ? 'is-chosen' : null] },
+        selected ? h('td', { 'data-label': 'Choose', class: 'select-cell' }, h('label', { class: 'select-hit' },
+          h('input', {
+            type: 'checkbox', checked: selected.has(a.id), 'data-focus-key': `choose-${a.id}`, 'aria-label': `Choose ${a.name}`,
+            onchange: (e) => onSelect([a.id], e.target.checked),
+          }))) : null,
         h('td', { 'data-label': 'Agent' }, h('a', { class: 'cell-title break', href }, a.name),
           a.description ? h('div', { class: 'cell-sub clamp-2' }, a.description) : null),
         h('td', { 'data-label': 'Status' }, chip('agent', a.status)),
@@ -1853,7 +2179,7 @@ function agentsTable(rows) {
           : h('span', { class: 'muted' }, 'None'))),
         h('td', { 'data-label': 'Last seen', class: 'nowrap' }, timeEl(a.last_seen_at, { empty: 'Never' })));
       tr.addEventListener('click', (e) => {
-        if (e.target.closest('a, button') || getSelection().toString()) return;
+        if (e.target.closest('a, button, input, label, .select-cell') || getSelection().toString()) return;
         location.hash = href;
       });
       return tr;
@@ -3722,7 +4048,13 @@ async function renderFindings({ params }) {
     severity: params.get('severity') || '',
     category: params.get('category') || '',
     type: params.get('type') || '',
+    group: params.get('group') === 'agent',
   };
+  // Those chosen for an action on many at once, by ID: only ever among those shown. Those
+  // who triage do anything to them; the people an issue reached acknowledge theirs.
+  const selected = new Set();
+  const selecting = () => mayTriage() || person || state.status === 'mine';
+  let shown = [];
   // People without a role see the issues sent to them; everyone else, every finding, or
   // theirs. Findings come a page at a time, newest first; the control plane says how many
   // there are in all.
@@ -3772,9 +4104,18 @@ async function renderFindings({ params }) {
     },
   });
   const listHost = h('div', { class: 'finding-list' });
+  const bulkHost = h('div', {});
   const listTitle = h('h2', { class: 'sr-only', tabindex: '-1', id: 'finding-list-title' }, 'Findings');
+  const groupBox = h('input', {
+    type: 'checkbox', id: 'finding-group', checked: state.group, 'data-focus-key': 'finding-group',
+    onchange: () => { state.group = groupBox.checked; keepFocus(apply); sync(); },
+  });
+  const csvButton = h('button', {
+    type: 'button', class: 'btn btn--sm btn--ghost', 'data-focus-key': 'findings-csv',
+    title: 'The findings shown, as a spreadsheet', onclick: () => saveCsv(person ? 'agentgov-issues' : 'agentgov-findings', findingCsv(agentsById), shown),
+  }, icon('download'), 'Download CSV');
 
-  const sync = () => setHashQuiet('/findings', { status: state.status === 'open' ? '' : state.status, severity: state.severity, category: state.category, type: state.type });
+  const sync = () => setHashQuiet('/findings', { status: state.status === 'open' ? '' : state.status, severity: state.severity, category: state.category, type: state.type, group: state.group ? 'agent' : '' });
 
   async function reload() {
     ({ rows: list, total } = await fetchPage(state.status));
@@ -3839,9 +4180,31 @@ async function renderFindings({ params }) {
     more.hidden = !capped;
     more.textContent = `Show ${fmt(Math.min(PAGE, total - list.length))} more`;
     const yours = person || state.status === 'mine';
-    listHost.replaceChildren(...(rows.length
-      ? rows.map((f) => findingCard(f, agentsById, (action) => act(f, action, rows), { yours }))
-      : [h('section', { class: 'card' }, emptyFindings(state.status, person))]));
+    shown = rows;
+    for (const id of [...selected]) if (!rows.some((f) => f.id === id)) selected.delete(id);
+    csvButton.disabled = !rows.length;
+    const choose = selecting() && rows.length ? {
+      selected,
+      onSelect: (ids, on) => {
+        for (const id of ids) { if (on) selected.add(id); else selected.delete(id); }
+        keepFocus(apply);
+      },
+    } : null;
+    bulkHost.replaceChildren(choose ? findingBulkBar(rows, choose, {
+      clear: () => { selected.clear(); keepFocus(apply); },
+      run: async (action) => {
+        const done = await findingsAtOnce(rows.filter((f) => selected.has(f.id)), action);
+        if (!done) return;
+        selected.clear();
+        try { await reload(); } catch (err) { toast(err.message, { tone: 'critical' }); }
+        apply();
+        listTitle.focus();
+        refreshBadges();
+      },
+    }) : '');
+    const card = (f) => findingCard(f, agentsById, (action) => act(f, action, rows), { yours, choose });
+    listHost.replaceChildren(...(!rows.length ? [h('section', { class: 'card' }, emptyFindings(state.status, person))]
+      : state.group ? findingGroups(rows, agentsById, card, choose) : rows.map(card)));
   }
 
   category.addEventListener('change', () => { state.category = category.value; apply(); sync(); });
@@ -3864,9 +4227,152 @@ async function renderFindings({ params }) {
     h('div', { class: 'filters' }, statusHost,
       h('div', { class: 'field', style: 'flex:0 1 180px' }, h('label', { for: 'finding-category', class: 'sr-only' }, 'Category'), category),
       typeSelect ? h('div', { class: 'field', style: 'flex:0 1 260px' }, h('label', { for: 'finding-type', class: 'sr-only' }, 'Type'), typeSelect) : null),
-    h('div', { class: 'filters' }, sevHost, countEl, more),
+    h('div', { class: 'filters' }, sevHost, countEl, more,
+      h('label', { class: 'check', for: 'finding-group' }, groupBox, 'Group by agent'), csvButton),
+    bulkHost,
     listTitle,
     listHost);
+}
+
+// The findings shown, by agent: the agents with the most severe first, then those with more.
+function findingGroups(rows, agentsById, card, choose) {
+  const groups = new Map();
+  for (const f of rows) {
+    const key = f.agent_id || `subject:${f.subject}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(f);
+  }
+  // Not about one agent: about a platform, say.
+  const nameOf = (list) => agentsById.get(list[0].agent_id)?.name || PLATFORM_SOURCES[list[0].subject] || list[0].subject || '';
+  const worst = (list) => Math.min(...list.map((f) => SEVERITY_ORDER.indexOf(f.severity)));
+  return [...groups.values()]
+    .sort((a, b) => worst(a) - worst(b) || b.length - a.length || nameOf(a).localeCompare(nameOf(b)))
+    .map((list, i) => {
+      const first = list[0];
+      const headingId = `finding-group-${i}`;
+      let box = null;
+      if (choose) {
+        const all = list.every((f) => choose.selected.has(f.id));
+        box = h('input', {
+          type: 'checkbox', checked: all, 'data-focus-key': `choose-group-${first.agent_id || first.subject}`,
+          'aria-label': `Choose the ${plural(list.length, 'finding')} about ${nameOf(list)}`,
+          onchange: (e) => choose.onSelect(list.map((f) => f.id), e.target.checked),
+        });
+        box.indeterminate = !all && list.some((f) => choose.selected.has(f.id));
+      }
+      return h('section', { class: 'finding-group', 'aria-labelledby': headingId },
+        h('div', { class: 'finding-group-head' },
+          box ? h('label', { class: 'check finding-choose' }, box) : null,
+          h('h2', { id: headingId, class: 'finding-group-title break' },
+            first.agent_id && !isPerson() ? agentLink(first.agent_id, nameOf(list)) : nameOf(list) || 'Not about an agent'),
+          chip('severity', SEVERITY_ORDER[worst(list)]),
+          h('span', { class: 'muted small' }, plural(list.length, 'finding'))),
+        h('div', { class: 'finding-list' }, list.map(card)));
+    });
+}
+
+// Who an issue is with, in a few words, for a spreadsheet.
+function withWhom(f) {
+  if (f.status === 'accepted') return `risk accepted until ${String(f.accepted_until).slice(0, 10)}`;
+  if (f.status !== 'open' || !f.level) return '';
+  const who = (f.assignees || []).join(', ');
+  return `${who}${who ? ' ' : ''}(${LEVEL_WORDS[f.level] || f.level})${f.acknowledged_at ? ', acknowledged' : ''}`;
+}
+
+function findingCsv(agentsById) {
+  return [
+    ['Severity', (f) => f.severity],
+    ['Status', (f) => f.status],
+    ['Agent', (f) => agentsById.get(f.agent_id)?.name || f.subject],
+    ['Title', (f) => f.title],
+    ['Type', (f) => f.type],
+    ['Category', (f) => f.category],
+    ['With', withWhom],
+    ['Times seen', (f) => f.occurrences],
+    ['First seen', (f) => f.first_seen],
+    ['Last seen', (f) => f.last_seen],
+    ['Verified', (f) => (f.verified === false ? 'no' : 'yes')],
+    ['Closed by', (f) => f.resolved_by],
+    ['Closed', (f) => f.resolved_at],
+    ['ID', (f) => f.id],
+  ];
+}
+
+// What can be done to many findings at once, and to which of them.
+const FINDINGS_AT_ONCE = {
+  acknowledge: { label: 'Acknowledge', icon: 'user-check', verb: 'Acknowledged', done: 'acknowledged', fits: (f) => f.status === 'open' && f.level && !f.acknowledged_at },
+  resolve: { label: 'Resolve', icon: 'check', verb: 'Resolved', done: 'resolved', fits: (f) => f.status === 'open', triage: true },
+  accept: { label: 'Accept risk', icon: 'shield-check', verb: 'Accepted the risk of', done: 'accepted', fits: (f) => f.status === 'open', triage: true },
+  dismiss: { label: 'Dismiss', icon: 'minus', verb: 'Dismissed', done: 'dismissed', fits: (f) => f.status === 'open', triage: true },
+  reopen: { label: 'Reopen', icon: 'undo', verb: 'Reopened', done: 'reopened', fits: (f) => f.status !== 'open', triage: true },
+};
+
+function findingBulkBar(rows, choose, { clear, run }) {
+  const chosen = rows.filter((f) => choose.selected.has(f.id));
+  const all = chosen.length === rows.length;
+  const box = h('input', {
+    type: 'checkbox', checked: all, id: 'choose-all-findings', 'data-focus-key': 'choose-all',
+    onchange: (e) => choose.onSelect(rows.map((f) => f.id), e.target.checked),
+  });
+  box.indeterminate = !all && chosen.length > 0;
+  const buttons = [];
+  if (chosen.length) {
+    const triage = mayTriage();
+    for (const [action, spec] of Object.entries(FINDINGS_AT_ONCE)) {
+      if (spec.triage && !triage) continue;
+      const n = chosen.filter(spec.fits).length;
+      if (!n) continue;
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `many-${action}`, onclick: guarded(() => run(action)) },
+        icon(spec.icon), n === chosen.length ? spec.label : `${spec.label} ${fmt(n)}`, ['accept', 'dismiss'].includes(action) ? '…' : ''));
+    }
+  }
+  return h('div', { class: ['bulk-bar', chosen.length ? null : 'bulk-bar--idle'], role: 'region', 'aria-label': 'Chosen findings' },
+    h('label', { class: 'check', for: 'choose-all-findings' }, box,
+      chosen.length ? h('strong', { 'aria-live': 'polite' }, `${fmt(chosen.length)} of ${fmt(rows.length)} chosen`) : `Choose all ${fmt(rows.length)} shown`),
+    buttons.length ? h('div', { class: 'btn-row' }, buttons) : null,
+    chosen.length ? h('button', { type: 'button', class: 'btn btn--sm btn--ghost', 'data-focus-key': 'choose-none', onclick: clear }, icon('x'), 'Clear') : null);
+}
+
+// Do one thing to the findings chosen; resolves to whether it was done.
+async function findingsAtOnce(chosen, action) {
+  const spec = FINDINGS_AT_ONCE[action];
+  const fits = chosen.filter(spec.fits);
+  const fields = [];
+  let text = {
+    acknowledge: 'Take them on: they go no further up their chains.',
+    resolve: 'Mark them resolved. A check that finds one again opens it again.',
+    reopen: 'They open again, and go to the people responsible for them.',
+    accept: 'They go to nobody until the date you choose, then each opens again if it still holds. A year at most: then someone decides again. Those about agents you own or sponsor are left to someone else.',
+    dismiss: 'Dismiss what is wrong: to live with real risks, accept them. They go to nobody; given a date, each opens again then if it still holds. A threat opens again when it happens again.',
+  }[action];
+  if (action === 'accept') {
+    fields.push(
+      { id: 'reason', label: 'Why their risk is acceptable', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with each of them.' },
+      { id: 'until', label: 'Until', required: true, value: new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10), mono: true, hint: 'A date (YYYY-MM-DD), or a number of days.' },
+    );
+  } else if (action === 'dismiss') {
+    fields.push(
+      { id: 'reason', label: 'Why they are wrong', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with each of them.' },
+      { id: 'until', label: 'Until', mono: true, hint: 'A date (YYYY-MM-DD) or a number of days. Empty: for good.' },
+    );
+  }
+  const others = chosen.length - fits.length;
+  if (others) text += ` ${plural(others, 'other finding')} chosen can't be ${spec.done}, and ${others === 1 ? 'stays as it is' : 'stay as they are'}.`;
+  const result = await ask({
+    title: `${spec.label} ${plural(fits.length, 'finding')}?`,
+    text, iconName: spec.icon, confirm: `${spec.label} ${plural(fits.length, 'finding')}`, busy: 'Working…',
+    extra: nameList(fits.map((f) => f.title)),
+    fields,
+    submit: (v) => {
+      const body = { action, findings: fits.map((f) => f.id) };
+      if (v.reason) body.reason = v.reason;
+      if (v.until) body.until = /^\d+$/.test(v.until) ? Number(v.until) : v.until;
+      return inTurns('v1/findings/bulk', body, 'findings');
+    },
+  });
+  if (!result) return false;
+  await manyDone(result, spec.verb, 'finding');
+  return true;
 }
 
 function emptyFindings(status, person) {
@@ -4026,7 +4532,7 @@ function exceptionAsked(f, act) {
       h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('decline-exception') }, icon('x'), 'Decline')) : null));
 }
 
-function findingCard(f, agentsById, act, { yours = false } = {}) {
+function findingCard(f, agentsById, act, { yours = false, choose = null } = {}) {
   const tone = toneOf('severity', f.severity);
   const agent = f.agent_id ? agentsById.get(f.agent_id) : null;
   const headingId = `finding-title-${f.id}`;
@@ -4034,7 +4540,12 @@ function findingCard(f, agentsById, act, { yours = false } = {}) {
   return h('article', { class: 'card finding', 'data-tone': tone, 'aria-labelledby': headingId, tabindex: '-1', 'data-focus-key': `finding-${f.id}` },
     h('div', { class: 'finding-stripe', 'aria-hidden': 'true' }),
     h('div', { class: 'finding-main' },
-      h('div', { class: 'finding-top' }, chip('severity', f.severity), plainChip(humanize(f.category)),
+      h('div', { class: 'finding-top' },
+        choose ? h('label', { class: 'check finding-choose' }, h('input', {
+          type: 'checkbox', checked: choose.selected.has(f.id), 'data-focus-key': `choose-${f.id}`, 'aria-label': `Choose: ${f.title}`,
+          onchange: (e) => choose.onSelect([f.id], e.target.checked),
+        })) : null,
+        chip('severity', f.severity), plainChip(humanize(f.category)),
         f.status !== 'open' ? chip('finding', f.status) : null,
         f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle', title: `${cap(f.unverified_reason || 'the sync that checks it failed')}: it may no longer hold.` }) : null,
         f.status === 'open' && f.details?.exception_request ? plainChip('Exception asked', { tone: 'warning', iconName: 'shield-check', title: `${f.details.exception_request.by}: ${f.details.exception_request.reason}` }) : null,

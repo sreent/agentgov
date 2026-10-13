@@ -111,6 +111,9 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Edit only if nobody changed it since you looked ([production](production.md#people-working-at-once)) | Every **Edit** form does | `agentgov <kind> update ... --if-version N` | `If-Match: "N"` on `PATCH` (`PUT` for policies); 412 if it changed |
 | See the control plane's replicas and which one leads | Overview → *Control plane* | `agentgov replicas` | `GET /v1/replicas` |
 | Approve, block, unblock, delete, restore | Agent toolbar | `agentgov agents approve\|block\|unblock\|delete\|restore REF` | `POST /v1/agents/{ref}/{action}` |
+| Sort and filter the agents, and download those shown as a spreadsheet | Agents → a column's header; *Where*, *Risk*, *Owner*; **Download CSV** | `agentgov agents list --source S --risk R --csv` (`-q`: only their names) | `GET /v1/agents?source=&risk_level=` |
+| Approve, block, unblock, delete or restore many agents at once ([many agents at once](#many-agents-at-once)) | Agents → tick them → **Approve**, **Block**, … | `agentgov agents approve\|block\|unblock\|delete\|restore REF REF ...` | `POST /v1/agents/bulk` |
+| Change the owner, team, sponsors or blueprint of many agents at once | Agents → tick them → **Edit…** | `agentgov agents update REF REF ... --owner T --add-sponsor P --remove-sponsor P` | `POST /v1/agents/bulk`, `action: update` |
 | Adopt a discovered agent | Agent → **Adopt** | `agentgov agents lifecycle REF adopt` | `POST /v1/agents/{ref}/adopt` |
 | Adopt agents at once, with their makers as owners | Agents → **Adopt n agents** | `agentgov agents adopt --platform copilot-studio --makers` | `POST /v1/agents/adopt` |
 | Delete a deleted agent permanently (otherwise it is purged after `AGENTGOV_SOFT_DELETE_RETENTION_DAYS`, 30 by default) | Agent → **Delete permanently** | `agentgov agents purge REF` | `DELETE /v1/agents/{ref}` |
@@ -148,7 +151,9 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Export manifests | Policies → **Export manifests** | `agentgov export` | `GET /v1/export` |
 | Decide an approval request | Approvals → **Approve** / **Deny** | `agentgov approvals approve\|deny ID` | `POST /v1/approvals/{id}/approve\|deny` |
 | See the approval requests sent to you, as the person an agent acted for | Approvals → *Waiting for you* | `agentgov approvals list --mine` | `GET /v1/me/approvals` |
-| Resolve, dismiss, reopen findings | Findings | `agentgov findings resolve\|dismiss\|reopen ID` | `POST /v1/findings/{id}/{action}` |
+| Resolve, dismiss, reopen findings | Findings | `agentgov findings resolve\|reopen ID`, `agentgov findings dismiss ID --reason R [--until DATE]` | `POST /v1/findings/{id}/resolve\|dismiss\|reopen` |
+| Do one of those to many findings at once, or acknowledge them or accept their risk ([issues](issues.md#many-at-once)) | Findings → tick them, or *Group by agent* and tick an agent | `agentgov findings acknowledge\|resolve\|dismiss\|accept\|reopen ID ID ...` | `POST /v1/findings/bulk` |
+| Download the findings shown as a spreadsheet | Findings → **Download CSV** | `agentgov findings list --csv` (`-q`: only their IDs) | `GET /v1/findings` |
 | See who an issue is with, its messages and its history ([issues](issues.md)) | Findings → **Details** | `agentgov findings get ID` | `GET /v1/findings/{id}` |
 | See the issues sent to you, as an owner, a sponsor or a team member | Findings → *Yours* (people without a role: *Your issues*) | `agentgov findings list --mine` | `GET /v1/me/issues` |
 | List findings, a page at a time, by type and severity | Findings: the type and severity filters, and **Show more** | `agentgov findings list --type T --severity S --limit N` | `GET /v1/findings?type=&severity=&limit=&offset=` (`X-Total-Count` says how many in all) |
@@ -202,6 +207,41 @@ blueprints, tool servers, model providers, identity issuers, destinations and po
 `apikeys revoke`, `agents clear-instructions`), `destinations replay`,
 `platforms push-connector-policy`, and `features set` (or `secops level`) when it lowers a
 feature, ask for confirmation unless you pass `--yes`.
+
+## Many agents at once
+
+With a few hundred agents, reviews come in batches: the agents someone who left owned, those
+found on a platform, the riskiest. On the **Agents** page, a column's header sorts by it (the
+riskiest or the most recently seen first, then the other way round), and the filters narrow
+the list by where the agents run, their risk and their owner. **Download CSV** gives the
+agents shown as a spreadsheet, for a review or an auditor.
+
+Tick the agents to act on, or all of those shown (the box in the table's header; on a phone,
+**Choose all**), and the bar above the table offers what fits them:
+
+- **Approve**, **Block**, **Unblock**, **Delete** and **Restore**, each agent on its own: one
+  that can't be (approved without a sponsor, say) is left as it was, and AgentGov lists those
+  left, with why. The reason you give is recorded for each of them in the ledger.
+- **Edit…**: an owner, a team, sponsors to add or to take off (someone who left, say), a
+  blueprint. Only what you fill in changes.
+- **Adopt**, for those found on platforms: each with its maker as owner and sponsor where
+  AgentGov knows them.
+
+Blocking or deleting an agent found on a platform changes AgentGov's registry, not the
+platform: the dialog says which of them run where, to block them there too. Administrators
+do all of these; the security team's role blocks and unblocks once the
+[hand-off](secops.md) has reached *contain*.
+
+In the CLI, name the agents: `agentgov agents block bot-a bot-b --reason "Incident 42"`, or
+`agentgov agents update bot-a bot-b --remove-sponsor alice@example.com --add-sponsor
+dana@example.com`. `agentgov agents list -q` prints only names, for other commands:
+`agentgov agents approve $(agentgov agents list --status pending -q)`. A command that left
+agents as they were says which, and why, and exits with 1.
+
+The API takes up to 500 agents a call: `POST /v1/agents/bulk` with `action`, `agents` (names
+or IDs), `reason` and, for `update`, `fields`: `owner`, `team`, `sponsors` (instead of each
+one's own), `add_sponsors`, `remove_sponsors`, `blueprint`, `environment` and `risk_tier`. It
+answers with the agents `done`, and those `left`, each with `why`.
 
 ## Registry as code
 

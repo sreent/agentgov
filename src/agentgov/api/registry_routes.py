@@ -16,6 +16,7 @@ from agentgov.registry import (
     agents,
     apikeys,
     blueprints,
+    bulk,
     features,
     identity_issuers,
     instructions,
@@ -158,13 +159,9 @@ def update_agent(
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         changed = agents.update(s, agent, body, actor=principal.actor, version=if_match(request))
-        if set(changed) & RISKY_FIELDS:
+        if set(changed) & agents.RISKY_FIELDS:
             agents.refresh_risk(s, rt.settings, agent)
         return agents.to_dict(agent)
-
-
-# What an agent's risk counts that an edit can change.
-RISKY_FIELDS = {"owner", "sponsors", "risk_tier", "blueprint", "permissions"}
 
 
 def _sponsors(agent: Any, principal: Principal) -> bool:
@@ -289,6 +286,44 @@ def adopt_agents(
         )
 
 
+@router.post("/agents/bulk", tags=["agents"])
+def bulk_agents(
+    request: Request,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(kill_switch),
+) -> dict[str, Any]:
+    """Do one thing to many agents (``agents``, by name or ID) at once: a lifecycle
+    ``action`` (approve, block, unblock, delete or restore), or ``update`` with ``fields``
+    (owner, team, sponsors, add_sponsors, remove_sponsors, blueprint, environment,
+    risk_tier). Each on its own: those it can't do are ``left``, each with why. The secops
+    role blocks and unblocks, as far as the hand-off lets it."""
+    unknown = sorted(set(body) - {"action", "agents", "reason", "fields"})
+    if unknown:
+        raise HTTPException(
+            422, f"unknown field(s) {', '.join(unknown)}: send action, agents, reason and fields"
+        )
+    action = str(body.get("action") or "")
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        raise HTTPException(422, "reason is text")
+    rt = _rt(request)
+    with rt.db.session() as s:
+        if action == "update":
+            if not principal.is_admin:
+                raise HTTPException(403, "administrators edit agents")
+        elif action in bulk.AGENT_ACTIONS:
+            handoff.check_kill_switch(s, principal, action)
+        return bulk.agents(
+            s,
+            rt.settings,
+            body.get("agents"),
+            action,
+            actor=principal.actor,
+            reason=(reason or "").strip() or None,
+            fields=body.get("fields"),
+        )
+
+
 @router.post("/agents/{ref}/{action}", tags=["agents"])
 def agent_lifecycle(
     request: Request,
@@ -312,8 +347,9 @@ def agent_lifecycle(
         if action in ("adopt", "approve", "restore"):
             # Its owner, sponsors and status count towards its risk: shown at once.
             agents.refresh_risk(s, rt.settings, agent)
-            if agent.on_platform:
-                platforms.review_summary(s)
+        if agent.on_platform:
+            # Those waiting to be reviewed on their platforms: blocked or deleted, they aren't.
+            platforms.review_summary(s)
         return agents.to_dict(agent)
 
 
