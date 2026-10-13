@@ -49,6 +49,7 @@ admin consent:
 |---|---|
 | `CopilotPackages.Read.All` | Microsoft 365 agent catalog |
 | `AgentIdentity.Read.All` | Microsoft Entra Agent ID |
+| `User.Read.All` | Microsoft Entra users (`User.ReadBasic.All` also does, without whose account is disabled) |
 | `AuditLogsQuery.Read.All` | Microsoft Purview audit log |
 | `SecurityAlert.Read.All` | Microsoft Defender alerts |
 | `EntitlementManagement.Read.All` | Microsoft Entra access packages (`EntitlementManagement.ReadWrite.All` also does, and lets AgentGov manage them) |
@@ -76,6 +77,15 @@ services agreement), AgentGov raises an `entra.disabled_by_microsoft` finding, w
 
 AgentGov doesn't read identities' sponsors: Microsoft Graph lists them only for apps that
 may also change every agent identity (`AgentIdentity.ReadWrite.All`).
+
+## Microsoft Entra users
+
+The Copilot Studio inventory names each agent's owner and maker by Microsoft Entra object
+ID. AgentGov looks them up (`POST /v1.0/$batch`, twenty `GET /users/{id}` at a time) after
+each import or sync, and on the schedule: the people it hasn't looked up yet, then again a
+week later, when someone the directory no longer has has left. It reads only those people,
+never the whole directory. [Who made each agent](platforms.md#who-made-each-agent) says
+what it does with them, and how to do without the permission.
 
 ## Microsoft Purview audit log
 

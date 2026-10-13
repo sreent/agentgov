@@ -872,6 +872,8 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .exception-list .icon-btn .ico { width: 14px; height: 14px; }
 .exception-scope { overflow-wrap: anywhere; }
 .exception-reach.tone-text-warning { color: var(--warning-ink); }
+.adopt-list { list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; margin: 0 0 12px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.adopt-list .cell-title, .adopt-list .cell-sub { display: block; }
 .dialog::backdrop { background: var(--scrim); }
 .dialog-form { display: flex; flex-direction: column; gap: 14px; padding: 20px; }
 .dialog-head { display: flex; gap: 12px; align-items: flex-start; }

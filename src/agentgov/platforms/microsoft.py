@@ -21,6 +21,7 @@ import base64
 import json
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
@@ -35,6 +36,18 @@ MAX_PAGES = 200
 DECLARATIVE_AGENT = "declarativeagent"
 # Entra object IDs: what may go into a Graph $filter.
 GUID = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+# Requests Graph takes in one $batch, at most.
+BATCH = 20
+USER_FIELDS = "id,displayName,mail,userPrincipalName"
+# Application permissions that also say whether a user's account is enabled; the others
+# (User.ReadBasic.All) read only who they are.
+USER_ROLES = frozenset(
+    {"User.Read.All", "User.ReadWrite.All", "Directory.Read.All", "Directory.ReadWrite.All"}
+)
+USERS_HINT = (
+    " (AgentGov's app needs User.Read.All or User.ReadBasic.All with admin consent; an "
+    "administrator signed in with Microsoft, the delegated permission User.ReadBasic.All)"
+)
 
 
 def token_roles(token: str) -> frozenset[str] | None:
@@ -210,6 +223,21 @@ class MicrosoftApp:
             {"$select": self.IDENTITY_FIELDS, "$top": "100"},
             hint=" (the app needs AgentIdentity.Read.All with admin consent)",
             what="agent identities",
+        )
+
+    # -- Microsoft Entra users ---------------------------------------------------------------
+
+    def users(
+        self, object_ids: list[str], *, roles: frozenset[str] | None = None
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Users by object ID (see :func:`lookup_users`); whether their accounts are enabled
+        when the app's permission says (``roles``, as granted)."""
+        enabled = roles is None or bool(USER_ROLES & roles)
+        return lookup_users(
+            lambda url, body: self.post(url, body, hint=USERS_HINT),
+            self.graph,
+            object_ids,
+            enabled=enabled,
         )
 
     # -- Microsoft Entra ID Governance: access packages -----------------------------------
@@ -435,6 +463,18 @@ class MicrosoftAdmin:
                 return rows
         raise PlatformError(f"stopped after {MAX_PAGES} pages of the Power Platform inventory")
 
+    def users(self, token: str, object_ids: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+        """Users by object ID, as the signed-in administrator (User.ReadBasic.All, which
+        doesn't say whose account is enabled)."""
+        return lookup_users(
+            lambda url, body: self._call(
+                url, token, what="Could not look up users", hint=USERS_HINT, body=body
+            ),
+            self.settings.graph_url.rstrip("/"),
+            object_ids,
+            enabled=False,
+        )
+
     def block_package(self, token: str, package_id: str, *, blocked: bool) -> None:
         """Block a Microsoft 365 agent for everyone in the organisation, or unblock it."""
         action = "block" if blocked else "unblock"
@@ -526,6 +566,56 @@ class MicrosoftAdmin:
             hint=POLICY_HINT,
             body={},
         )
+
+
+def lookup_users(
+    send: Callable[[str, dict[str, Any]], dict[str, Any]],
+    graph: str,
+    object_ids: list[str],
+    *,
+    enabled: bool,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Users by their Entra object IDs, 20 to a Graph $batch: those found, and the IDs
+    Graph has no user for (deleted, or never a person). A lookup Graph turned away for
+    now (throttled, or failed) is neither, and is tried again next time; one refused for
+    want of a permission stops them all.
+
+    ``send`` posts a body to a URL and returns Graph's answer; ``enabled`` asks whether
+    each account is enabled too, which User.ReadBasic.All doesn't allow.
+    """
+    fields = USER_FIELDS + (",accountEnabled" if enabled else "")
+    wanted = [i for i in dict.fromkeys(object_ids) if GUID.match(i)]
+    found: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for start in range(0, len(wanted), BATCH):
+        chunk = wanted[start : start + BATCH]
+        body = {
+            "requests": [
+                {"id": str(n), "method": "GET", "url": f"/users/{oid}?$select={fields}"}
+                for n, oid in enumerate(chunk)
+            ]
+        }
+        answer = send(f"{graph}/v1.0/$batch", body)
+        for item in answer.get("responses") or []:
+            try:
+                oid = chunk[int(item.get("id"))]
+            except (TypeError, ValueError, IndexError):
+                continue
+            status = item.get("status")
+            user = item.get("body")
+            if status == 200 and isinstance(user, dict):
+                found.append(user)
+            elif status == 404:
+                missing.append(oid)
+            elif status in (401, 403):
+                error = (user or {}).get("error") if isinstance(user, dict) else None
+                detail = error.get("message") if isinstance(error, dict) else None
+                raise PlatformError(
+                    f"Microsoft Graph refused to read users: {status}: {detail or 'forbidden'}"
+                    f"{USERS_HINT}",
+                    status=status,
+                )
+    return found, missing
 
 
 def is_declarative(package: dict[str, Any]) -> bool:

@@ -713,6 +713,8 @@ def record_inventory(
             continue
         seen.add(key)
         details = {**item.details, "kind": item.kind, "part": item.part, "in_inventory": True}
+        if item.maker and "@" in item.maker:  # a person, not a service principal
+            details["maker"] = item.maker
         agent, created = upsert(
             session,
             source=source,
@@ -854,8 +856,9 @@ def review_summary(session: Session) -> None:
             title=f"{len(names)} {label} agent{'' if len(names) == 1 else 's'} to review",
             description=f"Found in {label}, with no owner, sponsors or review in AgentGov yet: "
             f"{shown}.",
-            remediation="Adopt the agents you keep, giving each an owner and sponsors (Agents, "
-            f"those not reviewed yet), and block or delete the others in {label}.",
+            remediation="Adopt the agents you keep, giving each an owner and sponsors: on the "
+            "Agents page, those not reviewed yet, Adopt them at once, each with its maker as "
+            f"owner where AgentGov knows them. Block or delete the others in {label}.",
             details={"platform": label, "count": len(names)},
         )
 

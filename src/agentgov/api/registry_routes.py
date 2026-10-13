@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from sqlalchemy import select
 
 from agentgov import ledger
 from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.api.versions import if_match
 from agentgov.identity.keycloak import KeycloakError
-from agentgov.models import ACTIVE
+from agentgov.models import ACTIVE, PlatformAgent
 from agentgov.registry import (
     agents,
     apikeys,
@@ -18,6 +19,7 @@ from agentgov.registry import (
     features,
     identity_issuers,
     instructions,
+    people,
     platforms,
     policies,
     teams,
@@ -54,17 +56,32 @@ def list_agents(
 ) -> list[dict[str, Any]]:
     """``source`` is ``registered``, ``discovered:<how>`` or ``platform:<platform>``."""
     with _rt(request).db.session() as s:
+        listed = agents.list_agents(
+            s,
+            status=status,
+            blueprint=blueprint,
+            risk_level=risk_level,
+            q=q,
+            source=source,
+            include_deleted=include_deleted,
+        )
+        # Who made each agent found on a platform, as its platform says.
+        makers = people.for_records(
+            s,
+            list(
+                s.scalars(
+                    select(PlatformAgent).where(
+                        PlatformAgent.agent_id.in_([a.id for a in listed if a.on_platform])
+                    )
+                )
+            ),
+        )
         return [
-            agents.to_dict(a)
-            for a in agents.list_agents(
-                s,
-                status=status,
-                blueprint=blueprint,
-                risk_level=risk_level,
-                q=q,
-                source=source,
-                include_deleted=include_deleted,
-            )
+            {
+                **agents.to_dict(a),
+                **({"maker": people.shown(makers[a.id])} if a.id in makers else {}),
+            }
+            for a in listed
         ]
 
 
@@ -104,10 +121,14 @@ def register_agent(
 def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         agent = agents.get(s, ref)
+        makers = people.for_agent(s, agent.id)
         return {
             **agents.to_dict(agent),
             # What Microsoft 365 or Copilot Studio reports, for agents that run there.
             "platforms": platforms.for_agent(s, agent.id),
+            # Who made it and owns it there, and whom adopting it would make its owner.
+            "makers": makers,
+            "suggested_owner": people.suggested(makers),
             # The controls whose mode differs for it, and why (docs/features.md#exceptions).
             "control_modes": features.exceptions_for(
                 agent, features.modes(s), features.all_scopes(s)
@@ -230,6 +251,40 @@ def agent_credentials(
             severity="warning",
         )
         return creds
+
+
+@router.post("/agents/adopt", tags=["agents"])
+def adopt_agents(
+    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
+) -> dict[str, Any]:
+    """Adopt agents found on platforms at once (``{"agents": [...]}``): with ``makers:
+    true``, each agent's maker on its platform as owner and sponsor, where AgentGov knows
+    them; ``owner`` and ``sponsors`` for the others. Those it can't adopt are left, each
+    with why."""
+    refs = body.get("agents")
+    sponsors = body.get("sponsors")
+    if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
+        raise HTTPException(422, "agents is a list of agents' names or IDs")
+    if sponsors is not None and (
+        not isinstance(sponsors, list) or not all(isinstance(x, str) for x in sponsors)
+    ):
+        raise HTTPException(422, "sponsors is a list of email addresses")
+    owner = body.get("owner")
+    if owner is not None and not isinstance(owner, str):
+        raise HTTPException(422, "owner is a team or a person's email address")
+    reason = body.get("reason")
+    rt = _rt(request)
+    with rt.db.session() as s:
+        return people.adopt(
+            s,
+            rt.settings,
+            refs,
+            owner=(owner or "").strip() or None,
+            sponsors=sponsors or None,
+            makers=bool(body.get("makers")),
+            actor=principal.actor,
+            reason=reason if isinstance(reason, str) else None,
+        )
 
 
 @router.post("/agents/{ref}/{action}", tags=["agents"])

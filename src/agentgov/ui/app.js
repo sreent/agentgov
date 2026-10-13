@@ -1707,6 +1707,7 @@ async function renderAgents({ params }) {
   const countEl = h('p', { class: 'result-count', 'aria-live': 'polite' });
   const chipHost = h('div', { class: 'seg', role: 'group', 'aria-label': 'Filter by status' });
   const extraHost = h('div', { class: 'chip-row' });
+  const adoptHost = h('div', {});
   const search = h('input', {
     type: 'search', id: 'agent-search', placeholder: 'Search names and descriptions', value: state.q,
     'data-focus-key': 'agent-search', autocomplete: 'off',
@@ -1738,6 +1739,11 @@ async function renderAgents({ params }) {
     if (state.risk === 'elevated') rows = rows.filter((a) => ['high', 'critical'].includes(a.risk?.level));
     if (state.source) rows = rows.filter((a) => a.source === state.source);
     countEl.textContent = plural(rows.length, 'agent');
+    const adoptable = rows.filter((a) => a.status === 'discovered');
+    adoptHost.replaceChildren(can('admin') && adoptable.length > 1
+      ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'adopt-many', onclick: guarded(() => adoptMany(adoptable)) },
+        icon('user-check'), `Adopt ${plural(adoptable.length, 'agent')}…`)
+      : '');
     tableHost.replaceChildren(rows.length ? agentsTable(rows) : emptyState('No agents match these filters',
       state.q ? `Nothing matches "${state.q}".` : 'Try another status.',
       h('button', {
@@ -1783,8 +1789,51 @@ async function renderAgents({ params }) {
     }),
     h('div', { class: 'filters' },
       h('div', { class: 'field' }, h('label', { for: 'agent-search', class: 'sr-only' }, 'Search agents'), search),
-      chipHost, extraHost, countEl),
+      chipHost, extraHost, countEl, adoptHost),
     h('section', { class: 'card', 'aria-label': 'Agent list' }, tableHost));
+}
+
+// Adopt several discovered agents at once: each with its maker on its platform as owner and
+// sponsor where AgentGov knows them, or with one owner for all.
+async function adoptMany(candidates) {
+  const boxes = candidates.map((a) => {
+    const box = h('input', { type: 'checkbox', checked: true, value: a.id, 'aria-label': `Adopt ${a.name}` });
+    return { a, box };
+  });
+  const known = candidates.filter((a) => a.maker?.email && a.maker.known && !a.maker.left).length;
+  const list = h('ul', { class: 'adopt-list', role: 'list' }, boxes.map(({ a, box }) => h('li', {},
+    h('label', { class: 'check' }, box, h('span', {}, h('span', { class: 'cell-title' }, a.name),
+      h('span', { class: 'cell-sub' }, a.maker ? makerLine(a.maker) : 'Who made it isn\'t known'))))));
+  const result = await ask({
+    title: `Adopt ${plural(candidates.length, 'agent')}`,
+    text: `Each becomes pending review, with an owner and sponsors; approve them afterwards. AgentGov knows who made ${fmt(known)} of them.`,
+    iconName: 'user-check', confirm: 'Adopt', busy: 'Adopting…', wide: true,
+    extra: list,
+    fields: [
+      { id: 'makers', type: 'checkbox', value: known > 0, label: 'Make each one\'s maker its owner and sponsor, where AgentGov knows them' },
+      { id: 'owner', label: 'Owner', placeholder: 'A team or a person', hint: 'For the agents whose maker AgentGov doesn\'t know, or for all of them if the box above is clear.' },
+      { id: 'sponsors', label: 'Sponsors', placeholder: 'alice@example.com, bob@example.com', hint: 'Separate people with commas: for the agents that have no maker to sponsor them.' },
+      { id: 'reason', label: 'Reason', type: 'textarea', hint: 'Recorded in the evidence ledger.' },
+    ],
+    submit: async (v) => {
+      const chosen = boxes.filter(({ box }) => box.checked).map(({ a }) => a.id);
+      if (!chosen.length) throw new Error('Choose one agent at least.');
+      if (!v.makers && !v.owner) throw new Error('Give them an owner, or make their makers their owners.');
+      const body = { agents: chosen, makers: v.makers };
+      if (v.owner) body.owner = v.owner;
+      const sponsors = parseList(v.sponsors);
+      if (sponsors.length) body.sponsors = sponsors;
+      if (v.reason) body.reason = v.reason;
+      return api('v1/agents/adopt', { method: 'POST', body });
+    },
+  });
+  if (!result) return;
+  const left = result.left || [];
+  toast(left.length
+    ? `Adopted ${plural(result.adopted.length, 'agent')}; ${fmt(left.length)} left: ${left.slice(0, 3).map((x) => `${x.agent} (${x.why})`).join('; ')}${left.length > 3 ? '…' : ''}`
+    : `Adopted ${plural(result.adopted.length, 'agent')}. They are pending review.`, left.length ? { tone: 'critical' } : undefined);
+  refreshBadges();
+  await refresh();
 }
 
 function agentsTable(rows) {
@@ -1797,7 +1846,8 @@ function agentsTable(rows) {
           a.description ? h('div', { class: 'cell-sub clamp-2' }, a.description) : null),
         h('td', { 'data-label': 'Status' }, chip('agent', a.status)),
         h('td', { 'data-label': 'Risk' }, riskChip(a.risk)),
-        h('td', { 'data-label': 'Owner', class: 'break' }, a.owner || h('span', { class: 'muted' }, a.status === 'discovered' ? 'Unassigned' : 'No owner')),
+        h('td', { 'data-label': 'Owner', class: 'break' }, a.owner || h('span', { class: 'muted' }, a.status === 'discovered' ? 'Unassigned' : 'No owner'),
+          !a.owner && a.maker ? h('div', { class: 'cell-sub' }, makerLine(a.maker)) : null),
         h('td', { 'data-label': 'Blueprint' }, a.blueprint || (platformOf(a)
           ? h('span', { class: 'muted', title: 'Blueprints grant gateway tools; this agent runs on another platform' }, `${platformOf(a)} agent`)
           : h('span', { class: 'muted' }, 'None'))),
@@ -1955,9 +2005,12 @@ async function runLifecycle(a, action) {
   const spec = lifecycleSpec(a, action);
   const fields = [];
   if (action === 'adopt') {
+    // Its maker on its platform, where AgentGov knows them.
+    const maker = a.suggested_owner;
     fields.push(
-      { id: 'owner', label: 'Owner', placeholder: 'Team or person accountable for the agent', value: a.owner || '' },
-      { id: 'sponsors', label: 'Sponsors', placeholder: 'alice@example.com, bob@example.com', value: (a.sponsors || []).join(', '), hint: 'Separate people with commas. Approval needs at least one sponsor.' },
+      { id: 'owner', label: 'Owner', placeholder: 'Team or person accountable for the agent', value: a.owner || maker || '',
+        hint: maker && !a.owner ? `Suggested: ${maker}, ${suggestedWhy(a)}. Change it if someone else should own it.` : null },
+      { id: 'sponsors', label: 'Sponsors', placeholder: 'alice@example.com, bob@example.com', value: (a.sponsors?.length ? a.sponsors : maker ? [maker] : []).join(', '), hint: 'Separate people with commas. Approval needs at least one sponsor.' },
     );
     // Blueprints grant gateway tools, which agents on other platforms don't use.
     if (!platformOf(a)) {
@@ -2454,6 +2507,49 @@ function personRow(name, role) {
     h('span', { class: 'person-text' }, h('span', {}, name), h('span', { class: 'role' }, role)));
 }
 
+// Someone a platform names as an agent's maker or owner, as AgentGov knows them.
+function makerName(m) {
+  if (m.name && m.email) return `${m.name} (${m.email})`;
+  return m.name || m.email || `Entra ID ${m.entra_id}`;
+}
+
+function makerRole(m) {
+  const where = PLATFORM_SOURCES[`platform:${m.source}`] || m.source;
+  const roles = m.roles || [];
+  const words = roles.includes('owner') && roles.includes('creator') ? `Made it, and owns it in ${where}`
+    : roles.includes('owner') ? `Owns it in ${where}` : `Made it in ${where}`;
+  let note = null;
+  if (m.left) note = `left ${relTime(m.left_at)}`;
+  else if (m.enabled === false) note = 'account disabled';
+  else if (m.entra_id && !m.looked_up) note = 'not looked up yet';
+  else if (m.entra_id && !m.known) note = 'not a user in the directory';
+  return note ? `${words} · ${note}` : words;
+}
+
+// One line for a maker where there is room for one: the list, the adopt dialog.
+function makerLine(m) {
+  const where = PLATFORM_SOURCES[`platform:${m.source}`] || m.source;
+  const note = m.left ? ' (left)' : m.enabled === false ? ' (account disabled)' : '';
+  return (m.roles || []).includes('creator') ? `Made by ${makerName(m)}${note}` : `Owner in ${where}: ${makerName(m)}${note}`;
+}
+
+// Who the person adopting an agent suggests is to it: "who owns it in Copilot Studio".
+function suggestedWhy(a) {
+  const pick = (a.makers || []).find((m) => (m.email || '').toLowerCase() === a.suggested_owner);
+  return pick && (pick.roles || []).includes('owner') ? `who owns it in ${platformOf(a) || 'its platform'}` : 'who made it';
+}
+
+function makersBlock(a) {
+  const makers = a.makers || [];
+  if (!makers.length) return null;
+  const unknown = makers.some((m) => m.entra_id && !m.looked_up);
+  return [
+    h('ul', { class: 'people', role: 'list' }, makers.map((m) => personRow(makerName(m), makerRole(m)))),
+    unknown ? h('p', { class: 'hint' }, 'AgentGov knows people by name once it can look them up: ',
+      h('a', { href: '#/platforms' }, 'connect Microsoft Entra users, or upload a list of users'), '.') : null,
+  ];
+}
+
 function peopleCard(a) {
   const managed = a.status !== 'discovered';
   const sponsors = a.sponsors || [];
@@ -2463,7 +2559,10 @@ function peopleCard(a) {
     body: [
       a.owner ? h('ul', { class: 'people', role: 'list' }, personRow(a.owner, 'Owner'))
         : callout(managed ? 'warning' : 'neutral', managed ? 'alert-circle' : 'info',
-          managed ? 'No owner. Assign an owning team or person.' : 'Unmanaged agents have no owner until someone adopts them.'),
+          managed ? 'No owner. Assign an owning team or person.'
+            : a.suggested_owner ? `Unmanaged agents have no owner until someone adopts them. Adopting it suggests ${a.suggested_owner}, ${suggestedWhy(a)}.`
+              : 'Unmanaged agents have no owner until someone adopts them.'),
+      makersBlock(a),
       sponsors.length ? h('ul', { class: 'people', role: 'list' }, sponsors.map((p) => personRow(p, 'Sponsor')))
         : callout(managed ? 'warning' : 'neutral', managed ? 'alert-circle' : 'info',
           'No sponsor. An agent needs at least one sponsor before it can be activated.'),
@@ -5924,7 +6023,7 @@ async function renderPlatforms() {
     }),
     platformsCallout(view),
     connectionsCard(view),
-    h('div', { class: 'grid-halves' }, m365Card(sources['microsoft-365']), copilotStudioCard(sources['copilot-studio'], view.admin_actions)),
+    h('div', { class: 'grid-halves' }, m365Card(sources['microsoft-365']), copilotStudioCard(sources['copilot-studio'], view.admin_actions, view.people)),
     connectorsCard(usage, view, modes),
     otherPlatformsCard(view));
 }
@@ -5989,6 +6088,8 @@ const CONNECTION_COUNTS = {
   'microsoft-365': (c) => syncCounts(c),
   'copilot-studio': (c) => syncCounts(c),
   'entra-agent-id': (c) => `${fmt(c.created)} new, ${fmt(c.updated)} updated, ${fmt(c.linked)} linked to agents`,
+  'entra-users': (c) => [`${plural(c.found, 'person', 'people')} found`, c.not_found ? `${fmt(c.not_found)} not users` : null,
+    c.left ? `${fmt(c.left)} left` : null].filter(Boolean).join(', '),
   'purview-audit': (c) => [`${plural(c.interactions, 'interaction')}`, `${plural(c.maker_events, 'maker change')}`,
     c.searching ? `${plural(c.searching, 'search', 'searches')} running` : null].filter(Boolean).join(', '),
   defender: (c) => `${plural(c.alerts, 'alert')} about agents, ${fmt(c.matched)} matched, ${fmt(c.resolved)} resolved`,
@@ -6122,11 +6223,22 @@ async function syncMicrosoft365(button) {
   await refresh();
 }
 
-function copilotStudioCard(src, adminActions) {
+// Who made Copilot Studio's agents, as far as AgentGov knows them.
+function makersFact(summary) {
+  if (!summary?.named) return null;
+  const parts = [`${fmt(summary.known)} of ${fmt(summary.named)} known by name`];
+  if (summary.unknown) parts.push(`${fmt(summary.unknown)} not looked up yet`);
+  if (summary.left) parts.push(`${fmt(summary.left)} left`);
+  if (summary.disabled) parts.push(`${fmt(summary.disabled)} with their account disabled`);
+  return ['Makers and owners', parts.join(', ')];
+}
+
+function copilotStudioCard(src, adminActions, summary) {
   const asYou = adminActions && can('admin') && me?.microsoft;
   const actions = can('admin') ? [
     asYou ? h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'studio-sync', onclick: (e) => syncCopilotStudio(e.currentTarget) }, icon('refresh'), 'Sync now') : null,
     h('button', { type: 'button', class: asYou ? 'btn btn--sm' : 'btn btn--sm btn--primary', 'data-focus-key': 'studio-import', onclick: guarded(importCopilotStudio) }, icon('upload'), 'Import inventory'),
+    summary?.named ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'people-import', onclick: guarded(importPeople) }, icon('upload'), 'Upload users') : null,
   ].filter(Boolean) : null;
   return card({
     title: 'Copilot Studio',
@@ -6136,10 +6248,25 @@ function copilotStudioCard(src, adminActions) {
         + (adminActions && can('admin') ? ', or sign in to AgentGov with Microsoft Entra ID to sync it from here.' : '.'),
     actions,
     body: src.last_sync
-      ? sourceFacts(src, 'update')
+      ? [sourceFacts(src, 'update'), makersFact(summary) ? facts([makersFact(summary)]) : null,
+        summary?.unknown ? h('p', { class: 'hint' }, 'Copilot Studio names makers by their Entra IDs. AgentGov looks them up with its app (User.Read.All) or as an admin signed in with Microsoft; without either, upload the list of users from the Microsoft Entra admin center (Users, Download users).') : null]
       : emptyState('Nothing imported yet', 'Export the inventory as a Power Platform or AI administrator (a reader role is enough), then import the file:',
         h('pre', { class: 'kv-pre' }, INVENTORY_EXPORT)),
   });
+}
+
+async function importPeople() {
+  const result = await ask({
+    title: 'Upload a list of users',
+    text: "So that AgentGov knows the people Copilot Studio names by their Entra IDs. In the Microsoft Entra admin center, go to Users, then Download users (anyone can): the file has each user's object ID, name and email address. AgentGov keeps those; it doesn't take a user missing from the list to have left.",
+    iconName: 'upload', confirm: 'Upload', busy: 'Uploading…', wide: true,
+    fields: [{ id: 'csv', label: 'Users (CSV)', type: 'code', rows: 8, required: true, file: '.csv', placeholder: 'objectId,userPrincipalName,displayName,mail,accountEnabled\n…' }],
+    submit: (v) => api('v1/platforms/entra-users/import', { method: 'POST', text: v.csv, contentType: 'text/csv' }),
+  });
+  if (!result) return;
+  const m = result.makers || {};
+  toast(`Kept ${plural(result.people, 'person', 'people')}. AgentGov now knows ${fmt(m.known)} of the ${fmt(m.named)} people Copilot Studio names.`);
+  await refresh();
 }
 
 async function syncCopilotStudio(button) {

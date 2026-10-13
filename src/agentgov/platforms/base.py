@@ -65,6 +65,9 @@ class Found:
     complete: bool = True
     # What of it couldn't be read, and why: its findings say so while they wait.
     missing: list[str] = field(default_factory=list)
+    # Who made it, by email address, when the platform says: whom adopting it suggests as
+    # its owner (registry.people).
+    maker: str | None = None
 
 
 @dataclass

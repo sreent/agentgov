@@ -61,7 +61,7 @@ PLACES: dict[str, tuple[str, tuple[str, ...], str]] = {
 }
 # With Microsoft's platforms, what Microsoft knows about their agents too.
 MICROSOFT = {"copilot-studio", "microsoft-365", "entra-agent-id"}
-MICROSOFT_EXTRAS = ("purview-audit", "defender")
+MICROSOFT_EXTRAS = ("purview-audit", "defender", "entra-users")
 READERS = tuple(
     sorted({key for _, keys, _ in PLACES.values() for key in keys} | set(MICROSOFT_EXTRAS))
 )

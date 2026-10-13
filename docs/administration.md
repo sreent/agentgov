@@ -112,6 +112,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | See the control plane's replicas and which one leads | Overview → *Control plane* | `agentgov replicas` | `GET /v1/replicas` |
 | Approve, block, unblock, delete, restore | Agent toolbar | `agentgov agents approve\|block\|unblock\|delete\|restore REF` | `POST /v1/agents/{ref}/{action}` |
 | Adopt a discovered agent | Agent → **Adopt** | `agentgov agents lifecycle REF adopt` | `POST /v1/agents/{ref}/adopt` |
+| Adopt agents at once, with their makers as owners | Agents → **Adopt n agents** | `agentgov agents adopt --platform copilot-studio --makers` | `POST /v1/agents/adopt` |
 | Delete a deleted agent permanently (otherwise it is purged after `AGENTGOV_SOFT_DELETE_RETENTION_DAYS`, 30 by default) | Agent → **Delete permanently** | `agentgov agents purge REF` | `DELETE /v1/agents/{ref}` |
 | Attest an agent: its sponsors, whatever their role, and administrators | Agent → **Attest**, or **Attest** on the issue that its review is due | `agentgov agents attest REF` | `POST /v1/agents/{ref}/attest` |
 | Show or rotate an agent's client secret | Agent → Identity → **Show secret** / **Rotate** | `agentgov agents credentials REF [--rotate]` | `POST /v1/agents/{ref}/credentials` |

@@ -1318,6 +1318,55 @@ def agents_restore(ref: str, reason: str | None = REASON) -> None:
     _lifecycle(ref, "restore", reason)
 
 
+@agents_app.command("adopt")
+def agents_adopt(
+    refs: list[str] = typer.Argument(
+        None, help="The agents, by name or ID; with --platform, those it found as well."
+    ),
+    platform: str | None = typer.Option(
+        None,
+        "--platform",
+        help="Every agent found on this platform that waits to be adopted (copilot-studio, "
+        "aws, ...).",
+    ),
+    makers: bool = typer.Option(
+        False,
+        "--makers",
+        help="Make each agent's maker on its platform its owner and sponsor, where AgentGov "
+        "knows them.",
+    ),
+    owner: str | None = typer.Option(
+        None, "--owner", help="A team or a person: for all, or those whose maker isn't known."
+    ),
+    sponsor: list[str] = typer.Option(None, "--sponsor", help="Repeatable."),
+    reason: str | None = REASON,
+) -> None:
+    """Adopt agents found on platforms, several at once: each pending review, with an owner
+    and sponsors. Those that can't be adopted are left, each with why."""
+    names = list(refs or [])
+    if platform:
+        listed = _call(
+            "GET", "/v1/agents", params={"status": "discovered", "source": f"platform:{platform}"}
+        )
+        names += [a["name"] for a in listed]
+    if not names:
+        _fail("name the agents to adopt, or a --platform")
+    if not makers and not owner:
+        _fail("give them an --owner, or their --makers")
+    body: dict[str, Any] = {"agents": names, "makers": makers}
+    if owner:
+        body["owner"] = owner
+    if sponsor:
+        body["sponsors"] = _split(sponsor)
+    if reason:
+        body["reason"] = reason
+    out = _call("POST", "/v1/agents/adopt", json=body)
+    for adopted in out["adopted"]:
+        typer.echo(f"adopted {adopted['agent']}: owner {adopted['owner']}")
+    for left in out["left"]:
+        typer.echo(f"left {left['agent']}: {left['why']}", err=True)
+
+
 @agents_app.command("lifecycle")
 def agents_lifecycle(
     ref: str,
@@ -2603,7 +2652,14 @@ def platforms_status() -> None:
         )
 
 
-SYNC_SOURCES = ("microsoft-365", "copilot-studio", "entra-agent-id", "purview-audit", "defender")
+SYNC_SOURCES = (
+    "microsoft-365",
+    "copilot-studio",
+    "entra-agent-id",
+    "entra-users",
+    "purview-audit",
+    "defender",
+)
 # Platforms read by a connector of AgentGov's own (docs/other-platforms.md).
 OTHER_PLATFORMS = ("aws", "google-cloud", "salesforce", "databricks", "microsoft-foundry")
 
@@ -2618,6 +2674,8 @@ def _sync_summary(source: str, c: dict[str, Any]) -> str:
         )
     if source == "defender":
         return f"{c['alerts']} agent alerts, {c['matched']} matched, {c['resolved']} resolved"
+    if source == "entra-users":
+        return f"{c['found']} people found, {c['not_found']} not users, {c['left']} left"
     summary = f"{c['created']} new, {c['updated']} updated, {c['skipped']} skipped"
     if source in OTHER_PLATFORMS:
         summary += f", {c['findings']} open findings"
@@ -2631,7 +2689,8 @@ def platforms_sync(
     source: str = typer.Argument(
         "all",
         help="all (every connection AgentGov's app may use), microsoft-365, entra-agent-id, "
-        "purview-audit, defender, copilot-studio (as you, after `agentgov login` through "
+        "entra-users, purview-audit, defender, copilot-studio (as you, after `agentgov login` "
+        "through "
         "Microsoft Entra ID), or another platform: aws, google-cloud, salesforce, databricks, "
         "microsoft-foundry.",
     ),
@@ -2656,6 +2715,7 @@ def platforms_sync(
     counts = _call("POST", f"/v1/platforms/{source}/sync", timeout=LONG_TIMEOUT)
     if source in ("microsoft-365", "copilot-studio"):
         _synced(source, "synced", counts)
+        _people_looked_up(counts.get("people"))
     else:
         _done("platform", source, f"synced ({_sync_summary(source, counts)})")
 
@@ -2725,6 +2785,48 @@ def platforms_import(
         _fail(f"cannot read {file}: {exc}")
     counts = _call("POST", "/v1/platforms/copilot-studio/import", json=payload)
     _synced("copilot-studio", "imported", counts)
+    _people_looked_up(counts.get("people"))
+
+
+def _people_looked_up(outcome: dict[str, Any] | None) -> None:
+    """What looking up the makers an import or sync named came to."""
+    if outcome is None:
+        return
+    if "error" in outcome:
+        typer.echo(f"makers not looked up: {outcome['error']}", err=True)
+    else:
+        typer.echo(f"makers looked up: {_sync_summary('entra-users', outcome)}")
+
+
+@platforms_app.command("import-users")
+def platforms_import_users(
+    file: Path = typer.Argument(
+        ...,
+        help="The Microsoft Entra admin center's Users > Download users (CSV), or JSON with "
+        "id and mail.",
+    ),
+) -> None:
+    """Upload a list of users from Microsoft Entra ID, so that the people Copilot Studio
+    names by Entra ID are known by name without Microsoft Graph."""
+    try:
+        text = file.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        _fail(f"cannot read {file}: {exc}")
+    kind = "application/json" if text.lstrip().startswith(("[", "{")) else "text/csv"
+    out = _call(
+        "POST",
+        "/v1/platforms/entra-users/import",
+        content=text.encode(),
+        headers={"content-type": kind},
+        timeout=LONG_TIMEOUT,
+    )
+    makers = out["makers"]
+    _done(
+        "people",
+        file.name,
+        f"{out['people']} kept, {out['skipped']} without an object ID; "
+        f"{makers['known']} of the {makers['named']} people platforms name are known",
+    )
 
 
 @platforms_app.command("connectors")

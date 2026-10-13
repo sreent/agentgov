@@ -548,6 +548,26 @@ class ComponentReport(Base):
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class Person(Base):
+    """Someone in Microsoft Entra ID whom a platform names as an agent's maker or owner, by
+    object ID (registry.people): as the directory last said, or a list uploaded from it."""
+
+    __tablename__ = "people"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # the object ID
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    # Whether their account is enabled; None when what was read didn't say.
+    enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # False when the directory has no such user: never was one (not a person), or deleted.
+    found: Mapped[bool] = mapped_column(Boolean, default=True)
+    # When a user it had found was no longer there: they left.
+    gone_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # "graph" (read by AgentGov's app or a signed-in admin) or "upload".
+    source: Mapped[str] = mapped_column(String(16))
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
 class IntegrationState(Base):
     """Where an integration with another service got to, between runs (a cursor, a
     pending query, the permissions an app was granted)."""

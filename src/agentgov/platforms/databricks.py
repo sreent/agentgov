@@ -537,6 +537,7 @@ def serving_agent(
         risks=risks,
         instructions=record.get("instructions") or None,
         complete=acl is not None,
+        maker=endpoint.get("creator") or record.get("creator"),
     )
 
 
@@ -625,6 +626,7 @@ def app_agent(app: dict[str, Any], acl: list[dict[str, Any]] | None, host: str) 
         external_ids={"databricks_app": str(app.get("id") or name)},
         risks=risks,
         complete=acl is not None,
+        maker=app.get("creator"),
     )
 
 
@@ -769,4 +771,5 @@ def mcp_service(
         external_ids={"databricks_mcp_service": full},
         risks=risks,
         complete=grants is not None,
+        maker=service.get("created_by"),
     )

@@ -597,6 +597,24 @@ CATALOG: tuple[Feature, ...] = (
         needs="AgentGov's Microsoft app registration, with AgentIdentity.Read.All",
     ),
     Feature(
+        "entra-users",
+        "Microsoft Entra users",
+        "microsoft",
+        "AgentGov looks up the people Copilot Studio names as its agents' owners and makers, "
+        "by their Entra IDs: to show them by name, to make them owners when adopting, and to "
+        "see when one has left.",
+        SWITCH,
+        ON,
+        {
+            ON: "Looked up where AgentGov's app registration has the permission, and as the "
+            "administrator who syncs Copilot Studio when they sign in with Microsoft.",
+            OFF: "Not looked up: makers are known only from a list of users uploaded to "
+            "AgentGov, and otherwise shown by their Entra IDs.",
+        },
+        needs="AgentGov's Microsoft app registration, with User.Read.All (User.ReadBasic.All "
+        "doesn't say whose account is disabled), or administrators who sign in with Microsoft",
+    ),
+    Feature(
         "purview-audit",
         "Microsoft Purview audit log",
         "microsoft",
@@ -934,10 +952,11 @@ def unmet(key: str, mode: str, settings: Settings) -> str | None:
             "AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL"
         )
     if key == "identity-assertions" and mode != OFF:
-        if not settings.service_token:
+        if not settings.key_secret:
             return (
-                "AgentGov signs identity assertions with a key it derives from the service "
-                "token: set AGENTGOV_SERVICE_TOKEN where the control plane runs"
+                "AgentGov signs identity assertions with a key it derives from the signing "
+                "secret: set AGENTGOV_SIGNING_SECRET (or AGENTGOV_SERVICE_TOKEN) where the "
+                "control plane runs"
             )
         if not (settings.keycloak_issuer and settings.keycloak_jwks_url):
             return (

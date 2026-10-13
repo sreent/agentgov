@@ -40,6 +40,7 @@ from agentgov.registry import (
     issues,
     mcp_sightings,
     microsoft_signals,
+    people,
     platforms,
     posture,
     reachability,
@@ -629,6 +630,7 @@ class Runtime:
         runs = {
             "microsoft-365": self.sync_microsoft_365,
             "entra-agent-id": self.sync_agent_identities,
+            "entra-users": self.sync_people,
             "purview-audit": self.sync_audit,
             "defender": self.sync_defender,
             "entra-access-packages": self.sync_entra_access_packages,
@@ -701,6 +703,37 @@ class Runtime:
             counts = platforms.record_agent_identities(session, identities, actor=actor)
             platforms.refresh_risk(session, self.settings)
             return counts
+
+    def sync_people(
+        self,
+        *,
+        actor: str | None = None,
+        token: str | None = None,
+        limit: int = people.MAX_LOOKUP,
+    ) -> dict[str, int]:
+        """Look up the people platforms name as agents' owners and makers: with AgentGov's
+        app, or as the signed-in administrator whose access ``token`` is given. One lookup
+        at a time, on one replica."""
+        with self.coordination.job("people-lookup", wait=JOB_WAIT_SECONDS if actor else None):
+            with self.db.session() as session:
+                wanted = people.wanted(session, limit=limit)
+            try:
+                if not wanted:
+                    found, missing = [], []
+                elif token is not None:
+                    assert self.microsoft_admin is not None
+                    found, missing = self.microsoft_admin.users(token, wanted)
+                else:
+                    assert self.m365 is not None
+                    # Whether it may ask whose account is enabled: what its token holds.
+                    found, missing = self.m365.users(wanted, roles=self.m365.granted())
+            except PlatformError as exc:
+                self._failed("entra-users", exc, actor)
+                raise
+            with self.db.session() as session:
+                counts = people.record_lookup(session, found, missing, actor=actor)
+                platforms.set_sync(session, "entra-users", ok=True, counts=counts, actor=actor)
+                return counts
 
     def sync_audit(self, *, actor: str | None = None) -> dict[str, Any]:
         """Read agents' use and makers' changes from the Purview audit log.

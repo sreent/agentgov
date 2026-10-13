@@ -199,9 +199,10 @@ AGENTGOV_GUARDIAN_URL=http://demo-model:9100/guardian/v1 docker compose -f deplo
 Set `AGENTGOV_M365_TENANT_ID`, `AGENTGOV_M365_CLIENT_ID` and `AGENTGOV_M365_CLIENT_SECRET` in
 `.env` for a Microsoft Entra app registration, then run `docker compose up -d` again. Its
 Microsoft Graph application permissions decide what AgentGov reads: the Microsoft 365 agent
-catalog (`CopilotPackages.Read.All`), Entra Agent ID (`AgentIdentity.Read.All`), the Purview
-audit log (`AuditLogsQuery.Read.All`), Defender alerts (`SecurityAlert.Read.All`) and Entra
-access packages (`EntitlementManagement.Read.All`). The
+catalog (`CopilotPackages.Read.All`), Entra Agent ID (`AgentIdentity.Read.All`), who made
+each Copilot Studio agent (`User.Read.All`), the Purview audit log
+(`AuditLogsQuery.Read.All`), Defender alerts (`SecurityAlert.Read.All`) and Entra access
+packages (`EntitlementManagement.Read.All`). The
 control plane syncs at start-up and every hour, and the **Platforms** page shows each
 connection's state. Copilot Studio agents and their connectors are imported from a Power
 Platform inventory export on the **Platforms** page, with no configuration. When

@@ -129,6 +129,40 @@ review. AgentGov can't do it on a schedule, because Microsoft needs a signed-in 
 Agents missing from an import are left as they were, because an export may cover only
 some environments.
 
+## Who made each agent
+
+The inventory names each agent's owner in Copilot Studio and its maker, by their
+Microsoft Entra object IDs; Databricks names who created its agents by email address.
+AgentGov shows them on the agent's page (**Owner and sponsors**) and in the agents list,
+and adopting an agent suggests its owner on the platform, or its maker when the owner
+can't take it, as its owner and sponsor. To show people rather than IDs, AgentGov looks
+them up in Microsoft Entra ID, in whichever way it can:
+
+* **With its app registration** (the `entra-users` connection on the Platforms page):
+  the Graph application permission `User.Read.All`, with admin consent. `User.ReadBasic.All`
+  is enough to know who people are, but not whose account is disabled.
+* **As the admin who syncs the inventory**: an admin signed in through Microsoft Entra ID
+  looks up the people the sync names, with the delegated permission `User.ReadBasic.All`
+  (see [Setting it up](#setting-it-up)). That doesn't say whose account is disabled.
+* **From a list of users.** In the Microsoft Entra admin center, **Users** > **Download
+  users** gives a CSV of every user's object ID, name and email address; any user may
+  download it. Upload it with **Upload users** on the Platforms page, or
+  `agentgov platforms import-users users.csv`. A PowerShell export (`Get-MgUser -All |
+  Export-Csv`) or Graph's JSON works too, as long as it has the `id` and `mail` (or
+  `userPrincipalName`) of each user. A user missing from a list isn't taken to have left:
+  the list may be filtered.
+
+Without any of them, makers are shown by their Entra IDs, and whoever adopts an agent
+names its owner. AgentGov looks up each person once, then again after a week: someone the
+directory had and no longer has has left (a `person.left` entry in the ledger), and isn't
+suggested any more. Turning the `entra-users` feature off stops the lookups.
+
+To adopt many agents at once, filter the Agents page (for example to one platform's
+agents waiting to be adopted) and use **Adopt n agents**. Each becomes pending review with
+its maker as owner and sponsor where AgentGov knows them, or with the owner you give, such
+as a team, for the others; those it can't adopt are listed with why. From the CLI:
+`agentgov agents adopt --platform copilot-studio --makers --owner ai-governance`.
+
 ## Checks
 
 AgentGov checks every imported Copilot Studio agent and raises a finding for each
@@ -232,6 +266,7 @@ action under their name, and so does the ledger (`platform.agent_blocked`,
    | Power Platform API | `ResourceQuery.Resources.Read` | Sync the Copilot Studio inventory |
    | Power Platform API | `EnvironmentManagement.Groups.Read` | [Push the connector allowlist](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform) to environment groups (optional) |
    | Microsoft Graph | `CopilotPackages.ReadWrite.All` | Block Microsoft 365 agents (optional; needs Agent 365) |
+   | Microsoft Graph | `User.ReadBasic.All` | [Show who made each agent](#who-made-each-agent) by name (optional) |
 
    If **Power Platform API** isn't listed under **APIs my organization uses**, add it to
    the tenant first ([Microsoft's steps][pp-auth]):
@@ -295,6 +330,10 @@ See [Signing in](administration.md#signing-in) for how the CLI keeps its session
 | Sync every connection AgentGov's app may use | Platforms > Microsoft connections > **Sync all** | `agentgov platforms sync` | `POST /v1/platforms/sync` |
 | Sync the Copilot Studio inventory, as you | Platforms > Copilot Studio > **Sync now** | `agentgov platforms sync copilot-studio` | `POST /v1/platforms/copilot-studio/sync` |
 | Import the Copilot Studio inventory | Platforms > **Import inventory** | `agentgov platforms import FILE` | `POST /v1/platforms/copilot-studio/import` |
+| Look up the people agents' platforms name | Platforms > Microsoft connections > Microsoft Entra users | `agentgov platforms sync entra-users` | `POST /v1/platforms/entra-users/sync` |
+| Upload a list of users from Entra ID | Platforms > Copilot Studio > **Upload users** | `agentgov platforms import-users FILE` | `POST /v1/platforms/entra-users/import` (CSV or JSON) |
+| Who made an agent, and whom adopting it suggests | Agent page > Owner and sponsors | `agentgov agents get REF` | `makers` and `suggested_owner` in `GET /v1/agents/{ref}` |
+| Adopt agents at once | Agents > **Adopt n agents** | `agentgov agents adopt REF... \| --platform P --makers --owner TEAM` | `POST /v1/agents/adopt` |
 | Quarantine or block an agent in its platform, as you | Agent > Copilot Studio or Microsoft 365 card, or **Block** / **Unblock** | `agentgov agents platform-block\|platform-unblock REF`, or `agentgov agents block\|unblock REF --in-platform` | `POST /v1/agents/{ref}/platform/block\|unblock` |
 | List the agents from one platform | Platforms > *n agents* | `agentgov agents list --source platform:copilot-studio` | `GET /v1/agents?source=platform:copilot-studio` |
 | See the connectors in use | Platforms > Connectors | `agentgov platforms connectors` | `GET /v1/platforms/connectors` |
