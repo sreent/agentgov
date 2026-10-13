@@ -601,8 +601,8 @@ CATALOG: tuple[Feature, ...] = (
         "Microsoft Entra users",
         "microsoft",
         "AgentGov looks up the people Copilot Studio names as its agents' owners and makers, "
-        "by their Entra IDs: to show them by name, to make them owners when adopting, and to "
-        "see when one has left.",
+        "and the owners and sponsors it names itself: to show them by name, to make them "
+        "owners when adopting, and to see when one has left, so that issues go past them.",
         SWITCH,
         ON,
         {

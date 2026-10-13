@@ -10,8 +10,10 @@ Microsoft who syncs Copilot Studio, or from a list of users uploaded from the di
 (the Microsoft Entra admin center's **Download users**, which any user can do). With none
 of them, a maker is shown by their ID, and whoever adopts the agent names its owner.
 
-The people looked up are read again after a week: one the directory had, and has no
-more, has left (``gone_at``).
+It looks up the owners and sponsors AgentGov names by email address too. The people looked
+up are read again after a week: one the directory had, and has no more, has left
+(``gone_at``), and so has one whose account is disabled, as far as AgentGov goes: issues
+don't go to them, and their agents are flagged (docs/issues.md#people-who-leave).
 """
 
 from __future__ import annotations
@@ -27,7 +29,15 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.models import DELETED, DISCOVERED, Agent, Person, PlatformAgent
+from agentgov.models import (
+    DELETED,
+    DISCOVERED,
+    Agent,
+    IntegrationState,
+    Person,
+    PlatformAgent,
+    Team,
+)
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import platforms
 from agentgov.registry.errors import NotFound, RegistryError, ValidationError
@@ -35,6 +45,8 @@ from agentgov.registry.errors import NotFound, RegistryError, ValidationError
 GUID = re.compile(r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$")
 OWNER, CREATOR = "owner", "creator"
 GRAPH, UPLOAD = "graph", "upload"
+# The addresses the directory had no user for, and when it said so: asked again a week on.
+MISSES = "people-not-found"
 # People are read again after this long, to see who has left.
 RECHECK = timedelta(days=7)
 # Looked up in one run at most; the rest wait for the next.
@@ -86,18 +98,62 @@ def _records(session: Session) -> list[PlatformAgent]:
     )
 
 
+def owners_and_sponsors(session: Session) -> set[str]:
+    """The people AgentGov names as owners and sponsors of agents in the registry, by email
+    address (lower case): not teams, nor user names it can't look up."""
+    teams = {t.lower() for t in session.scalars(select(Team.name))}
+    names: set[str] = set()
+    for owner, sponsors in session.execute(
+        select(Agent.owner, Agent.sponsors).where(Agent.status != DELETED)
+    ):
+        for name in [owner, *(sponsors or [])]:
+            key = str(name or "").strip().lower()
+            if "@" in key and key not in teams:
+                names.add(key)
+    return names
+
+
+def _names(person: Person) -> set[str]:
+    return {n.lower() for n in (person.email, person.upn) if n}
+
+
 def wanted(session: Session, now: datetime | None = None, *, limit: int = MAX_LOOKUP) -> list[str]:
-    """The Entra object IDs platforms name that AgentGov hasn't looked up, then those it
-    looked up longest ago, over a week ago."""
+    """The Entra object IDs to look up: those platforms name that AgentGov hasn't looked up,
+    then those of the people platforms or AgentGov name that it looked up over a week ago,
+    the longest ago first."""
     now = now or ids.utcnow()
     named_ids = {n["entra_id"] for r in _records(session) for n in named(r) if "entra_id" in n}
     known = {p.id: p for p in session.scalars(select(Person))}
+    names = owners_and_sponsors(session)
+    ours = {p.id for p in known.values() if _names(p) & names}
     unknown = sorted(i for i in named_ids if i not in known)
     stale = sorted(
-        (known[i] for i in named_ids if i in known and known[i].checked_at < now - RECHECK),
+        (known[i] for i in named_ids | ours if i in known and known[i].checked_at < now - RECHECK),
         key=lambda p: p.checked_at,
     )
     return (unknown + [p.id for p in stale])[:limit]
+
+
+def _misses(session: Session) -> dict[str, str]:
+    row = session.get(IntegrationState, MISSES)
+    return dict((row.data or {}).get("emails") or {}) if row is not None else {}
+
+
+def wanted_emails(
+    session: Session, now: datetime | None = None, *, limit: int = MAX_LOOKUP
+) -> list[str]:
+    """The owners and sponsors AgentGov names by email address that it doesn't know yet,
+    but those the directory had no user for in the past week."""
+    now = now or ids.utcnow()
+    names = owners_and_sponsors(session)
+    if not names:
+        return []
+    known: set[str] = set()
+    for person in session.scalars(select(Person)):
+        known |= _names(person)
+    misses = _misses(session)
+    recent = {e for e, at in misses.items() if datetime.fromisoformat(at) > now - RECHECK}
+    return sorted(names - known - recent)[:limit]
 
 
 def record_lookup(
@@ -105,10 +161,12 @@ def record_lookup(
     found: list[dict[str, Any]],
     missing: list[str],
     *,
+    missing_emails: list[str] | None = None,
     actor: str | None = None,
 ) -> dict[str, int]:
     """Keep what the directory said about the people looked up: those it has, and those it
-    hasn't (a user it had before has left)."""
+    hasn't (a user it had before has left); by email address, the addresses it has no user
+    for, to ask again a week on."""
     now = ids.utcnow()
     counts = {"found": 0, "not_found": 0, "left": 0}
     for user in found:
@@ -118,6 +176,7 @@ def record_lookup(
         person = session.get(Person, oid) or Person(id=oid, source=GRAPH)
         person.name = user.get("displayName") or person.name
         person.email = user.get("mail") or user.get("userPrincipalName") or person.email
+        person.upn = user.get("userPrincipalName") or person.upn
         if "accountEnabled" in user:
             person.enabled = user["accountEnabled"]
         person.found, person.gone_at, person.source, person.checked_at = True, None, GRAPH, now
@@ -142,6 +201,17 @@ def record_lookup(
             )
         person.source, person.checked_at = GRAPH, now
         session.add(person)
+    if missing_emails is not None:
+        misses = _misses(session)
+        known: set[str] = set()
+        for user in found:
+            known |= {str(user.get(k) or "").lower() for k in ("mail", "userPrincipalName")}
+        misses = {e: at for e, at in misses.items() if e not in known}
+        misses.update(dict.fromkeys(missing_emails, ids.isoformat(now)))
+        row = session.get(IntegrationState, MISSES) or IntegrationState(key=MISSES, data={})
+        row.data, row.updated_at = {"emails": misses}, now
+        session.add(row)
+        counts["not_found"] += len(missing_emails)
     return counts
 
 
@@ -185,6 +255,7 @@ def import_list(session: Session, payload: Any, *, actor: str) -> dict[str, int]
         person = session.get(Person, oid) or Person(id=oid, source=UPLOAD)
         person.name = _column(row, "name") or person.name
         person.email = _column(row, "mail") or _column(row, "upn") or person.email
+        person.upn = _column(row, "upn") or person.upn
         enabled = str(_column(row, "enabled") or "").strip().lower()
         blocked = str(_column(row, "blocked") or "").strip().lower()
         if enabled in TRUE | FALSE:
@@ -290,6 +361,41 @@ def shown(makers: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The one to show where there is room for one: whom adopting suggests, else the
     platform's owner."""
     return next((m for m in makers if _usable(m)), makers[0] if makers else None)
+
+
+def gone(session: Session) -> dict[str, Person]:
+    """The people who have left, as far as AgentGov goes, by email address and user
+    principal name (lower case): the directory no longer has them, or their account is
+    disabled."""
+    out: dict[str, Person] = {}
+    for person in session.scalars(
+        select(Person).where((Person.gone_at.is_not(None)) | (Person.enabled.is_(False)))
+    ):
+        for name in _names(person):
+            out[name] = person
+    return out
+
+
+def who_left(
+    session: Session, agent: Agent, left: dict[str, Person] | None = None
+) -> list[dict[str, Any]]:
+    """The agent's owner and sponsors who have left, and how: "left" (not in the directory
+    any more) or "disabled" (their account)."""
+    left = gone(session) if left is None else left
+    out = []
+    for role, names in (("owner", [agent.owner]), ("sponsor", list(agent.sponsors or []))):
+        for name in names:
+            person = left.get(str(name or "").strip().lower())
+            if person is not None:
+                out.append(
+                    {
+                        "name": str(name),
+                        "role": role,
+                        "how": "left" if person.gone_at else "disabled",
+                        "at": ids.isoformat(person.gone_at or person.checked_at),
+                    }
+                )
+    return out
 
 
 def summary(session: Session) -> dict[str, int]:

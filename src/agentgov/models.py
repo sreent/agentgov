@@ -556,7 +556,10 @@ class Person(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)  # the object ID
     name: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    # Their email address (else their user principal name), and their user principal name:
+    # AgentGov names owners and sponsors by either.
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
+    upn: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
     # Whether their account is enabled; None when what was read didn't say.
     enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # False when the directory has no such user: never was one (not a person), or deleted.

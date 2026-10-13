@@ -2553,17 +2553,24 @@ function makersBlock(a) {
 function peopleCard(a) {
   const managed = a.status !== 'discovered';
   const sponsors = a.sponsors || [];
+  // The owner and sponsors who have left: issues go past them.
+  const gone = Object.fromEntries((a.left || []).map((g) => [g.name.toLowerCase(), g]));
+  const role = (name, word) => {
+    const g = gone[String(name).toLowerCase()];
+    return g ? `${word} · ${g.how === 'left' ? 'has left' : 'account disabled'}` : word;
+  };
   return card({
     title: 'Owner and sponsors',
     sub: 'The accountable team and the people who vouch for this agent',
     body: [
-      a.owner ? h('ul', { class: 'people', role: 'list' }, personRow(a.owner, 'Owner'))
+      (a.left || []).length ? callout('warning', 'alert-circle', `${a.left.map((g) => (g.how === 'left' ? `${g.name} has left` : `${g.name}'s account is disabled`)).join('; ')}, as Microsoft Entra ID says: its issues go to the next people responsible for it. Name others.`) : null,
+      a.owner ? h('ul', { class: 'people', role: 'list' }, personRow(a.owner, role(a.owner, 'Owner')))
         : callout(managed ? 'warning' : 'neutral', managed ? 'alert-circle' : 'info',
           managed ? 'No owner. Assign an owning team or person.'
             : a.suggested_owner ? `Unmanaged agents have no owner until someone adopts them. Adopting it suggests ${a.suggested_owner}, ${suggestedWhy(a)}.`
               : 'Unmanaged agents have no owner until someone adopts them.'),
       makersBlock(a),
-      sponsors.length ? h('ul', { class: 'people', role: 'list' }, sponsors.map((p) => personRow(p, 'Sponsor')))
+      sponsors.length ? h('ul', { class: 'people', role: 'list' }, sponsors.map((p) => personRow(p, role(p, 'Sponsor'))))
         : callout(managed ? 'warning' : 'neutral', managed ? 'alert-circle' : 'info',
           'No sponsor. An agent needs at least one sponsor before it can be activated.'),
       a.team ? h('ul', { class: 'people', role: 'list' }, personRow(a.team, 'Team: issues escalate to it')) : null,

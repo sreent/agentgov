@@ -801,21 +801,34 @@ class Runtime:
         with self.coordination.job("people-lookup", wait=JOB_WAIT_SECONDS if actor else None):
             with self.db.session() as session:
                 wanted = people.wanted(session, limit=limit)
+                emails = people.wanted_emails(session, limit=limit)
+            found: list[dict[str, Any]] = []
+            missing: list[str] = []
+            missing_emails: list[str] = []
             try:
-                if not wanted:
-                    found, missing = [], []
-                elif token is not None:
+                if token is not None:
                     assert self.microsoft_admin is not None
-                    found, missing = self.microsoft_admin.users(token, wanted)
+                    if wanted:
+                        found, missing = self.microsoft_admin.users(token, wanted)
+                    if emails:
+                        more, missing_emails = self.microsoft_admin.users_by_email(token, emails)
+                        found += more
                 else:
                     assert self.m365 is not None
                     # Whether it may ask whose account is enabled: what its token holds.
-                    found, missing = self.m365.users(wanted, roles=self.m365.granted())
+                    roles = self.m365.granted() if wanted or emails else None
+                    if wanted:
+                        found, missing = self.m365.users(wanted, roles=roles)
+                    if emails:
+                        more, missing_emails = self.m365.users_by_email(emails, roles=roles)
+                        found += more
             except PlatformError as exc:
                 self._failed("entra-users", exc, actor)
                 raise
             with self.db.session() as session:
-                counts = people.record_lookup(session, found, missing, actor=actor)
+                counts = people.record_lookup(
+                    session, found, missing, missing_emails=missing_emails, actor=actor
+                )
                 platforms.set_sync(session, "entra-users", ok=True, counts=counts, actor=actor)
                 return counts
 

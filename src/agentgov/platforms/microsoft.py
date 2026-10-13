@@ -240,6 +240,18 @@ class MicrosoftApp:
             enabled=enabled,
         )
 
+    def users_by_email(
+        self, emails: list[str], *, roles: frozenset[str] | None = None
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Users by email address (see :func:`lookup_by_email`)."""
+        enabled = roles is None or bool(USER_ROLES & roles)
+        return lookup_by_email(
+            lambda url, body: self.post(url, body, hint=USERS_HINT),
+            self.graph,
+            emails,
+            enabled=enabled,
+        )
+
     # -- Microsoft Entra ID Governance: access packages -----------------------------------
 
     ENTITLEMENT_HINT = (
@@ -475,6 +487,19 @@ class MicrosoftAdmin:
             enabled=False,
         )
 
+    def users_by_email(
+        self, token: str, emails: list[str]
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Users by email address, as the signed-in administrator."""
+        return lookup_by_email(
+            lambda url, body: self._call(
+                url, token, what="Could not look up users", hint=USERS_HINT, body=body
+            ),
+            self.settings.graph_url.rstrip("/"),
+            emails,
+            enabled=False,
+        )
+
     def block_package(self, token: str, package_id: str, *, blocked: bool) -> None:
         """Block a Microsoft 365 agent for everyone in the organisation, or unblock it."""
         action = "block" if blocked else "unblock"
@@ -609,6 +634,53 @@ def lookup_users(
                 missing.append(oid)
             elif status in (401, 403):
                 error = (user or {}).get("error") if isinstance(user, dict) else None
+                detail = error.get("message") if isinstance(error, dict) else None
+                raise PlatformError(
+                    f"Microsoft Graph refused to read users: {status}: {detail or 'forbidden'}"
+                    f"{USERS_HINT}",
+                    status=status,
+                )
+    return found, missing
+
+
+def lookup_by_email(
+    send: Callable[[str, dict[str, Any]], dict[str, Any]],
+    graph: str,
+    emails: list[str],
+    *,
+    enabled: bool,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Users by email address or user principal name, 20 to a Graph $batch: those found,
+    and the addresses no user has. As :func:`lookup_users`, a lookup Graph turned away for
+    now is neither, and one refused for want of a permission stops them all."""
+    fields = USER_FIELDS + (",accountEnabled" if enabled else "")
+    wanted = [e for e in dict.fromkeys(e.strip().lower() for e in emails) if "@" in e]
+    found: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for start in range(0, len(wanted), BATCH):
+        chunk = wanted[start : start + BATCH]
+        requests = []
+        for n, email in enumerate(chunk):
+            value = email.replace("'", "''")  # OData quotes a quote by doubling it
+            where = quote(f"mail eq '{value}' or userPrincipalName eq '{value}'", safe="")
+            requests.append(
+                {"id": str(n), "method": "GET", "url": f"/users?$filter={where}&$select={fields}"}
+            )
+        answer = send(f"{graph}/v1.0/$batch", {"requests": requests})
+        for item in answer.get("responses") or []:
+            try:
+                email = chunk[int(item.get("id"))]
+            except (TypeError, ValueError, IndexError):
+                continue
+            status, body = item.get("status"), item.get("body")
+            if status == 200 and isinstance(body, dict):
+                users = [u for u in body.get("value") or [] if isinstance(u, dict)]
+                if users:
+                    found.append(users[0])
+                else:
+                    missing.append(email)
+            elif status in (401, 403):
+                error = body.get("error") if isinstance(body, dict) else None
                 detail = error.get("message") if isinstance(error, dict) else None
                 raise PlatformError(
                     f"Microsoft Graph refused to read users: {status}: {detail or 'forbidden'}"

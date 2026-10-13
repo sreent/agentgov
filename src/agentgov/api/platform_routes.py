@@ -127,7 +127,8 @@ def _people(rt: Any, principal: Principal) -> dict[str, Any] | None:
     each-agent): with AgentGov's app when it may read users, else as the signed-in
     administrator. None when neither can; what went wrong, when it did."""
     with rt.db.session() as s:
-        if not features.is_on(s, "entra-users") or not people.wanted(s, limit=1):
+        nobody = not people.wanted(s, limit=1) and not people.wanted_emails(s, limit=1)
+        if not features.is_on(s, "entra-users") or nobody:
             return None  # off, or nobody to look up
         roles = connections.granted(s)
     ways = []

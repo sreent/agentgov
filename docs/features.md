@@ -140,7 +140,7 @@ describes. Turning one off stops it even where it is configured.
 |---|---|---|
 | `microsoft-365` | off, **on** | Reads the Microsoft 365 agent catalog into the inventory |
 | `entra-agent-id` | off, **on** | Reads agents' Entra identities and links them to their agents |
-| `entra-users` | off, **on** | Looks up the people Copilot Studio names as its agents' owners and makers, by name, and sees when one leaves ([platforms](platforms.md#who-made-each-agent)) |
+| `entra-users` | off, **on** | Looks up the people Copilot Studio names as its agents' owners and makers, and agents' owners and sponsors, by name, and sees when one leaves ([platforms](platforms.md#who-made-each-agent), [issues](issues.md#people-who-leave)) |
 | `purview-audit` | off, **on** | Reads agent usage, attacks on agents and makers' changes from the audit log |
 | `defender` | off, **on** | Turns Defender's alerts about agents into findings |
 | `entra-access-packages` | off, **inform**, manage | Reads the access packages Microsoft Entra ID Governance assigns agents' Entra identities, and raises an [issue](issues.md) before one expires. Managed, administrators also assign and remove them from AgentGov; informed, nothing is written into Entra ([Entra access packages](microsoft-connections.md#microsoft-entra-access-packages)) |

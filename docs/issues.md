@@ -145,6 +145,25 @@ On its page (the link in each email and chat message), besides acknowledging it,
   findings from other systems can't be checked on demand: they resolve themselves, or an
   approver resolves them.
 
+## People who leave
+
+People leave, and their agents stay. Once AgentGov can tell, it stops sending an issue to
+someone who has left, and says whose agents need someone else:
+
+* **Who it can tell about.** The owners and sponsors it names by email address (and the
+  makers platforms name: [who made each agent](platforms.md#who-made-each-agent)), looked
+  up in Microsoft Entra ID with the `entra-users` connection, as an admin signed in with
+  Microsoft who syncs Copilot Studio, or from an uploaded list of users. Someone it looked up
+  is read again a week later. Owners named by a user name, and teams, it can't look up:
+  keep team membership current instead.
+* **Who has left.** Someone the directory had and no longer has (a `person.left` entry in
+  the ledger), or whose account is disabled: User.Read.All, or an uploaded list with
+  `accountEnabled`, says so; User.ReadBasic.All doesn't.
+* **What happens.** An issue's chain passes over them: an agent's issues go to its sponsors
+  and team when its owner has left. The posture scan raises `agent.owner_left` (medium) and
+  `agent.sponsor_left` (medium when no sponsor is left, low otherwise) on their agents, and
+  the agent's page says who has left. Naming someone else resolves them at the next scan.
+
 ## People without an AgentGov role
 
 Owners and sponsors are rarely administrators. While issues are on, people who sign in to
@@ -273,6 +292,7 @@ findings aren't affected: they close when their check finds their cause gone.
 | `finding.declined` | Someone it reached said it isn't theirs, and why |
 | `finding.exception_requested`, `finding.exception_declined` | Someone asked for its risk to be accepted; an approver declined |
 | `finding.fix_claimed` | Someone said they fixed it: how AgentGov checked it, and whether it was gone |
+| `person.left` (warning) | Someone the directory had is no longer there ([people who leave](#people-who-leave)) |
 | `finding.accepted` (warning) | Its risk was accepted, with the date and the reason |
 | `finding.reopened` | Raised again, reopened by hand, or its accepted risk ran out |
 | `finding.resolved` | Its cause is gone, or, a threat, it hasn't happened for a while |

@@ -22,6 +22,7 @@ from agentgov.registry import (
     features,
     findings,
     identity_issuers,
+    people,
     platforms,
     reachability,
     validation,
@@ -32,6 +33,8 @@ FAILING = 3
 POSTURE_TYPES = {
     "agent.no_owner",
     "agent.no_sponsor",
+    "agent.owner_left",
+    "agent.sponsor_left",
     "agent.attestation_expired",
     "agent.stale",
     "agent.broad_permissions",
@@ -43,6 +46,43 @@ POSTURE_TYPES = {
     "toolserver.unverified",
     "toolserver.pending_review",
 }
+
+
+def _people_who_left(agent: Agent, gone: list[dict[str, Any]], flag: Any) -> None:
+    """An agent whose owner, or some of its sponsors, have left: its issues no longer reach
+    them, and someone names others."""
+
+    def words(g: dict[str, Any]) -> str:
+        return (
+            f"{g['name']} has left" if g["how"] == "left" else f"{g['name']}'s account is disabled"
+        )
+
+    owner = [g for g in gone if g["role"] == "owner"]
+    if owner:
+        flag(
+            "agent.owner_left",
+            agent.id,
+            "medium",
+            f"The owner of {agent.name} "
+            + ("has left" if owner[0]["how"] == "left" else "has a disabled account"),
+            agent_id=agent.id,
+            description=f"{words(owner[0])}: its issues go to its sponsors and team instead.",
+            remediation="Give it a new owner on its page (Edit), or delete it if nobody needs it.",
+            details={"person": owner[0]["name"], "how": owner[0]["how"]},
+        )
+    sponsors = [g for g in gone if g["role"] == "sponsor"]
+    if sponsors:
+        none_left = len(sponsors) >= len(agent.sponsors or [])
+        flag(
+            "agent.sponsor_left",
+            agent.id,
+            "medium" if none_left else "low",
+            f"{'Every' if none_left else 'A'} sponsor of {agent.name} has left",
+            agent_id=agent.id,
+            description="; ".join(words(g) for g in sponsors) + ".",
+            remediation="Name another sponsor: someone who vouches that it is still needed.",
+            details={"people": [g["name"] for g in sponsors]},
+        )
 
 
 def scan(
@@ -69,6 +109,8 @@ def scan(
         .unique()
         .all()
     )
+    # The people who left (docs/issues.md#people-who-leave), read once.
+    left = people.gone(session)
     for agent in agents:
         managed = agent.status in (ACTIVE, PENDING, BLOCKED)
         # Agents run by another platform (Microsoft 365, Copilot Studio) never call
@@ -136,6 +178,8 @@ def scan(
                 agent_id=agent.id,
                 remediation="Assign an IT-approved blueprint.",
             )
+        if managed and left:
+            _people_who_left(agent, people.who_left(session, agent, left), flag)
         if managed and agent.identity_error:
             flag(
                 "agent.identity_error",

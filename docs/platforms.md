@@ -153,9 +153,11 @@ them up in Microsoft Entra ID, in whichever way it can:
   the list may be filtered.
 
 Without any of them, makers are shown by their Entra IDs, and whoever adopts an agent
-names its owner. AgentGov looks up each person once, then again after a week: someone the
-directory had and no longer has has left (a `person.left` entry in the ledger), and isn't
-suggested any more. Turning the `entra-users` feature off stops the lookups.
+names its owner. AgentGov looks up the owners and sponsors it names by email address the
+same way. It looks up each person once, then again after a week: someone the directory
+had and no longer has has left (a `person.left` entry in the ledger), isn't suggested any
+more, and gets no more issues ([people who leave](issues.md#people-who-leave)). Turning
+the `entra-users` feature off stops the lookups.
 
 To adopt many agents at once, filter the Agents page (for example to one platform's
 agents waiting to be adopted) and use **Adopt n agents**. Each becomes pending review with

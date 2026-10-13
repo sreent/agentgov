@@ -7,6 +7,8 @@ import json
 from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
+from unittest.mock import ANY
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -181,6 +183,7 @@ class FakeDirectory:
                     "userPrincipalName": "frank@contoso.com", "accountEnabled": True},
         }  # fmt: skip
         self.batches: list[list[str]] = []
+        self.by_email: list[str] = []
         self.refuse = False
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -194,6 +197,21 @@ class FakeDirectory:
         self.batches.append([r["url"] for r in body["requests"]])
         answers = []
         for item in body["requests"]:
+            if item["url"].startswith("/users?"):  # by email address
+                where = unquote(item["url"].split("$filter=")[1].split("&")[0])
+                email = where.split("'")[1]
+                self.by_email.append(email)
+                users = [
+                    {
+                        k: v
+                        for k, v in u.items()
+                        if k != "accountEnabled" or "accountEnabled" in item["url"]
+                    }
+                    for u in self.users.values()
+                    if email in (u.get("mail"), u.get("userPrincipalName"))
+                ]
+                answers.append({"id": item["id"], "status": 200, "body": {"value": users}})
+                continue
             oid = item["url"].split("/users/")[1].split("?")[0]
             if self.refuse:
                 answers.append(
@@ -446,3 +464,82 @@ def test_wanted_first_those_never_looked_up(client) -> None:
     with rt.db.session() as s:
         assert people.wanted(s) == [FRANK]
         assert people.wanted(s, ids.utcnow() + timedelta(days=8)) == [FRANK, DANA]
+
+
+# ------------------------------------------------------------- people who leave
+
+
+def owned(client: TestClient, owner: str, sponsors: list[str]) -> dict[str, Any]:
+    """support-bot, active, owned and sponsored by people AgentGov names by email."""
+    from tests.conftest import seed
+
+    created = seed(client, sponsors=sponsors)
+    resp = client.patch(f"/v1/agents/{created['id']}", json={"owner": owner}, headers=ADMIN)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def open_of(client: TestClient, type_: str) -> list[dict[str, Any]]:
+    return client.get("/v1/findings", params={"type": type_}, headers=ADMIN).json()
+
+
+class TestPeopleWhoLeave:
+    def test_owners_and_sponsors_are_looked_up_by_email(self, ms, directory) -> None:
+        owned(ms, "dana@contoso.com", ["frank@contoso.com", "zoe@elsewhere.example"])
+        rt = ms.app.state.rt
+        counts = rt.sync_people(actor="admin:test")
+        assert counts == {"found": 2, "not_found": 1, "left": 0}
+        assert sorted(directory.by_email) == [
+            "dana@contoso.com", "frank@contoso.com", "zoe@elsewhere.example"
+        ]  # fmt: skip
+        # Found, they are read again by ID; not found, they are asked again a week on.
+        directory.by_email.clear()
+        assert rt.sync_people(actor="admin:test")["found"] == 0
+        assert directory.by_email == []
+
+    def test_an_owner_who_leaves_is_flagged_and_passed_over(self, ms, directory) -> None:
+        agent_ = owned(ms, "dana@contoso.com", ["frank@contoso.com"])
+        rt = ms.app.state.rt
+        rt.sync_people(actor="admin:test")
+        del directory.users[DANA]
+        with rt.db.session() as s:
+            s.execute(update(Person).values(checked_at=ids.utcnow() - timedelta(days=8)))
+        assert rt.sync_people(actor="admin:test")["left"] == 1
+        ms.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
+        [flagged] = open_of(ms, "agent.owner_left")
+        assert flagged["severity"] == "medium"
+        assert flagged["description"].startswith("dana@contoso.com has left")
+        assert agent(ms, agent_["name"])["left"] == [
+            {"name": "dana@contoso.com", "role": "owner", "how": "left", "at": ANY}
+        ]
+        # Its issues go to its sponsors: the owner who left is passed over.
+        rt.run_issues()
+        assert finding_level(ms, flagged["id"]) == ("sponsors", ["frank@contoso.com"])
+        # A new owner: the next scan resolves it.
+        ms.patch(f"/v1/agents/{agent_['id']}", json={"owner": "frank@contoso.com"}, headers=ADMIN)
+        ms.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
+        assert open_of(ms, "agent.owner_left") == []
+
+    def test_a_disabled_account_counts_as_gone(self, ms, directory) -> None:
+        directory.users[FRANK]["accountEnabled"] = False
+        owned(ms, "dana@contoso.com", ["frank@contoso.com", "dana@contoso.com"])
+        ms.app.state.rt.sync_people(actor="admin:test")
+        ms.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
+        [flagged] = open_of(ms, "agent.sponsor_left")
+        # One of two sponsors: low.
+        assert flagged["severity"] == "low"
+        assert flagged["description"] == "frank@contoso.com's account is disabled."
+        assert open_of(ms, "agent.owner_left") == []
+
+    def test_a_list_of_users_says_so_without_graph(self, client) -> None:
+        owned(client, "dana@contoso.com", ["eve@contoso.com"])
+        # Eve's account is disabled in the list: she is the only sponsor.
+        upload(client, USERS).raise_for_status()
+        client.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
+        [flagged] = open_of(client, "agent.sponsor_left")
+        assert flagged["severity"] == "medium" and flagged["title"].startswith("Every sponsor")
+
+
+def finding_level(client: TestClient, fid: str) -> tuple[str, list[str]]:
+    f = client.get(f"/v1/findings/{fid}", headers=ADMIN).json()
+    return f["level"], f["assignees"]

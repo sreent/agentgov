@@ -129,6 +129,8 @@ def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[
             # Who made it and owns it there, and whom adopting it would make its owner.
             "makers": makers,
             "suggested_owner": people.suggested(makers),
+            # Its owner and sponsors who have left (docs/issues.md#people-who-leave).
+            "left": people.who_left(s, agent),
             # The controls whose mode differs for it, and why (docs/features.md#exceptions).
             "control_modes": features.exceptions_for(
                 agent, features.modes(s), features.all_scopes(s)

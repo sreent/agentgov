@@ -74,8 +74,8 @@ CONNECTIONS: tuple[Connection, ...] = (
     Connection(
         "entra-users",
         "Microsoft Entra users",
-        "The people Copilot Studio names as its agents' owners and makers: their names, email "
-        "addresses, and whether they have left",
+        "The people Copilot Studio names as its agents' owners and makers, and the owners and "
+        "sponsors AgentGov names: their names, email addresses, and whether they have left",
         via="app",
         permission="User.Read.All",
         also=USERS_ALSO,

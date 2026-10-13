@@ -35,6 +35,7 @@ from agentgov.models import (
     ToolServer,
 )
 from agentgov.registry import finding_types, findings, teams
+from agentgov.registry import people as directory_people
 from agentgov.registry.errors import Forbidden, InvalidTransition, ValidationError
 
 OWNER, SPONSORS, TEAM = "owner", "sponsors", "team"
@@ -68,6 +69,8 @@ class Directory:
     def __init__(self, session: Session) -> None:
         self.teams = {t.name: t for t in teams.list_all(session)}
         self.default = next((t for t in self.teams.values() if t.is_default), None)
+        # People who left: an issue goes past them (docs/issues.md#people-who-leave).
+        self.left = set(directory_people.gone(session))
 
     def recipient(self, name: str | None) -> Recipient | None:
         """Who a name stands for: a team of that name, or else a person."""
@@ -80,6 +83,8 @@ class Directory:
             # Its own addresses, or else its members'.
             emails = tuple(team.emails or []) or tuple(m for m in members if teams.is_email(m))
             return Recipient("team", team.name, emails, tuple(team.destinations or []), members)
+        if name.lower() in self.left:
+            return None  # gone: the next step takes it
         if teams.is_email(name):
             return Recipient("person", name.lower(), (name.lower(),))
         # Reached in AgentGov only, when they sign in.
