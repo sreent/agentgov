@@ -871,6 +871,7 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .exception-list .icon-btn { width: 24px; height: 24px; }
 .exception-list .icon-btn .ico { width: 14px; height: 14px; }
 .exception-scope { overflow-wrap: anywhere; }
+.exception-reach.tone-text-warning { color: var(--warning-ink); }
 .dialog::backdrop { background: var(--scrim); }
 .dialog-form { display: flex; flex-direction: column; gap: 14px; padding: 20px; }
 .dialog-head { display: flex; gap: 12px; align-items: flex-start; }

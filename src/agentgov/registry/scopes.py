@@ -10,11 +10,28 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentgov.models import Agent
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from agentgov.models import Agent, Blueprint, FeatureSetting, ManagementRule, Team
 from agentgov.registry import validation
 from agentgov.registry.errors import ValidationError
 
 KEYS = ("blueprints", "teams", "environments", "platforms", "labels")
+# The keys whose names must exist, and what each names.
+WORDS = {"teams": "team", "blueprints": "blueprint", "platforms": "platform"}
+# Where agents run: AgentGov's gateway, or a platform it reads (registry.platforms.SOURCES).
+PLATFORMS = (
+    "gateway",
+    "microsoft-365",
+    "copilot-studio",
+    "entra-agent-id",
+    "aws",
+    "google-cloud",
+    "salesforce",
+    "databricks",
+    "microsoft-foundry",
+)
 
 
 def parse(value: Any, what: str = "scope") -> dict[str, Any]:
@@ -39,6 +56,68 @@ def parse(value: Any, what: str = "scope") -> dict[str, Any]:
             if items:
                 out[key] = items
     return out
+
+
+def known(session: Session) -> dict[str, set[str]]:
+    """The names a scope may use: the teams and blueprints there are, and the platforms."""
+    return {
+        "teams": set(session.scalars(select(Team.name))),
+        "blueprints": set(session.scalars(select(Blueprint.name))),
+        "platforms": set(PLATFORMS),
+    }
+
+
+def missing(scope: dict[str, Any], names: dict[str, set[str]]) -> list[str]:
+    """What ``scope`` names that there isn't ("team cx-platfrom"): it matches no agent there."""
+    return [
+        f"{word} {name}"
+        for key, word in WORDS.items()
+        for name in scope.get(key) or []
+        if name not in names[key]
+    ]
+
+
+def check_names(
+    session: Session,
+    scope: dict[str, Any],
+    what: str = "scope",
+    *,
+    had: list[dict[str, Any]] | None = None,
+) -> None:
+    """Refuse names there aren't: a misspelt team, blueprint or platform would leave the
+    scope matching no agent, and nobody would know. What the scopes it ``had`` named stays,
+    so editing them isn't stopped by a name from before."""
+    before: set[str] = set()
+    for old in had or []:
+        before |= {f"{w} {n}" for k, w in WORDS.items() for n in old.get(k) or []}
+    gone = [m for m in missing(scope, known(session)) if m not in before]
+    if gone:
+        where = (
+            f"; the platforms are {', '.join(PLATFORMS)}"
+            if any(m.startswith("platform ") for m in gone)
+            else ""
+        )
+        raise ValidationError(
+            f"{what}: there is no {', '.join(gone)} (add it first, or check the spelling{where})"
+        )
+
+
+def naming(session: Session, key: str, name: str) -> list[str]:
+    """The controls' exceptions and management rules that name ``name``, a team or a
+    blueprint (``key``): without it, their scopes would match no agent, and a rule that
+    gives agents an owner couldn't give them that team."""
+    found = [
+        f"the exceptions to {row.key}"
+        for row in session.scalars(select(FeatureSetting).order_by(FeatureSetting.key))
+        if any(name in ((e.get("scope") or {}).get(key) or []) for e in row.scopes or [])
+    ]
+    found += [
+        f"management rule {rule.name}"
+        for rule in session.scalars(select(ManagementRule).order_by(ManagementRule.name))
+        if name in ((rule.scope or {}).get(key) or [])
+        or (key == "teams" and (rule.params or {}).get("owner") == name)
+    ]
+    return found
 
 
 def platform(agent: Agent) -> str:

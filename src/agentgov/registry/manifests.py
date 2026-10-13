@@ -29,11 +29,15 @@ Applying is idempotent: unchanged resources are reported as ``unchanged``.
 Resources are applied in dependency order (features first, then destinations, the teams
 that post to them, identity issuers, blueprints, tool servers, model providers and the access
 packages that name blueprints, policies, and the management rules that name teams, before
-the agents that reference them).
+the agents that reference them); features' exceptions, which may name teams and blueprints,
+last.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import yaml
@@ -56,7 +60,7 @@ from agentgov.registry import (
     teams,
     toolservers,
 )
-from agentgov.registry.errors import NotFound, ValidationError
+from agentgov.registry.errors import NotFound, RegistryError, ValidationError
 
 API_VERSION = "agentgov/v1alpha1"
 ORDER = [
@@ -111,28 +115,52 @@ def apply(
     session: Session, settings: Settings, docs: list[dict[str, Any]], *, actor: str
 ) -> list[dict[str, str]]:
     results = []
+    # Features' exceptions, set last: they may name teams and blueprints applied here.
+    later: list[tuple[dict[str, str], dict[str, Any]]] = []
     for doc in sorted(docs, key=lambda d: ORDER.index(d["kind"])):
         kind, spec = doc["kind"], _spec(doc)
         name = spec["name"]
-        action = {
-            "Feature": _feature,
-            "FindingType": _finding_type,
-            "Destination": _destination,
-            "Team": _team,
-            "IdentityIssuer": _identity_issuer,
-            "Blueprint": _blueprint,
-            "ToolServer": _toolserver,
-            "ModelProvider": _model_provider,
-            "AccessPackage": _access_package,
-            "Policy": _policy,
-            "ManagementRule": _rule,
-            "Agent": _agent,
-        }[kind](session, settings, spec, actor)
+        with _about(kind, name):
+            action = {
+                "Feature": _feature,
+                "FindingType": _finding_type,
+                "Destination": _destination,
+                "Team": _team,
+                "IdentityIssuer": _identity_issuer,
+                "Blueprint": _blueprint,
+                "ToolServer": _toolserver,
+                "ModelProvider": _model_provider,
+                "AccessPackage": _access_package,
+                "Policy": _policy,
+                "ManagementRule": _rule,
+                "Agent": _agent,
+            }[kind](session, settings, spec, actor)
         results.append({"kind": kind, "name": name, "action": action})
+        if kind == "Feature" and "scopes" in spec:
+            later.append((results[-1], spec))
+    for result, spec in later:
+        with _about("Feature", spec["name"]):
+            if _feature_scopes(session, settings, spec, actor):
+                result["action"] = "configured"
     return results
 
 
+@contextmanager
+def _about(kind: str, name: str) -> Iterator[None]:
+    """What goes wrong applying a document names it: in a long manifest, "there is no team
+    x" alone doesn't say where."""
+    try:
+        yield
+    except RegistryError as exc:
+        what = f"{re.sub(r'(?<!^)(?=[A-Z])', ' ', kind).lower()} {name}"
+        if str(exc).startswith(what):
+            raise
+        raise type(exc)(f"{what}: {exc}") from None
+
+
 def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    """A feature's mode. Its exceptions are set after the other documents
+    (``_feature_scopes``), once the teams and blueprints they name are there."""
     if set(spec) - {"name", "mode", "scopes", "labels"}:
         raise ValidationError(f"feature {spec['name']}: spec takes only mode and scopes")
     if "mode" not in spec and "scopes" not in spec:
@@ -141,14 +169,16 @@ def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: 
     try:
         if "mode" in spec:
             changed = features.set_mode(session, settings, spec["name"], spec["mode"], actor=actor)
-        if "scopes" in spec:
-            changed = (
-                features.set_scopes(session, settings, spec["name"], spec["scopes"], actor=actor)
-                or changed
-            )
     except NotFound as exc:
         raise ValidationError(str(exc)) from None
     return "configured" if changed else "unchanged"
+
+
+def _feature_scopes(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> bool:
+    try:
+        return features.set_scopes(session, settings, spec["name"], spec["scopes"], actor=actor)
+    except NotFound as exc:
+        raise ValidationError(str(exc)) from None
 
 
 def _finding_type(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:

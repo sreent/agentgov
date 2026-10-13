@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.models import DELETED, Agent, Blueprint, Destination, Team
-from agentgov.registry import validation
+from agentgov.registry import scopes, validation
 from agentgov.registry.destinations import CHAT
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 from agentgov.registry.versions import edited, start_edit
@@ -184,8 +184,10 @@ def update_team(
 
 
 def users(session: Session, name: str) -> list[str]:
-    """The blueprints and agents that name a team: as their team, owner or sponsor."""
-    found = [
+    """The blueprints and agents that name a team (as their team, owner or sponsor), and
+    the controls' exceptions and management rules."""
+    found = scopes.naming(session, "teams", name)
+    found += [
         f"blueprint {b}"
         for b in session.scalars(select(Blueprint.name).where(Blueprint.team == name))
     ]

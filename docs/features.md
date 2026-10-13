@@ -277,12 +277,18 @@ AgentGov's gateway serves) and labels; every key a scope has must match. An agen
 the mode of the first exception whose scope it is in, and the control's mode otherwise.
 `unknown-callers` has none: its callers aren't agents.
 
+A scope names teams and blueprints that are there, and platforms AgentGov knows: a
+misspelt name, which would match no agent, is refused. Each exception says how many agents
+it applies to now (`agents` in the API), so one that applies to none stands out, and any
+name in it there isn't any more (`missing`), from before AgentGov checked. A team or
+blueprint an exception names can't be deleted until the exception changes.
+
 | | How |
 |---|---|
 | Admin UI | **Features**: **Add an exception** under a control's mode; the agent's page lists the controls whose mode differs for it, and why |
 | CLI | `agentgov features scope least-privilege monitor --environment dev`, `agentgov features unscope least-privilege 1`, `agentgov features get least-privilege` |
-| API | `PUT /v1/features/{feature}` with `{"scopes": [{"mode": "monitor", "scope": {"environments": ["dev"]}, "note": "..."}]}` (the whole list); `control_modes` in `GET /v1/agents/{agent}` |
-| Manifests | `kind: Feature` with `spec.scopes`, as the API takes them |
+| API | `PUT /v1/features/{feature}` with `{"scopes": [{"mode": "monitor", "scope": {"environments": ["dev"]}, "note": "..."}]}` (the whole list; what `GET` adds to each, `describe`, `agents` and `missing`, may come back with it); `control_modes` in `GET /v1/agents/{agent}` |
+| Manifests | `kind: Feature` with `spec.scopes`, as the API takes them; they are set after the manifest's other documents, so they can name teams and blueprints it adds |
 
 An administrator can also exempt one agent: its label `agentgov/exempt-controls` names the
 controls (`least-privilege,tool-integrity`), or all of them (`*`), that are monitored for

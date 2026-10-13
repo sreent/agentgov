@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.db import mark_changed
 from agentgov.models import Agent, Blueprint
-from agentgov.registry import teams, validation
+from agentgov.registry import scopes, teams, validation
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 from agentgov.registry.versions import edited, start_edit
 
@@ -143,6 +143,9 @@ def delete(session: Session, bp: Blueprint, *, actor: str) -> None:
     )
     if in_use:
         raise Conflict(f"blueprint {bp.name!r} is used by {in_use} agent(s)")
+    named_by = scopes.naming(session, "blueprints", bp.name)
+    if named_by:
+        raise Conflict(f"{', '.join(named_by)} name blueprint {bp.name!r}: change them first")
     ledger.append(session, type="blueprint.deleted", actor=actor, resource=f"blueprint/{bp.name}")
     session.delete(bp)
     mark_changed(session, "blueprints")

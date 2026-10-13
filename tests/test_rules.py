@@ -330,7 +330,25 @@ class TestEnforce:
             shown = rules.preview(s, rules.get(s, name), now)
             assert [u["agent"] for u in shown["unknown"]] == ["m365-helper"]
 
+    def test_a_rule_names_teams_and_blueprints_there_are(self, client, agent) -> None:
+        typo = client.post(
+            "/v1/rules", json={**INACTIVE, "scope": {"teams": ["cx-typo"]}}, headers=ADMIN
+        )
+        assert typo.status_code == 422 and "there is no team cx-typo" in typo.json()["detail"]
+        client.post("/v1/teams", json={"name": "cx-ops"}, headers=ADMIN).raise_for_status()
+        made = client.post(
+            "/v1/rules",
+            json={**INACTIVE, "action": "assign_owner", "params": {"owner": "cx-ops"}},
+            headers=ADMIN,
+        )
+        assert made.status_code == 201, made.text
+        # The team it gives agents stays while it does.
+        refused = client.delete("/v1/teams/cx-ops", headers=ADMIN)
+        assert refused.status_code == 409
+        assert "management rule inactive-agents" in refused.json()["detail"]
+
     def test_who_a_rule_looks_at(self, client, agent) -> None:
+        client.post("/v1/blueprints", json={"name": "other"}, headers=ADMIN).raise_for_status()
         name = _rule(client, scope={"blueprints": ["other"]})
         with _rt(client).db.session() as s:
             assert rules.preview(s, rules.get(s, name))["matching"] == 0

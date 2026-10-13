@@ -88,8 +88,12 @@ failed sync can't vouch for (unverified) don't. Rules' own issues never count.
 | `blueprints` | On one of these blueprints |
 | `teams` | Of one of these teams (the agent's own, or its blueprint's) |
 | `environments` | In one of these environments |
-| `platforms` | Where they run: `gateway`, `microsoft-365` or `copilot-studio` |
+| `platforms` | Where they run: `gateway`, or a platform AgentGov reads (`microsoft-365`, `copilot-studio`, `entra-agent-id`, `aws`, `google-cloud`, `salesforce`, `databricks`, `microsoft-foundry`) |
 | `labels` | With all these labels |
+
+A scope names teams and blueprints that are there: a misspelt one, which would match no
+agent, is refused. A team or blueprint a rule names, in its scope or as the owner it gives
+agents, can't be deleted while the rule does.
 
 An agent labelled `agentgov/exempt-rules` is left out of the rules it names (`inactive-agents,
 stale-registrations`), or of all of them (`*`); only administrators set labels under

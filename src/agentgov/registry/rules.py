@@ -265,6 +265,7 @@ def _apply(session: Session, rule: ManagementRule, data: dict[str, Any]) -> list
             value = _conditions(value)
         elif key == "scope":
             value = _scope(value)
+            scopes.check_names(session, value, had=[rule.scope or {}])
         elif key == "action":
             value = validation.one_of(value, ACTIONS, "action")
         elif key == "params":

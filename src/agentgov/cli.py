@@ -2929,6 +2929,17 @@ def features_set(
     _done("feature", key, f"{out['mode']}: {out['effect']}")
 
 
+# What listing a control's exceptions adds to each (registry.features.LISTED): not sent back.
+LISTED = ("describe", "agents", "missing")
+
+
+def _exception(e: dict[str, Any]) -> str:
+    """An exception in words, with how many agents it applies to now."""
+    missing = f"; there is no {', '.join(e['missing'])}" if e.get("missing") else ""
+    reach = f" ({e['agents']} agent(s) now{missing})" if "agents" in e else ""
+    return f"{e['mode']} for {e['describe']}{reach}"
+
+
 @features_app.command("scope")
 def features_scope(
     key: str,
@@ -2966,13 +2977,12 @@ def features_scope(
     modes = current["modes"]
     if mode in modes and modes.index(mode) < modes.index(current["mode"]):
         _confirm(f"{current['title']}: {mode} for these agents, {current['mode']} for others?", yes)
-    scopes = [{k: v for k, v in e.items() if k != "describe"} for e in current.get("scopes") or []]
+    scopes = [{k: v for k, v in e.items() if k not in LISTED} for e in current.get("scopes") or []]
     out = _call("PUT", f"/v1/features/{quote(key)}", json={"scopes": [*scopes, entry]})
     _done(
         "feature",
         key,
-        f"{len(out['scopes'])} exception(s): "
-        + "; ".join(f"{e['mode']} for {e['describe']}" for e in out["scopes"]),
+        f"{len(out['scopes'])} exception(s): " + "; ".join(_exception(e) for e in out["scopes"]),
     )
 
 
@@ -2986,7 +2996,7 @@ def features_unscope(
 ) -> None:
     """Remove one of a control's exceptions."""
     current = _call("GET", f"/v1/features/{quote(key)}")
-    scopes = [{k: v for k, v in e.items() if k != "describe"} for e in current.get("scopes") or []]
+    scopes = [{k: v for k, v in e.items() if k not in LISTED} for e in current.get("scopes") or []]
     if not 1 <= number <= len(scopes):
         _fail(f"{key} has {len(scopes)} exception(s)")
     gone = current["scopes"][number - 1]

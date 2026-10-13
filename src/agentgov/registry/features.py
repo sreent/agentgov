@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.config import FEATURE_PRESETS, Settings
 from agentgov.db import mark_changed
-from agentgov.models import Agent, FeatureSetting, IntegrationState
+from agentgov.models import DELETED, Agent, FeatureSetting, IntegrationState
 from agentgov.registry import scopes as scope_rules
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
@@ -796,6 +796,9 @@ SCOPABLE = (
 EXEMPT_LABEL = "agentgov/exempt-controls"
 # Exceptions a control has at most.
 MAX_SCOPES = 20
+# What listing a control's exceptions adds to each: the scope in words, how many agents it
+# applies to now, and what it names that there isn't. Sent back with them, they are ignored.
+LISTED = ("describe", "agents", "missing")
 
 
 def enforced_at_gateway(modes: dict[str, str]) -> list[str]:
@@ -1140,7 +1143,8 @@ def check_scopes(f: Feature, value: Any, settings: Settings) -> list[dict[str, A
         where = f"scopes[{i}]"
         if not isinstance(item, dict):
             raise ValidationError(f"{where} is a mapping of mode, scope and note")
-        unknown = sorted(set(item) - {"mode", "scope", "note"})
+        # What a listing adds to each (LISTED) may come back with it.
+        unknown = sorted(set(item) - {"mode", "scope", "note", *LISTED})
         if unknown:
             raise ValidationError(f"{where}: unknown key(s) {', '.join(unknown)}")
         mode = check_mode(f, item.get("mode"))
@@ -1216,6 +1220,9 @@ def set_scopes(session: Session, settings: Settings, key: str, value: Any, *, ac
             f"{key} is set by the deployment (AGENTGOV_FEATURES), for every agent: its "
             "exceptions can't be changed in the app"
         )
+    had = [e["scope"] for e in (row.scopes or [])] if row is not None else []
+    for i, entry in enumerate(new):
+        scope_rules.check_names(session, entry["scope"], f"scopes[{i}].scope", had=had)
     return _set_scopes(session, f, new, actor=actor)
 
 
@@ -1275,12 +1282,31 @@ def strictest_modes(session: Session) -> dict[str, str]:
     return strictest(modes(session), all_scopes(session))
 
 
+def _reach(entries: list[dict[str, Any]], agents: list[Agent]) -> list[int]:
+    """How many agents each exception applies to now: the first that matches an agent."""
+    counts = [0] * len(entries)
+    for agent in agents:
+        for i, entry in enumerate(entries):
+            if scope_rules.matches(entry["scope"], agent):
+                counts[i] += 1
+                break
+    return counts
+
+
 def describe(session: Session, settings: Settings, key: str | None = None) -> list[dict[str, Any]]:
     rows = _rows(session)
+    agents: list[Agent] | None = None
+    names: dict[str, set[str]] = {}
     out = []
     for f in [feature(key)] if key else CATALOG:
         row = rows.get(f.key)
         current = row.mode if row is not None else f.default
+        entries = (row.scopes or []) if row is not None else []
+        if entries and agents is None:
+            # Read once: how many agents each exception applies to, and what it names that
+            # there isn't.
+            agents = list(session.scalars(select(Agent).where(Agent.status != DELETED)).unique())
+            names = scope_rules.known(session)
         # A default that needs what isn't there, or a mode chosen before it went away: it
         # does nothing until it is there, and says so.
         missing = unmet(f.key, current, settings)
@@ -1309,9 +1335,16 @@ def describe(session: Session, settings: Settings, key: str | None = None) -> li
                 # Its mode for some agents (docs/features.md#exceptions); while the
                 # deployment pins it, none apply.
                 "scopable": f.key in SCOPABLE,
+                # With each, in words, how many agents it applies to now, and the teams,
+                # blueprints or platforms it names that there aren't.
                 "scopes": [
-                    {**e, "describe": scope_rules.describe(e["scope"])}
-                    for e in ((row.scopes or []) if row is not None else [])
+                    {
+                        **e,
+                        "describe": scope_rules.describe(e["scope"]),
+                        "agents": n,
+                        "missing": scope_rules.missing(e["scope"], names),
+                    }
+                    for e, n in zip(entries, _reach(entries, agents or []), strict=True)
                 ],
             }
         )

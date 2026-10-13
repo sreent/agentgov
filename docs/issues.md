@@ -84,7 +84,9 @@ spec:
 Blueprints name the team for their agents (`team`), and an agent can name its own instead
 (`agentgov blueprints update support --team cx-platform`, or **Team** in the agent's and the
 blueprint's forms). A team's name can't change, and a team can't be deleted while a
-blueprint or an agent names it, as its team, owner or sponsor.
+blueprint or an agent names it, as its team, owner or sponsor, or while a control's
+[exceptions](features.md#exceptions) or a [management rule](management-rules.md#which-agents)
+do.
 
 ## How long each step waits
 

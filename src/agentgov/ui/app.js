@@ -6633,7 +6633,15 @@ function featureProvenance(f) {
 
 // A control's exceptions: its mode for the agents in a scope, the first that matches.
 function plainScopes(f) {
-  return (f.scopes || []).map(({ describe, ...e }) => e);
+  return (f.scopes || []).map(({ describe, agents, missing, ...e }) => e);
+}
+
+// How many agents an exception applies to now, and what it names that there isn't.
+function exceptionReach(e) {
+  if (e.agents === undefined) return null;
+  const missing = e.missing?.length ? `There is no ${e.missing.join(', ')}. ` : '';
+  const reach = e.agents ? `Applies to ${plural(e.agents, 'agent')} now.` : 'Applies to no agent now.';
+  return h('span', { class: `exception-reach cell-sub${missing || !e.agents ? ' tone-text-warning' : ''}` }, `${missing}${reach}`);
 }
 
 function exceptionsBlock(f) {
@@ -6645,7 +6653,7 @@ function exceptionsBlock(f) {
   return h('div', { class: 'exceptions' },
     list.length ? h('ul', { class: 'exception-list', role: 'list' }, list.map((e, i) => h('li', {},
       plainChip(MODE_WORDS[e.mode] || e.mode, { tone: e.mode === 'enforce' ? 'good' : e.mode === 'monitor' ? 'warning' : null }),
-      h('span', { class: 'exception-scope' }, ruleScope(e.scope), e.note ? h('span', { class: 'cell-sub' }, ` (${e.note})`) : null),
+      h('span', { class: 'exception-scope' }, ruleScope(e.scope), e.note ? h('span', { class: 'cell-sub' }, ` (${e.note})`) : null, exceptionReach(e)),
       editable ? h('button', {
         type: 'button', class: 'icon-btn', title: 'Remove this exception',
         'aria-label': `Remove the exception: ${MODE_WORDS[e.mode] || e.mode} for ${ruleScope(e.scope)}`,
@@ -6684,7 +6692,13 @@ async function addException(f) {
       if (!Object.keys(scope).length) throw new Error('Say which agents: a blueprint, a team, a platform, an environment or a label.');
       const entry = { mode: v.mode, scope };
       if (v.note) entry.note = v.note;
-      return api(`v1/features/${encodeURIComponent(f.key)}`, { method: 'PUT', body: { scopes: [...plainScopes(f), entry] } });
+      try {
+        return await api(`v1/features/${encodeURIComponent(f.key)}`, { method: 'PUT', body: { scopes: [...plainScopes(f), entry] } });
+      } catch (err) {
+        // What is wrong with this exception, not where it is in the list ("scopes[3].scope").
+        if (err instanceof ApiError) err.message = err.message.replace(/\bscopes\[\d+\]\.scope: (\w)/i, (_, c) => c.toUpperCase());
+        throw err;
+      }
     },
   });
   if (result?.scopes) toast(`${f.title}: ${plural(result.scopes.length, 'exception')}.`);
