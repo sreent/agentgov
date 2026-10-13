@@ -2,8 +2,9 @@
 
 Each test takes what an attacker would try and follows it as far as a test can reach: the
 real gateway, given forged headers and tokens with forged claims; the kill switch, from a
-block to OPA's decision; usage, which only the gateway may report. Who may call each API
-route is checked route by route in tests/test_authz_matrix.py.
+block to OPA's decision; usage, which only the gateway may report; and the ledger's history,
+changed by whoever can write to its database. Who may call each API route is checked route
+by route in tests/test_authz_matrix.py.
 """
 
 from __future__ import annotations
@@ -25,10 +26,19 @@ import jwt
 import pytest
 import yaml
 from cryptography.hazmat.primitives.asymmetric import rsa
+from sqlalchemy import delete, select, update
 
+from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.gateway import render, to_yaml
-from agentgov.models import Agent, IdentityIssuer, ModelProvider
+from agentgov.models import (
+    Agent,
+    IdentityIssuer,
+    LedgerCheckpoint,
+    LedgerEntry,
+    LedgerHead,
+    ModelProvider,
+)
 from agentgov.registry import agents
 from tests.conftest import requires_opa
 from tests.test_gateway import IMAGE, _docker_ready
@@ -339,3 +349,75 @@ def test_usage_comes_from_the_gateway_alone() -> None:
     assert env["AGENTGOV_GATEWAY_USAGE_ENDPOINT"] == "otel-collector:4319"
     # Not published on the host, as the traces' receiver is.
     assert not any("4319" in str(p) for p in compose["services"]["otel-collector"]["ports"])
+
+
+def _edited(s: Any) -> None:
+    s.execute(update(LedgerEntry).where(LedgerEntry.seq == 3).values(reason="edited later"))
+
+
+def _removed(s: Any) -> None:
+    s.execute(delete(LedgerEntry).where(LedgerEntry.seq == 3))
+
+
+def _removed_behind_a_made_up_archive(s: Any) -> None:
+    # As archiving leaves the chain's start, without archiving.
+    s.get(LedgerCheckpoint, 5).pruned_at = ids.utcnow()
+    s.execute(delete(LedgerEntry).where(LedgerEntry.seq <= 5))
+
+
+def _cut_back_past_a_checkpoint(s: Any) -> None:
+    kept = s.get(LedgerEntry, 7)
+    s.execute(delete(LedgerEntry).where(LedgerEntry.seq > 7))
+    s.execute(update(LedgerHead).where(LedgerHead.id == 1).values(last_seq=7, last_hash=kept.hash))
+
+
+def _rewritten_with_its_hashes_worked_out_again(s: Any) -> None:
+    from tests.test_ledger import _rewrite
+
+    _rewrite(s, 2, "a denial, now an allow")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        _edited,
+        _removed,
+        _removed_behind_a_made_up_archive,
+        _cut_back_past_a_checkpoint,
+        _rewritten_with_its_hashes_worked_out_again,
+    ],
+)
+def test_a_change_to_the_ledgers_history_is_found(rt, change: Any) -> None:
+    """Whoever can write to the database can't change what the ledger says happened without
+    its verification saying so: an entry edited or removed, the oldest removed as if
+    archived, the newest cut back with the head, or the chain rewritten with its hashes
+    worked out again (the checkpoints don't match it; time-stamped by an authority, which
+    tests/test_evidence.py checks, they can't be made to). A database restored from an older
+    copy shows at the witness (tests/test_witness.py)."""
+    from tests.test_ledger import _append
+
+    _append(rt, 5)
+    with rt.db.session() as s:
+        ledger.checkpoint(s)
+    _append(rt, 5)
+    with rt.db.session() as s:
+        ledger.checkpoint(s)
+    _append(rt, 2)
+    with rt.db.session() as s:
+        assert ledger.verify(s)["valid"] is True
+        change(s)
+    with rt.db.session() as s:
+        assert ledger.verify(s)["valid"] is False
+
+
+def test_a_row_slipped_in_past_the_ledgers_head_is_found(rt) -> None:
+    """A row stored past the chain's head, around it, makes verification fail, and nothing
+    serves or counts it as the ledger's."""
+    from tests.test_ledger import _append, past_the_head
+
+    _append(rt, 3)
+    seq = past_the_head(rt)
+    with rt.db.session() as s:
+        assert ledger.verify(s)["valid"] is False
+        listed = s.scalars(select(LedgerEntry.seq).where(ledger.in_chain())).all()
+    assert seq not in listed

@@ -40,6 +40,12 @@ Examples of issues we especially want to hear about:
   a delegation AgentGov accepts although it didn't give it to that agent for that person
   (forged, expired, or someone else's), or headers about who handed the work down that a
   caller can set.
+* A caller that the processor, or an agent called, takes for another: through headers
+  named as AgentGov's, claims in another issuer's token, or a token meant for another
+  install's gateway.
+* Usage that counts against an agent's budget, reported by anything but the gateway.
+* A role for one team that reaches another team's agents, or what only roles for every
+  team may do.
 * Redaction that can be bypassed so that detected personal data or secrets reach an agent.
 * Tampering with the evidence ledger that `agentgov ledger verify` does not detect.
 * Authentication or authorization flaws in the control plane API or UI.
@@ -49,6 +55,9 @@ Examples of issues we especially want to hear about:
 * A call to the Copilot Studio threat-detection endpoint that AgentGov accepts without a
   token Microsoft Entra ID issued to an allowed caller, or a Copilot Studio tool call it
   allows in `enforce` mode when policy should deny it.
+
+What AgentGov protects, from whom, and which test checks each of its promises is in the
+[threat model](docs/threat-model.md): start there to review it, or to try to break it.
 
 ## Supported versions
 
@@ -207,12 +216,12 @@ AgentGov's examples. On one server, `docker-compose.server.yml` does most of wha
   The authority's key (in the chart, the Secret `<release>-tls-ca`) can issue any
   component's certificate: guard it as you guard the service token, and don't let the
   authority issue certificates to anything else (with cert-manager, the chart makes one
-  for the release unless you name an Issuer of your own). The components read their
-  certificates when they start, and OPA every minute: after cert-manager renews one,
-  restart the pods.
+  for the release unless you name an Issuer of your own). The components take a renewed
+  certificate without a restart; a new authority needs one
+  ([production](docs/production.md#mutual-tls-between-components)).
 * Administrators' roles are read from the identity provider when they sign in. Removing a
-  role or disabling an account there takes effect at the next sign-in; a session that is
-  already open lasts until it expires (`AGENTGOV_SESSION_HOURS`, default 8), the person
-  signs out, or an admin signs them out on the Access page (`agentgov access sign-out`).
-  Back-channel logout, which would end it automatically, is on the
-  [roadmap](docs/roadmap.md).
+  role or disabling an account there ends a session that is already open only where the
+  provider tells AgentGov (back-channel logout; Keycloak does, Microsoft Entra ID
+  doesn't): otherwise the session lasts until it expires (`AGENTGOV_SESSION_HOURS`,
+  default 8), the person signs out, or an admin signs them out on the Access page
+  (`agentgov access sign-out`) ([administration](docs/administration.md#signing-out-everywhere)).

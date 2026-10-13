@@ -81,6 +81,8 @@
 
 * [Architecture](architecture.md): the parts, the path of each call, trust boundaries,
   failure modes and scaling
+* [Threat model](threat-model.md): what AgentGov protects, from whom, what stops each
+  attack, the test that checks each promise, and where a review should start
 * [Landscape and standards](landscape.md): why each project was chosen, and the standards
   AgentGov follows
 * [Architecture decision records](adr)
