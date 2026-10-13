@@ -234,6 +234,7 @@ class Runtime:
             if settings.issues_interval_seconds > 0
             else None
         )
+        # Whatever connectors there are when it runs: one may be added after this.
         self._platforms_worker = (
             _Worker(
                 "platform-sync",
@@ -241,7 +242,7 @@ class Runtime:
                 settings.platform_sync_interval_seconds,
                 leading=leading,
             )
-            if self.platforms and settings.platform_sync_interval_seconds > 0
+            if settings.platform_sync_interval_seconds > 0
             else None
         )
         self._started = False
@@ -283,42 +284,24 @@ class Runtime:
                 leading=lambda: self.coordination.leading,
                 exclusive=lambda: self.coordination.job("identity"),
             )
-        if self.settings.gateway_config_path:
-            self._gateway_worker.start()
-        if self._posture_worker is not None:
-            self._posture_worker.start()
-        if self._m365_worker is not None:
-            self._m365_worker.start()
         if self._classifier_worker is not None:
             with self.db.session() as session:
                 instructions.queue_unclassified(session)
-            self._classifier_worker.start()
-        self._recheck_worker.start()
-        self._mcp_worker.start()
-        self._retention_worker.start()
-        if self._delivery_worker is not None:
-            self._delivery_worker.start()
-        if self._issues_worker is not None:
-            self._issues_worker.start()
+        # Every scheduled job, so that none is built and left idle.
+        for worker in self._workers():
+            worker.start()
         self._started = True
+
+    def _workers(self) -> list[_Worker]:
+        gateway = [self._gateway_worker] if self.settings.gateway_config_path else []
+        delivery = [self._delivery_worker] if self._delivery_worker is not None else []
+        return gateway + delivery + self._leader_workers()
 
     def stop(self) -> None:
         if self.identity is not None:
             self.identity.stop()
-        self._gateway_worker.stop()
-        if self._posture_worker is not None:
-            self._posture_worker.stop()
-        if self._m365_worker is not None:
-            self._m365_worker.stop()
-        if self._classifier_worker is not None:
-            self._classifier_worker.stop()
-        self._recheck_worker.stop()
-        self._mcp_worker.stop()
-        self._retention_worker.stop()
-        if self._delivery_worker is not None:
-            self._delivery_worker.stop()
-        if self._issues_worker is not None:
-            self._issues_worker.stop()
+        for worker in self._workers():
+            worker.stop()
         # Last: another replica takes the lead once this one lets go.
         self.coordination.stop()
         self.db.dispose()

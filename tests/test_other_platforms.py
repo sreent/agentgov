@@ -200,3 +200,27 @@ def test_only_configured_and_turned_on_platforms_sync(client, connector) -> None
     assert status["google-cloud"]["configured"] is False
     assert "AGENTGOV_GOOGLE_CLOUD_PROJECTS" in status["google-cloud"]["needs"]
     assert status["databricks"]["configured"] is False
+
+
+def test_platforms_are_read_on_a_schedule(settings: Settings, connector, monkeypatch) -> None:
+    from agentgov import runtime
+    from agentgov.registry import features
+
+    started: list[str] = []
+    monkeypatch.setattr(runtime._Worker, "start", lambda worker: started.append(worker.name))
+    rt = runtime.Runtime(settings.with_overrides(platform_sync_interval_seconds=3600))
+    # Connectors may come after the runtime is built, as in these tests.
+    rt.platforms["aws"] = connector
+    rt.start()
+    try:
+        assert "platform-sync" in started
+        # Each time it runs: every platform that is configured and turned on.
+        assert rt._platforms_worker is not None
+        rt._platforms_worker.fn()
+        assert connector.calls == 1
+        with rt.db.session() as s:
+            features.set_mode(s, rt.settings, "aws", "off", actor="admin:ada")
+        rt._platforms_worker.fn()
+        assert connector.calls == 1
+    finally:
+        rt.stop()
