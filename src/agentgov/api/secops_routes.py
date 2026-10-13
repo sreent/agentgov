@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy import select
 
+from agentgov import ledger
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.api.versions import if_match
 from agentgov.models import LedgerEntry
@@ -72,7 +73,7 @@ def secops_events(
             )
         entries = s.scalars(
             select(LedgerEntry)
-            .where(LedgerEntry.seq > after)
+            .where(LedgerEntry.seq > after, ledger.in_chain())
             .order_by(LedgerEntry.seq)
             .limit(limit)
         ).all()

@@ -456,6 +456,12 @@ def replay(session: Session, destination: Destination, after: Any, *, actor: str
     last = head(session)
     if after > last:
         raise ValidationError(f"the ledger ends at entry {last}")
+    if after >= destination.cursor:
+        # Moved on, it would skip entries the SIEM hasn't had: they would never reach it.
+        raise ValidationError(
+            f"replay goes back: {destination.name} has had the ledger up to entry "
+            f"{destination.cursor}, so after is less than that"
+        )
     previous, destination.cursor = destination.cursor, after
     destination.retry_at = None
     ledger.append(

@@ -22,7 +22,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agentgov import ids
+from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock
 from agentgov.models import (
@@ -593,7 +593,11 @@ def history(session: Session, finding: Finding, limit: int = 200) -> list[Ledger
     """What happened to it, newest first, from the ledger."""
     rows = session.scalars(
         select(LedgerEntry)
-        .where(LedgerEntry.type.like("finding.%"), LedgerEntry.resource == finding.subject)
+        .where(
+            LedgerEntry.type.like("finding.%"),
+            LedgerEntry.resource == finding.subject,
+            ledger.in_chain(),
+        )
         .order_by(LedgerEntry.seq.desc())
         .limit(limit * 5)
     )

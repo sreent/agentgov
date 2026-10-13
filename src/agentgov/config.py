@@ -239,6 +239,11 @@ class Settings:
     # An RFC 3161 time-stamping authority, such as https://freetsa.org/tsr. It signs each
     # checkpoint with its own time, which proves the chain existed then, unchanged since.
     ledger_tsa_url: str | None = None
+    # The authority's certificates (PEM: its root, and any intermediate ones), which each
+    # time-stamp's signature is checked against, when it comes and whenever the ledger is
+    # verified. Unset, a time-stamp is checked against the certificate it carries, which
+    # shows it whole, not that the authority signed it.
+    ledger_tsa_ca_file: str | None = None
     # A transparency log, Sigstore's Rekor v2: its public shard (such as
     # https://log2025-1.rekor.sigstore.dev) or a rekor-tiles of your own. Each checkpoint is
     # signed with AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE and added to it, where anyone can

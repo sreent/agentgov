@@ -20,6 +20,7 @@ access assignments, developers' MCP servers not reported since) go after
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import gzip
 import hashlib
@@ -32,7 +33,7 @@ from typing import Any
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
-from agentgov import ids, ledger
+from agentgov import ids, ledger, timestamping
 from agentgov.config import Settings
 from agentgov.models import (
     AccessAssignment,
@@ -103,21 +104,37 @@ def save_stamp(
     seq: int,
     url: str,
     *,
-    response: bytes | None = None,
-    time: datetime | None = None,
+    stamp: timestamping.Stamp | None = None,
     error: str | None = None,
 ) -> None:
+    """Keep the authority's time-stamp on the checkpoint, and record it in the chain, so
+    that one taken away or replaced later shows (agentgov.ledger.verify); or why there is
+    none yet."""
     point = session.get(LedgerCheckpoint, seq)
     if point is None:
         return
     point.tsa_url = url
-    if response is not None:
-        import base64
-
-        point.timestamp = base64.b64encode(response).decode()
-        point.timestamped_at, point.timestamp_error = time, None
-    else:
+    if stamp is None:
         point.timestamp_error = error
+        return
+    point.timestamp = base64.b64encode(stamp.response).decode()
+    point.timestamped_at, point.timestamp_error = stamp.time, None
+    ledger.append(
+        session,
+        type=ledger.STAMPED,
+        actor=SYSTEM,
+        reason=f"checkpoint {seq} time-stamped by {url}",
+        details={
+            "checkpoint": seq,
+            "hash": point.hash,
+            "token": hashlib.sha256(stamp.response).hexdigest(),
+            "time": ids.isoformat(stamp.time),
+            "tsa": url,
+            # Its signature checked against the authority's certificates, or only against
+            # the one it carries.
+            "authority": stamp.authority,
+        },
+    )
 
 
 def unlogged(session: Session) -> list[tuple[int, str]]:
@@ -173,10 +190,13 @@ def archivable(session: Session, settings: Settings, now: datetime) -> tuple[int
     floor, _ = ledger.base(session)
     cutoff = now - timedelta(days=settings.ledger_retention_days)
     young = session.scalar(
-        select(func.min(LedgerEntry.seq)).where(LedgerEntry.seq > floor, LedgerEntry.ts >= cutoff)
+        select(func.min(LedgerEntry.seq)).where(
+            LedgerEntry.seq > floor, LedgerEntry.ts >= cutoff, ledger.in_chain()
+        )
     )
     head = session.get(LedgerHead, 1)
     last = (young - 1) if young is not None else (head.last_seq if head else floor)
+    last = min(last, head.last_seq if head else floor)
     sent = _cursor_floor(session)
     if sent is not None:
         last = min(last, sent)
@@ -197,6 +217,7 @@ def archive(
     directory = Path(settings.ledger_archive_dir)
     name = f"ledger-{floor + 1:012d}-{last:012d}.jsonl.gz"
     _, prev = ledger.base(session)
+    follows = prev
     tmp = directory / f".{name}.tmp"
     count, last_entry = 0, None
     try:
@@ -214,8 +235,19 @@ def archive(
             raise ArchiveError(f"entries {floor + 1} to {last} aren't all there")
         with tmp.open("rb") as written:
             os.fsync(written.fileno())
-        os.replace(tmp, directory / name)
-        digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+        target = directory / name
+        if target.exists():
+            # Archives are evidence, never written over: one already there holds these
+            # entries (a round that didn't finish), or it is left as it is and nothing goes.
+            if not _same_entries(target, tmp):
+                raise ArchiveError(
+                    f"an archive {name} is already there, holding other entries: it is left as "
+                    "it is, and nothing is archived until someone finds out why"
+                )
+            tmp.unlink()
+        else:
+            os.replace(tmp, target)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
     except (OSError, ArchiveError) as exc:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
@@ -243,9 +275,25 @@ def archive(
             "archive": name,
             "sha256": digest,
             "hash": last_entry.hash,
+            # The hash the first entry goes on from: the archive before's last, so that
+            # the chain itself says where the archive starts, as well as where it ends.
+            "follows": follows,
         },
     )
     return {"from": floor + 1, "to": last, "entries": count, "archive": name, "sha256": digest}
+
+
+def _same_entries(one: Path, other: Path) -> bool:
+    """Whether two archives hold the same entries, however they were compressed."""
+
+    def entries(path: Path) -> list[Any]:
+        with gzip.open(path, "rt", encoding="utf-8") as lines:
+            return [json.loads(line) for line in lines if line.strip()]
+
+    try:
+        return entries(one) == entries(other)
+    except (OSError, EOFError, ValueError):
+        return False
 
 
 def _archive_failed(session: Session, error: str) -> None:

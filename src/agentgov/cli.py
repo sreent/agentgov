@@ -2785,7 +2785,20 @@ def ledger_verify(
         None,
         "--pack",
         help="Check an evidence pack offline (its folder or zip file): its ledger, against "
-        "its time-stamped checkpoints.",
+        "its time-stamped checkpoints and its transparency log's entries.",
+    ),
+    tsa_ca: Path | None = typer.Option(
+        None,
+        "--tsa-ca",
+        help="Offline: the time-stamping authority's certificates (PEM, its root and any "
+        "intermediate ones): each time-stamp's signature must lead to them.",
+    ),
+    checkpoint_hours: int | None = typer.Option(
+        None,
+        "--checkpoint-hours",
+        help="Offline: hours between checkpoints where the entries were written "
+        "(AGENTGOV_LEDGER_CHECKPOINT_HOURS; by default as the pack says, or 24): a "
+        "time-stamp that came later than that vouches only from its own time.",
     ),
 ) -> None:
     """Recompute the hash chain and report tampering; offline, check exports, archives and
@@ -2796,19 +2809,27 @@ def ledger_verify(
         if not result.get("valid"):
             raise typer.Exit(2)
         return
-    from agentgov import ledger, retention
+    from agentgov import ledger, retention, timestamping
 
+    trust = timestamping.trust(str(tsa_ca) if tsa_ca else None)
+    if trust.error:
+        _fail(trust.error)
+    contents: dict[str, bytes] = {}
     if pack is not None:
         contents = _pack_files(pack)
         if "ledger.jsonl" not in contents:
             _fail(f"{pack} is not an evidence pack: it has no ledger.jsonl")
         runs = [(f"{pack}: ledger.jsonl", _jsonl(contents["ledger.jsonl"]))]
         points = _checkpoint_points(contents, prefix="checkpoints/")
+        hours = checkpoint_hours if checkpoint_hours is not None else _pack_hours(contents)
     else:
         runs = [(str(path), retention.read_archive(path)) for path in file or []]
         points = _checkpoint_points(_folder_files(checkpoints)) if checkpoints else []
+        hours = checkpoint_hours if checkpoint_hours is not None else ledger.CHECKPOINT_HOURS
     wanted = {seq for seq, _, _ in points}
     hashes: dict[int, str] = {}
+    times: dict[int, Any] = {}
+    seen: list[dict[str, Any]] = []
     start: tuple[int, str] | None = None
     first: int | None = None
     for name, lines in runs:
@@ -2819,7 +2840,9 @@ def ledger_verify(
             first = records[0]["seq"]
             if first - 1 in wanted:
                 hashes[first - 1] = records[0]["prev_hash"]
-        hashes.update({r["seq"]: r["hash"] for r in records if r["seq"] in wanted})
+        for r in records:
+            if r["seq"] in wanted:
+                hashes[r["seq"]], times[r["seq"]] = r["hash"], _when(r.get("ts"))
         result = ledger.verify_records(records, start=start)
         state = (
             "valid" if result["valid"] else f"BROKEN at {result['broken_at']}: {result['problem']}"
@@ -2830,6 +2853,7 @@ def ledger_verify(
         )
         if not result["valid"]:
             raise typer.Exit(2)
+        seen += records
         if result["last"] is not None:
             # The next file must go on from this one.
             start = (result["last"], result["head"])
@@ -2841,10 +2865,36 @@ def ledger_verify(
             "holds together. Check it against the time-stamped checkpoints (--checkpoints)."
         )
         return
-    found = ledger.check_checkpoints(hashes, points)
-    for problem in found["problems"]:
+    found = ledger.check_checkpoints(
+        hashes, points, roots=trust.roots, times=times, window=ledger.stamp_window(hours)
+    )
+    problems = [text for _, text in found["problems"]]
+    last = start[0] if start is not None else None
+    if pack is not None:
+        problems += _pack_problems(contents, seen, points, first, last)
+    beyond = [seq for seq in found["unreached"] if last is not None and seq > last]
+    before = [seq for seq in found["unreached"] if seq not in beyond]
+    warnings = ledger.stamp_warnings(found, trust, "--tsa-ca")
+    if before:
+        listed = ", ".join(str(seq) for seq in before[:10]) + (", ..." if len(before) > 10 else "")
+        warnings.append(
+            f"checkpoint{'s' if len(before) > 1 else ''} {listed} "
+            f"{'are' if len(before) > 1 else 'is'} for entries these files don't hold (before "
+            f"entry {first}): check {'them' if len(before) > 1 else 'it'} with the archives, or "
+            "an export, that hold them"
+        )
+    if beyond and pack is None:
+        warnings.append(
+            f"checkpoints {', '.join(map(str, beyond))} are beyond the last entry here: check "
+            "them with the files that go on from these"
+        )
+    if pack is not None:
+        warnings += _log_entries(contents, problems)
+    for warning in warnings:
+        typer.echo(f"warning: {warning}")
+    for problem in problems:
         typer.secho(f"BROKEN: {problem}", fg=typer.colors.RED)
-    if found["problems"]:
+    if problems:
         raise typer.Exit(2)
     if not found["vouched"]:
         typer.echo(
@@ -2852,23 +2902,142 @@ def ledger_verify(
             "worked out again wouldn't show"
         )
         return
-    last = max(found["vouched"])
+    vouching = max(found["vouched"])
     stamped = [seq for seq, _, answer in points if answer is not None and seq in found["vouched"]]
     count = len(found["vouched"])
     typer.echo(
         f"{count} checkpoint{' vouches' if count == 1 else 's vouch'} for these entries, up to "
-        f"entry {last}{f', {len(stamped)} of them time-stamped' if stamped else ''}"
+        f"entry {vouching}{f', {len(stamped)} of them time-stamped' if stamped else ''}"
     )
-    if start is not None and start[0] > last:
+    if start is not None and start[0] > vouching:
         typer.echo(
-            f"entries {last + 1} to {start[0]} come after the last checkpoint: nothing outside "
-            "AgentGov vouches for them yet"
+            f"entries {vouching + 1} to {start[0]} come after the last checkpoint: nothing "
+            "outside AgentGov vouches for them yet"
         )
-    if stamped:
+    if found["stamped"] and trust.roots:
         typer.echo(
-            "check each time-stamp's signature, against the authority's certificate, with: "
-            "openssl ts -verify -data checkpoints/N.txt -in checkpoints/N.tsr -CAfile <its CA>"
+            f"the time-stamps' signatures check out against the authority's certificates in "
+            f"{tsa_ca}"
         )
+
+
+def _when(value: Any) -> Any:
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else None
+    except ValueError:
+        return None
+
+
+def _pack_hours(contents: dict[str, bytes]) -> int:
+    """How often the checkpoints were made, as the pack's reports say (else 24 hours)."""
+    from agentgov import ledger
+
+    for name, data in contents.items():
+        if name.startswith("reports/") and name.endswith(".json"):
+            with contextlib.suppress(ValueError, KeyError, TypeError, AttributeError):
+                return int(json.loads(data)["ledger"]["checkpoint_hours"])
+    return ledger.CHECKPOINT_HOURS
+
+
+def _pack_problems(
+    contents: dict[str, bytes],
+    records: list[dict[str, Any]],
+    points: list[tuple[int, str, bytes | None]],
+    first: int | None,
+    last: int | None,
+) -> list[str]:
+    """What an evidence pack's own lists say that its entries must agree with: the
+    checkpoints made of a longer ledger, where the entries start when the ones before were
+    archived, and the time-stamps the ledger recorded."""
+    from agentgov import ledger
+
+    try:
+        listed = json.loads(contents.get("checkpoints.json") or b"[]")
+    except ValueError:
+        return ["checkpoints.json can't be read"]
+    problems = [
+        f"checkpoint {c['seq']} is beyond the last entry here ({last}): the ledger was longer "
+        "when it was made"
+        for c in listed
+        if last is not None and c.get("seq", 0) > last
+    ]
+    pruned = {c["seq"]: c for c in listed if c.get("pruned_at")}
+    if first is not None and first - 1 in pruned:
+        # The pack starts where the chain in the database did: the chain must say that the
+        # entries before were archived.
+        floor = pruned[first - 1]
+        previous = max((seq for seq in pruned if seq < floor["seq"]), default=0)
+        follows = pruned[previous]["hash"] if previous else ledger.GENESIS
+        named = [
+            r
+            for r in records
+            if r.get("type") == ledger.ARCHIVED
+            and (r.get("details") or {}).get("to") == floor["seq"]
+        ]
+        details = (named[-1].get("details") or {}) if named else None
+        if details is None:
+            problems.append(
+                f"the entries before entry {first} left the database, but no ledger.archived "
+                "entry here says they were archived"
+            )
+        elif (
+            details.get("hash") != floor["hash"]
+            or details.get("from") != previous + 1
+            or details.get("follows", follows) != follows
+        ):
+            problems.append(
+                f"the ledger.archived entry for entries up to {floor['seq']} doesn't match the "
+                "checkpoints"
+            )
+    recorded: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+    for r in records:
+        details = r.get("details") or {}
+        if r.get("type") == ledger.STAMPED and isinstance(details.get("checkpoint"), int):
+            recorded.setdefault(details["checkpoint"], []).append((r["seq"], details))
+    by_seq = {seq: (hash_, answer) for seq, hash_, answer in points}
+    for seq, stamps in sorted(recorded.items()):
+        problems += [text for _, text in ledger.recorded_problems(seq, stamps, by_seq.get(seq))]
+    return problems
+
+
+def _log_entries(contents: dict[str, bytes], problems: list[str]) -> list[str]:
+    """Each checkpoint's entry in the transparency log, as the pack holds it, checked with
+    the log's key and AgentGov's in the pack (compare them with the log's published ones);
+    problems go to ``problems``, and what couldn't be checked comes back as warnings."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from agentgov import transparency
+
+    bundles = sorted(
+        name
+        for name in contents
+        if name.startswith("checkpoints/") and name.endswith(".sigstore.json")
+    )
+    if not bundles:
+        return []
+    try:
+        origin = json.loads(contents["transparency-log/log.json"])["origin"]
+        log_key = transparency.parse_log_key(contents["transparency-log/rekor.pub"], "the pack")
+    except (KeyError, ValueError, TypeError, transparency.TransparencyError) as exc:
+        return [f"the checkpoints' entries in the transparency log aren't checked: {exc}"]
+    signer = None
+    if "transparency-log/agentgov.pub" in contents:
+        with contextlib.suppress(ValueError):
+            key = serialization.load_pem_public_key(contents["transparency-log/agentgov.pub"])
+            signer = key if isinstance(key, ec.EllipticCurvePublicKey) else None
+    for name in bundles:
+        statement = contents.get(name.removesuffix(".sigstore.json") + ".txt", b"")
+        try:
+            [entry] = json.loads(contents[name])["verificationMaterial"]["tlogEntries"]
+            transparency.check(entry, statement, log_key=log_key, origin=origin, signer=signer)
+        except (ValueError, KeyError, TypeError) as exc:
+            problems.append(f"{name} can't be read: {exc}")
+        except transparency.TransparencyError as exc:
+            problems.append(f"{name}: the transparency log's entry doesn't check out: {exc}")
+    return []
 
 
 def _jsonl(data: bytes) -> list[dict[str, Any]]:
@@ -3673,6 +3842,19 @@ def components() -> None:
             )
 
     add("control plane", "now", view["control_plane"])
+    for name, c in (view.get("ledger") or {}).items():
+        state = ("checked" if c["ok"] else "not checked") if c["configured"] else "not set up"
+        if name == "witness" and c["configured"]:
+            state = "kept"
+        rows.append(
+            {
+                "component": "ledger",
+                "check": name,
+                "state": state,
+                "reported": "now",
+                "detail": c.get("detail") or "",
+            }
+        )
     for p in view["processors"]:
         where = f"processor {p['instance']}" + ("" if p["fresh"] else " (out of touch)")
         add(where, p["reported_at"], p["checks"])

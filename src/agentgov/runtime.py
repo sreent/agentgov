@@ -164,7 +164,7 @@ class Runtime:
         self.notifier = Notifier(self.db, settings, self.delivery)
         # And as tickets in service desks, kept in step with them (docs/tickets.md).
         self.ticketing = Ticketing(self.db, settings, self.delivery)
-        self.ledger_integrity = ledger.IntegrityMonitor()
+        self.ledger_integrity = ledger.IntegrityMonitor(settings=settings)
         # Administrator single sign-on (OIDC), when a client secret is configured.
         self.sso = OIDCClient(settings, http=oidc_http) if settings.sso_enabled else None
         # Acting as the signed-in administrator in Microsoft 365 and Power Platform.
@@ -549,7 +549,7 @@ class Runtime:
                     )
             if not status.rewound and status.error is None:
                 try:
-                    witness.write(path, status.head_seq, status.head_hash)
+                    witness.write(path, status.head_seq, status.head_hash, status.head_ts)
                 except witness.WitnessError as exc:
                     status.error = str(exc)
             if status.error:
@@ -589,7 +589,8 @@ class Runtime:
             with self.db.session() as session:
                 findings.resolve_key(session, f"{witness.FINDING}:ledger", actor=actor)
                 seq, hash_ = witness.head(session)
-            witness.write(path, seq, hash_)
+                ts = witness.written(session, seq)
+            witness.write(path, seq, hash_, ts)
             with self.db.session() as session:
                 return witness.compare(session, path)
 
@@ -609,23 +610,33 @@ class Runtime:
 
     def stamp_checkpoints(self) -> int:
         """Have the time-stamping authority sign the checkpoints it hasn't yet; returns how
-        many it did. Its failures are kept on the checkpoints, and tried again."""
+        many it did. Its failures are kept on the checkpoints, and tried again; so is an
+        answer whose signature doesn't check out (against the authority's certificates,
+        AGENTGOV_LEDGER_TSA_CA_FILE, when set), which isn't kept."""
         url = self.settings.ledger_tsa_url
         if not url:
             return 0
+        trust = timestamping.trust(self.settings.ledger_tsa_ca_file)
         with self.coordination.job("retention"):
             with self.db.session() as session:
                 todo = retention.unstamped(session)
+                if trust.error:
+                    for seq, _ in todo:
+                        error = f"AGENTGOV_LEDGER_TSA_CA_FILE: {trust.error}"
+                        retention.save_stamp(session, seq, url, error=error)
+                    return 0
             done = 0
             for seq, hash_ in todo:  # the network calls happen outside any transaction
                 try:
-                    got = timestamping.stamp(url, ledger.statement(seq, hash_), http=self._tsa_http)
+                    got = timestamping.stamp(
+                        url, ledger.statement(seq, hash_), http=self._tsa_http, roots=trust.roots
+                    )
                 except timestamping.TimestampError as exc:
                     with self.db.session() as session:
                         retention.save_stamp(session, seq, url, error=str(exc))
                     continue
                 with self.db.session() as session:
-                    retention.save_stamp(session, seq, url, response=got.response, time=got.time)
+                    retention.save_stamp(session, seq, url, stamp=got)
                 done += 1
             return done
 

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from agentgov import cli, ids
-from agentgov.models import Finding, LedgerEntry
+from agentgov.models import Finding, FindingType, LedgerEntry
 from agentgov.registry import finding_types, findings, issues, teams
 from tests.conftest import ADMIN, seed
 from tests.test_api import key
@@ -105,6 +105,18 @@ class TestChoosing:
 
 
 class TestOff:
+    @pytest.mark.parametrize("type_", ["ledger.rewound", "ledger.archive_failed"])
+    def test_the_ledgers_own_cant_be_turned_off(self, client, type_: str) -> None:
+        """They say the evidence ledger lost entries or can't be archived: an administrator
+        covering what happened must not be able to quiet them."""
+        resp = put(client, type_, {"mode": "off"})
+        assert resp.status_code == 422 and "can't be turned off" in resp.text
+        # One turned off before this, in the database: it still raises its issues.
+        with _rt(client).db.session() as s:
+            s.add(FindingType(type=type_, mode="off", changed_by="admin:before"))
+        _, new, state, _ = raise_(client, "ledger", type_=type_)
+        assert (new, state) == (True, "open")
+
     def test_turning_a_type_off_dismisses_what_it_found(self, client) -> None:
         fid, *_ = raise_(client, "a")
         other, *_ = raise_(client, "b", type_="agent.stale")

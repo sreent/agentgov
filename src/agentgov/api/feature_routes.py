@@ -55,6 +55,8 @@ def list_components(request: Request, _: Principal = Depends(read)) -> dict[str,
             "control_plane": rt.health.get(),
             "processors": health.reports(s),
             "credential_hosts": rt.settings.credential_host_list(),
+            # What vouches for the evidence ledger outside its database.
+            "ledger": health.ledger_checks(rt.settings),
         }
 
 

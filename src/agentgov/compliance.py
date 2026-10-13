@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from tempfile import SpooledTemporaryFile
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from agentgov import __version__, ids, ledger, transparency, witness
@@ -186,7 +186,7 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     f.exceptions = features.all_scopes(session)
     for type_, decision, n in session.execute(
         select(LedgerEntry.type, LedgerEntry.decision, func.count())
-        .where(LedgerEntry.ts >= since)
+        .where(LedgerEntry.ts >= since, ledger.in_chain())
         .group_by(LedgerEntry.type, LedgerEntry.decision)
     ):
         f.by_type[type_] += n
@@ -200,9 +200,10 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
             LedgerEntry.ts >= since,
             LedgerEntry.type.startswith("decision."),
             LedgerEntry.reason.startswith("monitored:"),
+            ledger.in_chain(),
         )
     )
-    f.chain = ledger.verify(session)
+    f.chain = ledger.verify(session, settings=settings)
     path = settings.witness_file()
     f.witness = witness.compare(session, path).to_dict() if path else None
     points = list(session.scalars(select(LedgerCheckpoint)))
@@ -210,7 +211,7 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     stamps = [p.timestamped_at for p in points if p.timestamp is not None and p.timestamped_at]
     f.stamped, f.latest_stamp = len(stamps), max(stamps, default=None)
     f.archives = sum(1 for p in points if p.archive)
-    f.oldest = session.scalar(select(func.min(LedgerEntry.ts)))
+    f.oldest = session.scalar(select(func.min(LedgerEntry.ts)).where(ledger.in_chain()))
     f.findings_open = Counter(
         dict(
             session.execute(
@@ -256,6 +257,7 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
                 LedgerEntry.ts >= since,
                 LedgerEntry.type.startswith("decision."),
                 LedgerEntry.agent_id.is_not(None),
+                ledger.in_chain(),
             )
             .distinct()
         )
@@ -362,6 +364,13 @@ def _logging(f: Facts) -> Assessment:
         a.gaps.append(
             "Set AGENTGOV_LEDGER_TSA_URL, so that a time-stamping authority vouches for the "
             "ledger's checkpoints outside AgentGov."
+        )
+    elif not f.settings.ledger_tsa_ca_file:
+        a.status = PARTLY
+        a.gaps.append(
+            "Set AGENTGOV_LEDGER_TSA_CA_FILE to the time-stamping authority's certificates, so "
+            "that AgentGov checks that the authority signed each time-stamp, not only that it "
+            "is whole."
         )
     return a
 
@@ -952,6 +961,10 @@ def report(f: Facts, framework: str) -> dict[str, Any]:
             "checkpoints": f.checkpoints,
             "timestamped": f.stamped,
             "last_timestamp": ids.isoformat(f.latest_stamp),
+            # What limits what the checkpoints prove, and how often they are made (for
+            # agentgov ledger verify --pack: a time-stamp later than that vouches only from then).
+            "warnings": f.chain.get("warnings") or [],
+            "checkpoint_hours": f.settings.ledger_checkpoint_hours,
         },
         "coverage": coverage(f),
         "summary": {s: sum(1 for c in controls if c["status"] == s) for s in STATUSES},
@@ -1036,11 +1049,12 @@ ledger.jsonl               The ledger's entries in the period, as AgentGov wrote
                            archives that checkpoints.json names, kept by the administrators.
                            Check that they are intact, link up, and match the checkpoints
                            below, from this folder (or on the zip file), with:
-                             agentgov ledger verify --pack .
+                             agentgov ledger verify --pack . --tsa-ca the-authority's-CA.pem
                            A ledger rewritten with every hash worked out again still links
                            up: only the checkpoints, which an authority time-stamped (or a
-                           transparency log holds) before, show it. Entries after the last
-                           checkpoint aren't vouched for yet.
+                           transparency log holds) before, show it. A time-stamp given long
+                           after its entry vouches only from then: the command says so.
+                           Entries after the last checkpoint aren't vouched for yet.
 checkpoints.json           The ledger's checkpoints, with their archives.
 checkpoints/*.txt, *.tsr   Each time-stamped checkpoint's statement and the time-stamping
                            authority's answer. Check one with:
@@ -1082,12 +1096,27 @@ def pack(session: Session, settings: Settings, days: int) -> SpooledTemporaryFil
         for r in reports:
             z.writestr(f"reports/{r['framework']['key']}.json", json.dumps(r, indent=2))
         z.writestr("report.md", markdown(reports))
-        first = session.scalar(select(func.min(LedgerEntry.seq)).where(LedgerEntry.ts >= f.since))
+        # The chain up to its head: rows stored past it aren't the ledger's.
+        head = ledger.head_seq(session)
+        first = session.scalar(
+            select(func.min(LedgerEntry.seq)).where(
+                LedgerEntry.ts >= f.since, LedgerEntry.seq <= head
+            )
+        )
         with z.open("ledger.jsonl", "w") as lines:
             if first is not None:
-                for entry in ledger.iter_entries(session, after=first - 1):
+                for entry in ledger.iter_entries(session, after=first - 1, until=head):
                     lines.write((json.dumps(ledger.to_dict(entry), sort_keys=True) + "\n").encode())
-        points = list(session.scalars(select(LedgerCheckpoint).order_by(LedgerCheckpoint.seq)))
+        # Every checkpoint of those entries, and any beyond the chain's head, which show it
+        # was longer; not those made since the entries were read (the head has moved).
+        moved = ledger.head_seq(session)
+        points = list(
+            session.scalars(
+                select(LedgerCheckpoint)
+                .where(or_(LedgerCheckpoint.seq <= head, LedgerCheckpoint.seq > moved))
+                .order_by(LedgerCheckpoint.seq)
+            )
+        )
         z.writestr(
             "checkpoints.json", json.dumps([ledger.checkpoint_dict(p) for p in points], indent=2)
         )

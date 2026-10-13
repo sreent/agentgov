@@ -6344,12 +6344,23 @@ async function renderLedger({ params }) {
     try {
       const v = await api('v1/ledger/verify');
       const origin = v.from ? `the checkpoint at entry #${fmt(v.from)} (the entries before it are archived)` : 'the genesis entry';
+      // What doesn't break the chain but limits what its checkpoints prove.
+      const warnings = (v.warnings || []).length
+        ? h('ul', { class: 'small' }, v.warnings.map((w) => h('li', {}, `${cap(w)}.`)))
+        : null;
+      const problems = v.problems || [];
+      const more = v.more_problems ? h('p', { class: 'small' }, `And ${plural(v.more_problems, 'more problem')}.`) : null;
       banner.replaceChildren(v.valid
-        ? callout('good', 'shield-check', h('span', {}, h('strong', {}, 'Chain intact. '),
-          `Recomputed ${plural(v.checked - (v.from || 0), 'hash', 'hashes')} from ${origin}; nothing was edited, removed or reordered. Head `,
-          h('code', { class: 'hash', title: v.head }, shortHash(v.head)), '.'))
-        : callout('critical', 'octagon', h('span', {}, h('strong', {}, `Chain broken at entry #${v.broken_at}. `),
-          `${cap(v.problem)}. The ${plural(v.checked, 'entry', 'entries')} before it verified; entries from #${v.broken_at} on can't be trusted.`)));
+        ? callout(warnings ? 'warning' : 'good', warnings ? 'triangle' : 'shield-check', h('div', { class: 'stack' },
+          h('span', {}, h('strong', {}, 'Chain intact. '),
+            `Recomputed ${plural(v.checked - (v.from || 0), 'hash', 'hashes')} from ${origin}; nothing was edited, removed or reordered. Head `,
+            h('code', { class: 'hash', title: v.head }, shortHash(v.head)), '.'),
+          warnings))
+        : callout('critical', 'octagon', h('div', { class: 'stack' },
+          h('span', {}, h('strong', {}, v.broken_at ? `Chain broken at entry #${v.broken_at}. ` : 'Chain broken. '),
+            `${plural(problems.length + (v.more_problems || 0), 'problem')}, each checked whatever broke before it: entries from the first on can't be trusted.`),
+          h('ul', { class: 'small' }, problems.map((p) => h('li', {}, p.seq ? `#${fmt(p.seq)}: ` : '', `${cap(p.problem)}.`))),
+          more, warnings)));
     } catch (err) {
       banner.replaceChildren(callout('critical', 'alert-circle', err.message));
     } finally {
@@ -6781,7 +6792,14 @@ function checkpointsCard(kept, points) {
         ['Ledger', kept.ledger_retention_days ? `${plural(kept.ledger_retention_days, 'day')} in the database, then archived` : 'Every entry kept in the database'],
         ['Chain in the database', kept.chain_from ? `From the checkpoint at entry #${fmt(kept.chain_from)}` : 'From the genesis entry'],
         ['Checkpoints', kept.checkpoint_hours ? `Every ${plural(kept.checkpoint_hours, 'hour')}` : 'On demand'],
-        ['Time-stamping authority', kept.tsa_url ? h('code', {}, kept.tsa_url) : h('span', { class: 'muted' }, 'None')],
+        ['Time-stamping authority', kept.tsa_url
+          ? h('span', {}, h('code', {}, kept.tsa_url), kept.tsa_ca
+            ? ' · its signature checked against its certificates'
+            : h('span', { class: 'muted' }, " · its certificates not given (AGENTGOV_LEDGER_TSA_CA_FILE): each time-stamp is checked against the one it carries"))
+          : h('span', { class: 'muted' }, 'None')],
+        ['Head kept outside the database', kept.witness_file
+          ? h('code', {}, kept.witness_file)
+          : h('span', { class: 'muted' }, 'Nowhere: a database restored from an older backup goes unnoticed (AGENTGOV_LEDGER_WITNESS_FILE)')],
         ['Transparency log', kept.rekor_url ? h('code', {}, kept.rekor_url) : h('span', { class: 'muted' }, 'None')],
         ['Operational records', kept.data_retention_days ? `${plural(kept.data_retention_days, 'day')}` : 'Kept'],
       ]),
@@ -7965,12 +7983,32 @@ function credentialHosts(hosts) {
     h('div', { class: 'cell-sub' }, "An administrator can send destinations' credentials and model providers' keys to any host, by changing a URL. List the hosts they may go to in AGENTGOV_CREDENTIAL_HOSTS."));
 }
 
+// What vouches for the evidence ledger outside its database: the authority's time-stamps,
+// checked against its certificates, and the head kept in a file a restore doesn't touch.
+function ledgerChecks(lg) {
+  if (!lg) return null;
+  const stamps = lg.time_stamps || {};
+  const kept = lg.witness || {};
+  const chips = [
+    stamps.configured
+      ? plainChip(stamps.ok ? 'Time-stamps: authority checked' : 'Time-stamps: authority not checked', { tone: stamps.ok ? 'good' : 'warning', iconName: stamps.ok ? 'check' : 'triangle', title: stamps.detail || null })
+      : plainChip('Time-stamps: none', { title: stamps.detail || null }),
+    kept.configured
+      ? plainChip('Head kept outside the database', { tone: 'good', iconName: 'check' })
+      : plainChip('Head not kept outside the database', { tone: 'warning', iconName: 'triangle', title: kept.detail || null }),
+  ];
+  return h('div', {},
+    h('div', { class: 'chip-row' }, chips),
+    ...[stamps, kept].filter((c) => !c.ok && c.detail).map((c) => h('div', { class: 'cell-sub' }, c.detail)));
+}
+
 function componentsCard(view) {
   const cp = view.control_plane || {};
   const processors = view.processors || [];
   const rows = [
     ['Control plane', h('div', { class: 'chip-row' }, ['opa', 'keycloak'].map((n) => checkChip(n, cp[n])))],
     'credential_hosts' in view ? ['Credentials go to', credentialHosts(view.credential_hosts)] : null,
+    view.ledger ? ['Evidence ledger', ledgerChecks(view.ledger)] : null,
     ...processors.map((p) => [
       h('span', {}, 'Governance processor ', h('code', {}, p.instance)),
       h('div', {},
