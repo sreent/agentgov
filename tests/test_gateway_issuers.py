@@ -325,10 +325,11 @@ class TestApi:
             "method": "workload-identity",
             "issuer": "cluster",
             "subject": SA,
+            # Its token for the gateway's address: not one every install's gateway takes.
             "gateway": {
                 "url": "http://localhost:8080",
                 "issuer": CLUSTER_URL,
-                "audience": "agentgov-gateway",
+                "audience": "http://localhost:8080",
             },
         }
         # Neither Keycloak nor the gateway takes the other's tokens.
@@ -359,7 +360,10 @@ class TestGatewayConfig:
             assert keycloak["jwks"] == {"url": SETTINGS.keycloak_jwks_url}
             # The keys AgentGov fetched, written in: the gateway never fetches them.
             assert json.loads(cluster["jwks"]) == {"keys": [KEY]}
-            assert cluster["audiences"] == [SETTINGS.gateway_audience]
+            # Their tokens are for this gateway (its address), or the audience the issuer
+            # names; Keycloak's, AgentGov's own, carry the gateway's audience.
+            assert keycloak["audiences"] == [SETTINGS.gateway_audience]
+            assert cluster["audiences"] == [SETTINGS.gateway_public_url]
             assert entra["audiences"] == ["api://ag"]
 
     def test_only_agentgovs_own_tokens_name_the_agent_and_the_person(self) -> None:

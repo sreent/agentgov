@@ -4098,7 +4098,7 @@ GATEWAY = typer.Option(
     None,
     "--gateway/--no-gateway",
     help="oidc and kubernetes: the gateway takes its tokens itself, without Keycloak, for the "
-    "audience it names (or AGENTGOV_GATEWAY_AUDIENCE).",
+    "audience it names (or the gateway's address, AGENTGOV_GATEWAY_PUBLIC_URL).",
 )
 
 

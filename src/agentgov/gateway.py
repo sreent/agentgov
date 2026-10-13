@@ -336,6 +336,13 @@ AI_PROVIDERS = {
 CHAT_PATH = "/v1/chat/completions"
 
 
+def issuer_audience(issuer: Any, settings: Settings) -> str:
+    """The audience the gateway takes a trusted identity issuer's tokens for: the issuer's
+    own, else the gateway's address. Not one every install shares: a token one install's
+    gateway receives, from an issuer another install trusts too, isn't good there."""
+    return issuer.audience or settings.gateway_public_url.rstrip("/")
+
+
 def _providers(settings: Settings, issuers: Any) -> list[dict[str, Any]]:
     """Whose tokens the gateway takes: Keycloak's, then those of each identity issuer it
     trusts, for the audience the issuer's tokens carry, with its keys written in (the
@@ -353,7 +360,7 @@ def _providers(settings: Settings, issuers: Any) -> list[dict[str, Any]]:
         providers.append(
             {
                 "issuer": issuer.issuer,
-                "audiences": [issuer.audience or settings.gateway_audience],
+                "audiences": [issuer_audience(issuer, settings)],
                 "jwks": json.dumps({"keys": issuer.gateway_keys}, sort_keys=True),
             }
         )

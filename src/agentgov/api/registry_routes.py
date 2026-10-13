@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy import select
 
-from agentgov import ledger
+from agentgov import gateway, ledger
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.api.versions import if_match
@@ -259,7 +259,7 @@ def _straight_to_the_gateway(s: Any, agent: Any, settings: Any) -> dict[str, str
             return {
                 "url": settings.gateway_public_url,
                 "issuer": issuer.issuer,
-                "audience": issuer.audience or settings.gateway_audience,
+                "audience": gateway.issuer_audience(issuer, settings),
             }
     return None
 

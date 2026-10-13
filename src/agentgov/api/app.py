@@ -140,6 +140,9 @@ def create_app(
                 else None
             ),
             "audience": settings.gateway_audience,
+            # What the tokens of the identity issuers the gateway trusts carry, unless an
+            # issuer names an audience of its own.
+            "issuer_audience": settings.gateway_public_url.rstrip("/"),
             "opa": bool(settings.opa_url),
             "sso": {"enabled": settings.sso_enabled, "login_url": "/auth/login"},
             # Signed-in administrators can act in Microsoft 365 through AgentGov.

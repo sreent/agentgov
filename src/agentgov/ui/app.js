@@ -6896,8 +6896,8 @@ async function issuerForm(i) {
   const editing = Boolean(i);
   const oidcOnly = (field) => !editing || i.kind === 'oidc' ? field : null;
   const info = await getInfo();
-  // The audience of the tokens agents call the gateway with themselves.
-  const audience = info?.audience || 'agentgov-gateway';
+  // The audience of the tokens agents call the gateway with themselves: its address.
+  const audience = info?.issuer_audience || info?.audience || 'agentgov-gateway';
   const gatewayHint = (kind) => kind === 'oidc'
     ? `Agents then call the gateway with their own token, without Keycloak: one for the audience above, else ${audience}. AgentGov fetches the issuer's keys for the gateway.`
     : `Agents then call the gateway with their own service account token, without Keycloak: a projected one for the audience ${audience}. AgentGov fetches the cluster's keys for the gateway.`;

@@ -258,8 +258,9 @@ class Settings:
     # was changed in Keycloak itself. The passes between, every minute and after each
     # change, sync only the agents whose clients should change. 0: every pass is full.
     identity_full_sync_seconds: int = 900
-    # Audience every agent token carries; the gateway requires it. So do the tokens of the
-    # identity issuers the gateway trusts, unless an issuer names an audience of its own.
+    # Audience every agent token Keycloak issues carries; the gateway requires it. The tokens
+    # of the identity issuers the gateway trusts carry the gateway's address instead
+    # (AGENTGOV_GATEWAY_PUBLIC_URL), unless an issuer names an audience of its own.
     gateway_audience: str = "agentgov-gateway"
     # Seconds between fetches of the signing keys of the identity issuers the gateway
     # trusts, which rotate them (docs/agent-identity.md#straight-to-the-gateway). 0: only
@@ -513,7 +514,9 @@ class Settings:
     # --- agentgateway (enforcement) ---------------------------------------------
     # Where the generated agentgateway config is written (shared volume).
     gateway_config_path: str | None = None
-    # The gateway's address as agents reach it, which the app and the API show.
+    # The gateway's address as agents reach it, which the app and the API show; also the
+    # audience of the tokens of the identity issuers the gateway trusts (unless an issuer
+    # names one), so that one install's are no good at another's.
     gateway_public_url: str = "http://localhost:8080"
     # The namespace of tool servers' names in the MCP registry ("<namespace>/<name>"); by
     # default the control plane's host name reversed, such as com.contoso.agentgov.

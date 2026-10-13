@@ -230,17 +230,17 @@ sequenceDiagram
 | API | `gateway: true` in `POST /v1/identity-issuers` and `PATCH /v1/identity-issuers/{name}`; `POST /v1/identity-issuers/{name}/keys` fetches its keys now; each issuer's `gateway` says whether the gateway takes its tokens, with how many keys, fetched when, and why not |
 | Manifests | `gateway: true` in an `IdentityIssuer`'s spec |
 
-**The token** carries the issuer's `audience` (`oidc`), else the gateway's
-(`AGENTGOV_GATEWAY_AUDIENCE`, `agentgov-gateway` by default), and goes in the
-`Authorization: Bearer` header of each call. Give each AgentGov install an audience of its
-own, such as its gateway's URL: with a shared one, a token that one install's gateway
-receives, from an issuer both trust, is good at the other's too. A pod gets one for the
-gateway alongside, or instead of, the one for Keycloak:
+**The token** carries the issuer's `audience` (`oidc`), else the gateway's address
+(`AGENTGOV_GATEWAY_PUBLIC_URL`, as agents reach it), and goes in the `Authorization:
+Bearer` header of each call. The address is this install's own: a token one install's
+gateway receives, from an issuer another install trusts too, isn't good there. An issuer's
+own `audience` is as good only if no other install's gateway takes it. A pod gets one for
+the gateway alongside, or instead of, the one for Keycloak:
 
 ```yaml
           - serviceAccountToken:
               path: agentgov-gateway
-              audience: agentgov-gateway  # AGENTGOV_GATEWAY_AUDIENCE
+              audience: https://gateway.example.com  # AGENTGOV_GATEWAY_PUBLIC_URL
               expirationSeconds: 3600
 ```
 
@@ -251,7 +251,7 @@ under `gateway`, and works without Keycloak then:
 "gateway": {
   "url": "https://gateway.example.com",
   "issuer": "https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE",
-  "audience": "agentgov-gateway"
+  "audience": "https://gateway.example.com"
 }
 ```
 
