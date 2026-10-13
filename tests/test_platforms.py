@@ -405,6 +405,55 @@ class TestCopilotStudio:
         assert "hr-faq, sales-helper" in summary["description"]
         assert "platform.imported" in ledger_types(client)
 
+    def test_the_whole_inventory_marks_the_missing_agents_gone(self, client) -> None:
+        import_inventory(client)
+        sales = agent_named(client, "sales-helper")
+        assert open_findings(client, sales["id"])
+        only_hr = {"data": [inventory()["data"][1]]}
+        # An export may cover only some environments: the others are left as they were.
+        assert "gone" not in import_inventory(client, only_hr)
+        assert open_findings(client, sales["id"])
+        # The whole inventory, without Sales Helper: it was deleted in Copilot Studio.
+        resp = client.post(
+            "/v1/platforms/copilot-studio/import",
+            params={"complete": "true"},
+            json=only_hr,
+            headers=ADMIN,
+        )
+        assert resp.status_code == 200 and resp.json()["gone"] == 1, resp.text
+        [view] = agent_named(client, "sales-helper")["platforms"]
+        assert view["in_inventory"] is False
+        assert open_findings(client, sales["id"]) == set()
+        summary = to_review(client, "copilot-studio")
+        assert summary is not None and summary["title"] == "1 Copilot Studio agent to review"
+        # An export with no agents in it is more likely the wrong file: none is marked gone.
+        empty = client.post(
+            "/v1/platforms/copilot-studio/import",
+            params={"complete": "true"},
+            json={"data": []},
+            headers=ADMIN,
+        )
+        assert (
+            "gone" not in empty.json()
+            and agent_named(client, "hr-faq")["platforms"][0]["in_inventory"]
+        )
+        # Seen again, it is back.
+        import_inventory(client)
+        assert agent_named(client, "sales-helper")["platforms"][0]["in_inventory"] is True
+        assert "platform.no_authentication" in open_findings(client, sales["id"])
+
+    def test_the_cli_imports_every_page_at_once(self, client, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(cli, "_client", lambda: _Shared(client, "test-admin"))
+        data = inventory()["data"]
+        first, second = tmp_path / "page1.json", tmp_path / "page2.json"
+        first.write_text(json.dumps({"data": data[:1]}))
+        second.write_text(json.dumps(data[1:]))  # a bare list, as `pac` writes it
+        out = runner.invoke(cli.app, ["platforms", "import", str(first), str(second)])
+        assert out.exit_code == 0 and "2 new" in out.output, out.output
+        out = runner.invoke(cli.app, ["platforms", "import", str(second), "--complete"])
+        assert out.exit_code == 0 and "1 gone from the platform" in out.output, out.output
+        assert agent_named(client, "sales-helper")["platforms"][0]["in_inventory"] is False
+
     def test_findings_stay_unverified_while_the_sync_fails(self, client) -> None:
         from agentgov.registry import platforms
 

@@ -475,6 +475,16 @@ class TestInventorySync:
         made = entra_client.get("/v1/agents/sales-helper", headers=ADMIN).json()
         assert made["suggested_owner"] == "dana@contoso.com"
 
+    def test_a_sync_marks_deleted_agents_gone(self, entra_client, entra, apis) -> None:
+        admin_signs_in(entra_client, entra)
+        entra_client.post("/v1/platforms/copilot-studio/sync", headers=CSRF).raise_for_status()
+        # IT Helpdesk is deleted in Copilot Studio: a sync reads the whole inventory.
+        apis.rows = apis.rows[:2]
+        resp = entra_client.post("/v1/platforms/copilot-studio/sync", headers=CSRF)
+        assert resp.status_code == 200 and resp.json()["gone"] == 1, resp.text
+        it = entra_client.get("/v1/agents/it-helpdesk", headers=ADMIN).json()
+        assert it["platforms"][0]["in_inventory"] is False
+
     def test_a_refused_sync_is_reported(self, entra_client, entra, apis) -> None:
         admin_signs_in(entra_client, entra)
         apis.status = 403

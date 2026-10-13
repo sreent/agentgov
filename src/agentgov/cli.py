@@ -3002,6 +3002,8 @@ def access_end_session(session_id: str) -> None:
 
 def _synced(source: str, verb: str, counts: dict[str, int]) -> None:
     outcome = f"{counts['created']} new, {counts['updated']} updated, {counts['skipped']} skipped"
+    if counts.get("gone"):
+        outcome += f", {counts['gone']} gone from the platform"
     if "findings" in counts:
         outcome += f"; {counts['findings']} open findings"
     _done("platform", source, f"{verb} ({outcome})")
@@ -3168,16 +3170,35 @@ def platforms_push_connector_policy(
 
 @platforms_app.command("import")
 def platforms_import(
-    file: Path = typer.Argument(
-        ..., help="JSON from `pac resource-query` or the Power Platform API."
+    files: list[Path] = typer.Argument(
+        ...,
+        help="JSON from `pac resource-query`, the Power Platform API or `az graph query`: "
+        "one file, or each page of a larger export.",
+    ),
+    complete: bool = typer.Option(
+        False,
+        "--complete",
+        help="The files are the whole inventory, every environment: agents missing from "
+        "them are marked gone from Copilot Studio, and their findings close.",
     ),
 ) -> None:
     """Import Copilot Studio agents from a Power Platform inventory export."""
-    try:
-        payload = json.loads(file.read_text())
-    except (OSError, ValueError) as exc:
-        _fail(f"cannot read {file}: {exc}")
-    counts = _call("POST", "/v1/platforms/copilot-studio/import", json=payload)
+    rows: list[Any] = []
+    for file in files:
+        try:
+            payload = json.loads(file.read_text())
+        except (OSError, ValueError) as exc:
+            _fail(f"cannot read {file}: {exc}")
+        page = payload.get("data", payload.get("value")) if isinstance(payload, dict) else payload
+        if not isinstance(page, list):
+            _fail(f"{file} isn't an inventory export: a JSON list, or an object with a data list")
+        rows.extend(page)
+    counts = _call(
+        "POST",
+        "/v1/platforms/copilot-studio/import",
+        json={"data": rows},
+        params={"complete": "true"} if complete else None,
+    )
     _synced("copilot-studio", "imported", counts)
     _people_looked_up(counts.get("people"))
 

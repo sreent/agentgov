@@ -154,12 +154,19 @@ def _with_people(counts: dict[str, Any], looked_up: dict[str, Any] | None) -> di
 
 @router.post("/copilot-studio/import")
 def import_copilot_studio(
-    request: Request, payload: Any = Body(...), principal: Principal = Depends(admin)
+    request: Request,
+    payload: Any = Body(...),
+    complete: bool = False,
+    principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
-    """Import Copilot Studio agents from a Power Platform inventory export (JSON)."""
+    """Import Copilot Studio agents from a Power Platform inventory export (JSON). With
+    ``complete``, the export is the whole inventory: agents missing from it are marked gone,
+    and their findings close."""
     rt = request.app.state.rt
     with rt.db.session() as s, platforms.first_sync(s, "copilot-studio"):
-        counts = platforms.import_copilot_studio(s, payload, actor=principal.actor)
+        counts = platforms.import_copilot_studio(
+            s, payload, actor=principal.actor, complete=complete
+        )
         platforms.refresh_risk(s, rt.settings)
     return _with_people(counts, _people(rt, principal))
 
@@ -178,7 +185,8 @@ def sync_copilot_studio(request: Request, principal: Principal = Depends(admin))
             )
         raise HTTPException(502, str(exc)) from exc
     with rt.db.session() as s, platforms.first_sync(s, "copilot-studio"):
-        counts = platforms.import_copilot_studio(s, rows, actor=principal.actor)
+        # Every page of the inventory, as the administrator's role sees the tenant.
+        counts = platforms.import_copilot_studio(s, rows, actor=principal.actor, complete=True)
         platforms.refresh_risk(s, rt.settings)
     return _with_people(counts, _people(rt, principal))
 

@@ -117,8 +117,9 @@ Or use **Import inventory** on the Platforms page. Some notes on the export:
   administrator or Global administrator.
 * **Azure CLI extension.** `az graph query` needs the Azure CLI's `resource-graph`
   extension (`az extension add --name resource-graph`).
-* **More than 1,000 agents.** Export them in pages with `--skip-token` and import each
-  file. Importing is idempotent: agents already in the registry are updated.
+* **More than 1,000 agents.** Export them in pages with `--skip-token` and import the
+  files together (`agentgov platforms import page1.json page2.json ...`). Importing is
+  idempotent: agents already in the registry are updated.
 * **Other ways to export.** The same rows come from the [Power Platform inventory
   API][inventory-api] (`POST https://api.powerplatform.com/resourcequery/resources/query`)
   and from `pac resource-query query-resources`. AgentGov accepts either a JSON list of
@@ -126,8 +127,14 @@ Or use **Import inventory** on the Platforms page. Some notes on the export:
 
 Sync or import again whenever you want AgentGov to catch up, for example after each
 review. AgentGov can't do it on a schedule, because Microsoft needs a signed-in person.
-Agents missing from an import are left as they were, because an export may cover only
-some environments.
+A sync reads the whole inventory, so agents missing from it are gone from Copilot Studio:
+they stay in the registry, marked gone, their Copilot Studio findings close, and they are
+no longer counted among the agents to review. An import does the same only when you say
+the export is the whole inventory, every environment (**This is the whole inventory** on
+the **Platforms** page, or `agentgov platforms import --complete`, with every page of a
+larger export at once); otherwise agents missing from it are left as they were, because an
+export may cover only some environments. An export with no agents in it marks none gone.
+An agent seen again is back. Delete the record of a gone agent once you no longer need it.
 
 ## Who made each agent
 

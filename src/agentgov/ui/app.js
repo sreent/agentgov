@@ -6911,6 +6911,7 @@ function connectorKey(id) {
 
 function syncCounts(c) {
   const parts = [`${fmt(c.created)} new`, `${fmt(c.updated)} updated`, `${fmt(c.skipped)} skipped`];
+  if (c.gone) parts.push(`${fmt(c.gone)} gone from the platform`);
   if (c.findings != null) parts.push(plural(c.findings, 'open finding'));
   return parts.join(', ');
 }
@@ -7196,6 +7197,10 @@ async function importCopilotStudio() {
     fields: [{
       id: 'json', label: 'Inventory (JSON)', type: 'code', rows: 10, required: true, file: '.json',
       placeholder: '{"data": [{"name": "…", "type": "microsoft.copilotstudio/agents", "properties": {…}}]}',
+    }, {
+      id: 'complete', type: 'checkbox', value: false,
+      label: 'This is the whole inventory, every environment',
+      hint: 'Agents missing from it are marked gone from Copilot Studio, and their findings close. Leave it unticked for an export of some environments, or one page of a larger one (import every page at once with `agentgov platforms import --complete`).',
     }],
     submit: (v) => {
       try {
@@ -7203,7 +7208,8 @@ async function importCopilotStudio() {
       } catch (err) {
         throw new Error(`That isn't valid JSON: ${err.message}`);
       }
-      return api('v1/platforms/copilot-studio/import', { method: 'POST', text: v.json, contentType: 'application/json' });
+      const path = `v1/platforms/copilot-studio/import${v.complete ? '?complete=true' : ''}`;
+      return api(path, { method: 'POST', text: v.json, contentType: 'application/json' });
     },
   });
   if (!result) return;
@@ -7423,6 +7429,7 @@ function platformCard(a, v, where) {
   const yesNo = (value) => (value == null ? null : value ? 'Yes' : 'No');
   const notes = [];
   if (v.in_catalog === false) notes.push(callout('warning', 'triangle', `This agent is no longer in the Microsoft 365 catalog. Delete it here when you no longer need its record.`));
+  if (studio && v.in_inventory === false) notes.push(callout('warning', 'triangle', 'Copilot Studio no longer has this agent: the last sync, or an import of the whole inventory, didn\'t list it. Delete it here when you no longer need its record.'));
   if (v.blocked) notes.push(callout('neutral', 'ban', 'Blocked in Microsoft 365.'));
   if (v.quarantined) notes.push(callout('neutral', 'ban', 'Quarantined in Copilot Studio: it works only in its makers\' test pane.'));
   if (acts && !me?.microsoft) notes.push(h('p', { class: 'hint' }, `To ${studio ? 'quarantine' : 'block'} it in ${v.source_name} from here, sign in to AgentGov with Microsoft Entra ID.`));

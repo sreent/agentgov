@@ -333,10 +333,16 @@ def _connectors(props: dict[str, Any]) -> list[dict[str, Any]]:
     return connectors
 
 
-def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict[str, int]:
-    """Store a Power Platform inventory export of Copilot Studio agents."""
+def import_copilot_studio(
+    session: Session, payload: Any, *, actor: str, complete: bool = False
+) -> dict[str, int]:
+    """Store a Power Platform inventory export of Copilot Studio agents. ``complete``: it is
+    the whole inventory (as a sync reads it), so the agents missing from it are gone from
+    Copilot Studio: they stay in the registry, marked gone, and their findings close. An
+    export may cover only some environments, so without it they are left as they were."""
     counts = {"created": 0, "updated": 0, "skipped": 0}
     index = _entra_index(session)
+    seen: set[str] = set()
     for row in _rows(payload):
         if str(row.get("type", INVENTORY_TYPE)).lower() != INVENTORY_TYPE:
             counts["skipped"] += 1  # apps, flows and environments share the table
@@ -355,6 +361,7 @@ def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict
             counts["skipped"] += 1
             continue
         agent_id = str(agent_id)
+        seen.add(f"copilot-studio:{agent_id}")
         viewers = props.get("sharedWithViewers") or {}
         editors = props.get("sharedWithEditors") or {}
         details = {
@@ -380,6 +387,7 @@ def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict
             "entra_app_id": props.get("entraAppId"),
             "schema_name": props.get("schemaName"),
             "connectors": _connectors(props),
+            "in_inventory": True,
         }
         external_ids = {"copilot_studio_agent_id": agent_id}
         if props.get("environmentId"):
@@ -397,10 +405,32 @@ def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict
             entra_index=index,
         )
         counts["created" if created else "updated"] += 1
+    # An export with no agents at all is more likely the wrong file than an empty tenant.
+    if complete and seen:
+        gone = 0
+        for record in session.scalars(
+            select(PlatformAgent).where(PlatformAgent.source == "copilot-studio")
+        ):
+            if record.id not in seen and (record.data or {}).get("in_inventory", True):
+                record.data = {**(record.data or {}), "in_inventory": False}
+                gone += 1
+        if gone:
+            counts["gone"] = gone
     session.flush()
     counts["findings"] = evaluate(session)
     set_sync(session, "copilot-studio", ok=True, counts=counts, actor=actor)
     return counts
+
+
+def gone_agents(session: Session) -> set[str]:
+    """The agents that no platform reporting them reports any more."""
+    there: set[str] = set()
+    gone: set[str] = set()
+    for agent_id, data in session.execute(select(PlatformAgent.agent_id, PlatformAgent.data)):
+        data = data or {}
+        missing = data.get("in_inventory", True) is False or data.get("in_catalog", True) is False
+        (gone if missing else there).add(agent_id)
+    return gone - there
 
 
 # ------------------------------------------------------------------ allowlist
@@ -578,6 +608,8 @@ def evaluate(session: Session) -> int:
 
     for record in _records(session, "copilot-studio"):
         data = record.data or {}
+        if data.get("in_inventory", True) is False:
+            continue  # gone from Copilot Studio: its findings close
         connectors = data.get("connectors") or []
         used = sorted({c["connector_id"] for c in connectors})
         unapproved = [c for c in used if c not in approved]
@@ -832,12 +864,14 @@ def review_summary(session: Session) -> None:
     (Agents found on platforms each had a finding of their own before: those resolve.)"""
     left: dict[str, list[str]] = defaultdict(list)
     platform_agents = []
+    # Gone from their platforms: there is nothing left to adopt.
+    gone = gone_agents(session)
     for agent in session.scalars(
         select(Agent).where(Agent.source.like("platform:%"), Agent.status != DELETED)
     ).unique():
         platform_agents.append(agent.id)
         source = (agent.source or "").removeprefix("platform:")
-        if agent.status == DISCOVERED and source in SOURCES:
+        if agent.status == DISCOVERED and source in SOURCES and agent.id not in gone:
             left[source].append(agent.name)
     for agent_id in platform_agents:
         findings.resolve_key(session, f"agent.unmanaged:{agent_id}", actor="system:platforms")
