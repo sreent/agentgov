@@ -1053,3 +1053,70 @@ def test_siem_events_skip_what_was_not_chosen(rt) -> None:
             3002
         ]
         assert delivery.siem_events(s, entries, ["changes"], "high") == []
+
+
+class TestCredentialHosts:
+    """With AGENTGOV_CREDENTIAL_HOSTS, destinations reach the hosts it lists, and no other."""
+
+    @pytest.fixture
+    def listed(self, settings: Settings, sink: Sink, secrets: Path) -> Iterator[TestClient]:
+        settings = settings.with_overrides(
+            destination_secrets_dir=str(secrets),
+            public_url="https://agentgov.example.com",
+            credential_hosts="otel-collector, *.slack.com",
+        )
+        rt = Runtime(settings, destinations_http=httpx.Client(transport=httpx.MockTransport(sink)))
+        with TestClient(create_app(settings, runtime=rt, background=False)) as client:
+            yield client
+
+    REFUSED = "AGENTGOV_CREDENTIAL_HOSTS doesn't list siem.evil.example"
+
+    def test_a_url_on_another_host_is_refused(self, listed: TestClient) -> None:
+        body = {"name": "siem", "kind": "webhook", "url": "https://siem.evil.example/in"}
+        refused = listed.post("/v1/destinations", json=body, headers=ADMIN)
+        assert refused.status_code == 422 and self.REFUSED in refused.json()["detail"]
+        destination(listed, name="collector", kind="otlp", url="http://otel-collector:4318")
+        moved = listed.patch("/v1/destinations/collector", json={"url": body["url"]}, headers=ADMIN)
+        assert moved.status_code == 422 and self.REFUSED in moved.json()["detail"]
+        doc = {
+            "apiVersion": manifests.API_VERSION,
+            "kind": "Destination",
+            "metadata": {"name": "siem"},
+            "spec": {"kind": "webhook", "url": body["url"]},
+        }
+        applied = listed.post("/v1/apply", json={"documents": [doc]}, headers=ADMIN)
+        assert self.REFUSED in applied.text
+        assert listed.get("/v1/components", headers=ADMIN).json()["credential_hosts"] == [
+            "otel-collector",
+            "*.slack.com",
+        ]
+
+    def test_nothing_goes_to_a_host_not_listed(
+        self, listed: TestClient, sink: Sink, secrets: Path
+    ) -> None:
+        rt = rt_of(listed)
+        with rt.db.session() as s:
+            # Set up before the deployment listed the hosts.
+            for data in (
+                {"name": "siem", "kind": "webhook", "url": "https://siem.evil.example/in"},
+                {"name": "soc", "kind": "slack", "events": ["blocks"]},
+            ):
+                destinations.create(s, data, actor="admin:test")
+        (secrets / "siem").write_text("Authorization: Bearer t0ken\n")
+        (secrets / "soc").write_text("https://hooks.evil.example/services/T0/B0/x\n")
+        agent = seed(listed)
+        listed.post(f"/v1/agents/{agent['id']}/block", headers=ADMIN).raise_for_status()
+        level(listed, "inform")
+        outcome = rt.delivery.run()
+        assert self.REFUSED in outcome["siem"]["error"]
+        assert "doesn't list hooks.evil.example" in outcome["soc"]["error"]
+        tested = listed.post("/v1/destinations/soc/test", headers=ADMIN).json()
+        assert not tested["ok"] and "hooks.evil.example" in tested["error"]
+        assert sink.requests == []
+        # A host it lists gets them.
+        (secrets / "soc").write_text("https://hooks.slack.com/services/T0/B0/x\n")
+        assert listed.post("/v1/destinations/soc/test", headers=ADMIN).json()["ok"]
+        assert [r.url.host for r in sink.requests] == ["hooks.slack.com"]
+
+    def test_any_host_while_none_is_listed(self, client: TestClient) -> None:
+        assert client.get("/v1/components", headers=ADMIN).json()["credential_hosts"] == []

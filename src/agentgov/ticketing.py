@@ -311,11 +311,10 @@ class Ticketing:
         if there == DONE:
             return  # over in the desk: nothing more to say there (see tickets.seen)
         if todo.ended:
-            text = f"{todo.ended}\n\n{link}"
             if desks.resolves(settings):
-                desk.resolve(remote, text)
+                desk.resolve(remote, todo.ended, link)
             else:
-                desk.note(remote, text)
+                desk.note(remote, todo.ended, link)
             return
         notes = list(todo.notes)
         if todo.severity:
@@ -328,7 +327,7 @@ class Ticketing:
                         raise
                     notes.append(f"(AgentGov couldn't change its priority: {exc})")
         if notes:
-            desk.note(remote, "\n".join(notes) + f"\n\n{link}")
+            desk.note(remote, "\n".join(notes), link)
 
     # -- tests --------------------------------------------------------------------------
     def test(self, ref: str, *, actor: str) -> dict[str, Any]:

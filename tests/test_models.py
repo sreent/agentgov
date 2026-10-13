@@ -94,13 +94,47 @@ class TestProviders:
             ({"name": "x", "kind": "openai-compatible"}, "needs base_url"),
             ({"name": "x", "kind": "openai", "base_url": "http://a"}, "only for openai-compat"),
             ({"name": "x", "kind": "openai-compatible", "base_url": "ftp://a"}, "must be an http"),
-            ({"name": "x", "kind": "openai", "key_file": "keys/x"}, "absolute path"),
+            ({"name": "x", "kind": "openai", "key_file": "keys/x"}, "a file in /model-keys"),
             ({"name": "x", "kind": "openai", "prices": {"m": {"input": -1}}}, "USD per million"),
             ({"name": "Bad Name", "kind": "openai"}, "lowercase"),
         ]
         for data, message in cases:
             with rt.db.session() as s, pytest.raises(ValidationError, match=message):
                 model_providers.create(s, data, actor="a")
+
+    def test_a_key_is_a_file_in_the_model_keys_directory(self, rt) -> None:
+        """The gateway sends the file as the provider's key: no other file it holds can be
+        one (its own TLS key, its service account's token)."""
+        for path in (
+            "/tls/tls.key",
+            "/model-keys/../tls/tls.key",
+            "/model-keys",
+            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+        ):
+            data = {"name": "x", "kind": "openai", "key_file": path}
+            with (
+                rt.db.session() as s,
+                pytest.raises(ValidationError, match="a file in /model-keys"),
+            ):
+                model_providers.create(s, data, actor="a")
+        with rt.db.session() as s:
+            data = {"name": "x", "kind": "openai", "key_file": "/model-keys/team-a//x"}
+            assert model_providers.create(s, data, actor="a").key_file == "/model-keys/team-a/x"
+
+    def test_a_key_goes_only_to_the_hosts_listed(self, rt, settings) -> None:
+        listed = settings.with_overrides(credential_hosts="vllm,*.groq.com")
+        data = {"name": "x", "kind": "openai-compatible", "base_url": "https://evil.example/v1"}
+        refused = "AGENTGOV_CREDENTIAL_HOSTS doesn't list evil.example"
+        with rt.db.session() as s, pytest.raises(ValidationError, match=refused):
+            model_providers.create(s, data, actor="a", settings=listed)
+        with rt.db.session() as s:
+            ok = {**data, "base_url": "https://api.groq.com/openai/v1"}
+            p = model_providers.create(s, ok, actor="a", settings=listed)
+            with pytest.raises(ValidationError, match=refused):
+                model_providers.update(s, p, data, actor="a", settings=listed)
+            model_providers.update(
+                s, p, {"base_url": "http://vllm:8000/v1"}, actor="a", settings=listed
+            )
 
     def test_lifecycle_is_recorded(self, rt, provider) -> None:
         with rt.db.session() as s:

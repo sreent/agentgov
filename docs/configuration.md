@@ -176,6 +176,7 @@ never in a values file you share.
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_DESTINATION_SECRETS_DIR` | `/destination-secrets` | Where destinations' credentials are: a file per destination, named after it (a mounted secret). Never in the database. |
+| `AGENTGOV_CREDENTIAL_HOSTS` | empty | The hosts credentials may go to, comma-separated: destinations' (SIEMs, chats and service desks, with what AgentGov sends them) and openai-compatible model providers' (the gateway sends those). `*.example.com` is any host under example.com. Empty: any host, so an administrator can send these credentials anywhere by changing a URL. |
 | `AGENTGOV_DELIVERY_INTERVAL_SECONDS` | `10` | How often destinations are sent what is new in the ledger (also as soon as it is written, on the replica that wrote it). 0 turns delivery off. |
 
 ### Issues

@@ -112,11 +112,20 @@ AgentGov's examples. On one server, `docker-compose.server.yml` does most of wha
   signed in through Entra ID who also holds Microsoft's Power Platform administrator
   role, and AgentGov shows what it would do first.
 * If admins sign in through Entra ID with `AGENTGOV_MICROSOFT_ADMIN_ACTIONS` on, the
-  control plane holds each signed-in admin's Microsoft refresh token in memory (never on
-  disk) for as long as the session lasts. Give the app registration only the delegated
-  permissions in [docs/platforms.md](docs/platforms.md#setting-it-up), and treat the
-  control plane's host and memory, and the app's client secret, as Microsoft admin
-  credentials.
+  control plane keeps each signed-in admin's Microsoft refresh token for as long as their
+  session lasts, in its database, so that every replica can act as them: sealed
+  (AES-256-GCM) with a key derived from the app's client secret
+  (`AGENTGOV_OIDC_CLIENT_SECRET`), and never in the ledger
+  ([how AgentGov holds the sign-in](docs/platforms.md#how-agentgov-holds-the-sign-in)).
+  The database, or a backup of it, gives none of them away alone. With the client secret,
+  it gives the refresh tokens of the admins signed in when it was taken, which Microsoft
+  takes until Entra ID expires or revokes them (AgentGov deleting its copy when a session
+  ends doesn't): enough to act as those admins in Microsoft 365 and Power Platform, with
+  the app's delegated permissions. Give the app registration only the delegated
+  permissions in [docs/platforms.md](docs/platforms.md#setting-it-up), keep the client
+  secret away from the database's backups, and treat both, and the control plane's host,
+  as Microsoft admin credentials. If both may have leaked, give the app a new client
+  secret and delete the old one in Entra ID: the tokens are useless without it.
 * `agentgov login` saves the CLI's session token in the user's agentgov config directory,
   readable only by that user. It is a bearer credential with the person's roles until it
   expires: run `agentgov logout` on shared machines, and end lost sessions on the Access
@@ -133,10 +142,18 @@ AgentGov's examples. On one server, `docker-compose.server.yml` does most of wha
   the `registrar` role. Give device management its own key, and revoke it if the
   machines it runs on are lost.
 * Model providers' API keys are files that the gateway and its config sidecar read
-  (`deploy/compose/model-keys`, or the Helm chart's `modelKeys` Secret). Keep them out of
-  version control (the Compose directory ignores everything but the demo's key). To
-  rotate one, replace the file (or the Secret) and restart the gateway. Mark a provider
-  `verified` only if personal data may go to it unmasked.
+  (`deploy/compose/model-keys`, or the Helm chart's `modelKeys` Secret), in `/model-keys`:
+  a provider's `key_file` can name no other file. Keep them out of version control (the
+  Compose directory ignores everything but the demo's key). To rotate one, replace the file
+  (or the Secret) and restart the gateway. Mark a provider `verified` only if personal data
+  may go to it unmasked.
+* List the hosts credentials may go to in `AGENTGOV_CREDENTIAL_HOSTS`: your SIEMs', chats'
+  and service desks', and your `openai-compatible` model providers'. Administrators can't
+  read destinations' credentials or providers' keys, but without the list they can send
+  them to any host, by changing a destination's `url` or a provider's `base_url`; with it,
+  AgentGov refuses other hosts, when they are set and again when it sends. The
+  **Features** page says when the list is empty
+  ([security operations](docs/secops.md#credentials), [model calls](docs/models.md)).
 
 ## Known limitations
 

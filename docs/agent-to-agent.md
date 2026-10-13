@@ -282,8 +282,16 @@ its long name). The test finds:
 |---|---|
 | `refused` | The agent refused a call without credentials (HTTP 401 or 403). It checks AgentGov's delegation, or credentials of its own; only the delegation shows that a call came through the gateway |
 | `accepted` | It answered (HTTP 2xx): whoever can reach it can call it around the gateway |
-| `unreachable` | AgentGov couldn't reach it, as the network should keep out every caller but the gateway. The test runs from the control plane: it shows what the control plane can reach, not what every agent can |
-| `inconclusive` | It answered something else (it may not serve JSON-RPC there), or its certificate couldn't be verified |
+| `unreachable` | AgentGov couldn't reach it, as the network should keep out every caller but the gateway, or it didn't answer within ten seconds. The test runs from the control plane: it shows what the control plane can reach, not what every agent can |
+| `inconclusive` | It answered something else (it may not serve JSON-RPC there), its certificate couldn't be verified, or it is at an address the test doesn't call |
+
+The test calls the URL an agent's owners give, from the control plane, so it goes only
+where an agent may be. It resolves the URL's host and calls the address it checked, not one
+a second lookup gives; it doesn't call link-local addresses, where cloud metadata services
+are, nor this machine's own addresses (unless people reach the control plane on this
+machine only, `AGENTGOV_PUBLIC_URL` on `localhost`), however the address is written
+(`2852039166` is `169.254.169.254`). It reads at most 64 KiB of an answer, and gives up after
+ten seconds, however slowly the agent answers.
 
 ## In policy
 

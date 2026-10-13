@@ -12,6 +12,7 @@ feature is off.
 from __future__ import annotations
 
 import logging
+import re
 import smtplib
 import ssl
 from collections.abc import Callable
@@ -41,10 +42,23 @@ MAX_ATTEMPTS = 13
 PER_ROUND = 50
 LEASE = timedelta(seconds=60)
 _LEVELS = {OWNER: "its owner", SPONSORS: "one of its sponsors"}
+# What a header can't hold: control characters, line breaks above all, which would end it
+# and start another. Titles carry names that agents, platforms and developers give.
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 
 class NotifyError(Exception):
-    """A notification couldn't be sent (never holds secrets)."""
+    """A notification couldn't be sent (never holds secrets). ``final``: it never will be,
+    so it isn't tried again."""
+
+    def __init__(self, message: str, *, final: bool = False) -> None:
+        super().__init__(message)
+        self.final = final
+
+
+def _one_line(value: str) -> str:
+    """A header's value, on one line and without control characters."""
+    return " ".join(_CONTROL.sub(" ", value).split())
 
 
 @dataclass
@@ -123,7 +137,7 @@ class Notifier:
             try:
                 self._send(item)
             except (NotifyError, DeliveryError, SecretError) as exc:
-                self._failed(item, str(exc))
+                self._failed(item, str(exc), final=getattr(exc, "final", False))
                 failed += 1
             else:
                 self._sent(item)
@@ -186,7 +200,7 @@ class Notifier:
                 to=item.recipient,
             )
 
-    def _failed(self, item: _Due, error: str) -> None:
+    def _failed(self, item: _Due, error: str, *, final: bool = False) -> None:
         log.warning("notification %s to %s: %s", item.id, item.recipient, error)
         with self.db.session() as s:
             n, f = s.get(Notification, item.id), s.get(Finding, item.finding_id)
@@ -194,7 +208,7 @@ class Notifier:
                 return
             n.attempts += 1
             n.last_error = error[:1000]
-            if n.attempts >= MAX_ATTEMPTS:
+            if final or n.attempts >= MAX_ATTEMPTS:
                 n.status = "failed"
                 findings.record(
                     s,
@@ -254,11 +268,8 @@ class Notifier:
         if not self.settings.smtp_url or not self.settings.smtp_from:
             raise NotifyError("no mail server: set AGENTGOV_SMTP_URL and AGENTGOV_SMTP_FROM")
         waiting = [x for x in lines if not x.taken_on]
-        message = EmailMessage()
-        message["From"] = self.settings.smtp_from
-        message["To"] = to
         them = "it" if len(waiting) == 1 else "them"
-        message["Subject"] = f"[AgentGov] {_count(len(lines), 'open issue')} with you" + (
+        subject = f"[AgentGov] {_count(len(lines), 'open issue')} with you" + (
             f", {len(waiting)} waiting for someone to take {them} on" if waiting else ""
         )
         body = ["The issues with you in AgentGov today, the most pressing first.", ""]
@@ -288,7 +299,24 @@ class Notifier:
             f"are about. Issues of {self.settings.issues_notify_severity} severity and above "
             "are also sent one by one as they come.",
         ]
-        message.set_content("\n".join(body))
+        self._mail(to, subject, "\n".join(body))
+
+    def _message(self, to: str, subject: str, body: str) -> EmailMessage:
+        """The email; NotifyError, final, if what it was given can't be one."""
+        try:
+            message = EmailMessage()
+            message["From"] = _one_line(self.settings.smtp_from or "")
+            message["To"] = _one_line(to)
+            message["Subject"] = _one_line(subject)
+            message.set_content(body)
+        except Exception as exc:  # whatever it is, one message never stops the others
+            raise NotifyError(
+                f"couldn't write the email: {type(exc).__name__}: {exc}", final=True
+            ) from None
+        return message
+
+    def _mail(self, to: str, subject: str, body: str) -> None:
+        message = self._message(to, subject, body)
         try:
             with self._smtp() as client:
                 client.send_message(message)
@@ -336,10 +364,7 @@ class Notifier:
         if not self.settings.smtp_url or not self.settings.smtp_from:
             raise NotifyError("no mail server: set AGENTGOV_SMTP_URL and AGENTGOV_SMTP_FROM")
         about = f" about agent {item.agent}" if item.agent else ""
-        message = EmailMessage()
-        message["From"] = self.settings.smtp_from
-        message["To"] = item.recipient
-        message["Subject"] = f"[AgentGov] {item.severity.capitalize()} issue{about}: {item.title}"
+        subject = f"[AgentGov] {item.severity.capitalize()} issue{about}: {item.title}"
         lines = [item.title, ""]
         if item.description:
             lines += [item.description, ""]
@@ -353,12 +378,7 @@ class Notifier:
             "in with your work account:",
             self._link(item.finding_id),
         ]
-        message.set_content("\n".join(lines))
-        try:
-            with self._smtp() as client:
-                client.send_message(message)
-        except (OSError, smtplib.SMTPException) as exc:
-            raise NotifyError(f"couldn't send the email: {type(exc).__name__}: {exc}") from None
+        self._mail(item.recipient, subject, "\n".join(lines))
 
     def _connect(self) -> smtplib.SMTP:
         """The mail server, over TLS: smtps from the start, smtp with STARTTLS when the

@@ -17,18 +17,28 @@ says:
   owners, a serious one if they said something stops it;
 * telemetry that shows a call straight to an agent's A2A URL is recorded in the ledger and
   is an issue for the owners of both agents (agentgov.telemetry).
+
+The test calls a URL an agent's owners give, so it goes only where an agent may be: not to
+where cloud metadata services live, nor to this machine itself (unless people reach the
+control plane on this machine only), whichever way the address is written; and to the
+address it checked, not to one a second lookup gives. It reads at most 64 KiB of the
+answer, and gives up after ten seconds, however slowly the agent answers.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
+import socket
 import ssl
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpcore
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -44,8 +54,14 @@ MODES = (features.OFF, WATCH, TEST)
 
 # What a test found.
 REFUSED, ACCEPTED, UNREACHABLE, INCONCLUSIVE = "refused", "accepted", "unreachable", "inconclusive"
+# Each step of a test's call (connecting, sending, each read) waits this long at most, and
+# the call this long all told; this much of the answer is read, at most.
 TIMEOUT = 5.0
+DEADLINE = 10.0
+ANSWER_BYTES = 64 * 1024
 WORKERS = 8
+# Where cloud providers serve instance metadata, besides link-local addresses.
+METADATA = frozenset(ipaddress.ip_address(a) for a in ("fd00:ec2::254", "100.100.100.200"))
 # The test's call: a read of a task that doesn't exist, which changes nothing.
 CALL = {
     "jsonrpc": "2.0",
@@ -56,6 +72,7 @@ CALL = {
 # So that the agent's owners can tell it from other calls in their logs.
 HEADERS = {
     "Accept": "application/json",
+    "Content-Type": "application/json",
     "User-Agent": f"AgentGov/{__version__} (calls-around-gateway test)",
     "X-AgentGov-Check": "calls-around-gateway",
 }
@@ -95,11 +112,102 @@ def _result(state: str, detail: str, url: str, status: int | None = None) -> dic
     }
 
 
-def _link_local(url: str) -> bool:
-    try:
-        return ipaddress.ip_address(urlsplit(url).hostname or "").is_link_local
-    except ValueError:
-        return False
+class Refused(Exception):
+    """An address the test doesn't call."""
+
+
+class OutOfTime(httpcore.TimeoutException):
+    """The call took all the time it had."""
+
+
+def resolve(host: str, port: int) -> list[str]:
+    """``host``'s addresses, as the system resolves them (an address in any form too:
+    2852039166 and 0251.0376.0251.0376 are 169.254.169.254)."""
+    found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(str(info[4][0]) for info in found))
+
+
+def refused(address: str, *, loopback: bool = False) -> str | None:
+    """Why the test doesn't call ``address``, if it doesn't."""
+    ip = ipaddress.ip_address(address.split("%", 1)[0])
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    if ip.is_link_local or ip in METADATA:
+        return "a link-local or metadata address"
+    if ip.is_unspecified or ip.is_multicast:
+        return "no agent's address"
+    if ip.is_loopback and not loopback:
+        return "this machine's own address"
+    return None
+
+
+class _Guard(httpcore.NetworkBackend):
+    """Connects a call to an address it may go to, the one it checked, and gives the call
+    DEADLINE seconds all told: no step waits past it."""
+
+    def __init__(
+        self,
+        backend: httpcore.NetworkBackend,
+        resolver: Callable[[str, int], list[str]],
+        *,
+        loopback: bool,
+        clock: Callable[[], float],
+    ) -> None:
+        self.backend, self.resolver, self.loopback, self.clock = backend, resolver, loopback, clock
+        self.ends = clock() + DEADLINE
+
+    def left(self, timeout: float | None) -> float:
+        remaining = self.ends - self.clock()
+        if remaining <= 0:
+            raise OutOfTime(f"no answer within {DEADLINE:g} seconds")
+        return remaining if timeout is None else min(timeout, remaining)
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.NetworkStream:
+        try:
+            addresses = self.resolver(host, port)
+        except OSError as exc:
+            raise httpcore.ConnectError(f"{host} can't be resolved: {exc}") from exc
+        for address in addresses:
+            why = refused(address, loopback=self.loopback)
+            if why:
+                raise Refused(f"{host} is {why}")
+        stream = self.backend.connect_tcp(
+            addresses[0], port, self.left(timeout), local_address, socket_options
+        )
+        return _Stream(stream, self)
+
+
+class _Stream(httpcore.NetworkStream):
+    def __init__(self, stream: httpcore.NetworkStream, guard: _Guard) -> None:
+        self.stream, self.guard = stream, guard
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return self.stream.read(max_bytes, self.guard.left(timeout))
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self.stream.write(buffer, self.guard.left(timeout))
+
+    def close(self) -> None:
+        self.stream.close()
+
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        tls = self.stream.start_tls(ssl_context, server_hostname, self.guard.left(timeout))
+        return _Stream(tls, self.guard)
+
+    def get_extra_info(self, info: str) -> Any:
+        return self.stream.get_extra_info(info)
 
 
 def _tls_failed(exc: BaseException) -> bool:
@@ -111,10 +219,10 @@ def _tls_failed(exc: BaseException) -> bool:
     return False
 
 
-def _rpc_error(resp: httpx.Response) -> str:
+def _rpc_error(answer: bytes) -> str:
     """The message of a JSON-RPC error, if the answer is one (and nothing else of it)."""
     try:
-        body = resp.json()
+        body = json.loads(answer)
     except ValueError:
         return ""
     error = body.get("error") if isinstance(body, dict) else None
@@ -122,21 +230,53 @@ def _rpc_error(resp: httpx.Response) -> str:
     return message[:200] if isinstance(message, str) else ""
 
 
-def call(url: str, client: httpx.Client) -> dict[str, Any]:
-    """Call an agent's A2A URL as a call around the gateway would, and say what happened."""
-    if _link_local(url):
-        # Cloud metadata services live there; an agent doesn't.
-        return _result(INCONCLUSIVE, "a link-local address isn't tested", url)
+def call(
+    url: str,
+    *,
+    loopback: bool = False,
+    backend: httpcore.NetworkBackend | None = None,
+    resolver: Callable[[str, int], list[str]] = resolve,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """Call an agent's A2A URL as a call around the gateway would, and say what happened.
+    ``loopback``: whether this machine's own addresses may be called."""
     try:
-        resp = client.post(url, json=CALL, headers=HEADERS)
-    except httpx.TimeoutException:
+        target = httpcore.URL(url)
+    except (TypeError, ValueError) as exc:
+        # One agent's URL never stops the others' tests.
+        return _result(INCONCLUSIVE, f"its URL can't be called ({exc})", url)
+    guard = _Guard(backend or httpcore.SyncBackend(), resolver, loopback=loopback, clock=clock)
+    timeouts = {"connect": TIMEOUT, "read": TIMEOUT, "write": TIMEOUT, "pool": TIMEOUT}
+    answer = bytearray()
+    try:
+        with (
+            httpcore.ConnectionPool(
+                ssl_context=httpx.create_ssl_context(), network_backend=guard
+            ) as pool,
+            pool.stream(
+                "POST",
+                target,
+                headers=HEADERS,
+                content=json.dumps(CALL).encode(),
+                extensions={"timeout": timeouts},
+            ) as resp,
+        ):
+            status = resp.status
+            for chunk in resp.iter_stream():
+                answer += chunk
+                if len(answer) >= ANSWER_BYTES:
+                    break  # enough to say what it answered
+    except Refused as exc:
+        return _result(INCONCLUSIVE, f"{exc}, which isn't tested", url)
+    except OutOfTime:
+        return _result(UNREACHABLE, f"it didn't answer within {DEADLINE:g} seconds", url)
+    except httpcore.TimeoutException:
         return _result(UNREACHABLE, f"it didn't answer within {TIMEOUT:g} seconds", url)
-    except httpx.TransportError as exc:
+    except (httpcore.NetworkError, httpcore.ProtocolError, httpcore.UnsupportedProtocol) as exc:
         if _tls_failed(exc):
             return _result(INCONCLUSIVE, f"its certificate couldn't be verified ({exc})", url)
         return _result(UNREACHABLE, f"it couldn't be reached ({exc})", url)
-    status = resp.status_code
-    said = _rpc_error(resp)
+    said = _rpc_error(bytes(answer))
     if status in (401, 403):
         why = f": {said}" if said else ""
         return _result(
@@ -166,17 +306,13 @@ def targets(session: Session) -> dict[str, str] | None:
     return {a.id: a.a2a_url for a in found if a.a2a_url and checked(a, modes)}
 
 
-def call_all(
-    urls: dict[str, str], *, transport: httpx.BaseTransport | None = None
-) -> dict[str, Any]:
-    """Call each agent's A2A URL (a few at a time), outside any transaction."""
+def call_all(urls: dict[str, str], **options: Any) -> dict[str, Any]:
+    """Call each agent's A2A URL (a few at a time), outside any transaction; ``options``
+    as :func:`call` takes them."""
     if not urls:
         return {}
-    with (
-        httpx.Client(timeout=TIMEOUT, follow_redirects=False, transport=transport) as client,
-        ThreadPoolExecutor(max_workers=min(WORKERS, len(urls))) as pool,
-    ):
-        found = pool.map(lambda item: (item[0], call(item[1], client)), urls.items())
+    with ThreadPoolExecutor(max_workers=min(WORKERS, len(urls))) as pool:
+        found = pool.map(lambda item: (item[0], call(item[1], **options)), urls.items())
         return dict(found)
 
 

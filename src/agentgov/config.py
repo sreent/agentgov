@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import ipaddress
 import os
 import re
 from dataclasses import dataclass
@@ -97,6 +98,19 @@ GOOGLE_ISSUER = "https://accounts.google.com"
 # A Keycloak realm's issuer: https://sso.example.com/realms/<realm>
 KEYCLOAK_REALM = re.compile(r"/realms/[^/]+$")
 _DOMAIN = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+# A host name (a service's short name too, such as splunk), or *. and a domain.
+_HOST_PATTERN = re.compile(
+    r"^(?=.{1,253}$)(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+
+
+def _ip_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _coerce(raw: str, target: str) -> Any:
@@ -163,6 +177,11 @@ class Settings:
     # Where destinations' credentials are: a file per destination, named after it (a
     # mounted secret). Never in the database.
     destination_secrets_dir: str = "/destination-secrets"
+    # The hosts credentials may go to, comma-separated: destinations' (SIEMs, chats and
+    # service desks, with what AgentGov sends them) and openai-compatible model providers'
+    # (the gateway sends those). `*.example.com` is any host under example.com. Empty: any
+    # host, so an administrator can send these credentials anywhere by changing a URL.
+    credential_hosts: str = ""
     # How often destinations are sent what is new in the ledger (also as soon as it is
     # written, on the replica that wrote it). 0 turns delivery off.
     delivery_interval_seconds: int = 10
@@ -647,6 +666,7 @@ class Settings:
             raise ValueError("AGENTGOV_GATEWAY_FAILURE_MODE must be 'modes', 'open' or 'closed'")
         if self.delivery_interval_seconds < 0:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
+        self.credential_host_list()
         if self.issues_interval_seconds < 0:
             raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
         if self.issues_notify_severity not in ("info", "low", "medium", "high", "critical"):
@@ -1082,6 +1102,31 @@ class Settings:
                 )
             pairs.setdefault(value, set()).add(role)
         return pairs
+
+    def credential_host_list(self) -> list[str]:
+        """AGENTGOV_CREDENTIAL_HOSTS, lowercase: hosts, IP addresses, and *.domain."""
+        hosts = [h.strip().lower().rstrip(".") for h in self.credential_hosts.split(",")]
+        for host in hosts:
+            if host and not (_HOST_PATTERN.match(host) or _ip_address(host)):
+                raise ValueError(
+                    f"AGENTGOV_CREDENTIAL_HOSTS: {host!r} is not a host, an IP address or *.domain"
+                )
+        return [h for h in hosts if h]
+
+    def credentials_may_go_to(self, url: str | None) -> bool:
+        """Whether a credential may go to ``url``'s host: any while AGENTGOV_CREDENTIAL_HOSTS
+        is empty, else only those it lists."""
+        listed = self.credential_host_list()
+        if not listed:
+            return True
+        try:
+            host = (urlsplit(url or "").hostname or "").rstrip(".")
+        except ValueError:
+            return False
+        return bool(host) and any(
+            host.endswith(entry[1:]) if entry.startswith("*.") else host == entry
+            for entry in listed
+        )
 
     def oidc_domains(self) -> list[str]:
         """AGENTGOV_OIDC_ALLOWED_DOMAINS, lowercase."""

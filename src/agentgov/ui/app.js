@@ -7946,11 +7946,19 @@ function failureLine(settings) {
   return parts.length ? h('div', { class: 'cell-sub' }, `${parts.join('. ')}.`) : null;
 }
 
+// Where destinations' credentials and model providers' keys may go (AGENTGOV_CREDENTIAL_HOSTS).
+function credentialHosts(hosts) {
+  if (hosts?.length) return h('div', {}, plainChip('Listed hosts only', { tone: 'good', iconName: 'lock' }), h('div', { class: 'cell-sub break' }, hosts.join(', ')));
+  return h('div', {}, plainChip('Any host', { tone: 'warning', iconName: 'triangle' }),
+    h('div', { class: 'cell-sub' }, "An administrator can send destinations' credentials and model providers' keys to any host, by changing a URL. List the hosts they may go to in AGENTGOV_CREDENTIAL_HOSTS."));
+}
+
 function componentsCard(view) {
   const cp = view.control_plane || {};
   const processors = view.processors || [];
   const rows = [
     ['Control plane', h('div', { class: 'chip-row' }, ['opa', 'keycloak'].map((n) => checkChip(n, cp[n])))],
+    'credential_hosts' in view ? ['Credentials go to', credentialHosts(view.credential_hosts)] : null,
     ...processors.map((p) => [
       h('span', {}, 'Governance processor ', h('code', {}, p.instance)),
       h('div', {},
@@ -8828,7 +8836,7 @@ function sightingsCard(groups, features) {
     : emptyState('No reports yet', h('span', {}, 'Developers, or your device management, run ', h('code', {}, command), ' with an API key of the registrar role.'));
   return card({
     title: "Set up on developers' machines",
-    sub: 'The MCP servers in VS Code, Copilot, Claude, Cursor and other clients, as developers report them, against the approved tool servers. Credentials never leave their machines.',
+    sub: 'The MCP servers in VS Code, Copilot, Claude, Cursor and other clients, as developers report them, against the approved tool servers. Credentials never leave their machines: an address comes by its host, with a hash of its path.',
     actions: [copyable(command, 'scan command')],
     flush: Boolean(groups.length),
     body: [
@@ -8839,12 +8847,13 @@ function sightingsCard(groups, features) {
 }
 
 // A tool server registration started from what developers set up: their address, or
-// the package they run.
+// the package they run. An address is reported by host, with a hash of its path, which
+// the administrator completes.
 function registerDraft(g) {
   const [kind, ...rest] = g.identity.split(':');
   const value = rest.join(':');
   const name = (g.names[0] || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
-  if (kind === 'url') return { name, url: g.url || value, gateway: false, developers: true };
+  if (kind === 'url') return { name, url: (g.url || value).split('#')[0], gateway: false, developers: true };
   if (['npm', 'pypi', 'oci'].includes(kind)) return { name, gateway: false, developers: true, packages: [{ registry_type: kind, identifier: value }] };
   return null;
 }

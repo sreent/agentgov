@@ -31,6 +31,13 @@ AgentGov, which suits a desk outside your network. To stop an issue for good, fi
 or, in AgentGov, ask an approver to accept its risk: a ticket closed while the
 problem is still there comes back.
 
+Tickets carry what agents, platforms and people wrote: an agent's name as its maker gave it,
+the reason someone gave in AgentGov. It shows as it was written, never as the desk's own
+markup. In Jira it is in a block that renders nothing (`{noformat}`), so a link, a mention,
+an image or a macro in it stays text; in ServiceNow, `[code]` tags in it are broken up, as
+they would render HTML in work notes; Freshservice gets it escaped. Only AgentGov's own link
+to the issue is a link. A ticket's summary is one line.
+
 ## Which issues get one
 
 An issue gets a ticket in each active desk once it goes to someone, if:
@@ -63,6 +70,9 @@ than all at once.
 The secret file holds HTTP headers, one per line (`Authorization: Basic …`, or ServiceNow's
 `x-sn-apikey: …`), or one line that AgentGov turns into the header: a user name and
 password (ServiceNow), an email address and API token (Jira), or an API key (Freshservice).
+Where the deployment lists the hosts credentials may go to (`AGENTGOV_CREDENTIAL_HOSTS`,
+[security operations](secops.md#credentials)), a desk's `url` must be on one of them, and
+AgentGov signs in to no other.
 
 ### ServiceNow
 

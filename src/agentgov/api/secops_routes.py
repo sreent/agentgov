@@ -124,7 +124,7 @@ def create_destination(
     credential goes in its secret file."""
     rt = _rt(request)
     with rt.db.session() as s:
-        destination = destinations.create(s, body, actor=principal.actor)
+        destination = destinations.create(s, body, actor=principal.actor, settings=rt.settings)
         return destinations.to_dict(destination, rt.settings, destinations.head(s))
 
 
@@ -147,7 +147,14 @@ def update_destination(
     rt = _rt(request)
     with rt.db.session() as s:
         destination = destinations.get(s, ref)
-        destinations.update(s, destination, body, actor=principal.actor, version=if_match(request))
+        destinations.update(
+            s,
+            destination,
+            body,
+            actor=principal.actor,
+            version=if_match(request),
+            settings=rt.settings,
+        )
         return destinations.to_dict(destination, rt.settings, destinations.head(s))
 
 

@@ -386,6 +386,21 @@ def model_route_for(
     provider: ModelProvider, settings: Settings, modes: dict[str, str], issuers: Any = ()
 ) -> dict[str, Any]:
     name = provider.name
+    matches = [{"path": {"exact": f"/llm/{name}{CHAT_PATH}"}}]
+    why = model_providers.refused(provider, settings)
+    if why:
+        # Set before the rules were, or the deployment's list changed since: no key goes.
+        message = f"The gateway doesn't send {name}'s key: {why}"
+        return {
+            "name": f"llm-{name}",
+            "matches": matches,
+            "policies": {
+                "directResponse": {
+                    "body": json.dumps({"error": {"message": message}}),
+                    "status": 503,
+                }
+            },
+        }
     backend: dict[str, Any] = {"name": name, "provider": {AI_PROVIDERS[provider.kind]: {}}}
     policies: dict[str, Any] = {}
     if provider.kind == "openai-compatible" and provider.base_url:
@@ -442,7 +457,6 @@ def model_route_for(
             },
         }
     )
-    matches = [{"path": {"exact": f"/llm/{name}{CHAT_PATH}"}}]
     # The gateway spends the provider's key on the caller's behalf: only for callers whose
     # token it has checked, whatever the mode of unknown callers, and not at all when it
     # can't check tokens.

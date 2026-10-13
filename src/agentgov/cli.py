@@ -3884,7 +3884,8 @@ def mcp_scan_command(
     as_json: bool = typer.Option(False, "--json", help="Print what was found as JSON."),
 ) -> None:
     """The MCP servers set up on this machine, in VS Code, Copilot, Claude, Cursor and
-    other clients. Credentials are left out: environment variables and headers by name."""
+    other clients. Credentials are left out: environment variables and headers by name,
+    addresses by host (with a hash of their path), arguments' credentials redacted."""
     from agentgov import mcp_scan
 
     found = mcp_scan.scan(directory or [Path.cwd()], home=home)
@@ -3970,7 +3971,7 @@ BASE_URL = typer.Option(
     None, help="An openai-compatible server's OpenAI API base, e.g. http://vllm:8000/v1."
 )
 KEY_FILE = typer.Option(
-    None, help="Where the gateway reads its API key (default /model-keys/<name>)."
+    None, help="Where the gateway reads its API key: a file in /model-keys (default its name)."
 )
 TRUST = typer.Option(None, "--trust", help="verified: personal data may be sent to it.")
 PRICE = typer.Option(
