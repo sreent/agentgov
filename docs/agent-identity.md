@@ -232,8 +232,10 @@ sequenceDiagram
 
 **The token** carries the issuer's `audience` (`oidc`), else the gateway's
 (`AGENTGOV_GATEWAY_AUDIENCE`, `agentgov-gateway` by default), and goes in the
-`Authorization: Bearer` header of each call. A pod gets one for the gateway alongside, or
-instead of, the one for Keycloak:
+`Authorization: Bearer` header of each call. Give each AgentGov install an audience of its
+own, such as its gateway's URL: with a shared one, a token that one install's gateway
+receives, from an issuer both trust, is good at the other's too. A pod gets one for the
+gateway alongside, or instead of, the one for Keycloak:
 
 ```yaml
           - serviceAccountToken:
