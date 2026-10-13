@@ -61,7 +61,9 @@ level above. `GET /v1/me` tells a client its level (`handoff.level`), and the UI
 ## Destinations
 
 A destination is where AgentGov sends: a SIEM, which gets OCSF events, or a chat, which
-gets alerts.
+gets alerts. A service desk (`servicenow`, `jira` or `freshservice`) is a destination too,
+which gets [issues](issues.md) as tickets it keeps in step with them, whatever the hand-off
+level: [tickets in service desks](tickets.md).
 
 | Kind | Gets | `url` | Its secret file holds |
 |---|---|---|---|

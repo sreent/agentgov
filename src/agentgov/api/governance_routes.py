@@ -41,6 +41,7 @@ from agentgov.registry import (
     issues,
     manifests,
     start,
+    tickets,
 )
 from agentgov.registry.errors import ValidationError
 from agentgov.runtime import JOB_WAIT_SECONDS
@@ -224,6 +225,7 @@ def get_finding(
             "agent_name": agent.name if agent else None,
             "chain": issues.describe(s, finding),
             "notifications": issues.notifications(s, finding),
+            "tickets": tickets.for_finding(s, finding),
             "history": [ledger.to_dict(e) for e in issues.history(s, finding)],
             "yours": mine,
         }

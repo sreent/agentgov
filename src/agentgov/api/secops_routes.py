@@ -10,7 +10,7 @@ from sqlalchemy import select
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.api.versions import if_match
 from agentgov.models import LedgerEntry
-from agentgov.registry import destinations
+from agentgov.registry import destinations, tickets
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 from agentgov.secops import handoff
 from agentgov.secops.delivery import siem_events
@@ -31,11 +31,13 @@ def secops_status(request: Request, _: Principal = Depends(read)) -> dict[str, A
     rt = _rt(request)
     with rt.db.session() as s:
         last = destinations.head(s)
+        counts = tickets.counts(s)
         return {
             **handoff.describe(s),
             "ledger_head": last,
             "destinations": [
-                destinations.to_dict(d, rt.settings, last) for d in destinations.list_all(s)
+                destinations.to_dict(d, rt.settings, last, counts.get(d.id))
+                for d in destinations.list_all(s)
             ],
             "events_api": "/v1/secops/events",
         }
@@ -87,19 +89,39 @@ def secops_events(
 # ---------------------------------------------------------------- destinations
 
 
+@router.get("/tickets")
+def list_tickets(
+    request: Request,
+    desk: str | None = None,
+    status: str | None = None,
+    _: Principal = Depends(read),
+) -> list[dict[str, Any]]:
+    """Issues' tickets in the service desks, newest first (docs/tickets.md): ``desk`` and
+    ``status`` (pending, open, closed, failed) narrow them."""
+    if status and status not in tickets.STATUSES:
+        raise ValidationError(f"status is one of {', '.join(tickets.STATUSES)}")
+    with _rt(request).db.session() as s:
+        return tickets.listing(s, desk=desk, status=status)
+
+
 @router.get("/destinations")
 def list_destinations(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
     rt = _rt(request)
     with rt.db.session() as s:
         last = destinations.head(s)
-        return [destinations.to_dict(d, rt.settings, last) for d in destinations.list_all(s)]
+        counts = tickets.counts(s)
+        return [
+            destinations.to_dict(d, rt.settings, last, counts.get(d.id))
+            for d in destinations.list_all(s)
+        ]
 
 
 @router.post("/destinations", status_code=201)
 def create_destination(
     request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
 ) -> dict[str, Any]:
-    """Send a SIEM the ledger, or a chat alerts. Its credential goes in its secret file."""
+    """Send a SIEM the ledger, a chat alerts, or a service desk issues as tickets. Its
+    credential goes in its secret file."""
     rt = _rt(request)
     with rt.db.session() as s:
         destination = destinations.create(s, body, actor=principal.actor)
@@ -110,7 +132,9 @@ def create_destination(
 def get_destination(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
     rt = _rt(request)
     with rt.db.session() as s:
-        return destinations.to_dict(destinations.get(s, ref), rt.settings, destinations.head(s))
+        destination = destinations.get(s, ref)
+        counts = tickets.counts(s).get(destination.id)
+        return destinations.to_dict(destination, rt.settings, destinations.head(s), counts)
 
 
 @router.patch("/destinations/{ref}")
@@ -137,9 +161,14 @@ def destination_action(
 ) -> dict[str, Any]:
     """``pause`` and ``resume`` (it keeps its place in the ledger meanwhile); ``replay``
     sends a SIEM the ledger again from after entry ``after`` (0: the start); ``test``
-    sends a test event or message now, whatever the hand-off level."""
+    sends a test event or message now, whatever the hand-off level, or signs in to a
+    service desk and looks at where its tickets go (changing nothing there)."""
     rt = _rt(request)
     if action == "test":
+        with rt.db.session() as s:
+            desk = destinations.get(s, ref).kind in destinations.DESK
+        if desk:
+            return rt.ticketing.test(ref, actor=principal.actor)
         return rt.delivery.test(ref, actor=principal.actor)
     if action not in ("pause", "resume", "replay"):
         raise NotFound(f"no action {action!r}: pause, resume, replay or test")

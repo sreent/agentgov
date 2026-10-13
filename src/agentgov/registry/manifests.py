@@ -205,6 +205,9 @@ def _destination(session: Session, settings: Settings, spec: dict[str, Any], act
         destinations.create(session, {**spec, "status": desired}, actor=actor)
         return "created"
     spec.pop("backfill", None)  # where a new destination starts in the ledger
+    if "tickets" in spec and isinstance(spec["tickets"], dict):
+        # The manifest says all of a desk's ticket settings: what it leaves out goes.
+        spec["tickets"] = {**{k: None for k in destination.tickets or {}}, **spec["tickets"]}
     changed = destinations.update(session, destination, spec, actor=actor)
     action = "configured" if changed else "unchanged"
     if destination.status != desired:
@@ -392,6 +395,7 @@ def export(session: Session) -> list[dict[str, Any]]:
             "events": destinations.default_events(destination.kind),
             "min_severity": destinations.default_severity(destination.kind),
             "labels": {},
+            "tickets": {},
         }
         for key, default in defaults.items():
             value = getattr(destination, key)

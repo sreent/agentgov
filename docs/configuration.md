@@ -101,7 +101,7 @@ database or settings:
 | What | Read by | Compose | Helm |
 |---|---|---|---|
 | Model providers' API keys, one file per provider named after it ([model calls](models.md)) | The gateway and its configuration sidecar, at `/model-keys` | `deploy/compose/model-keys/` | `modelKeys.existingSecret` |
-| Destinations' credentials, one file per destination named after it ([security operations](secops.md)) | The control plane, at `AGENTGOV_DESTINATION_SECRETS_DIR` (`/destination-secrets`) | `deploy/compose/destination-secrets/` | `destinationSecrets.existingSecret` |
+| Destinations' credentials, one file per destination named after it: SIEMs, chats and service desks ([security operations](secops.md), [tickets](tickets.md)) | The control plane, at `AGENTGOV_DESTINATION_SECRETS_DIR` (`/destination-secrets`) | `deploy/compose/destination-secrets/` | `destinationSecrets.existingSecret` |
 | The Keycloak realm: the control plane's client, the sign-in client, roles and demo users | Keycloak, on its first start only | `deploy/compose/keycloak/agentgov-realm.json` | the same file, in the chart |
 
 With Compose, `AGENTGOV_MODEL_KEYS_DIR` and `AGENTGOV_DESTINATION_SECRETS_DIR` in `.env` move

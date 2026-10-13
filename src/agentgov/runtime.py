@@ -50,6 +50,7 @@ from agentgov.registry import agents as agents_svc
 from agentgov.registry.errors import Conflict, InvalidTransition
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
 from agentgov.secops.delivery import Delivery
+from agentgov.ticketing import Ticketing
 
 log = logging.getLogger(__name__)
 # Package details (for declarative agents' instructions) read per Microsoft 365 sync.
@@ -150,6 +151,8 @@ class Runtime:
         self.delivery = Delivery(self.db, settings, http=destinations_http)
         # Issues to the people responsible for them, by email and in their teams' chats.
         self.notifier = Notifier(self.db, settings, self.delivery)
+        # And as tickets in service desks, kept in step with them (docs/tickets.md).
+        self.ticketing = Ticketing(self.db, settings, self.delivery)
         self.ledger_integrity = ledger.IntegrityMonitor()
         # Administrator single sign-on (OIDC), when a client secret is configured.
         self.sso = OIDCClient(settings, http=oidc_http) if settings.sso_enabled else None
@@ -241,6 +244,11 @@ class Runtime:
             if settings.issues_interval_seconds > 0
             else None
         )
+        self._tickets_worker = (
+            _Worker("tickets", self.run_tickets, settings.issues_interval_seconds, leading=leading)
+            if settings.issues_interval_seconds > 0
+            else None
+        )
         # Whatever connectors there are when it runs: one may be added after this.
         self._platforms_worker = (
             _Worker(
@@ -263,6 +271,7 @@ class Runtime:
             self._retention_worker,
             self._m365_worker,
             self._issues_worker,
+            self._tickets_worker,
             self._platforms_worker,
         ]
         return [w for w in workers if w is not None]
@@ -597,6 +606,12 @@ class Runtime:
                 **self.notifier.run(),
                 **self.notifier.digest(),
             }
+
+    def run_tickets(self) -> dict[str, Any]:
+        """Open issues' tickets in the service desks, read back what happened to them there,
+        and tell the desks what changed (docs/tickets.md)."""
+        with self.coordination.job("tickets"):
+            return self.ticketing.run()
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;

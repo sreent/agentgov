@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import httpx
 import typer
+import yaml
 
 from agentgov import __version__
 
@@ -109,10 +110,16 @@ secops_app = typer.Typer(
 )
 app.add_typer(secops_app, name="secops")
 destinations_app = typer.Typer(
-    help="SIEMs, and Teams and Slack channels, that get AgentGov's events and alerts.",
+    help="SIEMs, Teams and Slack channels, and service desks: where AgentGov's events, "
+    "alerts and tickets go.",
     no_args_is_help=True,
 )
 app.add_typer(destinations_app, name="destinations")
+tickets_app = typer.Typer(
+    help="Issues' tickets in service desks: ServiceNow, Jira and Freshservice.",
+    no_args_is_help=True,
+)
+app.add_typer(tickets_app, name="tickets")
 teams_app = typer.Typer(
     help="Teams: people and chat channels that own agents, and that issues escalate to.",
     no_args_is_help=True,
@@ -3871,24 +3878,28 @@ def secops_events(
         time.sleep(every)
 
 
+DESKS = ("servicenow", "jira", "freshservice")
+
+
 def _destination_table(rows: list[dict[str, Any]]) -> None:
     out = []
     for d in rows:
         delivery = d["delivery"]
-        state = delivery["last_error"] or (
-            f"{delivery['behind']} behind" if delivery["behind"] else "up to date"
-        )
+        events = ",".join(d["events"])
+        if d["kind"] in DESKS:
+            counts = delivery.get("tickets") or {}
+            events = "issues, as tickets"
+            state = delivery["last_error"] or f"{counts.get('open', 0)} tickets open"
+            if counts.get("failed"):
+                state += f", {counts['failed']} it couldn't open"
+        else:
+            state = delivery["last_error"] or (
+                f"{delivery['behind']} behind" if delivery["behind"] else "up to date"
+            )
         secret = d["secret"]
         if not secret["present"] and secret["need"] == "required":
             state = f"no secret file {secret['file']}"
-        out.append(
-            {
-                **d,
-                "events": ",".join(d["events"]),
-                "sent": delivery["delivered"],
-                "state": state,
-            }
-        )
+        out.append({**d, "events": events, "sent": delivery["delivered"], "state": state})
     _table(out, ["name", "kind", "status", "events", "min_severity", "sent", "state"])
 
 
@@ -3905,6 +3916,57 @@ DEST_SEVERITY = typer.Option(
     None, "--min-severity", help="info, low, medium, high or critical (chats: high by default)."
 )
 DEST_FORMAT = typer.Option(None, "--format", help="Webhooks: json (an array) or ndjson.")
+DEST_TICKETS = typer.Option(
+    None,
+    "--tickets",
+    help="Service desks: ticket settings as JSON, or @FILE (JSON or YAML): group, groups, "
+    "fields, priorities, resolve and the like (docs/tickets.md). Those given replace theirs.",
+)
+DEST_GROUP = typer.Option(
+    None,
+    "--group",
+    help="Service desks: where tickets go: a ServiceNow assignment group, a Freshservice "
+    "group's ID, or a Jira project's key.",
+)
+DEST_TEAM_GROUP = typer.Option(
+    None,
+    "--team-group",
+    help="Service desks: where a team's tickets go instead, TEAM=GROUP (repeatable; TEAM= "
+    "takes it off).",
+)
+
+
+def _ticket_settings(
+    tickets: str | None,
+    group: str | None,
+    team_group: list[str] | None,
+    current: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """A service desk's ticket settings from the options (None: none given)."""
+    body: dict[str, Any] = {}
+    if tickets is not None:
+        text = Path(tickets[1:]).read_text() if tickets.startswith("@") else tickets
+        try:
+            loaded = yaml.safe_load(text)
+        except yaml.YAMLError:
+            _fail("--tickets is JSON or YAML, or @FILE")
+        if not isinstance(loaded, dict):
+            _fail("--tickets is an object: group, groups, fields and the like")
+        body.update(loaded)
+    if group is not None:
+        body["group"] = group
+    if team_group:
+        groups = dict(body.get("groups") or (current or {}).get("groups") or {})
+        for item in team_group:
+            team, sep, where = item.partition("=")
+            if not sep or not team.strip():
+                _fail(f"--team-group looks like TEAM=GROUP (got {item!r})")
+            if where.strip():
+                groups[team.strip()] = where.strip()
+            else:
+                groups.pop(team.strip(), None)
+        body["groups"] = groups or None
+    return body or None
 
 
 def _destination_fields(**fields: Any) -> dict[str, Any]:
@@ -3933,19 +3995,28 @@ def destinations_get(name: str) -> None:
 @destinations_app.command("create")
 def destinations_create(
     name: str,
-    kind: str = typer.Option(..., help="otlp, webhook, splunk-hec, slack or teams."),
+    kind: str = typer.Option(
+        ..., help="otlp, webhook, splunk-hec, slack, teams, servicenow, jira or freshservice."
+    ),
     url: str | None = DEST_URL,
     events: str | None = DEST_EVENTS,
     min_severity: str | None = DEST_SEVERITY,
     format: str | None = DEST_FORMAT,
+    tickets: str | None = DEST_TICKETS,
+    group: str | None = DEST_GROUP,
+    team_group: list[str] | None = DEST_TEAM_GROUP,
     backfill: bool = typer.Option(
-        False, "--backfill", help="SIEMs: send the ledger from its start, not from now."
+        False,
+        "--backfill",
+        help="SIEMs: send the ledger from its start, not from now. Service desks: open "
+        "tickets for the issues open now too.",
     ),
     paused: bool = typer.Option(False, "--paused", help="Add it paused."),
     description: str | None = DESCRIPTION,
     label: list[str] | None = LABEL,
 ) -> None:
-    """Send a SIEM the ledger, or a chat alerts. Its credential goes in its secret file."""
+    """Send a SIEM the ledger, a chat alerts, or a service desk issues as tickets. Its
+    credential goes in its secret file."""
     body = _destination_fields(
         kind=kind,
         url=url,
@@ -3955,6 +4026,9 @@ def destinations_create(
         description=description,
         label=label,
     )
+    settings = _ticket_settings(tickets, group, team_group)
+    if settings is not None:
+        body["tickets"] = settings
     if backfill:
         body["backfill"] = True
     if paused:
@@ -3974,6 +4048,9 @@ def destinations_update(
     events: str | None = DEST_EVENTS,
     min_severity: str | None = DEST_SEVERITY,
     format: str | None = DEST_FORMAT,
+    tickets: str | None = DEST_TICKETS,
+    group: str | None = DEST_GROUP,
+    team_group: list[str] | None = DEST_TEAM_GROUP,
     description: str | None = DESCRIPTION,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
     if_version: int | None = IF_VERSION,
@@ -3987,6 +4064,9 @@ def destinations_update(
         description=description,
         label=label,
     )
+    if tickets is not None or group is not None or team_group:
+        current = _call("GET", f"/v1/destinations/{quote(name)}").get("tickets")
+        body["tickets"] = _ticket_settings(tickets, group, team_group, current) or {}
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
     out = _call("PATCH", f"/v1/destinations/{quote(name)}", json=body, **_if_version(if_version))
@@ -4021,11 +4101,30 @@ def destinations_replay(
 
 @destinations_app.command("test")
 def destinations_test(name: str) -> None:
-    """Send a test event (SIEMs) or message (chats) now."""
+    """Send a test event (SIEMs) or message (chats) now; sign in to a service desk and look
+    at where its tickets go (changing nothing there)."""
     out = _call("POST", f"/v1/destinations/{quote(name)}/test")
     if not out["ok"]:
         _fail(f"destination/{name}: {out['error']}")
-    _done("destination", name, "test sent")
+    _done("destination", name, out.get("message") or "test sent")
+
+
+@tickets_app.command("list")
+def tickets_list(
+    desk: str | None = typer.Option(None, "--desk", help="Only this service desk's."),
+    status: str | None = typer.Option(
+        None, "--status", help="pending, open, closed or failed (AgentGov couldn't open it)."
+    ),
+) -> None:
+    """Issues' tickets in the service desks, newest first."""
+    rows = _call("GET", "/v1/tickets", params=_given(desk=desk, status=status))
+    if not rows:
+        typer.echo("No tickets.")
+        return
+    for row in rows:
+        row["ticket"] = row["key"] or "(not yet)"
+        row["error"] = (row["last_error"] or "")[:80]
+    _table(rows, ["desk", "ticket", "status", "state", "assignee", "finding_id", "error"])
 
 
 @destinations_app.command("delete")

@@ -13,12 +13,16 @@ Chats get alerts: findings from a severity up, approval requests, and kill switc
 * ``slack``: a Slack incoming webhook;
 * ``teams``: a Microsoft Teams workflow's webhook.
 
+Service desks get issues, as tickets they keep in step with them (agentgov.registry.desks,
+agentgov.ticketing): ``servicenow``, ``jira`` and ``freshservice``.
+
 A destination's credential is never in the database or in what the API returns: it is a
 file named after the destination in AGENTGOV_DESTINATION_SECRETS_DIR (a mounted secret),
 read when AgentGov sends. For Slack and Teams it holds the webhook URL, which is the
 credential; for Splunk, the HTTP Event Collector's token; for OpenTelemetry and webhooks,
 HTTP headers to send (one per line, ``Authorization: Bearer ...``), and the URL itself for
-inputs whose URL is the credential.
+inputs whose URL is the credential; for a service desk, headers or the user name and
+password, email address and API token, or API key it signs in with (registry.desks).
 """
 
 from __future__ import annotations
@@ -36,13 +40,14 @@ from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
 from agentgov.models import DESTINATION_KINDS, Destination, LedgerHead, Team
-from agentgov.registry import validation
+from agentgov.registry import desks, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import edited, start_edit
 
-OTLP, WEBHOOK, SPLUNK_HEC, SLACK, TEAMS = DESTINATION_KINDS
+OTLP, WEBHOOK, SPLUNK_HEC, SLACK, TEAMS, SERVICENOW, JIRA, FRESHSERVICE = DESTINATION_KINDS
 SIEM = (OTLP, WEBHOOK, SPLUNK_HEC)
 CHAT = (SLACK, TEAMS)
+DESK = desks.DESKS
 ACTIVE, PAUSED = "active", "paused"
 SEVERITIES = ("info", "low", "medium", "high", "critical")
 FORMATS = ("json", "ndjson")
@@ -61,7 +66,7 @@ BLOCKS = frozenset(
         "platform.agent_blocked",
     }
 )
-FIELDS = ("description", "url", "format", "events", "min_severity", "labels")
+FIELDS = ("description", "url", "format", "events", "min_severity", "labels", "tickets")
 _HEADER = re.compile(r"^([A-Za-z0-9!#$%&'*+.^_`|~-]+):\s*(.*)$")
 
 
@@ -108,7 +113,7 @@ def secret_path(settings: Settings, name: str) -> Path:
 def secret_need(destination: Any) -> str:
     """Whether a destination needs its secret file: required or optional. A webhook
     without a URL needs it for the URL."""
-    if destination.kind in (SPLUNK_HEC, *CHAT) or (
+    if destination.kind in (SPLUNK_HEC, *CHAT, *DESK) or (
         destination.kind == WEBHOOK and not destination.url
     ):
         return "required"
@@ -147,6 +152,11 @@ def credentials(settings: Settings, destination: Destination) -> Credentials:
         if not _http_url(text):
             raise SecretError(f"the secret file {path} must hold the webhook URL")
         return Credentials(url=text)
+    if destination.kind in DESK:
+        try:
+            return Credentials(headers=desks.headers(destination.kind, text))
+        except ValueError as exc:
+            raise SecretError(f"the secret file {path}: {exc}") from None
     if destination.kind == SPLUNK_HEC:
         token = text.removeprefix("Splunk ").strip()
         if not token or "\n" in token:
@@ -191,6 +201,12 @@ def _url(value: Any) -> str:
 def _events(value: Any, kind: str) -> list[str]:
     allowed = CHAT_EVENTS if kind in CHAT else SIEM_EVENTS
     events = validation.string_list(value, "events")
+    if kind in DESK:
+        if events:
+            raise ValidationError(
+                "a service desk gets issues, as tickets: events is for SIEMs and chats"
+            )
+        return []
     # A chat may take no alerts at all: a team's channel, for the issues its team posts.
     if not events and kind not in CHAT:
         raise ValidationError(f"events takes one or more of {', '.join(allowed)}")
@@ -227,6 +243,15 @@ def _apply(destination: Destination, data: dict[str, Any]) -> list[str]:
             value = validation.labels(value)
         elif key == "description":
             value = str(value or "")
+        elif key == "tickets":
+            if kind not in DESK:
+                raise ValidationError(
+                    "tickets is for service desks: servicenow, jira, freshservice"
+                )
+            # Changing some settings keeps the others: null takes one out.
+            merged = {**(destination.tickets or {}), **(value or {})}
+            value = {k: v for k, v in merged.items() if v is not None}
+            value = desks.normalize(kind, value, destination.url)
         if getattr(destination, key) != value:
             setattr(destination, key, value)
             changed.append(key)
@@ -247,15 +272,23 @@ def _check(destination: Destination) -> None:
         raise ValidationError(f"an {kind} destination needs url: {what}")
     if destination.format and kind != WEBHOOK:
         raise ValidationError("format is for webhook destinations only")
+    if kind in DESK:
+        desks.check_url(kind, destination.url)
+        settings = desks.normalize(kind, destination.tickets, destination.url)
+        if settings != destination.tickets:
+            destination.tickets = settings
 
 
 def default_events(kind: str) -> list[str]:
+    if kind in DESK:
+        return []
     return list(CHAT_EVENTS if kind in CHAT else SIEM_EVENTS)
 
 
 def default_severity(kind: str) -> str:
-    # Chats hear about what needs someone now; SIEMs keep everything.
-    return "high" if kind in CHAT else "info"
+    # Chats hear about what needs someone now, and desks get tickets for it; SIEMs keep
+    # everything.
+    return "high" if kind in (*CHAT, *DESK) else "info"
 
 
 # --------------------------------------------------------------------- changes
@@ -279,7 +312,9 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Destination
     backfill = bool(data.get("backfill"))
     status = validation.one_of(data.get("status") or ACTIVE, (ACTIVE, PAUSED), "status")
     if backfill and kind in CHAT:
-        raise ValidationError("backfill is for SIEMs: chats get alerts as they happen")
+        raise ValidationError(
+            "backfill is for SIEMs and service desks: chats get alerts as they happen"
+        )
     destination = Destination(
         id=ids.new_id(ids.DESTINATION),
         name=name,
@@ -300,6 +335,11 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Destination
     _apply(destination, data)
     session.add(destination)
     session.flush()
+    if kind in DESK and not backfill:
+        # Tickets for the issues that start from now on, not the ones already open.
+        from agentgov.registry import tickets
+
+        tickets.skip_open(session, destination)
     ledger.append(
         session,
         type="destination.created",
@@ -330,6 +370,11 @@ def update(
     if "kind" in data and data["kind"] != destination.kind:
         raise ValidationError("a destination's kind can't change: add another destination")
     changed = _apply(destination, data)
+    if changed and destination.kind in DESK:
+        # Tickets the desk refused may go now: try them again.
+        from agentgov.registry import tickets
+
+        tickets.retry_failed(session, destination)
     if changed:
         edited(destination)
         ledger.append(
@@ -368,8 +413,8 @@ def set_status(
 
 def replay(session: Session, destination: Destination, after: Any, *, actor: str) -> Destination:
     """Send a SIEM the ledger again, from after entry ``after`` (0: from its start)."""
-    if destination.kind in CHAT:
-        raise ValidationError("replay is for SIEMs: chats get alerts as they happen")
+    if destination.kind not in SIEM:
+        raise ValidationError("replay is for SIEMs: chats and desks get what happens as it does")
     if isinstance(after, bool) or not isinstance(after, int) or after < 0:
         raise ValidationError("after is a ledger entry's sequence number (0: from the start)")
     last = head(session)
@@ -404,12 +449,20 @@ def delete(session: Session, destination: Destination, *, actor: str) -> None:
         resource=f"destination/{destination.name}",
         severity="warning",
     )
+    if destination.kind in DESK:
+        # Its tickets stay in the desk; AgentGov stops keeping them in step.
+        from agentgov.registry import tickets
+
+        tickets.forget(session, destination)
     session.delete(destination)
     mark_changed(session, "destinations")
 
 
 def to_dict(
-    destination: Destination, settings: Settings, last_seq: int | None = None
+    destination: Destination,
+    settings: Settings,
+    last_seq: int | None = None,
+    tickets: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "id": destination.id,
@@ -437,4 +490,9 @@ def to_dict(
         "created_at": ids.isoformat(destination.created_at),
         "updated_at": ids.isoformat(destination.updated_at),
     }
+    if destination.kind in DESK:
+        out["tickets"] = destination.tickets or {}
+        # How many of its tickets AgentGov keeps in step, and how many it couldn't open.
+        out["delivery"]["tickets"] = tickets or {}
+        out["delivery"]["behind"] = None
     return out

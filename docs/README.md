@@ -47,6 +47,8 @@
   while once approved, with reminders, renewals and reviews
 * [Issues](issues.md): findings sent to the people responsible for each agent (its owner,
   its sponsors, its team), escalated until someone takes them on
+* [Tickets in service desks](tickets.md): issues as tickets in ServiceNow, Jira Service
+  Management or Freshservice, kept in step with them both ways
 * [Management rules](management-rules.md): what to do about agents that meet some
   conditions for long enough (inactive, ownerless, long blocked), after telling their people
 * [Evidence](evidence.md): ledger checkpoints time-stamped by an authority, retention and

@@ -200,6 +200,10 @@ them. A password is never sent to a server that doesn't offer TLS. In the Helm c
 them in `controlPlane.env`, with the password from a secret
 ([configuration](configuration.md#issues)).
 
+Where work runs through a service desk, each issue can also be a ticket there, which
+AgentGov keeps in step with it: someone taking the ticket on there takes the issue on
+([tickets in service desks](tickets.md)).
+
 ### Fewer messages
 
 Not every issue needs to reach an inbox:
@@ -364,6 +368,7 @@ the findings shown as a spreadsheet: who each is with, how often it was seen, wh
 | `issues.digest_sent` | The day's digest went to an address or a chat, with how many issues it listed ([a daily digest](#a-daily-digest)) |
 | `issues.digest_failed` (warning) | The day's digest couldn't be sent, after retrying |
 | `team.created`, `team.updated`, `team.deleted` | A team changed |
+| `finding.ticket_opened`, `finding.ticket_done`, `finding.ticket_closed`, `finding.ticket_failed` | Its ticket in a service desk opened, was resolved there, was resolved by AgentGov, or couldn't be opened ([tickets](tickets.md#in-the-ledger)) |
 
 These go to the security team's tools like every ledger entry
 ([security operations](secops.md)): an issue is an OCSF Detection Finding whose status is New

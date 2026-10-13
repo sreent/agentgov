@@ -133,6 +133,7 @@ const ICONS = {
   models: 'M7 7h10v10H7zM10 10h4v4h-4zM10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4',
   developers: 'M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14',
   secops: 'M10 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8',
+  ticket: 'M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3a2 2 0 0 0 0 4v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-3a2 2 0 0 0 0-4zM10 5v2M10 11v2M10 17v2',
 };
 
 function icon(name, { label, cls } = {}) {
@@ -507,6 +508,12 @@ const STATUS = {
     active: ['good', 'check-circle', 'Active'],
     paused: ['neutral', 'minus', 'Paused'],
   },
+  ticket: {
+    pending: ['neutral', 'clock', 'Opening'],
+    open: ['good', 'check-circle', 'Kept in step'],
+    closed: ['neutral', 'minus', 'Closed'],
+    failed: ['critical', 'octagon', "Couldn't open"],
+  },
 };
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 const TONE_COLOR = {
@@ -670,7 +677,7 @@ function observeWidth(el, draw) {
 // checkbox, number; plus layout entries { type: 'section', label } and
 // { type: 'row', fields: [...] } for two fields side by side.
 function dialogField(f, controls) {
-  if (f.type === 'section') return h('h3', { class: 'dialog-section' }, f.label);
+  if (f.type === 'section') return h('h3', { class: 'dialog-section', id: f.id ? `dlg-${f.id}` : null }, f.label);
   if (f.type === 'row') return h('div', { class: 'form-row' }, f.fields.map((x) => dialogField(x, controls)));
   const id = `dlg-${f.id}`;
   const hint = f.hint ? h('p', { class: 'hint', id: `${id}-hint` }, f.hint) : null;
@@ -4639,6 +4646,7 @@ async function renderFinding({ match }) {
     f.type.startsWith('access.') ? await findingAccessCard(f) : null,
     findingAttestCard(f),
     chainCard(f),
+    ticketsCard(f),
     notificationsCard(f),
     historyCard(f));
 }
@@ -4713,6 +4721,31 @@ function chainCard(f) {
   });
 }
 
+// Its tickets in the service desks, and how each stands there.
+function ticketsCard(f) {
+  const rows = f.tickets || [];
+  if (!rows.length) return null;
+  return card({
+    title: 'Tickets',
+    sub: 'In your service desks: AgentGov keeps each in step with the issue, and reads back what happens to it there. Taking a ticket on there takes the issue on.',
+    flush: true,
+    body: h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+      h('caption', { class: 'sr-only' }, 'Tickets'),
+      h('thead', {}, h('tr', {}, ['Ticket', 'There', 'AgentGov'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, rows.map((t) => h('tr', {},
+        h('td', { 'data-label': 'Ticket', class: 'break' },
+          t.url && t.key ? h('a', { href: t.url, target: '_blank', rel: 'noopener', class: 'cell-title' }, t.key, ' ', icon('external')) : h('span', { class: 'cell-title' }, t.key || 'Not opened yet'),
+          h('div', { class: 'cell-sub' }, `${t.desk}${t.team ? `, team ${t.team}` : ''}`),
+          t.replaces ? h('div', { class: 'cell-sub' }, `Takes over from ${t.replaces}`) : null),
+        h('td', { 'data-label': 'There' }, t.state ? h('span', {}, t.state) : h('span', { class: 'muted' }, '—'),
+          t.assignee ? h('div', { class: 'cell-sub' }, t.assignee) : null,
+          t.synced_at ? h('div', { class: 'cell-sub' }, 'Read ', timeEl(t.synced_at)) : null),
+        h('td', { 'data-label': 'AgentGov' }, chip('ticket', t.status),
+          t.last_error ? h('div', { class: 'cell-sub break' }, t.last_error) : null,
+          t.next_attempt_at && t.attempts ? h('div', { class: 'cell-sub' }, 'Tries again ', timeEl(t.next_attempt_at)) : null)))))),
+  });
+}
+
 function notificationsCard(f) {
   const rows = f.notifications || [];
   if (!rows.length) return null;
@@ -4743,6 +4776,7 @@ function historyCard(f) {
       h('div', { class: 'cell-title' }, humanize(e.type.replace(/^finding\./, ''))),
       h('div', { class: 'cell-sub break' }, e.actor, ' · ', timeEl(e.ts),
         e.details?.to ? ` · to ${e.details.to}` : '',
+        e.details?.ticket ? ` · ${e.details.desk ? `${e.details.desk} ` : ''}${e.details.ticket}` : '',
         e.details?.why ? ` · ${e.details.why}` : '',
         e.details?.outcome ? ` · ${e.details.outcome}` : '',
         e.details?.assignees ? ` · ${e.details.assignees.join(', ')}` : '')))),
@@ -7713,6 +7747,15 @@ const DEST_KINDS = {
   'splunk-hec': ['Splunk HTTP Event Collector', 'siem', 'https://splunk.example.com:8088', "Splunk's HTTP Event Collector. Events go to /services/collector/event there."],
   slack: ['Slack', 'chat'],
   teams: ['Microsoft Teams', 'chat'],
+  servicenow: ['ServiceNow', 'desk', 'https://your-instance.service-now.com', 'Your instance. Tickets go to its Table API: the incident table, unless you choose another.'],
+  jira: ['Jira Service Management', 'desk', 'https://your-site.atlassian.net', "Your site (Jira Data Center: its base URL). With a service account's scoped token: https://api.atlassian.com/ex/jira/<cloud ID>."],
+  freshservice: ['Freshservice', 'desk', 'https://your-domain.freshservice.com', 'Your helpdesk.'],
+};
+// A desk's main setting: where its tickets go.
+const DESK_GROUP = {
+  servicenow: ['Assignment group', 'AI Governance', 'By name or sys_id. Empty: the table\'s own rules assign them.'],
+  jira: ['Project', 'OPS', "The key of the project tickets go to."],
+  freshservice: ['Group ID', '42', "The ID of the agent group tickets go to (in its URL in Freshservice's admin). Empty: Freshservice's own rules assign them."],
 };
 const DEST_EVENTS = {
   siem: [
@@ -7734,6 +7777,9 @@ const DEST_SECRET = {
   'splunk-hec': "The HTTP Event Collector's token.",
   slack: "The incoming webhook's URL (https://hooks.slack.com/services/…).",
   teams: "The webhook URL of a Teams workflow that posts to the channel (the workflow \"When a Teams webhook request is received\").",
+  servicenow: 'user:password on one line (an integration user with the itil role, say), or HTTP headers, one per line: x-sn-apikey: <key>, or Authorization: Basic <…>.',
+  jira: 'email:api-token on one line (Jira Cloud), or HTTP headers, one per line: Authorization: Bearer <personal access token> (Jira Data Center).',
+  freshservice: 'The API key, on one line (in Freshservice, Profile settings → API key).',
 };
 const destKind = (kind) => (DEST_KINDS[kind] || [kind])[0];
 const destFamily = (kind) => (DEST_KINDS[kind] || [kind, 'siem'])[1];
@@ -7743,7 +7789,7 @@ async function renderSecops() {
   return h('div', { class: 'page' },
     pageHead({
       title: 'Security operations',
-      sub: "What AgentGov hands to the security team's tools: the evidence ledger, as OCSF events, to their SIEMs; alerts to their Teams and Slack channels; and how much their secops role may do here.",
+      sub: "What AgentGov hands to other tools: the evidence ledger, as OCSF events, to the security team's SIEMs; alerts to Teams and Slack channels; issues, as tickets, to service desks; and how much the security team's secops role may do here.",
       actions: [refreshButton()],
     }),
     view.sending ? null : callout('neutral', 'power', h('span', {}, h('strong', {}, 'Nothing is sent. '),
@@ -7776,6 +7822,14 @@ function destinationState(d) {
       h('div', { class: 'cell-sub break' }, delivery.last_error),
       delivery.retry_at ? h('div', { class: 'cell-sub' }, 'Tries again ', timeEl(delivery.retry_at)) : null];
   }
+  if (destFamily(d.kind) === 'desk') {
+    const t = delivery.tickets || {};
+    return [plainChip(`${fmt(t.open || 0)} ${t.open === 1 ? 'ticket' : 'tickets'} kept in step`, { tone: 'good', iconName: 'check-circle' }),
+      t.pending ? h('div', { class: 'cell-sub' }, `${fmt(t.pending)} opening`) : null,
+      t.failed ? h('div', { class: 'cell-sub' }, plainChip(`${fmt(t.failed)} it couldn't open`, { tone: 'critical', iconName: 'octagon' })) : null,
+      t.erring ? h('div', { class: 'cell-sub' }, `${fmt(t.erring)} refused for now: their issues say why`) : null,
+      delivery.delivered_at ? h('div', { class: 'cell-sub' }, 'Last change sent ', timeEl(delivery.delivered_at)) : h('div', { class: 'cell-sub' }, 'Nothing sent yet')];
+  }
   const sent = delivery.delivered_at
     ? h('div', { class: 'cell-sub' }, `${plural(delivery.delivered, destFamily(d.kind) === 'chat' ? 'alert' : 'event')} sent, last `, timeEl(delivery.delivered_at))
     : h('div', { class: 'cell-sub' }, 'Nothing sent yet');
@@ -7795,7 +7849,7 @@ function destinationsCard(view) {
         h('div', { class: 'cell-sub' }, destKind(d.kind), d.format === 'ndjson' ? ', JSON lines' : ''),
         d.url ? h('div', { class: 'cell-sub' }, h('code', {}, d.url)) : null,
         d.description ? h('div', { class: 'cell-sub' }, d.description) : null),
-      h('td', { 'data-label': 'Gets' }, h('div', { class: 'chip-row' }, d.events.map((e) => plainChip(humanize(e)))),
+      h('td', { 'data-label': 'Gets' }, h('div', { class: 'chip-row' }, destFamily(d.kind) === 'desk' ? plainChip('Issues, as tickets', { iconName: 'ticket' }) : d.events.map((e) => plainChip(humanize(e)))),
         d.min_severity !== 'info' ? h('div', { class: 'cell-sub' }, `${humanize(d.min_severity)} severity and up`) : null),
       h('td', { 'data-label': 'Status' }, chip('destination', d.status)),
       h('td', { 'data-label': 'Delivery' }, destinationState(d)),
@@ -7806,10 +7860,10 @@ function destinationsCard(view) {
           icon(d.status === 'paused' ? 'play' : 'minus'), d.status === 'paused' ? 'Resume' : 'Pause'),
         destFamily(d.kind) === 'siem' ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `dest-replay-${d.name}`, onclick: guarded(() => replayDestination(d)) }, icon('undo'), 'Replay') : null,
         h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `dest-delete-${d.name}`, onclick: guarded(() => deleteDestination(d)) }, icon('trash'), 'Delete')) : null))))))
-    : emptyState('No destinations', 'Add a SIEM, through OpenTelemetry, an HTTP input or Splunk, to send it the ledger as OCSF events; or a Teams or Slack channel, to send it alerts.');
+    : emptyState('No destinations', 'Add a SIEM, through OpenTelemetry, an HTTP input or Splunk, to send it the ledger as OCSF events; a Teams or Slack channel, to send it alerts; or a service desk, where issues become tickets.');
   return card({
     title: 'Destinations',
-    sub: "Each gets what is new in the ledger, at least once and in order, and keeps its place while it is paused or failing. Its credential is a file the control plane reads, named after it: never in AgentGov's database.",
+    sub: "SIEMs get what is new in the ledger, at least once and in order, and keep their place while paused or failing; chats get alerts; service desks get issues as tickets, kept in step with them. Each one's credential is a file the control plane reads, named after it: never in AgentGov's database.",
     actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'add-destination', onclick: guarded(() => destinationForm(null)) }, icon('plus'), 'Add destination')] : null,
     flush: rows.length > 0,
     body,
@@ -7831,34 +7885,79 @@ function eventsApiCard(view) {
   });
 }
 
+// A desk's groups by team, a "team = group" a line.
+function teamGroupsText(groups) {
+  return Object.entries(groups || {}).map(([team, group]) => `${team} = ${group}`).join('\n');
+}
+
+function parseTeamGroups(text) {
+  const out = {};
+  for (const line of (text || '').split('\n').map((l) => l.trim()).filter(Boolean)) {
+    const at = line.indexOf('=');
+    if (at < 1 || !line.slice(at + 1).trim()) throw new Error(`Per team: "${line}" isn't "team = group".`);
+    out[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+  }
+  return out;
+}
+
+function jsonObject(text, what) {
+  if (!(text || '').trim()) return null;
+  let value;
+  try { value = JSON.parse(text); } catch { value = null; }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${what}: a JSON object, such as {"category": "security"}.`);
+  return value;
+}
+
 async function destinationForm(d) {
   const editing = Boolean(d);
   const kind0 = d?.kind || 'otlp';
+  const tk = d?.tickets || {};
   const eventFields = (family) => DEST_EVENTS[family].map(([key, label, hint]) => ({
     id: `ev-${family}-${key}`, label, hint, type: 'checkbox',
     value: editing ? d.events.includes(key) : true,
   }));
+  const pretty = (value) => (value ? JSON.stringify(value, null, 2) : '');
   const saved = await ask({
     title: editing ? `Edit ${d.name}` : 'Add a destination',
     text: editing
       ? `${destKind(d.kind)}. Changes apply to what it is sent next, and are recorded in the evidence ledger.`
-      : "A SIEM gets the ledger as OCSF events; a chat gets alerts. Put its credential in its secret file, which the control plane reads when it sends.",
+      : "A SIEM gets the ledger as OCSF events; a chat gets alerts; a service desk gets issues as tickets, kept in step with them. Put its credential in its secret file, which the control plane reads when it sends.",
     iconName: editing ? 'edit' : 'secops', confirm: editing ? 'Save changes' : 'Add destination', wide: true,
     fields: [
       editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'soc-splunk', hint: NAME_HINT },
       editing ? null : {
         id: 'kind', label: 'Kind', type: 'select', value: kind0,
-        options: Object.entries(DEST_KINDS).map(([value, [label, family]]) => ({ value, label: `${label}${family === 'chat' ? ': alerts' : ': OCSF events'}` })),
+        options: Object.entries(DEST_KINDS).map(([value, [label, family]]) => ({ value, label: `${label}: ${{ chat: 'alerts', desk: 'tickets' }[family] || 'OCSF events'}` })),
       },
       { id: 'url', label: 'URL', mono: true, value: d?.url || '', placeholder: DEST_KINDS[kind0][2] || '', hint: DEST_KINDS[kind0][3] || '' },
       { id: 'format', label: 'Body', type: 'select', value: d?.format || 'json', options: [
         { value: 'json', label: 'A JSON array of events' }, { value: 'ndjson', label: 'JSON lines: one event per line' },
       ] },
-      { type: 'section', label: 'What it gets' },
+      { type: 'section', id: 'sec-gets', label: 'What it gets' },
       ...eventFields('siem'),
       ...eventFields('chat'),
+      { type: 'section', id: 'sec-tickets', label: 'Its tickets' },
+      { id: 'tk-group', label: 'Assignment group', mono: true, value: tk.group ?? '' },
       {
-        id: 'min_severity', label: 'Minimum severity', type: 'select', value: d?.min_severity || (destFamily(kind0) === 'chat' ? 'high' : 'info'),
+        id: 'tk-groups', label: 'Per team', type: 'textarea', mono: true, value: teamGroupsText(tk.groups), placeholder: 'cx-platform = CX Platform',
+        hint: "Where the issues of AgentGov's teams go instead, a team a line. An issue's team is the first team in its chain: its owner, a sponsor, or its team.",
+      },
+      { id: 'tk-only', label: 'Only the issues of the teams listed', type: 'checkbox', value: Boolean(tk.only_listed_teams) },
+      { id: 'tk-table', label: 'Table', mono: true, value: tk.table || '', placeholder: 'incident', hint: 'incident, unless you choose another: sn_si_incident for Security Incident Response, say.' },
+      { id: 'tk-issue_type', label: 'Issue type', value: tk.issue_type || '', placeholder: 'Task', hint: "Its name in the project: Task, unless you choose another." },
+      { id: 'tk-site', label: 'Site', mono: true, value: tk.site || '', placeholder: 'https://your-site.atlassian.net', hint: "Where people open tickets: needed when the URL is Atlassian's API gateway." },
+      { id: 'tk-requester', label: 'Raised for', mono: true, value: tk.requester || '', placeholder: 'agentgov@example.com', hint: "The requester's email address: AgentGov's mailbox, say." },
+      {
+        id: 'tk-fields', label: 'More fields', type: 'textarea', mono: true, value: pretty(tk.fields), placeholder: '{"category": "security"}',
+        hint: "As JSON, by the desk's own names: what its forms require, such as a caller, a category or a custom field.",
+      },
+      { id: 'tk-resolve', label: 'Resolve the ticket when the issue ends', type: 'checkbox', value: tk.resolve !== false, hint: 'Otherwise AgentGov adds a note that it ended, and someone resolves it there.' },
+      {
+        id: 'tk-resolve_fields', label: 'Resolve it with', type: 'textarea', mono: true, value: pretty(tk.resolve_fields), placeholder: '{"close_code": "Solution provided"}',
+        hint: "As JSON: what resolving takes there, if not the defaults (docs/tickets.md).",
+      },
+      {
+        id: 'min_severity', label: 'Minimum severity', type: 'select', value: d?.min_severity || (destFamily(kind0) === 'siem' ? 'info' : 'high'),
         options: ['info', 'low', 'medium', 'high', 'critical'].map((value) => ({ value, label: humanize(value) })),
         hint: 'For a chat, of findings: approval requests and kill switches always go.',
       },
@@ -7875,15 +7974,37 @@ async function destinationForm(d) {
         const family = destFamily(kind);
         for (const [key] of DEST_EVENTS.siem) field(`ev-siem-${key}`).hidden = family !== 'siem';
         for (const [key] of DEST_EVENTS.chat) field(`ev-chat-${key}`).hidden = family !== 'chat';
+        document.getElementById('dlg-sec-gets').hidden = family === 'desk';
+        document.getElementById('dlg-sec-tickets').hidden = family !== 'desk';
+        for (const id of ['tk-group', 'tk-groups', 'tk-only', 'tk-fields', 'tk-resolve', 'tk-resolve_fields']) field(id).hidden = family !== 'desk';
+        field('tk-table').hidden = kind !== 'servicenow';
+        field('tk-issue_type').hidden = kind !== 'jira';
+        field('tk-site').hidden = kind !== 'jira';
+        field('tk-requester').hidden = kind !== 'freshservice';
+        if (family === 'desk') {
+          const [label, placeholder, hint] = DESK_GROUP[kind];
+          field('tk-group').querySelector('label').firstChild.nodeValue = label;
+          controls['tk-group'].placeholder = placeholder;
+          const groupHint = field('tk-group').querySelector('.hint');
+          if (groupHint) groupHint.textContent = hint;
+          else field('tk-group').append(h('p', { class: 'hint' }, hint));
+        }
         field('url').hidden = family === 'chat';
         field('format').hidden = kind !== 'webhook';
-        if (field('backfill')) field('backfill').hidden = family === 'chat';
+        const severityHint = field('min_severity').querySelector('.hint');
+        if (severityHint) severityHint.textContent = family === 'desk' ? 'Issues from this severity up become tickets.' : 'For a chat, of findings: approval requests and kill switches always go.';
+        if (field('backfill')) {
+          field('backfill').hidden = family === 'chat';
+          field('backfill').querySelector('label').lastChild.nodeValue = family === 'desk'
+            ? 'Open tickets for the issues already open too, not only those from now on'
+            : 'Send it the ledger from its start, not from now';
+        }
         controls.url.placeholder = DEST_KINDS[kind][2] || '';
         const hint = field('url').querySelector('.hint');
         if (hint) hint.textContent = DEST_KINDS[kind][3] || '';
         const name = editing ? d.name : (controls.name.value || '<name>');
         secretHint.textContent = `Secret file: ${d?.secret?.file || `<destination secrets>/${name}`}. ${DEST_SECRET[kind]}`;
-        if (!editing && document.activeElement !== controls.min_severity) controls.min_severity.value = family === 'chat' ? 'high' : 'info';
+        if (!editing && document.activeElement !== controls.min_severity) controls.min_severity.value = family === 'siem' ? 'info' : 'high';
       };
       if (!editing) {
         controls.kind.addEventListener('change', show);
@@ -7894,16 +8015,32 @@ async function destinationForm(d) {
     submit: (v) => {
       const kind = editing ? d.kind : v.kind;
       const family = destFamily(kind);
-      const events = DEST_EVENTS[family].map(([key]) => key).filter((key) => v[`ev-${family}-${key}`]);
-      // A chat may take no alerts: a team's channel, for the issues its team posts there.
-      if (!events.length && family !== 'chat') throw new Error('Choose at least one kind of event to send it.');
-      const body = {
-        events, min_severity: v.min_severity, description: v.description, labels: parseLabels(v.labels),
-        ...(family === 'siem' ? { url: orNull(v.url) } : {}),
-        ...(kind === 'webhook' ? { format: v.format } : {}),
-      };
+      const body = { min_severity: v.min_severity, description: v.description, labels: parseLabels(v.labels) };
+      if (family === 'desk') {
+        const groups = parseTeamGroups(v['tk-groups']);
+        // Cleared settings go (null), so that an edit can take one out.
+        body.tickets = {
+          group: orNull(v['tk-group']),
+          groups: Object.keys(groups).length ? groups : null,
+          only_listed_teams: v['tk-only'] || null,
+          fields: jsonObject(v['tk-fields'], 'More fields'),
+          resolve: v['tk-resolve'] ? null : false,
+          resolve_fields: jsonObject(v['tk-resolve_fields'], 'Resolve it with'),
+          ...(kind === 'servicenow' ? { table: orNull(v['tk-table']) } : {}),
+          ...(kind === 'jira' ? { issue_type: orNull(v['tk-issue_type']), site: orNull(v['tk-site']) } : {}),
+          ...(kind === 'freshservice' ? { requester: orNull(v['tk-requester']) } : {}),
+        };
+        body.url = orNull(v.url);
+      } else {
+        const events = DEST_EVENTS[family].map(([key]) => key).filter((key) => v[`ev-${family}-${key}`]);
+        // A chat may take no alerts: a team's channel, for the issues its team posts there.
+        if (!events.length && family !== 'chat') throw new Error('Choose at least one kind of event to send it.');
+        body.events = events;
+        if (family === 'siem') body.url = orNull(v.url);
+        if (kind === 'webhook') body.format = v.format;
+      }
       if (editing) return api(`v1/destinations/${encodeURIComponent(d.name)}`, { method: 'PATCH', body, ifMatch: d.version });
-      return api('v1/destinations', { method: 'POST', body: { name: v.name, kind, ...body, ...(family === 'siem' && v.backfill ? { backfill: true } : {}) } });
+      return api('v1/destinations', { method: 'POST', body: { name: v.name, kind, ...body, ...(family !== 'chat' && v.backfill ? { backfill: true } : {}) } });
     },
   });
   if (!saved) return;
@@ -7914,7 +8051,8 @@ async function destinationForm(d) {
 
 async function testDestination(d) {
   const out = await api(`v1/destinations/${encodeURIComponent(d.name)}/test`, { method: 'POST' });
-  if (out.ok) toast(`Sent ${d.name} a test ${destFamily(d.kind) === 'chat' ? 'message' : 'event'}.`);
+  if (out.ok && out.message) toast(`${d.name}: ${out.message}.`);
+  else if (out.ok) toast(`Sent ${d.name} a test ${destFamily(d.kind) === 'chat' ? 'message' : 'event'}.`);
   else toast(`${d.name}: ${out.error}`, { tone: 'critical' });
   await refresh();
 }
@@ -7923,7 +8061,9 @@ async function pauseDestination(d) {
   const pause = d.status !== 'paused';
   const done = await ask({
     title: pause ? `Pause ${d.name}?` : `Resume ${d.name}?`,
-    text: pause ? 'It gets nothing until it is resumed, then everything it missed (alerts older than an hour excepted).' : 'It gets what it missed while it was paused, then what happens next.',
+    text: destFamily(d.kind) === 'desk'
+      ? (pause ? 'AgentGov opens no tickets there, and neither updates nor reads back the ones it has, until it is resumed.' : 'AgentGov opens the tickets due meanwhile, tells it what changed, and reads its tickets back.')
+      : (pause ? 'It gets nothing until it is resumed, then everything it missed (alerts older than an hour excepted).' : 'It gets what it missed while it was paused, then what happens next.'),
     tone: pause ? 'danger' : 'primary', iconName: pause ? 'minus' : 'play', confirm: pause ? 'Pause' : 'Resume',
     submit: () => api(`v1/destinations/${encodeURIComponent(d.name)}/${pause ? 'pause' : 'resume'}`, { method: 'POST' }),
   });

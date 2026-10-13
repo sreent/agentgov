@@ -325,6 +325,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   opinion on tool results, people's prompts and agents' answers
 * [Security operations](docs/secops.md): the ledger to SIEMs as OCSF events,
   alerts in Teams and Slack, and how much the security team's tools may do
+* [Tickets in service desks](docs/tickets.md): issues as tickets in ServiceNow, Jira Service
+  Management or Freshservice, kept in step with them both ways
 * [Running in production](docs/production.md): several control-plane replicas, people
   working at once, mutual TLS between the components, with certificates from SPIRE if you
   like, and signed policy bundles

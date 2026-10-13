@@ -86,7 +86,7 @@ answers, and `--hide` hides it; with the API, `GET` and `PUT /v1/start`
 
 | Role | Can |
 |---|---|
-| `admin` | Everything below, plus agent lifecycle, blueprints, access packages, [management rules](management-rules.md), tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations, teams and which [features](features.md) are used |
+| `admin` | Everything below, plus agent lifecycle, blueprints, access packages, [management rules](management-rules.md), tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations (SIEMs, chats and [service desks](tickets.md)), teams and which [features](features.md) are used |
 | `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks, but not those of agents they are accountable for; attest the agents it sponsors; classify agents for the [classification register](evidence.md#a-classification-register) |
 | `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings, acknowledge issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing. They start on **Ledger** → *Compliance* |
@@ -196,6 +196,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Choose how much is handed to the security team ([security operations](secops.md)) | Security operations → *Hand-off* | `agentgov secops level LEVEL`, `agentgov secops status` | `PUT /v1/features/security-operations`, `GET /v1/secops` |
 | Add, edit, test, pause, resume, replay and delete destinations (SIEMs, Teams, Slack) | Security operations → **Add destination**, **Test**, **Edit**, **Pause**/**Resume**, **Replay**, **Delete** | `agentgov destinations create\|update\|test\|pause\|resume\|replay\|delete` | `POST /v1/destinations`, `PATCH`/`DELETE /v1/destinations/{name}`, `POST /v1/destinations/{name}/{action}` |
 | Read the ledger as OCSF events | Security operations → *Events API* | `agentgov secops events [--after N] [--follow]` | `GET /v1/secops/events?after=N` |
+| Open issues as tickets in ServiceNow, Jira Service Management or Freshservice, kept in step ([tickets](tickets.md)) | Security operations → **Add destination** → a service desk; an issue's page → *Tickets* | `agentgov destinations create NAME --kind servicenow --url URL --group G`, `agentgov tickets list` | `POST /v1/destinations` with `kind` and `tickets`; `GET /v1/tickets` |
 | See what monitored controls would have stopped | Ledger → decision **Monitored** | `agentgov ledger tail --decision monitored` | `GET /v1/ledger?decision=monitored` |
 
 Two commands run where the control plane runs, against its database
