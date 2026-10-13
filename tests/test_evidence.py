@@ -478,7 +478,10 @@ class TestCompliance:
         assert control("Art. 14")["status"] == "partly"
         client.put("/v1/features/least-privilege", json={"mode": "monitor"}, headers=ADMIN)
         security = control("MEASURE 2.7", "nist-ai-rmf")
-        assert security["status"] == "partly" and "least-privilege" in security["gaps"][0]
+        # Set, but no call went through AgentGov's checks yet: nothing shows them working.
+        assert security["status"] == "configured"
+        assert "least-privilege" in security["gaps"][0]
+        assert "No call went through" in security["gaps"][-1]
         rt = client.app.state.rt  # type: ignore[attr-defined]
         with rt.db.session() as s:
             for decision, reason in [
@@ -492,7 +495,9 @@ class TestCompliance:
                 )
         counts = {e["label"]: e["value"] for e in security["evidence"]}
         assert counts["Calls refused"] == 0 and counts["Let through in monitor mode"] == 0
-        counts = {e["label"]: e["value"] for e in control("MEASURE 2.7", "nist-ai-rmf")["evidence"]}
+        security = control("MEASURE 2.7", "nist-ai-rmf")
+        assert security["status"] == "partly" and "least-privilege" in security["gaps"][0]
+        counts = {e["label"]: e["value"] for e in security["evidence"]}
         assert counts["Calls refused"] == 2 and counts["Let through in monitor mode"] == 1
         with rt.db.session() as s:
             s.get(LedgerEntry, 1).reason = "edited"

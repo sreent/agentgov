@@ -269,6 +269,18 @@ function personHome() {
   return `#/${personPages()[0]}`;
 }
 
+// Auditors, and no other role: they read reports, so their first page is Compliance.
+function isAuditor() {
+  const roles = me?.roles || [];
+  return roles.includes('auditor') && !roles.some((r) => ['admin', 'approver', 'secops'].includes(r));
+}
+
+// The page someone starts on, by what they do here.
+function home() {
+  if (isPerson()) return personHome();
+  return isAuditor() ? '#/ledger/compliance' : '#/overview';
+}
+
 // Reasons /auth/callback sends back (?sso_error=...). Only these fixed texts are shown.
 const SSO_ERRORS = {
   no_role: 'You signed in, but your account has no AgentGov role. Ask an administrator for agentgov-admin, agentgov-approver, agentgov-secops or agentgov-auditor.',
@@ -431,6 +443,7 @@ const STATUS = {
   compliance: {
     in_place: ['good', 'check-circle', 'In place'],
     partly: ['warning', 'alert-circle', 'Partly'],
+    configured: ['warning', 'eye', 'Configured, not observed'],
     not_set_up: ['neutral', 'minus', 'Not set up'],
     attention: ['critical', 'octagon', 'Needs attention'],
     outside: ['neutral', 'info', 'Outside AgentGov'],
@@ -958,7 +971,7 @@ async function route({ soft = false } = {}) {
     match = path.match(p.re);
     if (match) { page = p; break; }
   }
-  if (!page) { location.replace(isPerson() ? personHome() : '#/overview'); return; }
+  if (!page) { location.replace(home()); return; }
   if (isPerson() && !personPages().includes(page.nav)) { location.replace(personHome()); return; }
   const seq = ++renderSeq;
   setActiveNav(page.nav);
@@ -1077,7 +1090,7 @@ function enterApp() {
     link.closest('li').hidden = isPerson() && !personPages().includes(link.dataset.nav);
   }
   $('#nav-findings-label').textContent = isPerson() ? 'Your issues' : 'Findings';
-  if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', isPerson() ? personHome() : '#/overview');
+  if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', home());
   route();
   refreshBadges();
   getInfo().then(async (info) => {
@@ -6216,7 +6229,41 @@ async function renderCompliance({ params }) {
     h('p', { class: 'muted' }, l.valid
       ? `The ledger verifies: ${plural(l.checked - (l.from || 0), 'entry', 'entries')} in the database; ${plural(l.checkpoints, 'checkpoint')}, ${fmt(l.timestamped)} time-stamped${l.last_timestamp ? ` (last on ${l.last_timestamp.slice(0, 10)})` : ''}.`
       : 'The ledger\u2019s chain is broken: see the Entries tab.'),
+    coverageCard(report.coverage),
     h('div', { class: 'bp-grid' }, report.controls.map(complianceCard)));
+}
+
+// What AgentGov saw of the agents in the period, each counted once by the most it saw.
+const COVERAGE = [
+  ['calls_checked', 'Calls checked by AgentGov', 'good', 'shield-check'],
+  ['activity_only', 'Seen at work, calls not checked', 'warning', 'eye'],
+  ['inventory_only', 'In their platform\u2019s inventory only', 'neutral', 'platforms'],
+  ['not_seen', 'Not seen', 'critical', 'alert-circle'],
+];
+
+function coverageCard(c) {
+  if (!c) return null;
+  if (!c.agents) {
+    return card({ title: 'What AgentGov saw', body: emptyState('No agents yet', 'Register agents, or connect the platforms they run on.') });
+  }
+  const rows = COVERAGE.map(([key, label, tone, iconName]) => ({ label, tone, iconName, count: c[key] || 0, color: TONE_COLOR[tone] }));
+  const pct = (n) => `${Math.round((n / c.agents) * 100)}%`;
+  const more = c.not_seen - (c.not_seen_names || []).length;
+  return card({
+    title: 'What AgentGov saw',
+    sub: 'In the period. A control only works for the agents AgentGov sees: the rest of this report is about them.',
+    body: [
+      h('div', {}, h('div', { class: 'hero-figure' }, fmt(c.agents)), h('p', { class: 'hero-caption' }, 'agents in the inventory')),
+      h('div', { class: 'chart' }, h('div', { class: 'splitbar', role: 'img', 'aria-label': rows.map((r) => `${r.label}: ${r.count}`).join(', ') },
+        rows.filter((r) => r.count).map((r) => h('span', { style: `flex: ${r.count} 1 0px; background: ${r.color}`, title: `${r.label}: ${fmt(r.count)}` })))),
+      h('ul', { class: 'split-legend', role: 'list' }, rows.map((r) => h('li', {},
+        icon(r.iconName, { cls: `t-${r.tone}` }), h('span', {}, r.label),
+        h('span', { class: 'count' }, fmt(r.count)), h('span', { class: 'pct' }, pct(r.count))))),
+      c.not_seen ? h('p', { class: 'small' }, h('strong', {}, 'Not seen: '), (c.not_seen_names || []).join(', '), more > 0 ? ` and ${fmt(more)} more` : '', '.') : null,
+      c.platforms_not_read?.length ? callout('warning', 'triangle',
+        `Not read in the period, or the last read failed: ${c.platforms_not_read.join(', ')}. What AgentGov holds about their agents may be out of date.`) : null,
+    ],
+  });
 }
 
 function complianceCard(c) {

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.config import Settings
-from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, ToolServer
+from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, IntegrationState, ToolServer
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import (
     destinations,
@@ -30,6 +30,8 @@ from agentgov.registry import (
 
 # Failed deliveries in a row before a destination is a finding.
 FAILING = 3
+# Where the last scan's time is kept (an IntegrationState).
+SCANNED = "posture-scan"
 POSTURE_TYPES = {
     "agent.no_owner",
     "agent.no_sponsor",
@@ -271,6 +273,11 @@ def scan(
         else:
             findings.mark_unverified(session, types={type_}, reason=why)
     resolved = findings.resolve_absent(session, types=checked, present_keys=present)
+    # When it last ran, for the compliance reports: a check set up but never run shows
+    # nothing working (agentgov.compliance).
+    row = session.get(IntegrationState, SCANNED) or IntegrationState(key=SCANNED, data={})
+    row.data, row.updated_at = {"at": ids.isoformat(now), "agents": len(agents)}, now
+    session.add(row)
     return {
         "checked_agents": len(agents),
         "open_posture_findings": len(present),

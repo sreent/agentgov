@@ -4630,6 +4630,7 @@ EVIDENCE_DAYS = typer.Option(90, "--days", help="The period: the last N days.")
 STATUS_NAMES = {
     "in_place": "in place",
     "partly": "partly",
+    "configured": "configured, not observed",
     "not_set_up": "not set up",
     "attention": "NEEDS ATTENTION",
     "outside": "outside AgentGov",
@@ -4651,6 +4652,15 @@ def evidence_report(
         _print(report)
         return
     typer.echo(f"{report['framework']['title']}, the last {report['period']['days']} days")
+    c = report["coverage"]
+    typer.echo(
+        f"What AgentGov saw of the {c['agents']} agent{'' if c['agents'] == 1 else 's'}: "
+        f"{c['calls_checked']} had their calls checked, {c['activity_only']} were seen at "
+        f"work only, {c['inventory_only']} only in their platform's inventory, "
+        f"{c['not_seen']} not at all."
+    )
+    if c["platforms_not_read"]:
+        typer.echo(f"Not read in the period: {', '.join(c['platforms_not_read'])}.")
     rows = []
     for c in report["controls"]:
         evidence = "; ".join(f"{e['label']}: {e['value']}" for e in c["evidence"][:3])

@@ -128,7 +128,8 @@ reported since. An entry `retention.pruned` counts what went.
 
 ## Compliance reports
 
-A report takes a framework and a period, and says, control by control, what the framework
+A report takes a framework and a period. It says first what AgentGov saw of the agents in
+the period ([below](#what-agentgov-saw)), then, control by control, what the framework
 asks, what AgentGov does towards it, how far that is set up in this deployment, and the
 evidence: counts from the registry and the ledger over the period, with where to look.
 
@@ -136,13 +137,33 @@ evidence: counts from the registry and the ledger over the period, with where to
 |---|---|
 | In place | AgentGov does this here, and the evidence is there |
 | Partly | Set up in part: say, a control monitored rather than enforced, or agents without an owner. The report says what is missing |
+| Configured, not observed | Set up, but nothing in the period shows it working: no call went through AgentGov's checks, the posture checks never ran, nothing reached the security team, no platform was read. Often a component that isn't deployed, or isn't reached |
 | Not set up | The features that would do it are off |
 | Needs attention | Something is wrong: a broken chain, a failing destination |
 | Outside AgentGov | The framework asks it of the organisation: AgentGov records what bears on it |
 
 A report doesn't say that an organisation complies. That depends on its AI systems, its
 processes and its people, and is for its assessors to judge; the report and the evidence
-pack are for them.
+pack are for them. People with the `auditor` role, and no other, start on this page when
+they sign in.
+
+### What AgentGov saw
+
+A control only works for the agents AgentGov sees, so each report starts with what it saw
+of the agents in the inventory over the period. Each agent counts once, by the most
+AgentGov saw of it:
+
+| Seen | Means |
+|---|---|
+| Calls checked | AgentGov's policies decided on its calls: at the gateway, in the agent's own process, or through Copilot Studio's threat detection |
+| Seen at work | Its activity reached AgentGov (its telemetry, its platform's usage logs), but not its calls: what it did is known, not checked |
+| Inventory only | AgentGov read its platform's inventory in the period: its settings, not what it did |
+| Not seen | Nothing at all in the period. The report names some of them |
+
+It also names the platforms not read in the period, or whose last read failed: what
+AgentGov holds about their agents may be out of date. An agent that is only in a platform's
+inventory can still have an owner, sponsors, posture findings and a classification; the
+gateway's controls just don't reach it.
 
 **EU AI Act** (Regulation (EU) 2024/1689, as amended by Regulation (EU) 2026/1744, under
 which the obligations for high-risk AI systems apply from 2 December 2027 for Annex III
@@ -180,7 +201,7 @@ A zip for the last N days:
 
 | File | What it is |
 |---|---|
-| `reports/*.json`, `report.md` | The three frameworks' reports, as data and as a document |
+| `reports/*.json`, `report.md` | The three frameworks' reports, as data and as a document, each starting with what AgentGov saw |
 | `ledger.jsonl` | The ledger's entries in the period, as AgentGov wrote them: `agentgov ledger verify --file ledger.jsonl` checks them |
 | `checkpoints.json`, `checkpoints/*.txt`, `*.tsr` | The checkpoints, their archives, and each time-stamp with its statement, for `openssl ts -verify` |
 | `checkpoints/*.sigstore.json`, `transparency-log/` | Each checkpoint's entry in the transparency log, as a Sigstore bundle, with AgentGov's key, the log's, and a trusted root with the log, for `cosign verify-blob` or `agentgov ledger verify-log-entry` |
