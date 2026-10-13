@@ -84,7 +84,9 @@ def register_agent(
             approve = requested
         else:
             approve = not features.is_on(s, "registration-approval")
-        agent = agents.register(s, rt.settings, body, actor=principal.actor, approve=approve)
+        agent = agents.register(
+            s, rt.settings, body, actor=principal.actor, approve=approve, admin=principal.is_admin
+        )
         if text is not None:
             instructions.report(
                 s,
@@ -102,8 +104,15 @@ def register_agent(
 def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         agent = agents.get(s, ref)
-        # What Microsoft 365 or Copilot Studio reports, for agents that run there.
-        return {**agents.to_dict(agent), "platforms": platforms.for_agent(s, agent.id)}
+        return {
+            **agents.to_dict(agent),
+            # What Microsoft 365 or Copilot Studio reports, for agents that run there.
+            "platforms": platforms.for_agent(s, agent.id),
+            # The controls whose mode differs for it, and why (docs/features.md#exceptions).
+            "control_modes": features.exceptions_for(
+                agent, features.modes(s), features.all_scopes(s)
+            ),
+        }
 
 
 @router.get("/agents/{ref}/a2a", tags=["agents"])

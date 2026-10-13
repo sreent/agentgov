@@ -400,6 +400,9 @@ class FeatureSetting(Base):
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     changed_by: Mapped[str] = mapped_column(String(200))
     changed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # Its exceptions: another mode for the agents in a scope, the first that matches
+    # ({"mode", "scope", "note"}; docs/features.md#exceptions).
+    scopes: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, server_default="[]")
 
 
 class ApiKey(Base):

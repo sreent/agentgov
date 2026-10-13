@@ -313,6 +313,39 @@ test_least_privilege_off_neither_denies_nor_records if {
 	d.monitored == []
 }
 
+# An agent's own mode (docs/features.md#exceptions): its exceptions, from the bundle.
+with_agent_modes(modes, agent_modes) := object.union(with_modes(modes), {"agents": {"agt_support": object.union(
+	registry.agents.agt_support,
+	{"modes": agent_modes},
+)}})
+
+test_an_exception_monitors_a_control_for_its_agents_only if {
+	reg := with_agent_modes({"least-privilege": "enforce"}, {"least-privilege": "monitor"})
+	d := mcp.decision with input as call("agent-support-bot", "crm", "export_all") with data.registry as reg
+	d.effect == "allow"
+	d.monitored == ["least-privilege: crm/export_all is not granted to agent support-bot"]
+
+	# Others are still refused.
+	other := mcp.decision with input as call("agent-risky", "crm", "export_all") with data.registry as reg
+	other.effect == "deny"
+}
+
+test_an_exception_enforces_a_control_for_its_agents if {
+	reg := with_agent_modes({"least-privilege": "monitor"}, {"least-privilege": "enforce"})
+	d := mcp.decision with input as call("agent-support-bot", "crm", "export_all") with data.registry as reg
+	d.effect == "deny"
+}
+
+test_the_processor_asks_for_a_callers_modes if {
+	reg := with_agent_modes({"least-privilege": "enforce", "approvals": "enforce"}, {"approvals": "monitor"})
+	modes := ctx.caller_modes with input as {"agent": {"client_id": "agent-support-bot"}} with data.registry as reg
+	modes == {"least-privilege": "enforce", "approvals": "monitor"}
+
+	# A caller AgentGov doesn't know has the features' modes.
+	unknown := ctx.caller_modes with input as {"agent": {"client_id": "nobody"}} with data.registry as reg
+	unknown == {"least-privilege": "enforce", "approvals": "enforce"}
+}
+
 test_monitored_approval_lets_destructive_calls_through if {
 	d := mcp.decision with input as call("agent-support-bot", "crm", "delete_customer")
 		with data.registry as with_modes({"approvals": "monitor"})

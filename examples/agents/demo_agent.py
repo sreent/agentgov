@@ -729,7 +729,10 @@ async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
             allowed, payload = await call(client, "export_customers", {})
             report(allowed, payload, expect_allowed=False)
 
-            step("7. Monitor mode: try a control on real traffic before enforcing it")
+            step(
+                "7. Monitor mode: try a control on real traffic before enforcing it, for "
+                "every agent or for some"
+            )
             admin("PUT", "/v1/features/least-privilege", json={"mode": "monitor"})
             print("  least-privilege set to monitor")
             try:
@@ -746,6 +749,28 @@ async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
             finally:
                 admin("PUT", "/v1/features/least-privilege", json={"mode": "enforce"})
                 print("  least-privilege set back to enforce")
+            allowed, payload = await once_mode_applies(
+                client, "export_customers", {}, allowed=False
+            )
+            report(allowed, payload, expect_allowed=False)
+            # Or monitored for some agents only: an exception (docs/features.md#exceptions).
+            exception = {"mode": "monitor", "scope": {"blueprints": ["customer-support"]}}
+            admin("PUT", "/v1/features/least-privilege", json={"scopes": [exception]})
+            print("  least-privilege monitored for the customer-support blueprint's agents only")
+            try:
+                allowed, payload = await once_mode_applies(
+                    client, "export_customers", {}, allowed=True
+                )
+                report(allowed, payload, expect_allowed=True)
+                mine = admin("GET", f"/v1/agents/{name}").get("control_modes", {})
+                show(
+                    "its own mode:",
+                    mine.get("least-privilege", {}).get("mode") == "monitor",
+                    json.dumps(mine.get("least-privilege") or {}),
+                )
+            finally:
+                admin("PUT", "/v1/features/least-privilege", json={"scopes": []})
+                print("  exception removed")
             allowed, payload = await once_mode_applies(
                 client, "export_customers", {}, allowed=False
             )

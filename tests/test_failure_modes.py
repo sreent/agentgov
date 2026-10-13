@@ -55,7 +55,7 @@ class DecisionsDown(FakeOpa):
     """OPA that says what the modes are, but can't decide anything else."""
 
     async def evaluate(self, path: str, input_doc: dict[str, Any]):
-        if path == "registry/features":
+        if path in ("registry/features", "agentgov/context/caller_modes"):
             return self.modes, None
         raise OpaError("connection refused")
 

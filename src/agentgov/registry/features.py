@@ -30,7 +30,8 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.config import FEATURE_PRESETS, Settings
 from agentgov.db import mark_changed
-from agentgov.models import FeatureSetting, IntegrationState
+from agentgov.models import Agent, FeatureSetting, IntegrationState
+from agentgov.registry import scopes as scope_rules
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
 OFF, ON, MONITOR, ENFORCE = "off", "on", "monitor", "enforce"
@@ -767,6 +768,14 @@ GATEWAY_CONTROLS = (
     "external-decision-point",
 )
 GATEWAYS = ("mcp-gateway", "model-gateway", "a2a-gateway")
+# The controls whose mode can differ for some agents (docs/features.md#exceptions): every
+# control at the gateway but unknown-callers, whose callers aren't agents.
+SCOPABLE = tuple(key for key in GATEWAY_CONTROLS if key != "unknown-callers")
+# A label administrators put on an agent to exempt it from controls: "*", or the controls'
+# keys, comma-separated. For that agent, an enforced control it names is monitored.
+EXEMPT_LABEL = "agentgov/exempt-controls"
+# Exceptions a control has at most.
+MAX_SCOPES = 20
 
 
 def enforced_at_gateway(modes: dict[str, str]) -> list[str]:
@@ -791,10 +800,23 @@ class Preset:
     description: str
     # The modes it sets, given the current ones.
     sets: Callable[[dict[str, str]], dict[str, str]]
+    # The controls' exceptions it changes, given the current ones.
+    sets_scopes: Callable[[dict[str, list[dict[str, Any]]]], dict[str, list[dict[str, Any]]]] = (
+        lambda current: {}
+    )
 
 
 def _monitor(current: dict[str, str]) -> dict[str, str]:
     return {f.key: MONITOR for f in CATALOG if current[f.key] == ENFORCE and MONITOR in f.modes}
+
+
+def _monitor_scopes(current: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    """Exceptions that enforce a control for some agents are monitored too."""
+    return {
+        key: [{**e, "mode": MONITOR} if e["mode"] == ENFORCE else e for e in entries]
+        for key, entries in current.items()
+        if any(e["mode"] == ENFORCE for e in entries)
+    }
 
 
 def _inventory(current: dict[str, str]) -> dict[str, str]:
@@ -810,9 +832,11 @@ def _inventory(current: dict[str, str]) -> dict[str, str]:
 PRESETS = {
     "monitor": Preset(
         "Monitor everything",
-        "Every control in enforce mode goes to monitor: AgentGov records what each would have "
-        "done and stops nothing. Enforce them one at a time once their records look right.",
+        "Every control in enforce mode goes to monitor, and so do exceptions that enforce one "
+        "for some agents: AgentGov records what each would have done and stops nothing. "
+        "Enforce them one at a time once their records look right.",
         _monitor,
+        _monitor_scopes,
     ),
     "inventory": Preset(
         "Inventory only",
@@ -1019,6 +1043,19 @@ def preview_preset(session: Session, settings: Settings, name: str) -> dict[str,
             kept.append({**item, "reason": why})
         else:
             changes.append(item)
+    exceptions = {key: e for key, e in all_scopes(session).items() if key not in pinned}
+    for key, entries in preset.sets_scopes(exceptions).items():
+        for before, after in zip(exceptions[key], entries, strict=True):
+            if before["mode"] != after["mode"]:
+                changes.append(
+                    {
+                        "key": key,
+                        "title": BY_KEY[key].title,
+                        "scope": scope_rules.describe(before["scope"]),
+                        "from": before["mode"],
+                        "to": after["mode"],
+                    }
+                )
     return {
         "preset": name,
         "title": preset.title,
@@ -1033,7 +1070,14 @@ def apply_preset(session: Session, settings: Settings, name: str, *, actor: str)
     each change is a feature.changed entry that names the preset."""
     plan = preview_preset(session, settings, name)
     for change in plan["changes"]:
-        _set(session, BY_KEY[change["key"]], change["to"], actor=actor, pinned=False, preset=name)
+        if "scope" not in change:
+            _set(
+                session, BY_KEY[change["key"]], change["to"], actor=actor, pinned=False, preset=name
+            )
+    exceptions = all_scopes(session)
+    for key, entries in PRESETS[name].sets_scopes(exceptions).items():
+        if any(c["key"] == key and "scope" in c for c in plan["changes"]):
+            _set_scopes(session, BY_KEY[key], entries, actor=actor, preset=name)
     return plan
 
 
@@ -1055,6 +1099,160 @@ def apply_deployment_preset(session: Session, settings: Settings) -> None:
         state = IntegrationState(key=PRESET_STATE)
         session.add(state)
     state.data, state.updated_at = {"applied": name}, ids.utcnow()
+
+
+# ------------------------------------------------------------------- exceptions
+
+
+def check_scopes(f: Feature, value: Any, settings: Settings) -> list[dict[str, Any]]:
+    """A control's exceptions as the API takes them, checked: a list of its mode for the
+    agents in a scope, the first that matches an agent applying to it."""
+    if f.key not in SCOPABLE:
+        raise ValidationError(f"{f.key} applies alike to every agent: it takes no exceptions")
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValidationError("scopes is a list of {mode, scope, note}")
+    if len(value) > MAX_SCOPES:
+        raise ValidationError(f"a control takes {MAX_SCOPES} exceptions at most")
+    out = []
+    for i, item in enumerate(value):
+        where = f"scopes[{i}]"
+        if not isinstance(item, dict):
+            raise ValidationError(f"{where} is a mapping of mode, scope and note")
+        unknown = sorted(set(item) - {"mode", "scope", "note"})
+        if unknown:
+            raise ValidationError(f"{where}: unknown key(s) {', '.join(unknown)}")
+        mode = check_mode(f, item.get("mode"))
+        scope = scope_rules.parse(item.get("scope"), f"{where}.scope")
+        if not scope:
+            raise ValidationError(
+                f"{where}.scope names no agents: an exception for every agent is the mode itself"
+            )
+        reason = unmet(f.key, mode, settings)
+        if reason:
+            raise ValidationError(reason)
+        note = item.get("note")
+        if note is not None and (not isinstance(note, str) or len(note) > 500):
+            raise ValidationError(f"{where}.note is text of 500 characters at most")
+        entry: dict[str, Any] = {"mode": mode, "scope": scope}
+        if note and note.strip():
+            entry["note"] = note.strip()
+        out.append(entry)
+    return out
+
+
+def _scopes_weaken(f: Feature, mode: str, before: list[Any], after: list[Any]) -> bool:
+    """Whether new exceptions are weaker than the mode, or removed ones were stronger."""
+    rank = f.modes.index
+    added = [e for e in after if e not in before]
+    removed = [e for e in before if e not in after]
+    return any(rank(e["mode"]) < rank(mode) for e in added) or any(
+        rank(e["mode"]) > rank(mode) for e in removed
+    )
+
+
+def _set_scopes(
+    session: Session,
+    f: Feature,
+    new: list[dict[str, Any]],
+    *,
+    actor: str,
+    preset: str | None = None,
+) -> bool:
+    row = session.get(FeatureSetting, f.key)
+    before = list(row.scopes or []) if row is not None else []
+    if before == new:
+        return False
+    if row is None:
+        row = FeatureSetting(key=f.key, mode=f.default, pinned=False)
+        session.add(row)
+    row.scopes, row.changed_by, row.changed_at = new, actor, ids.utcnow()
+    words = "; ".join(f"{e['mode']} for {scope_rules.describe(e['scope'])}" for e in new)
+    details: dict[str, Any] = {"scopes_from": before, "scopes_to": new}
+    if preset:
+        details["preset"] = preset
+    ledger.append(
+        session,
+        type="feature.changed",
+        actor=actor,
+        resource=f"feature/{f.key}",
+        severity="warning" if _scopes_weaken(f, row.mode, before, new) else "info",
+        reason=f"{f.title}: exceptions {words or 'none'}"
+        + (f" (preset {preset})" if preset else ""),
+        details=details,
+    )
+    mark_changed(session, "features", f"feature:{f.key}")
+    return True
+
+
+def set_scopes(session: Session, settings: Settings, key: str, value: Any, *, actor: str) -> bool:
+    """An administrator's exceptions to a control; returns whether anything changed."""
+    f = feature(key)
+    new = check_scopes(f, value, settings)
+    row = session.get(FeatureSetting, key)
+    if row is not None and row.pinned:
+        raise Conflict(
+            f"{key} is set by the deployment (AGENTGOV_FEATURES), for every agent: its "
+            "exceptions can't be changed in the app"
+        )
+    return _set_scopes(session, f, new, actor=actor)
+
+
+def all_scopes(session: Session) -> dict[str, list[dict[str, Any]]]:
+    """Each control's exceptions that apply: none while the deployment pins the control."""
+    return {
+        row.key: list(row.scopes)
+        for row in _rows(session).values()
+        if row.scopes and not row.pinned and row.key in SCOPABLE
+    }
+
+
+def exempted(agent: Agent) -> set[str]:
+    """The controls the agent's EXEMPT_LABEL names ("*": all of them)."""
+    names = {n.strip() for n in str((agent.labels or {}).get(EXEMPT_LABEL, "")).split(",")}
+    return set(SCOPABLE) if "*" in names else names & set(SCOPABLE)
+
+
+def exceptions_for(
+    agent: Agent, current: dict[str, str], exceptions: dict[str, list[dict[str, Any]]]
+) -> dict[str, dict[str, str]]:
+    """The controls whose mode differs for ``agent``, with why: an exception's scope it is
+    in (the first), or its exemption label, which turns enforcement into monitoring."""
+    out: dict[str, dict[str, str]] = {}
+    for key, entries in exceptions.items():
+        entry = next((e for e in entries if scope_rules.matches(e["scope"], agent)), None)
+        if entry is not None and entry["mode"] != current.get(key):
+            out[key] = {"mode": entry["mode"], "why": scope_rules.describe(entry["scope"])}
+    for key in exempted(agent):
+        if out.get(key, {}).get("mode", current.get(key)) == ENFORCE:
+            out[key] = {"mode": MONITOR, "why": f"label {EXEMPT_LABEL}"}
+    return out
+
+
+def mode_for(session: Session, agent: Agent, key: str) -> str:
+    """A feature's mode for one agent: its exception's, or the feature's."""
+    current = {key: mode(session, key)}
+    exceptions = {k: v for k, v in all_scopes(session).items() if k == key}
+    return exceptions_for(agent, current, exceptions).get(key, {}).get("mode", current[key])
+
+
+def strictest(
+    current: dict[str, str], exceptions: dict[str, list[dict[str, Any]]]
+) -> dict[str, str]:
+    """Each feature's strongest mode for any agent: what the gateway is set up for, and
+    what counts as enforced when nothing is known of the caller."""
+    out = dict(current)
+    for key, entries in exceptions.items():
+        rank = BY_KEY[key].modes.index
+        for entry in entries:
+            if rank(entry["mode"]) > rank(out[key]):
+                out[key] = entry["mode"]
+    return out
+
+
+def strictest_modes(session: Session) -> dict[str, str]:
+    return strictest(modes(session), all_scopes(session))
 
 
 def describe(session: Session, settings: Settings, key: str | None = None) -> list[dict[str, Any]]:
@@ -1088,11 +1286,23 @@ def describe(session: Session, settings: Settings, key: str | None = None) -> li
                 "unavailable": {
                     m: reason for m in f.modes if (reason := unmet(f.key, m, settings))
                 },
+                # Its mode for some agents (docs/features.md#exceptions); while the
+                # deployment pins it, none apply.
+                "scopable": f.key in SCOPABLE,
+                "scopes": [
+                    {**e, "describe": scope_rules.describe(e["scope"])}
+                    for e in ((row.scopes or []) if row is not None else [])
+                ],
             }
         )
     return out
 
 
-def chosen(session: Session) -> dict[str, str]:
-    """Modes administrators chose (for export: pins belong to the deployment)."""
-    return {row.key: row.mode for row in _rows(session).values() if not row.pinned}
+def chosen(session: Session) -> dict[str, dict[str, Any]]:
+    """Modes, and exceptions, administrators chose (for export: pins belong to the
+    deployment)."""
+    return {
+        row.key: {"mode": row.mode, **({"scopes": list(row.scopes)} if row.scopes else {})}
+        for row in _rows(session).values()
+        if not row.pinned
+    }

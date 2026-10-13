@@ -229,7 +229,8 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             or opa_input.get("phase", "request") != "request"
         ):
             return decision, decision_id
-        mode = (await self.features.current()).get("external-decision-point", "off")
+        caller = opa_input.get("agent") if isinstance(opa_input.get("agent"), dict) else None
+        mode = (await self.features.for_caller(caller)).get("external-decision-point", "off")
         if mode == "off":
             return decision, decision_id
 
@@ -366,6 +367,13 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
     def _identity(meta: dict[str, Any]) -> dict[str, Any]:
         return {k: meta[k] for k in ("client_id", "agent_id", "subject") if meta.get(k)}
 
+    def _caller(self, message: Any) -> dict[str, Any]:
+        """Who sent a message the processor failed on, if that much can be read."""
+        try:
+            return self._identity(_struct(message.metadata_context))
+        except Exception:
+            return {}
+
     @staticmethod
     def holder(identity: dict[str, Any]) -> dict[str, Any] | None:
         """The agent a call's token names, for refusals made before policy looks it up:
@@ -409,7 +417,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         try:
             return await self._check_request(request, trace_id_of(context, request.headers))
         except Exception as exc:
-            if self.unchecked(self.features.last()):
+            if self.unchecked(self.features.last(self._caller(request))):
                 log.exception("CheckRequest failed; letting the call through unchecked")
                 server = (list(request.service_names) or ["unknown"])[0]
                 self.note_unchecked(
@@ -445,7 +453,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         chain, unusable = self.delegation(_header(request.headers, chains.HEADER), identity, person)
         if chain is not None and person is None:
             person = chain.person
-        modes = await self.features.current()
+        modes = await self.features.for_caller(identity)
         inspection = await self._inspect(
             payload, protect=modes["data-protection"] != "off", check_injection=False
         )
@@ -621,7 +629,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         try:
             return await self._check_response(request, trace_id_of(context))
         except Exception as exc:
-            if self.unchecked(self.features.last()):
+            if self.unchecked(self.features.last(self._caller(request))):
                 log.exception("CheckResponse failed; passing the result on unchecked")
                 server = (list(request.service_names) or ["unknown"])[0]
                 self.note_unchecked(
@@ -656,7 +664,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
 
         started = time.perf_counter()
         target = (meta.get("request") or {}).get("agentgov_target") or "unknown"
-        modes = await self.features.current()
+        modes = await self.features.for_caller(identity)
         inspection = await self._inspect(
             result,
             protect=modes["data-protection"] != "off",
@@ -789,7 +797,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         result: dict[str, Any],
     ) -> pb.McpResponseResult:
         tools = [t for t in result.get("tools") or [] if isinstance(t, dict)]
-        modes = await self.features.current()
+        modes = await self.features.for_caller(identity)
         integrity = modes["tool-integrity"]
         poisoned = detectors.scan_tool_definitions(tools) if integrity != "off" else {}
         self._spawn(self._report_catalog(server, tools, poisoned))

@@ -548,10 +548,12 @@ class GatewayConfigWriter:
                     select(Agent).where(Agent.a2a_url.is_not(None)).order_by(Agent.name)
                 ).unique()
             )
+            # Ready for the strictest mode any agent has: the gateway can't tell agents
+            # apart, the processor and OPA do (docs/features.md#exceptions).
             return render(
                 servers,
                 self.settings,
-                features.modes(session),
+                features.strictest_modes(session),
                 model_providers.list_all(session),
                 agents,
             )

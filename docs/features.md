@@ -249,17 +249,61 @@ can reach.
    warning. Its reason starts with `monitored:` and its details list what each control
    would have done.
 3. Fix what you find. For example, grant the tools agents legitimately need.
-4. Enforce: `agentgov features set least-privilege enforce`.
+4. Enforce: `agentgov features set least-privilege enforce`, or first only for some agents
+   ([exceptions](#exceptions)): `agentgov features scope least-privilege enforce --team
+   payments`.
+
+## Exceptions
+
+A control at the gateway can have another mode for some agents: enforced for one team
+while the rest are monitored, or monitored for a team that isn't ready yet while the rest
+are enforced. Each exception is a mode and a scope, which names agents as
+[management rules](management-rules.md#which-agents) do: by blueprint, team (the agent's
+own, or its blueprint's), environment, the platform it runs on (`gateway` for agents
+AgentGov's gateway serves) and labels; every key a scope has must match. An agent takes
+the mode of the first exception whose scope it is in, and the control's mode otherwise.
+`unknown-callers` has none: its callers aren't agents.
+
+| | How |
+|---|---|
+| Admin UI | **Features**: **Add an exception** under a control's mode; the agent's page lists the controls whose mode differs for it, and why |
+| CLI | `agentgov features scope least-privilege monitor --environment dev`, `agentgov features unscope least-privilege 1`, `agentgov features get least-privilege` |
+| API | `PUT /v1/features/{feature}` with `{"scopes": [{"mode": "monitor", "scope": {"environments": ["dev"]}, "note": "..."}]}` (the whole list); `control_modes` in `GET /v1/agents/{agent}` |
+| Manifests | `kind: Feature` with `spec.scopes`, as the API takes them |
+
+An administrator can also exempt one agent: its label `agentgov/exempt-controls` names the
+controls (`least-privilege,tool-integrity`), or all of them (`*`), that are monitored for
+it while they are enforced for others. Labels under `agentgov/`, this one and
+`agentgov/exempt-rules`, are set by administrators only: registering an agent with one
+takes the administrator role.
+
+Every change to a control's exceptions is a `feature.changed` entry in the ledger, a
+warning when it weakens the control for some agents. A feature the deployment pins
+applies its pinned mode to every agent: its exceptions don't apply while it is pinned,
+and can't be changed in the app. The `monitor` [starting point](#starting-points) also
+monitors the exceptions that enforce a control.
+
+Scopes match what an agent's registration says (its blueprint, team, environment and
+labels), and registrars choose those when they register an agent: with
+`registration-approval` on, an administrator sees them before the agent is active. The
+gateway can't tell agents apart, so it is set up for the strictest mode any agent has:
+`AGENTGOV_GATEWAY_FAILURE_MODE=modes` refuses what it can't check while a control is
+enforced for any agent, and the Features page judges each feature by the strictest mode
+too. The processor and OPA apply each agent's own mode to its calls. Compliance reports
+say which safeguards are enforced for some agents only, and the evidence pack has the
+exceptions (`feature-exceptions.json`).
 
 ## How each part applies the modes
 
-* **OPA.** The bundle carries every mode as `data.registry.features`. The built-in
-  policies apply each control as its mode says. They return what monitored controls
+* **OPA.** The bundle carries every mode as `data.registry.features`, and each agent's
+  [exceptions](#exceptions) as `data.registry.agents.<id>.modes`. The built-in
+  policies apply each control as its mode for the calling agent says. They return what monitored controls
   would have done as `monitored` in the decision. An organisation policy can read the
   modes too, with `data.agentgov.context.enforced("approvals")`, `monitored(...)` and
   `mode(...)`. Its `deny` always applies; its `require_approval` follows `approvals`,
   and its `redact` follows `data-protection`.
-* **The governance processor** reads the modes from OPA at most five seconds old. It
+* **The governance processor** reads the modes from OPA at most five seconds old, and each
+  caller's own (`data.agentgov.context.caller_modes`) the same way. It
   doesn't inspect what an off control would look at, and it records `monitored` with
   each decision.
 * **The gateway's configuration** follows `mcp-gateway`, `model-gateway`, `a2a-gateway`,

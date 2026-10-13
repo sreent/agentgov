@@ -9,7 +9,12 @@ registry := data.registry
 # "off", "monitor" or "enforce"; a bundle without modes, or a test, enforces them.
 features := object.get(registry, "features", {})
 
-mode(key) := object.get(features, key, "enforce")
+# A feature's mode for the calling agent: its own, where an exception's scope takes it in
+# or its agentgov/exempt-controls label exempts it (docs/features.md#exceptions); else
+# the feature's.
+mode(key) := m if {
+	m := agent.modes[key]
+} else := object.get(features, key, "enforce")
 
 enforced(key) if mode(key) == "enforce"
 
@@ -30,6 +35,10 @@ agent_id := id if {
 }
 
 agent := registry.agents[agent_id]
+
+# Every feature's mode for the calling agent (the governance processor asks:
+# agentgov.processor.modes).
+caller_modes := {key: mode(key) | some key, _ in features}
 
 server := registry.toolservers[input.resource.server]
 

@@ -17,7 +17,9 @@ spec:
 ```
 
 A ``Feature`` sets how strictly one of AgentGov's features applies
-(docs/features.md): ``metadata.name`` is the feature, ``spec.mode`` its mode.
+(docs/features.md): ``metadata.name`` is the feature, ``spec.mode`` its mode, and for a
+control ``spec.scopes`` its exceptions, its mode for the agents in a scope
+(docs/features.md#exceptions).
 
 Applying is idempotent: unchanged resources are reported as ``unchanged``.
 Resources are applied in dependency order (features first, then destinations, the teams
@@ -124,10 +126,19 @@ def apply(
 
 
 def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
-    if set(spec) - {"name", "mode", "labels"}:
-        raise ValidationError(f"feature {spec['name']}: spec takes only mode")
+    if set(spec) - {"name", "mode", "scopes", "labels"}:
+        raise ValidationError(f"feature {spec['name']}: spec takes only mode and scopes")
+    if "mode" not in spec and "scopes" not in spec:
+        raise ValidationError(f"feature {spec['name']}: spec needs mode, scopes or both")
+    changed = False
     try:
-        changed = features.set_mode(session, settings, spec["name"], spec.get("mode"), actor=actor)
+        if "mode" in spec:
+            changed = features.set_mode(session, settings, spec["name"], spec["mode"], actor=actor)
+        if "scopes" in spec:
+            changed = (
+                features.set_scopes(session, settings, spec["name"], spec["scopes"], actor=actor)
+                or changed
+            )
     except NotFound as exc:
         raise ValidationError(str(exc)) from None
     return "configured" if changed else "unchanged"
@@ -301,7 +312,7 @@ def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: st
 def export(session: Session) -> list[dict[str, Any]]:
     # Features administrators chose; the deployment's pins belong to the deployment.
     docs: list[dict[str, Any]] = [
-        _doc("Feature", key, {"mode": mode}) for key, mode in features.chosen(session).items()
+        _doc("Feature", key, spec) for key, spec in features.chosen(session).items()
     ]
     # Where events and alerts go; their credentials are files, never exported.
     for destination in destinations.list_all(session):

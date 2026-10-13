@@ -200,7 +200,9 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
     }
     return Situation(
         settings=settings,
-        modes=features.modes(session),
+        # The strictest mode any agent has: a control enforced for some agents can refuse
+        # their calls (docs/features.md#exceptions).
+        modes=features.strictest_modes(session),
         control_plane=rt.health.get(),
         processors=reports(session),
         connections={row["key"]: row for row in connections.state(session, settings)},

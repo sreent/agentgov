@@ -51,7 +51,7 @@ from agentgov.models import (
     RuleMatch,
 )
 from agentgov.platforms import connections
-from agentgov.registry import access_packages, features, findings, teams, validation
+from agentgov.registry import access_packages, features, findings, scopes, teams, validation
 from agentgov.registry import agents as agents_svc
 from agentgov.registry.errors import Conflict, NotFound, RegistryError, ValidationError
 from agentgov.registry.versions import edited, start_edit
@@ -89,7 +89,7 @@ CONDITIONS = (
     "risk_level",
     "status",
 )
-SCOPES = ("blueprints", "teams", "environments", "platforms", "labels")
+SCOPES = scopes.KEYS
 # The statuses a rule can look for (deleted agents are no rule's business).
 STATUSES = (PENDING, ACTIVE, BLOCKED, DISCOVERED)
 ISSUE_SEVERITIES = ("low", "medium", "high", "critical")
@@ -223,26 +223,7 @@ def _conditions(value: Any) -> dict[str, Any]:
 
 
 def _scope(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValidationError(f"scope is a mapping of {', '.join(SCOPES)}")
-    unknown = sorted(set(value) - set(SCOPES))
-    if unknown:
-        raise ValidationError(
-            f"unknown scope key(s) {', '.join(unknown)}; a rule's scope is {', '.join(SCOPES)}"
-        )
-    out: dict[str, Any] = {}
-    for key, raw in value.items():
-        if key == "labels":
-            labels = validation.labels(raw)
-            if labels:
-                out[key] = labels
-        else:
-            items = validation.string_list(raw, f"scope.{key}")
-            if items:
-                out[key] = items
-    return out
+    return scopes.parse(value)
 
 
 def _params(session: Session, action: str, value: Any) -> dict[str, Any]:
@@ -507,9 +488,7 @@ def _context(session: Session, now: datetime, feature: str) -> _Context:
     return _Context(now, feature, agents, dict(open_findings), holding, _usage(session, now))
 
 
-def platform(agent: Agent) -> str:
-    """Where the agent runs: "gateway", or the platform that runs it."""
-    return (agent.source or "")[len("platform:") :] if agent.on_platform else "gateway"
+platform = scopes.platform
 
 
 def _platform_name(agent: Agent) -> str:
@@ -517,8 +496,7 @@ def _platform_name(agent: Agent) -> str:
     return PLATFORMS.get(key, key)
 
 
-def _team(agent: Agent) -> str | None:
-    return agent.team or (agent.blueprint.team if agent.blueprint else None)
+_team = scopes.team
 
 
 def exempt(rule: ManagementRule, agent: Agent) -> bool:
@@ -527,20 +505,7 @@ def exempt(rule: ManagementRule, agent: Agent) -> bool:
 
 
 def in_scope(rule: ManagementRule, agent: Agent) -> bool:
-    if exempt(rule, agent):
-        return False
-    scope = rule.scope or {}
-    blueprint = agent.blueprint.name if agent.blueprint else None
-    if scope.get("blueprints") and blueprint not in scope["blueprints"]:
-        return False
-    if scope.get("teams") and _team(agent) not in scope["teams"]:
-        return False
-    if scope.get("environments") and agent.environment not in scope["environments"]:
-        return False
-    if scope.get("platforms") and platform(agent) not in scope["platforms"]:
-        return False
-    labels = agent.labels or {}
-    return all(labels.get(k) == v for k, v in (scope.get("labels") or {}).items())
+    return not exempt(rule, agent) and scopes.matches(rule.scope or {}, agent)
 
 
 def _applies(rule: ManagementRule, agent: Agent, row: RuleMatch | None, ctx: _Context) -> bool:

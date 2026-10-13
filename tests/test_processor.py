@@ -34,8 +34,8 @@ class FakeOpa:
     async def evaluate(self, path: str, input_doc: dict[str, Any]):
         if self.fail:
             raise OpaError("down")
-        if path == "registry/features":
-            return self.modes, None
+        if path in ("registry/features", "agentgov/context/caller_modes"):
+            return self.modes, None  # the features' modes, or a caller's (here the same)
         self.inputs.append((path, input_doc))
         if path.endswith("list_view"):
             return {"agent": AGENT, "visible": self.visible or []}, None

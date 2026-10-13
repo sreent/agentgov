@@ -229,7 +229,7 @@ class Message:
         try:
             return await self._mask(body)
         except Exception as exc:
-            if self.p.unchecked(self.p.features.last()):
+            if self.p.unchecked(self.p.features.last(self.identity)):
                 log.exception("masking a message to agent %s failed; it goes on", self.target)
                 self.p.note_unchecked(
                     f"masking it failed: {type(exc).__name__}",
@@ -253,7 +253,7 @@ class Message:
         parts = message.get("parts") if message is not None else None
         if not isinstance(parts, list) or not parts:
             return body
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(self.identity)
         if modes["a2a-masking"] != "enforce" or modes["data-protection"] == "off":
             return body
         inspection = await self.p._inspect(parts, protect=True, check_injection=False)
@@ -363,7 +363,7 @@ class Answer:
     async def _withheld_unchecked(self) -> bool:
         """Whether an answer that can't be checked is withheld: while a control that
         looks at answers is enforced, unless AGENTGOV_GATEWAY_FAILURE_MODE is open."""
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(self.identity)
         enforced = "enforce" in (modes["data-protection"], modes["prompt-injection"])
         return enforced and not self.p.unchecked(modes)
 
@@ -407,7 +407,7 @@ class Answer:
         try:
             return await self._decide(value)
         except Exception as exc:
-            if not self.p.unchecked(self.p.features.last()):
+            if not self.p.unchecked(self.p.features.last(self.identity)):
                 raise
             log.exception("checking an answer from agent %s failed; it goes on", self.target)
             why = f"the governance processor failed: {type(exc).__name__}"
@@ -419,7 +419,7 @@ class Answer:
         rpc = value if isinstance(value, dict) else {}
         key = next((k for k in ("result", "error") if k in rpc), None)
         content = value[key] if key else value
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(self.identity)
         inspection = await self.p._inspect(
             content,
             protect=modes["data-protection"] != "off",

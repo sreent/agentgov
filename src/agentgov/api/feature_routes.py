@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, Request
 from agentgov import health
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.registry import features
+from agentgov.registry.errors import ValidationError
 
 router = APIRouter(prefix="/v1", tags=["features"])
 read = require(*READ_ROLES)
@@ -21,7 +22,9 @@ def _described(s: Any, rt: Any, key: str | None = None) -> list[dict[str, Any]]:
     items = features.describe(s, rt.settings, key)
     situation = health.situation(s, rt.settings, rt)
     for item in items:
-        item.update(health.assess(features.BY_KEY[item["key"]], item["mode"], situation))
+        # As strict as it is for any agent: off, but enforced for some, it isn't off.
+        mode = situation.modes.get(item["key"], item["mode"])
+        item.update(health.assess(features.BY_KEY[item["key"]], mode, situation))
     return items
 
 
@@ -81,9 +84,16 @@ def set_feature(
     body: dict[str, Any] = Body(...),
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
-    """Choose a feature's mode: ``{"mode": "monitor"}``. Features the deployment pins
-    (AGENTGOV_FEATURES) can only be changed there."""
+    """Choose a feature's mode, ``{"mode": "monitor"}``, and for a control its exceptions,
+    ``{"scopes": [{"mode": "enforce", "scope": {"teams": ["payments"]}}]}``: its mode for
+    the agents in a scope, the first that matches (docs/features.md#exceptions). Features
+    the deployment pins (AGENTGOV_FEATURES) can only be changed there."""
+    if "mode" not in body and "scopes" not in body:
+        raise ValidationError("give the feature's mode, its exceptions (scopes), or both")
     rt = request.app.state.rt
     with rt.db.session() as s:
-        features.set_mode(s, rt.settings, key, body.get("mode"), actor=principal.actor)
+        if "mode" in body:
+            features.set_mode(s, rt.settings, key, body.get("mode"), actor=principal.actor)
+        if "scopes" in body:
+            features.set_scopes(s, rt.settings, key, body.get("scopes"), actor=principal.actor)
         return _described(s, rt, key)[0]

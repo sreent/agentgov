@@ -2754,13 +2754,15 @@ def features_list() -> None:
         {
             "feature": f["key"],
             "mode": f["mode"],
+            # Its mode for some agents: how many exceptions (agentgov features get shows them).
+            "exceptions": len(f.get("scopes") or []) or "",
             "status": f.get("status"),
             "set_by": f["set_by"],
             "does": (f.get("problems") or [f["effect"]])[0],
         }
         for f in view["features"]
     ]
-    _table(rows, ["feature", "mode", "status", "set_by", "does"])
+    _table(rows, ["feature", "mode", "exceptions", "status", "set_by", "does"])
 
 
 @app.command()
@@ -2824,6 +2826,74 @@ def features_set(
         )
     out = _call("PUT", f"/v1/features/{quote(key)}", json={"mode": mode})
     _done("feature", key, f"{out['mode']}: {out['effect']}")
+
+
+@features_app.command("scope")
+def features_scope(
+    key: str,
+    mode: str = typer.Argument(..., help="The control's mode for these agents."),
+    blueprint: list[str] = typer.Option(None, "--blueprint", help="Repeatable."),
+    team: list[str] = typer.Option(None, "--team", help="Repeatable."),
+    environment: list[str] = typer.Option(None, "--environment", help="Repeatable."),
+    platform: list[str] = typer.Option(
+        None, "--platform", help="gateway, aws, microsoft-365, ... Repeatable."
+    ),
+    label: list[str] = typer.Option(None, "--label", help="key=value. Repeatable."),
+    note: str | None = typer.Option(None, "--note", help="Why, for whoever reads it next."),
+    yes: bool = YES,
+) -> None:
+    """Add an exception to a control: its mode for the agents in a scope (every option
+    given must match). The first exception that matches an agent applies to it."""
+    current = _call("GET", f"/v1/features/{quote(key)}")
+    scope: dict[str, Any] = {
+        k: _split(v)
+        for k, v in (
+            ("blueprints", blueprint),
+            ("teams", team),
+            ("environments", environment),
+            ("platforms", platform),
+        )
+        if v
+    }
+    if label:
+        scope["labels"] = _labels(label)
+    if not scope:
+        _fail("say which agents: --blueprint, --team, --environment, --platform or --label")
+    entry: dict[str, Any] = {"mode": mode, "scope": scope}
+    if note:
+        entry["note"] = note
+    modes = current["modes"]
+    if mode in modes and modes.index(mode) < modes.index(current["mode"]):
+        _confirm(f"{current['title']}: {mode} for these agents, {current['mode']} for others?", yes)
+    scopes = [{k: v for k, v in e.items() if k != "describe"} for e in current.get("scopes") or []]
+    out = _call("PUT", f"/v1/features/{quote(key)}", json={"scopes": [*scopes, entry]})
+    _done(
+        "feature",
+        key,
+        f"{len(out['scopes'])} exception(s): "
+        + "; ".join(f"{e['mode']} for {e['describe']}" for e in out["scopes"]),
+    )
+
+
+@features_app.command("unscope")
+def features_unscope(
+    key: str,
+    number: int = typer.Argument(
+        ..., help="Which exception, as agentgov features get lists them (1 is the first)."
+    ),
+    yes: bool = YES,
+) -> None:
+    """Remove one of a control's exceptions."""
+    current = _call("GET", f"/v1/features/{quote(key)}")
+    scopes = [{k: v for k, v in e.items() if k != "describe"} for e in current.get("scopes") or []]
+    if not 1 <= number <= len(scopes):
+        _fail(f"{key} has {len(scopes)} exception(s)")
+    gone = current["scopes"][number - 1]
+    _confirm(f"{current['title']}: remove {gone['mode']} for {gone['describe']}?", yes)
+    out = _call(
+        "PUT", f"/v1/features/{quote(key)}", json={"scopes": scopes[: number - 1] + scopes[number:]}
+    )
+    _done("feature", key, f"{len(out['scopes'])} exception(s) left")
 
 
 @features_app.command("presets")

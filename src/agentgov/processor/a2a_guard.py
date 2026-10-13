@@ -76,7 +76,7 @@ class A2AGuard:
         try:
             return await self._check(target, request)
         except Exception as exc:
-            if self.p.unchecked(self.p.features.last()):
+            if self.p.unchecked(self.p.features.last(ModelGuard._identity(request.headers))):
                 log.exception("checking a call to agent %s failed; letting it through", target)
                 self.p.note_unchecked(
                     f"the governance processor failed: {type(exc).__name__}",
@@ -111,7 +111,7 @@ class A2AGuard:
         person = ModelGuard._person(headers)
         trace_id = trace_id_from([headers.get("traceparent") or ""])
         parts = message.get("parts") if isinstance(message.get("parts"), list) else []
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(identity)
         inspection = await self.p._inspect(
             parts, protect=modes["data-protection"] != "off", check_injection=False
         )

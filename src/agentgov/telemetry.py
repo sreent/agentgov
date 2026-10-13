@@ -165,6 +165,7 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
     seen_agents: set[str] = set()
     reported: dict[str, str] = {}
     modes = features.modes(session)
+    exceptions = features.all_scopes(session)
     # Where agents serve A2A, to see calls that went straight there.
     served = reachability.endpoints(session, modes)
     around: set[tuple[str | None, str, str]] = set()
@@ -221,8 +222,9 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
             tool = attrs.get("gen_ai.tool.name") or "unknown"
             server = attrs.get("agentgov.server") or "local"
             discovery.record_activity(session, agent.id, when=when, tool_calls=1)
+            own = features.exceptions_for(agent, modes, exceptions).get("least-privilege")
             if (
-                modes["least-privilege"] != features.OFF
+                (own["mode"] if own else modes["least-privilege"]) != features.OFF
                 and agent.status == ACTIVE
                 and not granted(agents_svc.effective_grants(agent), server, tool)
                 and not granted(

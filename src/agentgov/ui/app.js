@@ -2445,6 +2445,9 @@ function identityCard(a) {
         a.platform ? ['Platform', a.platform] : null,
         (a.models || []).length ? ['Models', h('div', { class: 'chip-row' }, a.models.map((m) => plainChip(m, { mono: true })))] : null,
         labels.length ? ['Labels', h('div', { class: 'chip-row' }, labels.map(([k, v]) => plainChip(`${k}=${v}`, { mono: true })))] : null,
+        Object.keys(a.control_modes || {}).length ? ['Controls for it', h('div', { class: 'stack-tight' },
+          Object.entries(a.control_modes).map(([key, c]) => h('div', {},
+            h('a', { href: '#/features' }, key), `: ${(MODE_WORDS[c.mode] || c.mode).toLowerCase()} (${c.why})`)))] : null,
         external.length ? ['External IDs', h('div', { class: 'chip-row' }, external.map(([k, v]) => plainChip(`${k}: ${v}`, { mono: true })))] : null,
         ['Created', [timeEl(a.created_at), a.created_by ? ` by ${a.created_by}` : '']],
         ['Last seen', timeEl(a.last_seen_at, { empty: 'Never' })],
@@ -6352,7 +6355,7 @@ function featuresCard(title, list) {
         h('td', { 'data-label': 'Feature' },
           h('span', { class: 'cell-title' }, f.title), h('div', { class: 'cell-sub' }, f.description),
           f.needs ? h('div', { class: 'cell-sub' }, `Needs ${f.needs}.`) : null),
-        h('td', { 'data-label': 'Mode' }, modeControl(f)),
+        h('td', { 'data-label': 'Mode' }, modeControl(f), exceptionsBlock(f)),
         h('td', { 'data-label': 'Now' }, featureNow(f), featureProvenance(f))))))),
   });
 }
@@ -6374,6 +6377,83 @@ function featureProvenance(f) {
   }
   if (f.set_by === 'admin') return h('div', { class: 'cell-sub' }, `Set by ${f.changed_by} `, timeEl(f.changed_at));
   return h('div', { class: 'cell-sub' }, 'The default');
+}
+
+// A control's exceptions: its mode for the agents in a scope, the first that matches.
+function plainScopes(f) {
+  return (f.scopes || []).map(({ describe, ...e }) => e);
+}
+
+function exceptionsBlock(f) {
+  if (!f.scopable) return null;
+  const pinned = f.set_by === 'deployment';
+  const editable = can('admin') && !pinned;
+  const list = f.scopes || [];
+  if (!list.length && !editable) return null;
+  return h('div', { class: 'exceptions' },
+    list.length ? h('ul', { class: 'exception-list', role: 'list' }, list.map((e, i) => h('li', {},
+      plainChip(MODE_WORDS[e.mode] || e.mode, { tone: e.mode === 'enforce' ? 'good' : e.mode === 'monitor' ? 'warning' : null }),
+      h('span', { class: 'exception-scope' }, ruleScope(e.scope), e.note ? h('span', { class: 'cell-sub' }, ` (${e.note})`) : null),
+      editable ? h('button', {
+        type: 'button', class: 'icon-btn', title: 'Remove this exception',
+        'aria-label': `Remove the exception: ${MODE_WORDS[e.mode] || e.mode} for ${ruleScope(e.scope)}`,
+        onclick: guarded(() => removeException(f, i)),
+      }, icon('x')) : null))) : null,
+    pinned && list.length ? h('div', { class: 'cell-sub' }, 'Not applied: the deployment pins this feature for every agent.') : null,
+    editable ? h('button', { type: 'button', class: 'btn btn--sm btn--ghost', onclick: guarded(() => addException(f)) }, icon('plus'), 'Add an exception') : null);
+}
+
+async function addException(f) {
+  const result = await ask({
+    title: `${f.title}: an exception`,
+    text: 'Its mode for the agents in a scope. Every box you fill in must match; the first exception that matches an agent applies to it, and the others have the feature\'s mode.',
+    confirm: 'Add the exception', busy: 'Saving…',
+    fields: [
+      { id: 'mode', label: 'Mode for these agents', type: 'select', required: true, value: f.mode === 'enforce' ? 'monitor' : 'enforce', options: f.modes.map((m) => ({ value: m, label: MODE_WORDS[m] || humanize(m) })) },
+      { type: 'row', fields: [
+        { id: 'blueprints', label: 'Blueprints', mono: true },
+        { id: 'teams', label: 'Teams', mono: true },
+      ] },
+      { type: 'row', fields: [
+        { id: 'platforms', label: 'Platforms', mono: true, hint: 'gateway, microsoft-365, copilot-studio, aws, google-cloud, salesforce, databricks or microsoft-foundry.' },
+        { id: 'environments', label: 'Environments', mono: true },
+      ] },
+      { id: 'labels', label: 'With labels', mono: true, hint: 'key=value, separated by commas.' },
+      { id: 'note', label: 'Why', hint: 'For whoever reads it next.' },
+    ],
+    submit: async (v) => {
+      const scope = {};
+      for (const key of ['blueprints', 'teams', 'platforms', 'environments']) {
+        const list = parseList(v[key]);
+        if (list.length) scope[key] = list;
+      }
+      const labels = parseLabels(v.labels);
+      if (Object.keys(labels).length) scope.labels = labels;
+      if (!Object.keys(scope).length) throw new Error('Say which agents: a blueprint, a team, a platform, an environment or a label.');
+      const entry = { mode: v.mode, scope };
+      if (v.note) entry.note = v.note;
+      return api(`v1/features/${encodeURIComponent(f.key)}`, { method: 'PUT', body: { scopes: [...plainScopes(f), entry] } });
+    },
+  });
+  if (result?.scopes) toast(`${f.title}: ${plural(result.scopes.length, 'exception')}.`);
+  await refresh();
+}
+
+async function removeException(f, i) {
+  const e = f.scopes[i];
+  const ok = await ask({
+    title: 'Remove this exception?',
+    text: `${f.title}: ${(MODE_WORDS[e.mode] || e.mode).toLowerCase()} for ${ruleScope(e.scope)}. These agents then have the feature's mode, ${(MODE_WORDS[f.mode] || f.mode).toLowerCase()}, unless a later exception takes them in.`,
+    tone: 'danger', iconName: 'triangle', confirm: 'Remove it',
+  });
+  if (!ok) return;
+  try {
+    const out = await api(`v1/features/${encodeURIComponent(f.key)}`, { method: 'PUT', body: { scopes: plainScopes(f).filter((_, j) => j !== i) } });
+    toast(`${f.title}: ${plural(out.scopes.length, 'exception')} left.`);
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+  }
+  await refresh();
 }
 
 function modeControl(f) {

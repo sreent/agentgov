@@ -150,7 +150,10 @@ the gateway. It shows each control in turn:
 5. **Indirect prompt injection**: a poisoned tool result is withheld.
 6. **Ungranted tools** are refused even when called directly.
 7. **Monitor mode**: with least privilege monitored, the same call goes through and the
-   ledger records what would have stopped it; enforced again, it is refused.
+   ledger records what would have stopped it; enforced again, it is refused. Monitored
+   for the customer-support blueprint's agents only (an
+   [exception](docs/features.md#exceptions)), it goes through again; without the
+   exception, it is refused.
 8. **Human in the loop**: a destructive tool waits for an approver; once approved, the
    agent's retry goes through.
 9. **Access packages**: alice, the agent's sponsor, asks for the crm-export package for it;

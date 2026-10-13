@@ -158,7 +158,7 @@ class ModelGuard:
     def _let_through(self, headers: Any, phase: str, exc: Exception) -> bool:
         """Whether a prompt or an answer that couldn't be checked goes on
         (AGENTGOV_GATEWAY_FAILURE_MODE); if so, it is recorded."""
-        if not self.p.unchecked(self.p.features.last()):
+        if not self.p.unchecked(self.p.features.last(self._identity(headers))):
             return False
         provider, model = headers.get(PROVIDER) or "unknown", headers.get(MODEL) or ""
         self.p.note_unchecked(
@@ -251,7 +251,7 @@ class ModelGuard:
         ]
         provider, model = headers.get(PROVIDER) or "unknown", headers.get(MODEL) or ""
         identity = self._identity(headers)
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(identity)
         inspection = await self.p._inspect(
             messages, protect=modes["data-protection"] != "off", check_injection=False
         )
@@ -383,7 +383,7 @@ class ModelGuard:
 
     # ------------------------------------------------------------------ answers
     async def check_answer(self, payload: dict[str, Any], headers: Any) -> dict[str, Any]:
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(self._identity(headers))
         if modes["data-protection"] == "off":
             return PASS  # the only control that looks at answers
         choices = [
