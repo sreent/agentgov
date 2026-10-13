@@ -3,8 +3,9 @@
 ``agentgov mcp scan --report`` sends what one person's MCP clients are set up
 with on one machine (``agentgov.mcp_scan``); each report replaces that machine
 and person's previous one. AgentGov compares every server with the approved
-tool servers, by what identifies it (``identity``: its URL, or the package or
-command that starts it):
+tool servers, by what identifies it (``identity``: its address, or the package or
+command that starts it). Reports are sanitised again before they are kept, as the scanner
+sanitises them: an address is its scheme, host and port, and a hash of its path.
 
 * approved: a tool server's gateway address, a developer server's own address,
   or a package an approved server lists;
@@ -22,7 +23,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -44,38 +44,31 @@ KEEP_DAYS = 90  # servers no machine has reported for this long are forgotten
 ACTOR = "system:mcp-discovery"
 
 
-def normal_url(url: str) -> str:
-    parts = urlsplit(url.strip())
-    host = (parts.hostname or "").lower()
-    if parts.port:
-        host = f"{host}:{parts.port}"
-    return urlunsplit((parts.scheme.lower(), host, parts.path.rstrip("/"), "", ""))
-
-
 def matcher(session: Session, settings: Settings) -> Callable[[str], tuple[str, str | None]]:
-    """``identity`` -> (status, the tool server it is)."""
+    """``identity`` -> (status, the tool server it is). Addresses compare as reported: by
+    scheme, host, port and their path's hash (agentgov.mcp_scan.address)."""
     known: dict[str, tuple[str, str]] = {}
+    address = mcp_scan.address
     for ts in session.scalars(select(ToolServer).where(ToolServer.status != "pending")):
         blocked = ts.status == BLOCKED
         ok = BLOCKED_STATUS if blocked else APPROVED
         if ts.gateway:
-            known[f"url:{normal_url(mcp_registry.gateway_url(ts, settings))}"] = (ok, ts.name)
+            known[f"url:{address(mcp_registry.gateway_url(ts, settings))}"] = (ok, ts.name)
             if ts.url:
                 known.setdefault(
-                    f"url:{normal_url(ts.url)}", (BLOCKED_STATUS if blocked else BYPASS, ts.name)
+                    f"url:{address(ts.url)}", (BLOCKED_STATUS if blocked else BYPASS, ts.name)
                 )
         elif ts.url:
-            known[f"url:{normal_url(ts.url)}"] = (ok, ts.name)
+            known[f"url:{address(ts.url)}"] = (ok, ts.name)
         for package in ts.packages or []:
             known[f"{package['registry_type']}:{package['identifier']}"] = (ok, ts.name)
             if package.get("command"):
                 # The command line developers run, recognised as the scanner recognises it.
-                known[mcp_scan.identity_of(None, package["command"])] = (ok, ts.name)
+                command = mcp_scan.clean_args(package["command"])
+                known[mcp_scan.identity_of(None, command)] = (ok, ts.name)
 
     def match(identity: str) -> tuple[str, str | None]:
-        if identity.startswith("url:"):
-            identity = "url:" + normal_url(identity[4:])
-        status, server = known.get(identity, (UNAPPROVED, None))
+        status, server = known.get(mcp_scan.clean_identity(identity), (UNAPPROVED, None))
         return status, server
 
     return match
@@ -95,6 +88,14 @@ def _strings(value: Any, field: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ValidationError(f"{field} must be a list of text")
     return [v[:500] for v in value[:100]]
+
+
+def _sanitised(url: str | None, command: list[str], identity: str) -> tuple[Any, ...]:
+    """A server's address, command line and identity, as the scanner reports them now
+    (agentgov.mcp_scan): what an older scanner, or anything else, sent holds no more."""
+    url = mcp_scan.address(url) if url else None
+    command = mcp_scan.clean_args(command)
+    return url, command, mcp_scan.identity_of(url, command) or mcp_scan.clean_identity(identity)
 
 
 def report(
@@ -122,16 +123,24 @@ def report(
     for i, item in enumerate(servers):
         if not isinstance(item, dict):
             raise ValidationError(f"servers[{i}] must be an object")
+        url, command, identity = _sanitised(
+            _text(item.get("url"), f"servers[{i}].url", 2000, required=False) or None,
+            _strings(item.get("command"), f"servers[{i}].command"),
+            _text(item.get("identity"), f"servers[{i}].identity", 400),
+        )
         fields = {
             "name": _text(item.get("name"), f"servers[{i}].name", 200),
             "client": _text(item.get("client"), f"servers[{i}].client", 64),
             "scope": _text(item.get("scope") or "user", f"servers[{i}].scope", 16),
-            "identity": _text(item.get("identity"), f"servers[{i}].identity", 400),
+            "identity": identity[:400],
             "transport": _text(item.get("transport") or "stdio", f"servers[{i}].transport", 16),
-            "url": _text(item.get("url"), f"servers[{i}].url", 2000, required=False) or None,
-            "command": _strings(item.get("command"), f"servers[{i}].command"),
-            "env": _strings(item.get("env"), f"servers[{i}].env"),
-            "headers": _strings(item.get("headers"), f"servers[{i}].headers"),
+            "url": url,
+            "command": command,
+            # By name only.
+            "env": [v.split("=", 1)[0] for v in _strings(item.get("env"), f"servers[{i}].env")],
+            "headers": [
+                v.split(":", 1)[0] for v in _strings(item.get("headers"), f"servers[{i}].headers")
+            ],
         }
         key = (fields["client"], fields["scope"], fields["name"], fields["identity"])
         if key in seen:
@@ -228,6 +237,11 @@ def refresh(session: Session, settings: Settings, identities: set[str] | None = 
         stale = select(McpSighting).where(McpSighting.last_seen_at < cutoff)
         for old in session.scalars(stale):
             session.delete(old)
+        # Servers reported before addresses were reported by host keep no more either.
+        for row in session.scalars(select(McpSighting)):
+            url, command, identity = _sanitised(row.url, list(row.command or []), row.identity)
+            if (url, command, identity[:400]) != (row.url, row.command, row.identity):
+                row.url, row.command, row.identity = url, command, identity[:400]
         session.flush()
     present: set[str] = set()
     for g in view(session, settings, identities):

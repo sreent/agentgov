@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -63,14 +64,14 @@ def test_identities(machine) -> None:
     home, project = machine
     found = {s.name: s.identity for s in mcp_scan.scan([project], home=home)}
     assert found == {
-        "crm": "url:https://gateway.example.com/mcp/crm",
-        "github": "url:https://api.githubcopilot.com/mcp",
+        "crm": f"url:https://gateway.example.com#{digest('/mcp/crm')}",
+        "github": f"url:https://api.githubcopilot.com#{digest('/mcp')}",
         "playwright": "npm:@playwright/mcp",
         "postgres": "oci:mcp/postgres",
         "fetch": "pypi:mcp-server-fetch",
         "notes": "command:python3 notes_server.py",
         "files": "npm:@modelcontextprotocol/server-filesystem",
-        "crm-direct": "url:http://crm-mcp:9000/mcp",
+        "crm-direct": f"url:http://crm-mcp:9000#{digest('/mcp')}",
     }
 
 
@@ -88,7 +89,7 @@ def test_credentials_never_leave_the_machine(machine) -> None:
         "--api-key",
         "<redacted>",
     ]
-    assert found["github"].url == "https://api.githubcopilot.com/mcp/"
+    assert found["github"].url == f"https://api.githubcopilot.com#{digest('/mcp')}"
 
 
 @pytest.mark.parametrize(
@@ -125,3 +126,86 @@ def test_identity_of_commands(command: list[str], identity: str) -> None:
 )  # fmt: skip
 def test_arguments_lose_their_credentials(args: list[str], cleaned: list[str]) -> None:
     assert mcp_scan.clean_args(args) == cleaned
+
+
+ZAPIER = "https://actions.zapier.com/mcp/sk-ak-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c/sse"
+ZAPIER_KEY = "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c"
+ZAPIER_SERVER = "ODg5YzQ1ZTAtNGQ4Mi00ZjI5LWI2NDgtM2E3ZGU5YjFjMmQ0OjEyMzQ1Njc4OTA"
+COMPOSIO = "2b1f7c0e-9a4d-4c55-8a51-6d0d8f3e2a11"
+
+
+def digest(path: str) -> str:
+    return hashlib.sha256(path.encode()).hexdigest()[:12]
+
+
+def test_what_paths_and_options_hold_stays_on_the_machine(tmp_path: Path) -> None:
+    """Some services put the credential in the URL's path; docker takes one as -e NAME=value."""
+    home = tmp_path / "home"
+    (home / ".cursor").mkdir(parents=True)
+    (home / ".cursor/mcp.json").write_text(json.dumps({"mcpServers": {
+        "zapier": {"url": ZAPIER},
+        "zapier-remote": {"command": "npx", "args": [
+            "-y", "mcp-remote", f"https://mcp.zapier.com/api/mcp/s/{ZAPIER_SERVER}=/mcp"]},
+        "composio": {"url": f"https://mcp.composio.dev/composio/server/{COMPOSIO}/mcp"},
+        "postgres": {"command": "docker", "args": [
+            "run", "-i", "--rm", "-e", "POSTGRES_PASSWORD=Sup3rS3cretPw!", "--env=API=abc",
+            "-e", "PGHOST", "mcp/postgres"]},
+        "git": {"command": "uvx", "args": [
+            "mcp-server-git==2025.4.7", "--repository", "/src/app",
+            "9c1185a5c5e9fc54612808977ee8f548b2258d31"]},
+    }}))  # fmt: skip
+    found = {s.name: s for s in mcp_scan.scan([], home=home)}
+    report = json.dumps([s.to_dict() for s in found.values()])
+    for secret in (ZAPIER_KEY, ZAPIER_SERVER, COMPOSIO, "Sup3rS3cretPw!", "=abc", "9c1185a5"):
+        assert secret not in report
+    path = f"/mcp/sk-ak-{ZAPIER_KEY}/sse"
+    assert found["zapier"].url == f"https://actions.zapier.com#{digest(path)}"
+    assert found["zapier"].identity == f"url:{found['zapier'].url}"
+    assert found["composio"].url.startswith("https://mcp.composio.dev#")
+    assert found["zapier-remote"].command == [
+        "npx", "-y", "mcp-remote", "https://mcp.zapier.com/api/mcp/s/<redacted>=/mcp",
+    ]  # fmt: skip
+    assert found["zapier-remote"].identity == "npm:mcp-remote"
+    assert found["postgres"].command == [
+        "docker", "run", "-i", "--rm", "-e", "POSTGRES_PASSWORD=<redacted>",
+        "--env=API=<redacted>", "-e", "PGHOST", "mcp/postgres",
+    ]  # fmt: skip
+    assert found["postgres"].identity == "oci:mcp/postgres"
+    assert found["git"].command == [
+        "uvx", "mcp-server-git==2025.4.7", "--repository", "/src/app", "<redacted>",
+    ]  # fmt: skip
+    assert found["git"].identity == "pypi:mcp-server-git"
+
+
+@pytest.mark.parametrize(
+    "arg",
+    [
+        "@modelcontextprotocol/server-filesystem", "mcp-server-fetch==2025.4.7",
+        "@playwright/mcp@0.0.41", "/home/alice/projects/notes_server.py", "x86_64-linux-gnu",
+        "2024-01-01T00:00:00Z", "C:\\Program Files\\nodejs\\npx.cmd", "--port=3000",
+        "https://api.githubcopilot.com/mcp/", "server.smithery.ai/@smithery-ai/github",
+    ],
+)  # fmt: skip
+def test_words_paths_and_versions_stay(arg: str) -> None:
+    assert mcp_scan.clean_args(["server", arg]) == ["server", arg]
+
+
+def test_a_digest_keeps_its_image() -> None:
+    pinned = (
+        "ghcr.io/github/github-mcp-server:v1"
+        "@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    )
+    cleaned = mcp_scan.clean_args(["docker", "run", "-i", "--rm", pinned])
+    assert cleaned[-1] == "ghcr.io/github/github-mcp-server:v1@sha256:<redacted>"
+    assert mcp_scan.identity_of(None, cleaned) == "oci:ghcr.io/github/github-mcp-server"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [ZAPIER, "https://u:p@api.githubcopilot.com/mcp/?token=abc", "http://[::1]:9000/mcp",
+     "https://mcp.example.com/", "https://mcp.example.com"],
+)  # fmt: skip
+def test_sanitising_again_changes_nothing(url: str) -> None:
+    assert mcp_scan.address(mcp_scan.address(url)) == mcp_scan.address(url)
+    args = ["npx", "mcp-remote", url, "-e", "A=b", "--token", "t", "--header", "X: y"]
+    assert mcp_scan.clean_args(mcp_scan.clean_args(args)) == mcp_scan.clean_args(args)

@@ -3884,7 +3884,8 @@ def mcp_scan_command(
     as_json: bool = typer.Option(False, "--json", help="Print what was found as JSON."),
 ) -> None:
     """The MCP servers set up on this machine, in VS Code, Copilot, Claude, Cursor and
-    other clients. Credentials are left out: environment variables and headers by name."""
+    other clients. Credentials are left out: environment variables and headers by name,
+    addresses by host (with a hash of their path), arguments' credentials redacted."""
     from agentgov import mcp_scan
 
     found = mcp_scan.scan(directory or [Path.cwd()], home=home)

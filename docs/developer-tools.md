@@ -160,13 +160,25 @@ role or an administrator's. Each report replaces the previous one from the same 
 person. Run it from your device management to cover every machine; `--home` scans
 another person's home directory.
 
-Configuration files hold credentials, and none of them leave the machine. Environment
-variables and headers are reported by name only, addresses without their query or user
-information, and command arguments that look like credentials, or follow options such
-as `--token` and `--api-key`, as `<redacted>`.
+Configuration files hold credentials, and none of them leave the machine:
 
-AgentGov compares each server with the approved tool servers, by its address, or by
-the package or command that starts it:
+* environment variables and headers are reported by name only;
+* a server's address by its scheme, host and port, and a short hash of its path
+  (`https://actions.zapier.com#3f2a1b9c4d5e`), as some services put the credential in the
+  path; its query and user information not at all;
+* in command arguments, URLs lose their query and user information, and these are
+  `<redacted>`: what follows options such as `--token`, `--api-key` and `--header`, the
+  value of an environment variable given as `-e NAME=value`, and what looks like a key or
+  a token (what AgentGov's detectors find, a UUID, or a long run of letters and digits
+  that reads as random), in a URL's path too.
+
+AgentGov sanitises each report again before it keeps it, so a report from an older
+`agentgov`, or from anything else, keeps no more; servers reported before are sanitised
+within the hour.
+
+AgentGov compares each server with the approved tool servers, by its address (a tool
+server's address is hashed the same way, so the two still match), or by the package or
+command that starts it:
 
 | Status | Meaning | Issue |
 |---|---|---|
