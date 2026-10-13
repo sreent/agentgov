@@ -158,6 +158,7 @@ never in a values file you share.
 | `AGENTGOV_DEV_MODE` | `false` | Development only: without an admin token, the control plane makes one up and logs it. |
 | `AGENTGOV_SERVICE_TOKEN` (secret) | — | Shared token for internal components (OPA, governance processor, OTel collector) calling the control plane. |
 | `AGENTGOV_FEATURES` | empty | Features pinned by the deployment, e.g. `least-privilege=monitor,discovery=off` ([features](features.md)). Administrators choose the others in the app. |
+| `AGENTGOV_FEATURE_PRESET` | empty | A starting point for the features' modes, applied once, when the control plane starts with one it hasn't applied yet: `monitor` (every control records what it would do and stops nothing) or `inventory` (no gateway: AgentGov finds agents and checks them). Administrators change the modes from there; pinned features keep their pins. |
 | `AGENTGOV_APPROVAL_TTL_SECONDS` | `86400` | How long an approval request waits for a decision before it expires. |
 | `AGENTGOV_SOFT_DELETE_RETENTION_DAYS` | `30` | Deleted agents can be restored for this many days, then they are purged (Agent 365 parity). 0 keeps them. |
 | `AGENTGOV_AUTO_BLOCK_RISK_SCORE` | `0` | When &gt; 0, agents whose risk score reaches this value are blocked. |
@@ -283,7 +284,8 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Micro
 | `AGENTGOV_GUARDIAN_MODEL`<br>`AGENTGOV_GUARDIAN_API_KEY` (secret) | `ibm-granite/granite-guardian-4.1-8b`<br>— | The name the server serves the model under, and its API key if it needs one. |
 | `AGENTGOV_GUARDIAN_CRITERIA` | `harm,jailbreak,social_bias,violence,unethical_behavior,exfiltration,deception` | Criteria to judge agent instructions by (one classifier call each): harm, jailbreak, social_bias, violence, profanity, unethical_behavior, exfiltration, deception. |
 | `AGENTGOV_GUARDIAN_TIMEOUT_SECONDS` | `60.0` | The longest one classifier call may take. |
-| `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` | `3.0` | How long the processor waits for the classifier's verdict on a call where it is enforced; past that, the rules alone decide, and the ledger says so. |
+| `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` | `3.0` | How long the processor waits for the classifier's verdict on a call where it is enforced; past that, `AGENTGOV_GUARDIAN_FAILURE_MODE` says what happens, and the ledger says so. |
+| `AGENTGOV_GUARDIAN_FAILURE_MODE` | `open` | Where the processor waits for the classifier and gets no verdict (it is down, or too slow): `open` lets the rules decide alone; `closed` counts the text as flagged, so the call is refused. |
 | `AGENTGOV_CLASSIFIER_CONCURRENCY` | `4` | Classifier calls one processor makes at a time. In the background, what waits beyond a few hundred goes unclassified rather than piling up. |
 
 ### OPA (policy decisions)
@@ -294,6 +296,7 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Micro
 | `AGENTGOV_AUTHZEN_URL` | — | An AuthZEN decision point of your own (OpenID AuthZEN Authorization API 1.0), which the processor also asks about the calls AgentGov's policies let through, as the external-decision-point feature says: its base URL, such as `https://pdp.example.com` ([policies](policies.md)#authzen). |
 | `AGENTGOV_AUTHZEN_TOKEN` (secret) | — | The bearer token it asks for, if it asks for one. |
 | `AGENTGOV_AUTHZEN_TIMEOUT_SECONDS` | `2.0` | Seconds to wait for its answer. |
+| `AGENTGOV_AUTHZEN_FAILURE_MODE` | `closed` | When it can't be asked while the external-decision-point feature is enforced: `closed` refuses the call; `open` lets AgentGov's own decision stand. Monitored, it never stops a call. |
 | `AGENTGOV_BUNDLE_LONG_POLL_SECONDS` | `30` | Longest a bundle long-poll request is held open. |
 | `AGENTGOV_BUNDLE_SIGNING_KEY_FILE` | — | A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles with; OPA verifies each with the matching certificate or public key, and refuses one that doesn't verify ([production](production.md)). `agentgov bundle-signing-key DIR` makes a pair. Unset, bundles go unsigned. |
 | `AGENTGOV_BUNDLE_SIGNING_KEY_ID` | `agentgov` | The key's name: OPA's configuration names the same one (bundles.&lt;name&gt;.signing.keyid). |
@@ -308,6 +311,7 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Micro
 | `AGENTGOV_GATEWAY_PORT` | `8080` | The port agentgateway listens on, in the configuration generated for it. |
 | `AGENTGOV_PROCESSOR_ADDRESS` | `processor:50051` | Where agentgateway reaches the governance processor for tool calls (gRPC). |
 | `AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS` | `processor:8091` | ...and for model calls and calls between agents (HTTP). |
+| `AGENTGOV_GATEWAY_FAILURE_MODE` | `modes` | When a call through the gateway can't be checked (OPA can't decide, or the governance processor can't be reached or fails): `closed` refuses it; `open` lets it through unchecked, and recorded where the processor can; `modes` refuses it only while a control at the gateway is enforced, so that controls in monitor mode never stop a call. Set it alike where the control plane (which configures the gateway) and the processor run. |
 | `AGENTGOV_GATEWAY_OTLP_ENDPOINT` | — | OTLP/gRPC endpoint for gateway traces, e.g. `http://otel-collector:4317`. |
 | `AGENTGOV_GATEWAY_IPV6` | `false` | agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts. |
 | `AGENTGOV_TRACE_URL` | — | Link to a trace in your trace viewer, with {trace_id} where the W3C trace ID goes, such as `http://localhost:16686/trace/{trace_id}` for Jaeger. Ledger entries recorded at the gateway then link to their trace. |

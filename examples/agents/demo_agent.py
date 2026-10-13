@@ -1620,6 +1620,23 @@ def component_health() -> None:
             f["status"] == "active",
             f"{f['mode']}, {f['status']}" + (f": {f['problems'][0]}" if f["problems"] else ""),
         )
+    # What happens to a call when OPA can't decide, as the processor is set.
+    failure = (processors[0].get("settings") or {}).get("gateway_failure_mode") if ok else None
+    show(
+        "when OPA can't decide:",
+        failure == "modes",
+        f"AGENTGOV_GATEWAY_FAILURE_MODE={failure}: refused while a control is enforced, "
+        "let through unchecked, and recorded, while every one is monitored",
+    )
+    # A monitor-first starting point, shown and not applied: the steps above enforce.
+    presets = admin("GET", "/v1/feature-presets")["presets"]
+    monitor = next(p for p in presets if p["preset"] == "monitor")
+    show(
+        "the monitor starting point:",
+        bool(monitor["changes"]),
+        f"would put {len(monitor['changes'])} enforced controls in monitor mode "
+        "(agentgov features preset monitor)",
+    )
 
 
 def back_channel_logout() -> None:

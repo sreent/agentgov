@@ -181,11 +181,13 @@ def internal_decisions(
 @router.post("/v1/internal/components", tags=["internal"])
 def internal_components(
     request: Request, body: Any = Body(...), _: Principal = Depends(service)
-) -> dict[str, str]:
-    """A governance processor's report of what it can reach (agentgov.health)."""
+) -> dict[str, Any]:
+    """A governance processor's report of what it can reach (agentgov.health). The answer
+    gives it the features' modes, which it otherwise reads from OPA: it then knows them
+    while OPA can't be asked."""
     with _rt(request).db.session() as s:
         health.record(s, body)
-    return {"recorded": "ok"}
+        return {"recorded": "ok", "features": features.modes(s)}
 
 
 @router.post("/v1/internal/catalog", tags=["internal"])

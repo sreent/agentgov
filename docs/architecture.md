@@ -134,7 +134,7 @@ calls. [Model calls](models.md) has the details.
 An agent that serves A2A is a gateway route, `/a2a/<agent>`, whose card agentgateway
 points at the gateway. The calling agent sends its A2A request with its own token.
 agentgateway validates the token, then asks the processor (external authorization over
-HTTP, fail-closed) with the request's JSON-RPC body and headers it computes from the
+HTTP) with the request's JSON-RPC body and headers it computes from the
 token: the caller, the person it acts for, and any delegation the caller carries. The
 processor checks the delegation, inspects the message, asks OPA
 (`data.agentgov.a2a.decision`), and answers go ahead or refuse. Going ahead, it gives the
@@ -146,7 +146,7 @@ the calls it makes for that work, and the processor puts the chain into policy a
 ledger of each one. While `a2a-masking` is enforced, the message goes through the
 processor's external processing too, after the decision, which masks the personal data the
 agent called may not have. The answer comes back through the processor too (external
-processing over gRPC, fail-closed), event by event when it streams: credentials and personal data in
+processing over gRPC), event by event when it streams: credentials and personal data in
 it are masked, and instructions aimed at the agent that asked are withheld.
 [Agent to agent](agent-to-agent.md) has the details.
 
@@ -220,7 +220,7 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | Gateway → model provider | The provider's API key, which only the gateway (and its config sidecar) can read, from a file; the agent's token is never forwarded |
 | Gateway → agent serving A2A | The caller's token is never forwarded; the agent called gets a delegation and who handed it the work in headers AgentGov sets on every call it passes on. AgentGov doesn't own the network: only the gateway should reach agents' A2A endpoints (a NetworkPolicy in Kubernetes), or the agents refuse calls without a delegation; AgentGov looks for calls around the gateway and tells the agents' owners ([calls around the gateway](agent-to-agent.md#calls-around-the-gateway)) |
 | Agent → agent (delegation) | A JWT for the agent called only (its name and ID), signed by the processors (ES256) with a key derived from the service token, whose public half the control plane publishes (`/v1/delegations/jwks`), lasting an hour; checked by AgentGov on each call that carries it (signature, expiry, holder, and the same person as the caller's token), and by agents that check it, on the calls they take |
-| Gateway → processor | Mutual TLS: each shows a certificate from AgentGov's own authority, cert-manager or SPIRE ([production](production.md#mutual-tls-between-components)); fail-closed (`failureMode: failClosed`, or `deny` for external authorization) for tool calls (gRPC), model calls (the webhook), calls between agents (external authorization) and their answers (external processing, gRPC) |
+| Gateway → processor | Mutual TLS: each shows a certificate from AgentGov's own authority, cert-manager or SPIRE ([production](production.md#mutual-tls-between-components)); for tool calls (gRPC), model calls (the webhook), calls between agents (external authorization) and their answers (external processing, gRPC). When the processor can't be reached, agentgateway refuses the call or lets it through as `AGENTGOV_GATEWAY_FAILURE_MODE` says (`failureMode: failClosed` or `failOpen`; `deny` or `allow` for external authorization) |
 | Processor, control plane → OPA | Mutual TLS: OPA asks every caller for a certificate from AgentGov's authority (with SPIRE, the processor's or the control plane's, by their SPIFFE IDs) |
 | Processor, control plane → Granite Guardian | Inside your network, like Presidio; they send it the text it judges, with its API key if it has one |
 | Control plane → OPA (bundles) | Signed: OPA refuses a bundle that doesn't verify against the control plane's certificate, and keeps the last good one ([production](production.md#signed-bundles)) |
@@ -231,12 +231,13 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 
 | Failure | Behaviour |
 |---|---|
-| Processor down or erroring | agentgateway refuses governed calls, model calls and calls between agents (fail-closed) |
+| Processor down or erroring | While a control at the gateway is enforced, agentgateway refuses governed calls, model calls and calls between agents; while none is, it lets them through unchecked (`AGENTGOV_GATEWAY_FAILURE_MODE`, [when something is down](features.md#when-something-is-down)) |
 | A model provider's API key is missing | That provider's route answers 503 until the key is there; the gateway serves its other routes as usual |
 | Access logs don't reach the control plane | Model calls go on, unmetered: budgets can't stop an agent whose usage isn't counted |
-| OPA unreachable or bundle missing | Processor denies ("policy engine unavailable") |
-| Presidio unreachable | Deny by default; `AGENTGOV_PRESIDIO_FAILURE_MODE=open` skips PII scanning instead |
-| Granite Guardian unreachable or slow | The rules alone decide. A call that waits for the classifier waits `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` at most, and its decision says the classifier didn't answer; instructions to check stay queued until it is back |
+| OPA unreachable or bundle missing | While a control at the gateway is enforced, the processor denies ("policy engine unavailable"); while none is, calls go through unchecked and the ledger says so (`AGENTGOV_GATEWAY_FAILURE_MODE`) |
+| Presidio unreachable, or its answer unreadable | Deny while `data-protection` is enforced; `AGENTGOV_PRESIDIO_FAILURE_MODE=open` skips PII scanning instead |
+| Your decision point unreachable | Deny while `external-decision-point` is enforced; `AGENTGOV_AUTHZEN_FAILURE_MODE=open` lets AgentGov's own decision stand |
+| Granite Guardian unreachable or slow | The rules alone decide (`AGENTGOV_GUARDIAN_FAILURE_MODE=closed` refuses the calls that wait for it instead). A call that waits for the classifier waits `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` at most, and its decision says the classifier didn't answer; instructions to check stay queued until it is back |
 | A custom Rego policy fails to compile | Rejected at submission, after a compile and a smoke evaluation, so a broken module never reaches OPA |
 | OPA cannot activate a bundle anyway, or it doesn't verify | OPA keeps the last good bundle; its status report raises a critical finding |
 | A control-plane replica stops | The others answer; if it led, another takes the scheduled work over within seconds ([production](production.md#several-replicas)) |

@@ -56,13 +56,41 @@ class PresidioClient:
             raise PresidioError(f"Presidio unreachable: {exc}") from exc
         if resp.status_code != 200:
             raise PresidioError(f"Presidio returned {resp.status_code}: {resp.text[:200]}")
-        results = resp.json()
-        if len(batch) == 1 and results and isinstance(results[0], dict):
-            results = [results]  # older analyzers answer a single text with a flat list
+        try:
+            results = resp.json()
+        except ValueError:
+            raise PresidioError(f"Presidio's answer isn't JSON: {resp.text[:200]}") from None
+        # Older analyzers answer a single text with a flat list.
+        if (
+            isinstance(results, list)
+            and len(batch) == 1
+            and all(isinstance(r, dict) for r in results)
+        ):
+            results = [results]
+        # An answer it can't read is Presidio failing (AGENTGOV_PRESIDIO_FAILURE_MODE), not
+        # Presidio finding nothing.
+        if not isinstance(results, list) or len(results) != len(batch):
+            raise PresidioError("Presidio's answer doesn't match the texts it was sent")
         spans = []
-        for (path, _), items in zip(batch, results, strict=False):
-            for item in items or []:
-                entity = item.get("entity_type")
-                if item.get("score", 0) >= self.thresholds.get(entity, 1.1):
+        for (path, _), items in zip(batch, results, strict=True):
+            if not isinstance(items, list) or not all(_finding(item) for item in items):
+                raise PresidioError(f"Presidio's answer can't be read: {str(items)[:200]}")
+            for item in items:
+                entity = item["entity_type"]
+                if item["score"] >= self.thresholds.get(entity, 1.1):
                     spans.append(Span(path, item["start"], item["end"], entity, PII, item["score"]))
         return spans, skipped
+
+
+def _finding(item: Any) -> bool:
+    """Whether ``item`` is one of Presidio's findings: an entity type, where it starts and
+    ends, and a score."""
+    return (
+        isinstance(item, dict)
+        and isinstance(item.get("entity_type"), str)
+        and all(
+            isinstance(item.get(k), int) and not isinstance(item.get(k), bool)
+            for k in ("start", "end")
+        )
+        and isinstance(item.get("score"), int | float)
+    )

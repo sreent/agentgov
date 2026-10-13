@@ -2,8 +2,9 @@
 
 A mode says what should happen; this says what can. A feature can be on and do nothing
 (data protection with no Presidio to look for personal data), do part of it (Presidio
-down, with its failure mode open), or stop more than it should (OPA down: every call
-through the gateway is refused, whatever the modes).
+down, with its failure mode open), or stop more than it should (OPA down while a control
+is enforced: every call through the gateway is refused, as AGENTGOV_GATEWAY_FAILURE_MODE
+says).
 
 What AgentGov knows comes from two places: the checks the control plane runs itself (OPA
 and Keycloak, where it is set to use them) and the reports each governance processor
@@ -24,7 +25,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids
-from agentgov.config import Settings
+from agentgov.config import FAILURE_SETTINGS, Settings
 from agentgov.models import ComponentReport, Destination, PlatformSync
 from agentgov.registry import features
 from agentgov.registry.errors import ValidationError
@@ -125,7 +126,11 @@ def record(session: Session, body: Any) -> None:
     row.interval = interval if isinstance(interval, int) and 0 < interval <= 86400 else 60
     row.checks = checks
     settings = body.get("settings") if isinstance(body.get("settings"), dict) else {}
-    row.settings = {"presidio_failure_mode": str(settings.get("presidio_failure_mode") or "")}
+    row.settings = {
+        name: value
+        for name in FAILURE_SETTINGS
+        if isinstance(value := settings.get(name), str) and value in ("modes", "open", "closed")
+    }
     session.add(row)
     session.execute(delete(ComponentReport).where(ComponentReport.reported_at < now - KEEP))
 
@@ -217,31 +222,75 @@ def _processors(s: Situation, name: str) -> tuple[bool, dict[str, Any] | None]:
     return configured, down
 
 
+def _setting(s: Situation, name: str, processors: list[dict[str, Any]]) -> str:
+    """A failure setting as the processors say they use it (the strictest, if they
+    differ), or as the control plane has it, for processors that don't say."""
+    said = {(p.get("settings") or {}).get(name) for p in processors} - {None}
+    for value in ("closed", "modes", "open"):
+        if value in said:
+            return value
+    return str(getattr(s.settings, name))
+
+
+def _unchecked(s: Situation, processors: list[dict[str, Any]]) -> tuple[bool, str]:
+    """Whether calls the gateway can't check go through (AGENTGOV_GATEWAY_FAILURE_MODE),
+    and why, for the message."""
+    setting = _setting(s, "gateway_failure_mode", processors)
+    if features.fails_open(setting, s.modes):
+        why = "nothing at the gateway is enforced" if setting == "modes" else "it is open"
+    else:
+        why = "controls at the gateway are enforced" if setting == "modes" else "it is closed"
+    return features.fails_open(setting, s.modes), f"AGENTGOV_GATEWAY_FAILURE_MODE={setting}: {why}"
+
+
 def _gateway(s: Situation) -> list[tuple[str, str]]:
-    """What stops every control at the gateway: nothing in touch checks calls, or what
-    checks them can't decide."""
-    if not s.fresh:
-        last = next((p["reported_at"] for p in s.processors), None)
-        since = f" since {last}" if last else ""
+    """What stops every control at the gateway: no gateway is on, nothing in touch checks
+    calls, or what checks them can't decide."""
+    if all(s.modes.get(key) == features.OFF for key in features.GATEWAYS):
         return [
             (
                 INACTIVE,
-                f"No governance processor has reported to the control plane{since}: these "
-                "controls check only calls through AgentGov's gateway, and nothing is known "
-                "to check them.",
+                "The gateways are off (tool servers, models and agent-to-agent): there are "
+                "no calls through AgentGov to check.",
+            )
+        ]
+    if not s.fresh:
+        if not s.processors:
+            return [
+                (
+                    INACTIVE,
+                    "No governance processor has reported to the control plane: these "
+                    "controls check only calls through AgentGov's gateway, and nothing is "
+                    "known to check them.",
+                )
+            ]
+        passes, why = _unchecked(s, s.processors)
+        outcome = "go through unchecked" if passes else "are refused"
+        return [
+            (
+                INACTIVE,
+                "No governance processor has reported to the control plane since "
+                f"{s.processors[0]['reported_at']}: if it is down, calls through the gateway "
+                f"{outcome} until it is back ({why}).",
             )
         ]
     opa = [p["checks"].get("opa") for p in s.fresh]
     down = next((c for c in opa if c and not c["ok"]), None)
     if down is not None:
-        return [
-            (
-                FAILING,
-                "The governance processor can't reach OPA, or OPA has no policies loaded"
-                f"{_with(down.get('detail', ''))}: every call through the gateway is "
-                "refused, whatever the modes.",
-            )
-        ]
+        passes, why = _unchecked(s, s.fresh)
+        cause = (
+            "The governance processor can't reach OPA, or OPA has no policies loaded"
+            f"{_with(down.get('detail', ''))}"
+        )
+        if passes:
+            return [
+                (
+                    INACTIVE,
+                    f"{cause}: calls through the gateway go through unchecked, and are "
+                    f"recorded as such ({why}).",
+                )
+            ]
+        return [(FAILING, f"{cause}: every call through the gateway is refused ({why}).")]
     return []
 
 
@@ -277,10 +326,7 @@ def _presidio(s: Situation, key: str) -> list[tuple[str, str]]:
                 "until it is.",
             )
         ]
-    closed = any(
-        (p.get("settings") or {}).get("presidio_failure_mode", "closed") == "closed"
-        for p in s.fresh
-    )
+    closed = _setting(s, "presidio_failure_mode", s.fresh) == "closed"
     if s.modes.get("data-protection") == features.ENFORCE and closed:
         return [
             (
@@ -322,14 +368,28 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
                 )
             )
         elif down is not None:
-            out.append(
-                (
-                    LIMITED,
-                    "Granite Guardian isn't reachable from the governance processor"
-                    f"{_with(down.get('detail', ''))}: the prompt-injection and jailbreak "
-                    "checks decide alone.",
-                )
+            waited = mode == features.ENFORCE and features.ENFORCE in (
+                s.modes.get("prompt-injection"),
+                s.modes.get("jailbreak-detection"),
             )
+            if waited and _setting(s, "guardian_failure_mode", s.fresh) == "closed":
+                out.append(
+                    (
+                        FAILING,
+                        "Granite Guardian isn't reachable from the governance processor"
+                        f"{_with(down.get('detail', ''))}: the calls it is waited for on are "
+                        "refused until it is (AGENTGOV_GUARDIAN_FAILURE_MODE=closed).",
+                    )
+                )
+            else:
+                out.append(
+                    (
+                        LIMITED,
+                        "Granite Guardian isn't reachable from the governance processor"
+                        f"{_with(down.get('detail', ''))}: the prompt-injection and jailbreak "
+                        "checks decide alone.",
+                    )
+                )
     elif key == "external-decision-point" and s.fresh:
         configured, down = _processors(s, "authzen")
         if not configured:
@@ -340,13 +400,17 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
                     "point isn't asked.",
                 )
             )
-        elif down is not None and mode == features.ENFORCE:
+        elif (
+            down is not None
+            and mode == features.ENFORCE
+            and _setting(s, "authzen_failure_mode", s.fresh) == "closed"
+        ):
             out.append(
                 (
                     FAILING,
                     "Your decision point isn't reachable from the governance processor"
                     f"{_with(down.get('detail', ''))}: the calls it would be asked about are "
-                    "refused until it is.",
+                    "refused until it is (AGENTGOV_AUTHZEN_FAILURE_MODE=closed).",
                 )
             )
         elif down is not None:

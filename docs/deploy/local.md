@@ -275,6 +275,9 @@ docker compose -f deploy/compose/docker-compose.yml down -v   # removes all data
   the collector. Check `docker compose ... logs otel-collector`.
 * **Calls are denied with "policy engine unavailable"**: OPA has no bundle yet. Check
   `docker compose ... logs opa`; bundle errors also raise a finding (`agentgov findings`).
+  While no control at the gateway is enforced, such calls go through unchecked instead,
+  and the ledger records them as `Not checked`
+  ([when something is down](../features.md#when-something-is-down)).
 * **Single sign-on stops at Keycloak with "Invalid parameter: redirect_uri"**, or the UI
   says the identity provider could not complete the sign-in: Keycloak imports the realm
   only on its first start, so later changes to `AGENTGOV_PUBLIC_URL` or

@@ -2826,6 +2826,54 @@ def features_set(
     _done("feature", key, f"{out['mode']}: {out['effect']}")
 
 
+@features_app.command("presets")
+def features_presets() -> None:
+    """Starting points that set many modes at once, and what each would change now."""
+    view = _call("GET", "/v1/feature-presets")
+    rows: list[dict[str, Any]] = []
+    for preset in view["presets"]:
+        name = preset["preset"]
+        rows += [
+            {"preset": name, "feature": c["key"], "from": c["from"], "to": c["to"], "note": ""}
+            for c in preset["changes"]
+        ]
+        rows += [
+            {
+                "preset": name,
+                "feature": c["key"],
+                "from": c["from"],
+                "to": c["to"],
+                "note": f"kept: {c['reason']}",
+            }
+            for c in preset["kept"]
+        ]
+        if not preset["changes"] and not preset["kept"]:
+            rows.append({"preset": name, "note": "changes nothing now"})
+    _table(rows, ["preset", "feature", "from", "to", "note"])
+    if view.get("applied"):
+        typer.echo(f"The deployment applied {view['applied']} (AGENTGOV_FEATURE_PRESET).")
+
+
+@features_app.command("preset")
+def features_preset(
+    name: str = typer.Argument(..., help="monitor or inventory."), yes: bool = YES
+) -> None:
+    """Apply a starting point: set the modes it sets, but for features the deployment pins
+    (agentgov features presets shows what it would change)."""
+    view = _call("GET", "/v1/feature-presets")
+    plan = next((p for p in view["presets"] if p["preset"] == name), None)
+    if plan is None:
+        _fail(f"no preset {name!r}; presets: {', '.join(p['preset'] for p in view['presets'])}")
+    if not plan["changes"]:
+        _done("preset", name, "nothing to change")
+        return
+    summary = "; ".join(f"{c['key']} {c['from']} to {c['to']}" for c in plan["changes"])
+    _confirm(f"{plan['title']}: {summary}?", yes)
+    out = _call("POST", f"/v1/feature-presets/{quote(name)}")
+    count = len(out["changes"])
+    _done("preset", name, f"{count} feature{'' if count == 1 else 's'} changed")
+
+
 # ----------------------------------------------------------------------- mcp
 
 

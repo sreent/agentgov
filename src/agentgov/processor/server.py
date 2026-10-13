@@ -49,6 +49,7 @@ from agentgov.processor.modes import FeatureModes
 from agentgov.processor.presidio import PresidioClient, PresidioError
 from agentgov.processor.proto import ext_mcp_pb2 as pb
 from agentgov.processor.proto import ext_mcp_pb2_grpc as pb_grpc
+from agentgov.registry.features import fails_open
 
 log = logging.getLogger(__name__)
 
@@ -158,11 +159,15 @@ class Inspection:
     def __init__(self, scan: detectors.ScanResult, threshold: float) -> None:
         self.scan = scan
         self.summary = scan.summary(threshold)
+        # Why the classifier, waited for, gave no verdict.
+        self.classifier_error: str | None = None
 
     def add_verdict(self, verdict: classifier.Verdict) -> None:
         """The classifier's verdict, waited for: what it flags counts as what the rules
         flag does."""
         self.summary["classifier"] = verdict.summary()
+        if verdict.flagged is None:
+            self.classifier_error = verdict.error or "no verdict"
         if verdict.flagged:
             flag, reasons = _FLAGS[verdict.criterion]
             self.summary[flag] = True
@@ -238,12 +243,15 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             )
         except authzen.AuthZenError as exc:
             log.warning("external decision point: %s", exc)
-            if mode == "enforce":
+            if mode == "enforce" and self.settings.authzen_failure_mode == "closed":
                 reasons = [
                     f"Your decision point can't be asked ({exc}); the call was not forwarded"
                 ]
                 return {**decision, "effect": "deny", "reasons": reasons}, decision_id
-            return monitored(f"external-decision-point: couldn't be asked ({exc})"), decision_id
+            note = f"external-decision-point: couldn't be asked ({exc})"
+            if mode == "enforce":
+                note += "; AgentGov's decision stands (AGENTGOV_AUTHZEN_FAILURE_MODE=open)"
+            return monitored(note), decision_id
         if verdict.effect == "allow":
             if not verdict.redact:
                 return decision, decision_id
@@ -321,6 +329,39 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             and self.settings.presidio_failure_mode == "closed"
         )
 
+    def classifier_closed(self, inspection: Inspection) -> bool:
+        """Whether a call must stop because the classifier, waited for (it is enforced),
+        gave no verdict: as AGENTGOV_GUARDIAN_FAILURE_MODE says."""
+        return (
+            inspection.classifier_error is not None
+            and self.settings.guardian_failure_mode == "closed"
+        )
+
+    def unchecked(self, modes: dict[str, str]) -> bool:
+        """Whether a call the processor can't check goes on, unchecked, as
+        AGENTGOV_GATEWAY_FAILURE_MODE says: with "modes", while no control at the gateway
+        is enforced (agentgov.registry.features.fails_open)."""
+        return fails_open(self.settings.gateway_failure_mode, modes)
+
+    def unchecked_reason(self, why: str) -> str:
+        """The ledger's reason for a call let through unchecked."""
+        because = (
+            "no control at the gateway is enforced"
+            if self.settings.gateway_failure_mode == "modes"
+            else "AGENTGOV_GATEWAY_FAILURE_MODE is open"
+        )
+        return f"Not checked ({why}); let through, as {because}"
+
+    def note_unchecked(self, why: str, **fields: Any) -> None:
+        """Record a call let through unchecked because checking it failed, with what is
+        known of it (``fields``)."""
+        try:
+            self._record(
+                effect="allow", reasons=[self.unchecked_reason(why)], unchecked=why, **fields
+            )
+        except Exception:
+            log.exception("could not record a call let through unchecked")
+
     @staticmethod
     def _identity(meta: dict[str, Any]) -> dict[str, Any]:
         return {k: meta[k] for k in ("client_id", "agent_id", "subject") if meta.get(k)}
@@ -367,7 +408,18 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
     async def CheckRequest(self, request: pb.McpRequest, context: Any) -> pb.McpRequestResult:
         try:
             return await self._check_request(request, trace_id_of(context, request.headers))
-        except Exception:
+        except Exception as exc:
+            if self.unchecked(self.features.last()):
+                log.exception("CheckRequest failed; letting the call through unchecked")
+                server = (list(request.service_names) or ["unknown"])[0]
+                self.note_unchecked(
+                    f"the governance processor failed: {type(exc).__name__}",
+                    phase="request",
+                    method=request.method,
+                    server=server,
+                    resource=server,
+                )
+                return _pass_request()
             log.exception("CheckRequest failed; denying")
             return pb.McpRequestResult(
                 error=pb.AuthorizationError(
@@ -408,6 +460,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             approval_id: str | None = None,
             redacted: list[str] | None = None,
             decision_id: str | None = None,
+            unchecked: str | None = None,
         ) -> None:
             self._record(
                 phase="request",
@@ -428,6 +481,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 trace_id=trace_id,
                 delegation=_delegation(chain),
+                unchecked=unchecked,
             )
 
         def reject(
@@ -467,6 +521,10 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             )
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
+            if self.unchecked(modes):
+                why = f"the policy engine is unavailable: {exc}"
+                finish("allow", [self.unchecked_reason(why)], unchecked=why)
+                return _pass_request({"agentgov_target": target, "agentgov_method": method})
             reasons = ["Policy engine unavailable; the call was not forwarded"]
             finish("deny", reasons)
             return reject("deny", reasons)
@@ -562,7 +620,18 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
     async def CheckResponse(self, request: pb.McpResponse, context: Any) -> pb.McpResponseResult:
         try:
             return await self._check_response(request, trace_id_of(context))
-        except Exception:
+        except Exception as exc:
+            if self.unchecked(self.features.last()):
+                log.exception("CheckResponse failed; passing the result on unchecked")
+                server = (list(request.service_names) or ["unknown"])[0]
+                self.note_unchecked(
+                    f"the governance processor failed: {type(exc).__name__}",
+                    phase="response",
+                    method=request.method,
+                    server=server,
+                    resource=server,
+                )
+                return _pass_response()
             log.exception("CheckResponse failed; withholding the result")
             return pb.McpResponseResult(
                 error=pb.AuthorizationError(
@@ -627,6 +696,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             agent: dict[str, Any] | None = None,
             redacted: list[str] | None = None,
             decision_id: str | None = None,
+            unchecked: str | None = None,
         ) -> None:
             self._record(
                 phase="response",
@@ -645,6 +715,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                 opa_decision_id=decision_id,
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 trace_id=trace_id,
+                unchecked=unchecked,
             )
 
         def withhold(reasons: list[str]) -> pb.McpResponseResult:
@@ -658,6 +729,13 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
 
         if inspection.scan.pii_error and self._fail_closed(modes):
             reasons = ["Content inspection is unavailable, so the result was withheld"]
+            finish("deny", reasons)
+            return withhold(reasons)
+        if self.classifier_closed(inspection):
+            reasons = [
+                f"The classifier gave no verdict ({inspection.classifier_error}), so the "
+                "result was withheld"
+            ]
             finish("deny", reasons)
             return withhold(reasons)
 
@@ -674,6 +752,10 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
             decision, decision_id = await self.opa.evaluate("agentgov/mcp/decision", opa_input)
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
+            if self.unchecked(modes):
+                why = f"the policy engine is unavailable: {exc}"
+                finish("allow", [self.unchecked_reason(why)], unchecked=why)
+                return _pass_response()
             reasons = ["Policy engine unavailable; the result was withheld"]
             finish("deny", reasons)
             return withhold(reasons)
@@ -721,17 +803,21 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         }
         if person:
             opa_input["user"] = person
+        # Every tool but those quarantined here and now.
+        quarantined = set(poisoned) if integrity == "enforce" else set()
+        unquarantined = {t.get("name") for t in tools} - quarantined
         try:
             view, _ = await self.opa.evaluate("agentgov/mcp/list_view", opa_input)
         except OpaError as exc:
             log.error("policy evaluation failed for tools/list: %s", exc)
-            view = {"agent": None, "visible": []}
-        if view.get("agent") is None and modes["unknown-callers"] == "monitor":
-            self._spawn(self._observe_unknown(identity, server, "tools/list"))
-            quarantined = set(poisoned) if integrity == "enforce" else set()
-            visible = {t.get("name") for t in tools} - quarantined
+            # Unchecked, the agent sees what it would see if nothing were enforced; else
+            # nothing, as nothing it sees could be called.
+            view = {"agent": None, "visible": unquarantined if self.unchecked(modes) else []}
         else:
-            visible = set(view.get("visible") or [])
+            if view.get("agent") is None and modes["unknown-callers"] == "monitor":
+                self._spawn(self._observe_unknown(identity, server, "tools/list"))
+                view = {**view, "visible": unquarantined}
+        visible = set(view.get("visible") or [])
         filtered = [t for t in tools if t.get("name") in visible]
         if len(filtered) == len(tools):
             return _pass_response()
@@ -814,7 +900,7 @@ async def serve(settings: Settings) -> None:
     # What it can reach, for the Features page (agentgov.health).
     from agentgov.processor.health import ComponentReporter
 
-    reporter = ComponentReporter(settings, control_plane, components=http)
+    reporter = ComponentReporter(settings, control_plane, components=http, modes=processor.features)
     recorder.start()
     await server.start()
     webhook_task = asyncio.create_task(webhook.serve())

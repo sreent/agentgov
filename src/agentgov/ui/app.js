@@ -6225,7 +6225,7 @@ const FEATURE_STATUS = {
 };
 
 async function renderFeatures() {
-  const [view, components] = await Promise.all([api('v1/features'), api('v1/components')]);
+  const [view, components, presets] = await Promise.all([api('v1/features'), api('v1/components'), api('v1/feature-presets')]);
   const monitored = view.features.filter((f) => f.mode === 'monitor' && f.group === 'controls');
   const failing = view.features.filter((f) => f.status === 'failing');
   const short = view.features.filter((f) => f.status === 'inactive' || f.status === 'limited');
@@ -6246,6 +6246,7 @@ async function renderFeatures() {
       'Calls they would have stopped go through, and the ledger records them as warnings. ',
       h('a', { href: '#/ledger?decision=monitored' }, 'See what they would have stopped'), '.')) : null,
     componentsCard(components),
+    presetsCard(presets),
     Object.entries(view.groups).map(([group, title]) => {
       const list = view.features.filter((f) => f.group === group);
       return list.length ? featuresCard(title, list) : null;
@@ -6267,6 +6268,21 @@ function checkChip(name, c) {
     : plainChip(`${label}: unreachable`, { tone: 'critical', iconName: 'alert-circle', title: c.detail || null });
 }
 
+// What a governance processor does when what it depends on fails (AGENTGOV_*_FAILURE_MODE).
+const FAILURE_WORDS = {
+  gateway_failure_mode: ['Calls it can\'t check', { modes: 'refused while a control is enforced', closed: 'refused', open: 'let through, recorded' }],
+  presidio_failure_mode: ['Presidio down', { closed: 'refused while data protection is enforced', open: 'personal data not looked for' }],
+  guardian_failure_mode: ['Granite Guardian down', { open: 'the rules decide alone', closed: 'refused where it is waited for' }],
+  authzen_failure_mode: ['Your decision point down', { closed: 'refused while it is enforced', open: 'AgentGov decides alone' }],
+};
+
+function failureLine(settings) {
+  const parts = Object.entries(FAILURE_WORDS)
+    .filter(([k]) => settings?.[k])
+    .map(([k, [label, words]]) => `${label}: ${words[settings[k]] || settings[k]}`);
+  return parts.length ? h('div', { class: 'cell-sub' }, `${parts.join('. ')}.`) : null;
+}
+
 function componentsCard(view) {
   const cp = view.control_plane || {};
   const processors = view.processors || [];
@@ -6277,6 +6293,7 @@ function componentsCard(view) {
       h('div', {},
         h('div', { class: 'chip-row' }, ['opa', 'presidio', 'guardian', 'authzen'].map((n) => checkChip(n, p.checks[n]))),
         h('div', { class: 'cell-sub' }, p.fresh ? 'Reported ' : 'Out of touch: last reported ', timeEl(p.reported_at)),
+        failureLine(p.settings),
         ...Object.entries(p.checks).filter(([, c]) => c.configured && !c.ok && c.detail).map(([n, c]) => h('div', { class: 'cell-sub' }, `${CHECK_NAMES[n] || n}: ${c.detail}`))),
     ]),
   ];
@@ -6287,6 +6304,41 @@ function componentsCard(view) {
       processors.length ? null : callout('warning', 'triangle', 'No governance processor has reported. The controls at the gateway check only calls through AgentGov\'s gateway, and nothing is known to check them.'),
       facts(rows)),
   });
+}
+
+// Starting points that set many modes at once.
+function presetsCard(view) {
+  const applied = view.applied ? ` The deployment applied ${view.applied} (AGENTGOV_FEATURE_PRESET).` : '';
+  return card({
+    title: 'Starting points',
+    sub: `Set many modes at once, then change them one by one. Each change goes into the ledger with the preset's name; features the deployment pins keep their modes.${applied}`,
+    body: h('ul', { class: 'apply-results', role: 'list' }, view.presets.map((p) => h('li', { 'data-preset': p.preset },
+      h('div', {},
+        h('span', { class: 'cell-title' }, p.title),
+        h('div', { class: 'cell-sub' }, p.description),
+        h('div', { class: 'cell-sub' }, p.changes.length ? `Would change ${plural(p.changes.length, 'feature')} now.` : 'Changes nothing now.')),
+      can('admin') && p.changes.length
+        ? h('button', { type: 'button', class: 'btn', onclick: guarded(() => applyPreset(p)) }, `Apply ${p.title.toLowerCase()}…`)
+        : null))),
+  });
+}
+
+async function applyPreset(p) {
+  const words = (m) => (MODE_WORDS[m] || humanize(m)).toLowerCase();
+  const weakens = p.changes.some((c) => c.to === 'off' || (c.from === 'enforce' && c.to === 'monitor'));
+  const result = await ask({
+    title: `${p.title}?`,
+    text: p.description,
+    tone: weakens ? 'danger' : 'primary', iconName: weakens ? 'triangle' : 'info',
+    confirm: `Change ${plural(p.changes.length, 'feature')}`, busy: 'Changing…',
+    extra: h('div', { class: 'stack-tight' },
+      h('ul', { class: 'apply-results', role: 'list' }, p.changes.map((c) => h('li', {},
+        h('span', {}, c.title), h('span', { class: 'cell-sub' }, `${words(c.from)} to ${words(c.to)}`)))),
+      p.kept.length ? h('p', { class: 'cell-sub' }, 'Left as they are: ', p.kept.map((c) => `${c.title} (${c.reason})`).join('; '), '.') : null),
+    submit: () => api(`v1/feature-presets/${encodeURIComponent(p.preset)}`, { method: 'POST' }),
+  });
+  if (result?.changes) toast(`${p.title}: ${plural(result.changes.length, 'feature')} changed.`);
+  await refresh();
 }
 
 function featuresCard(title, list) {

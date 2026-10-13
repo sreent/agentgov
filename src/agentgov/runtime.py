@@ -275,6 +275,7 @@ class Runtime:
             with self.db.session() as session:
                 ledger.ensure_head(session)
             with self.db.session() as session:
+                features.apply_deployment_preset(session, self.settings)
                 features.apply_pins(session, self.settings)
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:

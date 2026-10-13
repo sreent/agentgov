@@ -20,6 +20,7 @@ own jobs from the database.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,9 +28,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
-from agentgov.config import Settings
+from agentgov.config import FEATURE_PRESETS, Settings
 from agentgov.db import mark_changed
-from agentgov.models import FeatureSetting
+from agentgov.models import FeatureSetting, IntegrationState
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
 OFF, ON, MONITOR, ENFORCE = "off", "on", "monitor", "enforce"
@@ -42,6 +43,8 @@ HANDOFF = (OFF, "inform", "triage", "contain", "decide")
 INFORM, MANAGE = "inform", "manage"
 READ_OR_MANAGE = (OFF, INFORM, MANAGE)
 DEPLOYMENT = "deployment"  # the actor of pinned modes
+# Which AGENTGOV_FEATURE_PRESET was applied (integration_state).
+PRESET_STATE = "feature-preset"
 
 GROUPS = {
     "gateway": "Gateway",
@@ -757,6 +760,69 @@ CATALOG: tuple[Feature, ...] = (
     ),
 )
 BY_KEY = {f.key: f for f in CATALOG}
+# The controls whose enforce mode refuses calls at the gateway.
+GATEWAY_CONTROLS = (
+    *(f.key for f in CATALOG if f.group == "controls" and ENFORCE in f.modes),
+    "access-packages",
+    "external-decision-point",
+)
+GATEWAYS = ("mcp-gateway", "model-gateway", "a2a-gateway")
+
+
+def enforced_at_gateway(modes: dict[str, str]) -> list[str]:
+    """The controls at the gateway that are enforced."""
+    return [key for key in GATEWAY_CONTROLS if modes.get(key) == ENFORCE]
+
+
+def fails_open(setting: str, modes: dict[str, str]) -> bool:
+    """Whether a call the gateway can't check goes through unchecked, as
+    AGENTGOV_GATEWAY_FAILURE_MODE says: "open" always, "closed" never, and "modes" while no
+    control at the gateway is enforced, so that controls in monitor mode never stop a call."""
+    if setting == "modes":
+        return not enforced_at_gateway(modes)
+    return setting == "open"
+
+
+@dataclass(frozen=True)
+class Preset:
+    """A starting point that sets many modes at once (apply_preset)."""
+
+    title: str
+    description: str
+    # The modes it sets, given the current ones.
+    sets: Callable[[dict[str, str]], dict[str, str]]
+
+
+def _monitor(current: dict[str, str]) -> dict[str, str]:
+    return {f.key: MONITOR for f in CATALOG if current[f.key] == ENFORCE and MONITOR in f.modes}
+
+
+def _inventory(current: dict[str, str]) -> dict[str, str]:
+    out = dict.fromkeys(GATEWAYS, OFF)
+    out.update(
+        {f.key: OFF if OFF in f.modes else MONITOR for f in CATALOG if f.group == "controls"}
+    )
+    out.update(dict.fromkeys(("external-decision-point", "access-packages"), OFF))
+    out["calls-around-gateway"] = OFF
+    return out
+
+
+PRESETS = {
+    "monitor": Preset(
+        "Monitor everything",
+        "Every control in enforce mode goes to monitor: AgentGov records what each would have "
+        "done and stops nothing. Enforce them one at a time once their records look right.",
+        _monitor,
+    ),
+    "inventory": Preset(
+        "Inventory only",
+        "Nothing is published on the gateway and its controls are off: AgentGov finds your "
+        "agents, in its registry and on the platforms it reads, and checks how they are set "
+        "up, without changing how they run.",
+        _inventory,
+    ),
+}
+assert tuple(PRESETS) == FEATURE_PRESETS
 
 
 def feature(key: str) -> Feature:
@@ -864,7 +930,15 @@ def _weaker(f: Feature, before: str, after: str) -> bool:
     return f.modes.index(after) < f.modes.index(before)
 
 
-def _set(session: Session, f: Feature, new: str, *, actor: str, pinned: bool) -> bool:
+def _set(
+    session: Session,
+    f: Feature,
+    new: str,
+    *,
+    actor: str,
+    pinned: bool,
+    preset: str | None = None,
+) -> bool:
     row = session.get(FeatureSetting, f.key)
     before = row.mode if row is not None else f.default
     if row is not None and row.mode == new and row.pinned == pinned:
@@ -874,14 +948,17 @@ def _set(session: Session, f: Feature, new: str, *, actor: str, pinned: bool) ->
         session.add(row)
     row.mode, row.pinned, row.changed_by, row.changed_at = new, pinned, actor, ids.utcnow()
     if before != new:
+        details: dict[str, Any] = {"from": before, "to": new, "pinned": pinned}
+        if preset:
+            details["preset"] = preset
         ledger.append(
             session,
             type="feature.changed",
             actor=actor,
             resource=f"feature/{f.key}",
             severity="warning" if _weaker(f, before, new) else "info",
-            reason=f"{f.title}: {before} to {new}",
-            details={"from": before, "to": new, "pinned": pinned},
+            reason=f"{f.title}: {before} to {new}" + (f" (preset {preset})" if preset else ""),
+            details=details,
         )
         mark_changed(session, "features", f"feature:{f.key}")
     return True
@@ -916,6 +993,68 @@ def apply_pins(session: Session, settings: Settings) -> None:
         if row.pinned and row.key not in pins:
             # No longer pinned: it keeps its mode, and administrators may now change it.
             row.pinned, row.changed_by, row.changed_at = False, DEPLOYMENT, ids.utcnow()
+
+
+def preview_preset(session: Session, settings: Settings, name: str) -> dict[str, Any]:
+    """What applying preset ``name`` would change, and what it leaves: features the
+    deployment pins, and modes that can't be used yet."""
+    try:
+        preset = PRESETS[name]
+    except KeyError:
+        raise NotFound(f"no preset {name!r}; presets: {', '.join(PRESETS)}") from None
+    current = modes(session)
+    pins = parse_pins(settings.features)
+    pinned = set(pins) | {row.key for row in _rows(session).values() if row.pinned}
+    changes, kept = [], []
+    for key, new in preset.sets(current).items():
+        if current[key] == new:
+            continue
+        why = (
+            "pinned by the deployment (AGENTGOV_FEATURES)"
+            if key in pinned
+            else unmet(key, new, settings)
+        )
+        item = {"key": key, "title": BY_KEY[key].title, "from": current[key], "to": new}
+        if why:
+            kept.append({**item, "reason": why})
+        else:
+            changes.append(item)
+    return {
+        "preset": name,
+        "title": preset.title,
+        "description": preset.description,
+        "changes": changes,
+        "kept": kept,
+    }
+
+
+def apply_preset(session: Session, settings: Settings, name: str, *, actor: str) -> dict[str, Any]:
+    """Set the modes preset ``name`` sets, but for those preview_preset says it keeps;
+    each change is a feature.changed entry that names the preset."""
+    plan = preview_preset(session, settings, name)
+    for change in plan["changes"]:
+        _set(session, BY_KEY[change["key"]], change["to"], actor=actor, pinned=False, preset=name)
+    return plan
+
+
+def deployment_preset(session: Session) -> str | None:
+    """The AGENTGOV_FEATURE_PRESET last applied, if any."""
+    state = session.get(IntegrationState, PRESET_STATE)
+    return (state.data or {}).get("applied") if state is not None else None
+
+
+def apply_deployment_preset(session: Session, settings: Settings) -> None:
+    """AGENTGOV_FEATURE_PRESET, when the control plane starts with one it hasn't applied
+    (before the pins, which then hold)."""
+    name = settings.feature_preset
+    if not name or deployment_preset(session) == name:
+        return
+    apply_preset(session, settings, name, actor=DEPLOYMENT)
+    state = session.get(IntegrationState, PRESET_STATE)
+    if state is None:
+        state = IntegrationState(key=PRESET_STATE)
+        session.add(state)
+    state.data, state.updated_at = {"applied": name}, ids.utcnow()
 
 
 def describe(session: Session, settings: Settings, key: str | None = None) -> list[dict[str, Any]]:

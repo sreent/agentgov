@@ -263,7 +263,12 @@ def test_the_processor_reports_its_checks() -> None:
     assert checks["presidio"]["ok"] is True
     assert checks["guardian"]["ok"] is False and "503" in checks["guardian"]["detail"]
     assert checks["authzen"] == {"configured": False, "ok": False, "detail": ""}
-    assert payload["settings"] == {"presidio_failure_mode": "closed"}
+    assert payload["settings"] == {
+        "gateway_failure_mode": "modes",
+        "presidio_failure_mode": "closed",
+        "guardian_failure_mode": "open",
+        "authzen_failure_mode": "closed",
+    }
 
 
 def test_a_processor_without_opas_address_says_where_it_asks() -> None:

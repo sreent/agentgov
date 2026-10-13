@@ -75,7 +75,21 @@ class A2AGuard:
         target = request.path_params["target"]
         try:
             return await self._check(target, request)
-        except Exception:
+        except Exception as exc:
+            if self.p.unchecked(self.p.features.last()):
+                log.exception("checking a call to agent %s failed; letting it through", target)
+                self.p.note_unchecked(
+                    f"the governance processor failed: {type(exc).__name__}",
+                    kind="a2a",
+                    phase="request",
+                    method=request.method,
+                    server=target,
+                    target=target,
+                    resource=target,
+                    identity=ModelGuard._identity(request.headers),
+                )
+                # Without a delegation, and with none the caller may have set.
+                return self._pass_on(None, None, [], None, None, {})
             log.exception("checking a call to agent %s failed; refusing it", target)
             return refuse(None, "deny", ["Governance processor error; the call was not passed on"])
 
@@ -117,6 +131,7 @@ class A2AGuard:
             approval_id: str | None = None,
             decision_id: str | None = None,
             redacted: list[str] | None = None,
+            unchecked: str | None = None,
         ) -> None:
             self.p._record(
                 kind="a2a",
@@ -148,6 +163,7 @@ class A2AGuard:
                     "uid": issued.get("uid"),
                     "parent_uid": chain.uid if chain else None,
                 },
+                unchecked=unchecked,
             )
 
         if unusable:
@@ -173,6 +189,11 @@ class A2AGuard:
             )
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
+            if self.p.unchecked(modes):
+                # Without a delegation of its own: the agent called doesn't know it was checked.
+                why = f"the policy engine is unavailable: {exc}"
+                finish("allow", [self.p.unchecked_reason(why)], unchecked=why)
+                return self._pass_on(None, None, handed_down, chain, person, issued)
             reasons = ["Policy engine unavailable; the call was not passed on"]
             finish("deny", reasons)
             return refuse(rpc_id, "deny", reasons)

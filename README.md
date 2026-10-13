@@ -98,7 +98,9 @@ flowchart LR
 1. When an agent is approved, the control plane creates its Keycloak client. The agent
    requests short-lived tokens with the client-credentials grant.
 2. Every MCP request goes through agentgateway, which validates the token and passes the
-   call to the governance processor (agentgateway's `ExtMcp` hook, fail-closed).
+   call to the governance processor (agentgateway's `ExtMcp` hook; when it can't be
+   checked, a call is refused while a control is enforced, as
+   [features](docs/features.md#when-something-is-down) explains).
 3. The processor scans arguments and results (Presidio for personal data; detectors for
    secrets, prompt injection and poisoned tool descriptions) and asks OPA for a
    decision. OPA evaluates the Rego library and your own policies against live registry
@@ -220,7 +222,10 @@ the gateway. It shows each control in turn:
     ([administration](docs/administration.md#signing-out-everywhere)).
 26. **Is it working?**: the governance processor has told the control plane what it can
     reach, OPA and Presidio, so least privilege and data protection can do what their
-    modes say ([features](docs/features.md#is-it-working)).
+    modes say ([features](docs/features.md#is-it-working)); and what it does when OPA
+    can't decide, and what the monitor-first starting point would change
+    ([when something is down](docs/features.md#when-something-is-down),
+    [starting points](docs/features.md#starting-points)).
 
 Then look around:
 

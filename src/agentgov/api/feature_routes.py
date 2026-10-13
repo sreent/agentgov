@@ -50,6 +50,30 @@ def list_components(request: Request, _: Principal = Depends(read)) -> dict[str,
         return {"control_plane": rt.health.get(), "processors": health.reports(s)}
 
 
+@router.get("/feature-presets")
+def list_presets(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+    """Starting points that set many modes at once, with what each would change now and
+    what it would leave (docs/features.md#starting-points)."""
+    rt = request.app.state.rt
+    with rt.db.session() as s:
+        return {
+            "presets": [features.preview_preset(s, rt.settings, name) for name in features.PRESETS],
+            "applied": features.deployment_preset(s),
+        }
+
+
+@router.post("/feature-presets/{name}")
+def apply_preset(
+    request: Request, name: str, principal: Principal = Depends(admin)
+) -> dict[str, Any]:
+    """Apply a starting point: each mode it changes is a feature.changed entry in the
+    ledger that names it. Features the deployment pins keep their pins."""
+    rt = request.app.state.rt
+    with rt.db.session() as s:
+        plan = features.apply_preset(s, rt.settings, name, actor=principal.actor)
+        return {**plan, "features": _described(s, rt)}
+
+
 @router.put("/features/{key}")
 def set_feature(
     request: Request,

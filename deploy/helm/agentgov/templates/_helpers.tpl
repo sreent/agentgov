@@ -185,6 +185,9 @@ capabilities:
       key: service-token
 - name: AGENTGOV_OPA_URL
   value: {{ if .Values.internalTLS.enabled }}https{{ else }}http{{ end }}://{{ include "agentgov.name" (list . "opa") }}:8181
+{{- /* The control plane configures the gateway with it; the processor acts on it. */}}
+- name: AGENTGOV_GATEWAY_FAILURE_MODE
+  value: {{ .Values.gatewayFailureMode | default "modes" | quote }}
 {{- if .Values.internalTLS.enabled }}
 - name: AGENTGOV_TLS_DIR
   value: /tls

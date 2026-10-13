@@ -173,6 +173,16 @@ def _to_processor(settings: Settings, address: str, *, grpc: bool = False) -> di
     return {"policies": {"backendTLS": processor_tls(settings, address, grpc=grpc)}}
 
 
+def _fails_open(settings: Settings, modes: dict[str, str]) -> bool:
+    """Whether agentgateway lets a call through when the processor can't be reached or
+    fails, as it does itself when it can't check one (AGENTGOV_GATEWAY_FAILURE_MODE)."""
+    return features.fails_open(settings.gateway_failure_mode, modes)
+
+
+def _failure_mode(settings: Settings, modes: dict[str, str]) -> str:
+    return "failOpen" if _fails_open(settings, modes) else "failClosed"
+
+
 def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
     policies: dict[str, Any] = {
         "cors": {
@@ -185,7 +195,7 @@ def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict
                 {
                     "kind": "remote",
                     "host": settings.processor_address,
-                    "failureMode": "failClosed",
+                    "failureMode": _failure_mode(settings, modes),
                     "methods": dict(GUARDED_METHODS),
                     "metadata": {**IDENTITY_METADATA, "server": f'"{ts.name}"'},
                     "requestHeaders": {"disallowed": ["authorization", "cookie"]},
@@ -282,7 +292,7 @@ def model_route_for(
                             "webhook": {
                                 "target": webhook,
                                 "headers": guard_headers,
-                                "failureMode": "failClosed",
+                                "failureMode": _failure_mode(settings, modes),
                             }
                         }
                     ],
@@ -291,7 +301,7 @@ def model_route_for(
                             "webhook": {
                                 "target": webhook,
                                 "headers": guard_headers,
-                                "failureMode": "failClosed",
+                                "failureMode": _failure_mode(settings, modes),
                             }
                         }
                     ],
@@ -338,7 +348,7 @@ def _answer_checks(agent: Agent, settings: Settings, modes: dict[str, str]) -> d
 
     return {
         "host": settings.processor_address,
-        "failureMode": "failClosed",
+        "failureMode": _failure_mode(settings, modes),
         "metadataContext": {
             "agentgov": {
                 "agent": json.dumps(agent.name),
@@ -402,7 +412,9 @@ def a2a_route_for(agent: Agent, settings: Settings, modes: dict[str, str]) -> di
                 }
             },
             "includeRequestBody": {"maxRequestBytes": A2A_MAX_BODY},
-            "failureMode": "deny",
+            # Let through, a call goes on without a delegation from AgentGov: agents that
+            # check for one refuse it (docs/agent-to-agent.md).
+            "failureMode": "allow" if _fails_open(settings, modes) else "deny",
             **_to_processor(settings, settings.processor_webhook_address),
         },
     }

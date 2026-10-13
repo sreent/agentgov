@@ -29,6 +29,14 @@ urls:
 # Administrators see them in the app but can't change them there; they choose the
 # modes of the other features themselves.
 features: {}
+# A starting point for the features' modes, applied once (docs/features.md#starting-points):
+# "monitor" (every control records what it would do and stops nothing) or "inventory" (no
+# gateway). Empty: each feature's default.
+featurePreset: ""
+# When a call through the gateway can't be checked, because OPA can't decide or the
+# governance processor can't be reached (docs/features.md#when-something-is-down): "modes"
+# refuses it only while a control at the gateway is enforced, "closed" always, "open" never.
+gatewayFailureMode: modes
 
 # The Keycloak clients of the apps people use agents from, which hand people's tokens
 # to the agents that act for them (docs/acting-for-people.md). AgentGov offers these
@@ -138,8 +146,10 @@ controlPlane:
 processor:
   replicas: 1
   # More settings for the governance processor, as AGENTGOV_* environment variables
-  # (docs/configuration.md), for example AGENTGOV_PII_ENTITIES or
-  # AGENTGOV_PRESIDIO_FAILURE_MODE; and Secrets or ConfigMaps to read them from.
+  # (docs/configuration.md), for example AGENTGOV_PII_ENTITIES, or what it does when
+  # Presidio, Granite Guardian or your decision point is down
+  # (AGENTGOV_PRESIDIO_FAILURE_MODE, AGENTGOV_GUARDIAN_FAILURE_MODE,
+  # AGENTGOV_AUTHZEN_FAILURE_MODE); and Secrets or ConfigMaps to read them from.
   env: {}
   envFrom: []
   resources:

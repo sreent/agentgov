@@ -16,6 +16,10 @@ x-agentgov-env: &agentgov-env
   # its own directory of the certs volume, at /tls. A renewed one (`agentgov
   # internal-certs /certs --renew`) is taken within AGENTGOV_TLS_RELOAD_SECONDS (60).
   AGENTGOV_TLS_DIR: /tls
+  # When a call through the gateway can't be checked (docs/features.md#when-something-is-down):
+  # modes (refused only while a control at the gateway is enforced), closed or open. The
+  # control plane configures the gateway with it, and the processor acts on it.
+  AGENTGOV_GATEWAY_FAILURE_MODE: ${AGENTGOV_GATEWAY_FAILURE_MODE:-modes}
 
 services:
   postgres:
@@ -115,6 +119,9 @@ services:
       # Features the deployment pins, e.g. "least-privilege=monitor" (docs/features.md).
       # Administrators choose the others on the Features page.
       AGENTGOV_FEATURES: ${AGENTGOV_FEATURES:-}
+      # A starting point for the features' modes, applied once: monitor or inventory
+      # (docs/features.md#starting-points).
+      AGENTGOV_FEATURE_PRESET: ${AGENTGOV_FEATURE_PRESET:-}
       # AgentGov's Microsoft app registration: the Microsoft 365 agent catalog, Entra Agent
       # ID, the Purview audit log and Defender alerts, each with its own permission
       # (docs/microsoft-connections.md). Off while these are empty.

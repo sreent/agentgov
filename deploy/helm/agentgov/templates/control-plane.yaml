@@ -81,6 +81,10 @@ spec:
             - name: AGENTGOV_FEATURES
               value: {{ include "agentgov.features" $ | quote }}
             {{- end }}
+            {{- with .Values.featurePreset }}
+            - name: AGENTGOV_FEATURE_PRESET
+              value: {{ . | quote }}
+            {{- end }}
             {{- $apps := .Values.peopleApps }}
             {{- if and .Values.keycloak.enabled .Values.keycloak.demoUsers }}
             {{- $apps = append $apps "agentgov-demo-chat" }}

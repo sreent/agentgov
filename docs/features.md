@@ -4,8 +4,10 @@ AgentGov is one application, but you don't have to use all of it. Every feature 
 `unknown-callers` can be turned off, and most controls the gateway enforces can also run in
 **monitor** mode. In
 monitor mode AgentGov decides as usual and records what it would have done, but lets the
-call through, like Conditional Access's report-only mode. Use it to try a control on real
-traffic before you enforce it.
+call through, like Conditional Access's report-only mode, and it doesn't stop calls when
+what it depends on is down ([when something is down](#when-something-is-down)). Use it to
+try a control on real traffic before you enforce it. A new installation can start with
+every control monitored, or with no gateway at all ([starting points](#starting-points)).
 
 ## Choosing
 
@@ -26,6 +28,28 @@ it, but can only change it in the deployment: the Compose `.env` file, or the He
 `features`. Pins are applied, and recorded, when the control plane starts. Remove a pin
 and the feature keeps its mode, which administrators may then change. `agentgov export`
 includes the modes administrators chose, not the pins.
+
+## Starting points
+
+Rather than choose every mode one by one, start from a preset and change modes from there:
+
+| Preset | What it sets |
+|---|---|
+| `monitor` | Every control in enforce mode goes to monitor: AgentGov records what each would have done and stops nothing, even when what it depends on is down. Enforce them one at a time once their records look right ([rolling out a control](#rolling-out-a-control)) |
+| `inventory` | Nothing is published on the gateway and its controls are off (`unknown-callers`, which can't be, is monitored), as are `external-decision-point`, `access-packages` and `calls-around-gateway`, which only matter with the gateway. AgentGov finds your agents, in its registry and on the platforms it reads, and checks how they are set up, without changing how they run |
+
+| | How |
+|---|---|
+| Admin UI | **Features**, **Starting points**: what each would change now, then **Apply** |
+| CLI | `agentgov features presets` (what each would change), `agentgov features preset monitor` |
+| API | `GET /v1/feature-presets`, `POST /v1/feature-presets/{preset}` |
+| Deployment | `AGENTGOV_FEATURE_PRESET=monitor` (the Helm value `featurePreset`) |
+
+Each mode a preset changes is a `feature.changed` entry in the ledger that names the
+preset. Features the deployment pins keep their pins, and modes that need a setting that
+isn't there stay as they are: the preview lists both. The deployment's preset is applied
+once, when the control plane starts with one it hasn't applied yet: administrators'
+changes after that stand when it restarts, and setting another preset applies that one.
 
 ## The features
 
@@ -52,11 +76,11 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 | `acting-for-people` | off, monitor, **enforce** | Agents act for the people their blueprints allow ([acting for people](acting-for-people.md)). A blueprint can say that its agents act only for a person, with a token they got for that person, or only on their own, and only for people in some groups. Monitor lets other calls through and records them. Off, who agents act for isn't checked; the ledger still records the person |
 | `approvals` | off, monitor, **enforce** | Calls to tools their servers mark destructive, and calls organisation policies single out (`require_approval`), wait for a person to approve them |
 | `approvals-by-person` | **off**, on | Sends the approval requests an agent makes while it acts for a person to that person, where its blueprint says so (`approvals_by: person`). People sign in to AgentGov to decide them, people without an AgentGov role too, who see only the requests sent to them. Administrators can always decide. Off, approvers decide every request, and people without an AgentGov role can't sign in unless `issues` is on. Needs AgentGov's sign-in through the Keycloak realm that issues agents' tokens ([acting for people](acting-for-people.md)) |
-| `data-protection` | off, monitor, **enforce** | Inspects tool calls, model calls and calls between agents, and their answers, for credentials and personal data. Credentials stop the call (a tool's or a model's answer that contains them is withheld, and another agent's is masked), and personal data is masked unless policy allows it. Off, nothing is inspected and Presidio isn't called. Monitor records what was found. Only an enforced control stops calls when Presidio is down (`AGENTGOV_PRESIDIO_FAILURE_MODE=closed`) |
+| `data-protection` | off, monitor, **enforce** | Inspects tool calls, model calls and calls between agents, and their answers, for credentials and personal data. Credentials stop the call (a tool's or a model's answer that contains them is withheld, and another agent's is masked), and personal data is masked unless policy allows it. Off, nothing is inspected and Presidio isn't called. Monitor records what was found. Only an enforced control stops calls when Presidio is down (`AGENTGOV_PRESIDIO_FAILURE_MODE=closed`, [when something is down](#when-something-is-down)) |
 | `a2a-masking` | off, **monitor**, enforce | Masks personal data in the messages agents send each other through the gateway, unless the agent called may have it (its `pii-access` label, or its blueprint's). Monitored, messages go as they are and each call's decision records what would have been masked; off, the personal data in them is only recorded. Data protection finds it, so it needs `data-protection` on; credentials in messages are refused by `data-protection` whatever this says ([agent to agent](agent-to-agent.md#messages)) |
 | `prompt-injection` | off, monitor, **enforce** | Withholds tool results and other agents' answers that carry instructions aimed at the agent (indirect prompt injection) and raises a finding, and refuses model calls whose conversation holds such a result. Monitor lets them through and still raises the finding |
 | `jailbreak-detection` | off, **monitor**, enforce | Looks for jailbreaks, prompts that try to talk a model out of its instructions or its safety rules, in the latest message from a person in each [model call](models.md). Enforced, they are refused; monitored, they go through. Either way they are recorded and raise a finding. It starts in monitor mode because people's own words vary more than tool results do: see what it would refuse before you enforce it |
-| `traffic-classifier` | off, **monitor**, enforce | A second opinion from IBM Granite Guardian on what `prompt-injection` and `jailbreak-detection` let through: tool results, the answers agents send each other, and people's prompts to models ([detection](detection.md)). It follows the check it supports: where both are enforced, calls wait for its verdict (`AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` at most) and what it flags is withheld or refused; otherwise it answers in the background, after the call went on, and what it flags is recorded and raises a finding. Needs Granite Guardian where the processor runs (`AGENTGOV_GUARDIAN_URL`) |
+| `traffic-classifier` | off, **monitor**, enforce | A second opinion from IBM Granite Guardian on what `prompt-injection` and `jailbreak-detection` let through: tool results, the answers agents send each other, and people's prompts to models ([detection](detection.md)). It follows the check it supports: where both are enforced, calls wait for its verdict (`AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` at most) and what it flags is withheld or refused, while without a verdict the rules decide alone (`AGENTGOV_GUARDIAN_FAILURE_MODE`); otherwise it answers in the background, after the call went on, and what it flags is recorded and raises a finding. Needs Granite Guardian where the processor runs (`AGENTGOV_GUARDIAN_URL`) |
 | `tool-integrity` | off, monitor, **enforce** | Quarantines tools whose descriptions hide instructions. Tools that changed since approval are held until an administrator reviews them |
 | `risk-based-access` | off, monitor, **enforce** | Refuses agents at critical risk, and blocks agents whose risk score reaches `AGENTGOV_AUTO_BLOCK_RISK_SCORE`. Monitor lets them through, and the automatic block raises an `agent.would_auto_block` finding instead. Risk is always scored and shown |
 | `token-budgets` | off, monitor, **enforce** | Refuses model calls from agents that have used their daily token budget, their own or their blueprint's, until the day ends (UTC). Off, budgets aren't checked; usage is still metered |
@@ -75,7 +99,7 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 
 | Feature | Modes | What it does |
 |---|---|---|
-| `external-decision-point` | **off**, monitor, enforce | Has the processor also ask an AuthZEN decision point of yours (Cedar, Cerbos, Topaz, OpenFGA, Keycloak...) about each call to a tool, a model or another agent that AgentGov's policies let through: who, the method, the tool, model or agent, and what was found in the call, never its content ([AuthZEN](policies.md#your-own-decision-point-beside-agentgovs)). Enforced, calls it denies are refused and calls it says need approval wait for one; if it can't be asked, calls are refused. Monitored, each call's decision records what it would have done. Needs `AGENTGOV_AUTHZEN_URL` where the processor runs |
+| `external-decision-point` | **off**, monitor, enforce | Has the processor also ask an AuthZEN decision point of yours (Cedar, Cerbos, Topaz, OpenFGA, Keycloak...) about each call to a tool, a model or another agent that AgentGov's policies let through: who, the method, the tool, model or agent, and what was found in the call, never its content ([AuthZEN](policies.md#your-own-decision-point-beside-agentgovs)). Enforced, calls it denies are refused and calls it says need approval wait for one; if it can't be asked, calls are refused (`AGENTGOV_AUTHZEN_FAILURE_MODE`). Monitored, each call's decision records what it would have done. Needs `AGENTGOV_AUTHZEN_URL` where the processor runs |
 | `authzen-decision-point` | **off**, on | Answers AuthZEN evaluations with AgentGov's policies at `/access/v1/evaluation` on the control plane, for enforcement points other than AgentGov's gateway ([AuthZEN](policies.md#agentgov-as-a-decision-point)). Off, the endpoints answer 404. Needs OPA where the control plane runs |
 
 ### Developer tools
@@ -161,11 +185,11 @@ in a row, or three minutes, whichever is longer, is out of touch and doesn't cou
 
 | Feature | What stops it |
 |---|---|
-| The gateway and every control at it | no governance processor in touch: inactive, since nothing is known to check calls; a processor that can't reach OPA, or whose OPA has no policies loaded: failing, since every call through the gateway is refused, in every mode |
+| The gateway and every control at it | every gateway off: inactive, since there are no calls to check; no governance processor in touch: inactive, since nothing is known to check calls (and, once one went quiet, whether calls are refused or go through unchecked if it is down); a processor that can't reach OPA, or whose OPA has no policies loaded: failing while calls are refused, inactive while they go through unchecked ([when something is down](#when-something-is-down)) |
 | `data-protection` | no Presidio where the processor runs: limited, since credentials are still found; Presidio unreachable: failing while enforced with `AGENTGOV_PRESIDIO_FAILURE_MODE=closed`, limited otherwise |
 | `a2a-masking` | `data-protection` off, or Presidio missing or unreachable: inactive, since nothing finds the personal data to mask |
-| `traffic-classifier` | no Granite Guardian where the processor runs: inactive; unreachable: limited, since the rules decide alone |
-| `external-decision-point` | no `AGENTGOV_AUTHZEN_URL` where the processor runs: inactive; unreachable: failing while enforced, limited while monitored |
+| `traffic-classifier` | no Granite Guardian where the processor runs: inactive; unreachable: limited, since the rules decide alone, or failing where calls wait for it with `AGENTGOV_GUARDIAN_FAILURE_MODE=closed` |
+| `external-decision-point` | no `AGENTGOV_AUTHZEN_URL` where the processor runs: inactive; unreachable: failing while enforced with `AGENTGOV_AUTHZEN_FAILURE_MODE=closed`, limited otherwise |
 | `token-budgets` | no `AGENTGOV_GATEWAY_OTLP_ENDPOINT`: inactive, since usage isn't metered |
 | `authzen-decision-point`, `copilot-studio-threat-detection` | OPA unreachable from the control plane: failing |
 | `developer-sign-in`, `identity-assertions`, `approvals-by-person` | Keycloak's keys unreachable from the control plane: limited |
@@ -181,6 +205,42 @@ which setting.
 | Admin UI | **Features**: a status on each feature that isn't fully working, with why, and **What AgentGov can reach** |
 | CLI | `agentgov features list` (its `status` column), `agentgov components` |
 | API | `status` and `problems` in `GET /v1/features`; `GET /v1/components` |
+
+## When something is down
+
+AgentGov's checks depend on other components: OPA decides every call through the gateway,
+the governance processor checks it, and Presidio, Granite Guardian and your decision point
+each do part of it. When one of them is down, a call can't be checked as the modes say, and
+a setting says what happens to it. With the defaults, a control in monitor mode never stops
+a call: not when it decides, and not when it can't.
+
+| Setting | When | Default | Otherwise |
+|---|---|---|---|
+| `AGENTGOV_GATEWAY_FAILURE_MODE` | OPA can't decide (unreachable, or no policies loaded), or the governance processor can't be reached or fails | `modes`: refused while any control at the gateway is enforced, through unchecked while none is | `closed`: always refused; `open`: always through unchecked |
+| `AGENTGOV_PRESIDIO_FAILURE_MODE` | Presidio can't be reached, or answers what can't be read | `closed`: refused while `data-protection` is enforced (credentials are still found) | `open`: personal data isn't looked for |
+| `AGENTGOV_GUARDIAN_FAILURE_MODE` | Granite Guardian gives no verdict where a call waits for it (`traffic-classifier` and the check it supports both enforced) | `open`: the rules decide alone | `closed`: refused |
+| `AGENTGOV_AUTHZEN_FAILURE_MODE` | your decision point can't be asked while `external-decision-point` is enforced | `closed`: refused | `open`: AgentGov's own decision stands |
+
+Unchecked isn't anonymous: agentgateway still checks each caller's token itself, unless
+`unknown-callers` is monitored. A call that goes through unchecked is a warning in the
+ledger: its decision is `allow`, its reason starts with `Not checked`, and
+`details.unchecked` says why. Where the processor
+can't be reached at all, agentgateway lets the call through itself, and only the gateway's
+logs and traces record it. A call between agents that goes through unchecked carries no
+delegation from AgentGov, so an agent that checks for one refuses it
+([agent to agent](agent-to-agent.md#agents-that-refuse-calls-around-the-gateway)).
+
+`AGENTGOV_GATEWAY_FAILURE_MODE` is read in two places: the control plane configures
+agentgateway with it (the `failureMode` of each route's checks, for when the processor
+can't be reached), and the processor applies it to what it can't check itself. Set it alike
+in both; the Helm value `gatewayFailureMode` and the Compose `.env` file do. Any enforced
+control at the gateway counts, `access-packages` and `external-decision-point` among them.
+The processor knows the modes from OPA, and from the control plane's answer to each of its
+reports, so it still knows them while OPA is down; until it has heard from either, it takes
+the features' defaults, in which most controls are enforced.
+
+The Features page shows what each processor does when something is down, beside what it
+can reach.
 
 ## Rolling out a control
 

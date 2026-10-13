@@ -95,7 +95,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 
 | Agent 365 capability | AgentGov | How |
 |---|---|---|
-| Real-time blocking of risky tool calls | ✅ | Governance processor via agentgateway's `ExtMcp` hook, fail-closed; Copilot Studio agents' tool calls through Copilot Studio's external threat detection, decided by the same OPA ([connections](microsoft-connections.md#copilot-studio-threat-detection)) |
+| Real-time blocking of risky tool calls | ✅ | Governance processor via agentgateway's `ExtMcp` hook, refusing what it can't check while a control is enforced ([configurable](features.md#when-something-is-down)); Copilot Studio agents' tool calls through Copilot Studio's external threat detection, decided by the same OPA ([connections](microsoft-connections.md#copilot-studio-threat-detection)) |
 | Secret exfiltration detection | ✅ | Credential detectors on tool arguments (deny) and results (redact) |
 | Prompt injection (XPIA) protection | ✅ | Tool results and other agents' answers with injected instructions are withheld, and model calls whose conversation holds one are refused; found by heuristics and, optionally, by **IBM Granite Guardian** ([detection](detection.md)); jailbreak and XPIA attempts that Microsoft detects against Microsoft 365 and Copilot Studio agents become findings (Purview audit log) |
 | Tool poisoning and definition drift | ✅ | Poisoned tools hidden; changed definitions refused until re-approved |

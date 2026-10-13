@@ -14,8 +14,9 @@ from typing import Any
 import httpx
 
 from agentgov import __version__
-from agentgov.config import Settings
+from agentgov.config import FAILURE_SETTINGS, Settings
 from agentgov.processor.control_plane import ControlPlaneClient, ControlPlaneError
+from agentgov.processor.modes import FeatureModes
 
 log = logging.getLogger(__name__)
 TIMEOUT = 3.0
@@ -87,7 +88,8 @@ async def checks(
 
 
 class ComponentReporter:
-    """Reports this processor's checks to the control plane now and at every interval."""
+    """Reports this processor's checks to the control plane now and at every interval;
+    the control plane answers with the features' modes, which ``modes`` learns."""
 
     def __init__(
         self,
@@ -97,12 +99,14 @@ class ComponentReporter:
         components: httpx.AsyncClient,
         services: httpx.AsyncClient | None = None,
         instance: str | None = None,
+        modes: FeatureModes | None = None,
     ) -> None:
         self.settings = settings
         self.control_plane = control_plane
         self.components = components
         self.services = services or httpx.AsyncClient(timeout=TIMEOUT)
         self.instance = instance or socket.gethostname()
+        self.modes = modes
         self._task: asyncio.Task[None] | None = None
 
     async def report(self) -> dict[str, Any]:
@@ -114,9 +118,11 @@ class ComponentReporter:
             "checks": await checks(
                 self.settings, components=self.components, services=self.services
             ),
-            "settings": {"presidio_failure_mode": self.settings.presidio_failure_mode},
+            "settings": {name: getattr(self.settings, name) for name in FAILURE_SETTINGS},
         }
-        await self.control_plane.report_component(payload)
+        answer = await self.control_plane.report_component(payload)
+        if self.modes is not None and isinstance(answer, dict):
+            self.modes.learn(answer.get("features"))
         return payload
 
     async def _run(self) -> None:

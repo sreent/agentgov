@@ -57,6 +57,9 @@ def record_mcp_decisions(
         resource = rec.get("resource")
         # What controls in monitor mode would have done (the call went through).
         monitored = [str(m) for m in rec.get("monitored") or []]
+        # Why the call couldn't be checked, when it went through unchecked
+        # (AGENTGOV_GATEWAY_FAILURE_MODE).
+        unchecked = str(rec["unchecked"])[:500] if rec.get("unchecked") else None
         actor = (
             f"agent:{agent.name}" if agent else f"client:{identity.get('client_id') or 'unknown'}"
         )
@@ -70,7 +73,9 @@ def record_mcp_decisions(
             actor=actor,
             agent=agent,
             agent_name=None if agent else identity.get("client_id"),
-            severity="warning" if effect in ("deny", "require_approval") or monitored else "info",
+            severity="warning"
+            if effect in ("deny", "require_approval") or monitored or unchecked
+            else "info",
             action=rec.get("method"),
             resource=resource,
             decision=effect,
@@ -93,6 +98,7 @@ def record_mcp_decisions(
                     )
                     if k in detections
                 },
+                **({"unchecked": unchecked} if unchecked else {}),
                 "approval_id": rec.get("approval_id"),
                 "opa_decision_id": rec.get("opa_decision_id"),
                 "latency_ms": rec.get("latency_ms"),
