@@ -1,7 +1,10 @@
 # Requirements
 
 What AgentGov needs to run: for evaluation on one machine, and on Kubernetes for others
-to rely on. [Deploying AgentGov](deploy/README.md) has the guides.
+to rely on. [Deploying AgentGov](deploy/README.md) has the guides. Everything below is for
+the whole of AgentGov; an inventory of your platforms' agents without the gateway needs
+only the control plane and PostgreSQL ([on Kubernetes](deploy/kubernetes.md#profiles),
+[with Compose](deploy/local.md#just-the-inventory)).
 
 ## At a glance
 
@@ -65,6 +68,10 @@ The Helm chart reserves:
 | PostgreSQL (bundled) | 100m, 256 MiB, and an 8 GiB volume | 1 GiB |
 | Keycloak (bundled) | 200m, 768 MiB | 1.5 GiB |
 | **Total** | **810m CPU, 3.1 GiB** (510m, 2.1 GiB without the bundled two) | |
+
+The [profiles](deploy/kubernetes.md#profiles) reserve less: 710m CPU and 1.6 GiB to monitor
+(no Presidio), and 250m and 576 MiB for the inventory alone (the control plane, the
+collector and PostgreSQL).
 
 Each component's `resources` value changes them ([Kubernetes](deploy/kubernetes.md)); GKE
 Autopilot and AKS Automatic raise requests below their minimums, so AgentGov reserves a

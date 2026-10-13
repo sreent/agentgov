@@ -1,3 +1,4 @@
+{{- if .Values.gateway.enabled }}
 {{- $name := include "agentgov.name" (list . "gateway") }}
 {{- $v := .Values.gateway }}
 {{- $sync := dict "image" (include "agentgov.image" .) "pullPolicy" .Values.image.pullPolicy }}
@@ -133,6 +134,8 @@ spec:
     - name: http
       port: {{ $v.service.port }}
       targetPort: http
+
+{{- end }}
 
 {{- define "agentgov.gatewayConfigEnv" -}}
 - name: AGENTGOV_CONTROL_PLANE_URL

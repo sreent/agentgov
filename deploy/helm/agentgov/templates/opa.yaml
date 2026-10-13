@@ -1,3 +1,4 @@
+{{- if .Values.opa.enabled }}
 {{- $name := include "agentgov.name" (list . "opa") }}
 {{- $v := .Values.opa }}
 {{- $config := include "agentgov.opaConfig" . }}
@@ -152,6 +153,8 @@ spec:
     - name: http
       port: 8181
       targetPort: http
+
+{{- end }}
 
 {{- define "agentgov.opaConfig" -}}
 services:

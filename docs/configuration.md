@@ -31,7 +31,9 @@ services:
 
 Compose reads the override when you start the stack from `deploy/compose`. From elsewhere,
 name both files: `docker compose -f deploy/compose/docker-compose.yml -f
-deploy/compose/docker-compose.override.yml up -d`.
+deploy/compose/docker-compose.override.yml up -d`. The
+[inventory stack](deploy/local.md#just-the-inventory), `docker-compose.inventory.yml`, gives
+the control plane every setting in `.env` itself.
 
 ### Helm
 
@@ -73,16 +75,18 @@ file, which is how [CONTRIBUTING.md](../CONTRIBUTING.md) develops it.
 
 | Value | Settings |
 |---|---|
-| `urls.controlPlane`, `urls.gateway` | `AGENTGOV_PUBLIC_URL`, `AGENTGOV_GATEWAY_PUBLIC_URL` |
-| `urls.keycloak`, the issuer, with the bundled Keycloak (reached at its Service, in the realm `agentgov`); or `externalKeycloak.url`, `.realm` and `.issuer` | `AGENTGOV_KEYCLOAK_URL`, `AGENTGOV_KEYCLOAK_REALM`, `AGENTGOV_KEYCLOAK_ISSUER`, `AGENTGOV_KEYCLOAK_JWKS_URL` |
+| `urls.controlPlane`, `urls.gateway` (with `gateway.enabled`) | `AGENTGOV_PUBLIC_URL`, `AGENTGOV_GATEWAY_PUBLIC_URL` |
+| `urls.keycloak`, the issuer, with the bundled Keycloak (reached at its Service, in the realm `agentgov`); or `externalKeycloak.url`, `.realm` and `.issuer`; neither without the gateway | `AGENTGOV_KEYCLOAK_URL`, `AGENTGOV_KEYCLOAK_REALM`, `AGENTGOV_KEYCLOAK_ISSUER`, `AGENTGOV_KEYCLOAK_JWKS_URL` |
 | `secrets.existingSecret` (or the Secret the chart generates) | `AGENTGOV_ADMIN_TOKEN`, `AGENTGOV_SERVICE_TOKEN`, `AGENTGOV_KEYCLOAK_CLIENT_SECRET`, `AGENTGOV_OIDC_CLIENT_SECRET` |
 | `postgresql.enabled`, or `externalDatabase.existingSecret` and `.key` | `AGENTGOV_DATABASE_URL` |
 | `controlPlane.autoMigrate` | `AGENTGOV_DATABASE_AUTO_MIGRATE` |
-| `features` | `AGENTGOV_FEATURES` |
+| `features`, `featurePreset` | `AGENTGOV_FEATURES`, `AGENTGOV_FEATURE_PRESET` |
 | `peopleApps` (and the demo app, with `keycloak.demoUsers`) | `AGENTGOV_PEOPLE_APP_CLIENTS` |
 | `presidio.enabled` | `AGENTGOV_PRESIDIO_URL` |
 | `otelCollector.enabled` | `AGENTGOV_GATEWAY_OTLP_ENDPOINT` |
-| always | `AGENTGOV_OPA_URL`, `AGENTGOV_CONTROL_PLANE_URL`, `AGENTGOV_PROCESSOR_ADDRESS`, `AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS`, `AGENTGOV_DESTINATION_SECRETS_DIR` |
+| `opa.enabled` | `AGENTGOV_OPA_URL` |
+| `gateway.enabled` | `AGENTGOV_PROCESSOR_ADDRESS`, `AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS`, and the processor's and the sidecar's `AGENTGOV_CONTROL_PLANE_URL` |
+| always | `AGENTGOV_DESTINATION_SECRETS_DIR` |
 
 Don't set these in `controlPlane.env` too: the chart's values are where they are kept
 consistent across the parts. An Entra ID app's client secret, for administrators' sign-in,

@@ -1,4 +1,5 @@
-{{- if .Values.presidio.enabled }}
+{{- /* Presidio is the gateway's processor's: it runs with the gateway. */}}
+{{- if and .Values.presidio.enabled .Values.gateway.enabled }}
 {{- $name := include "agentgov.name" (list . "presidio") }}
 {{- $v := .Values.presidio }}
 # Personal-data detection for the governance processor.

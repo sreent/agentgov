@@ -362,7 +362,9 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 
 * [Deploying AgentGov](docs/deploy/README.md): [on your machine](docs/deploy/local.md),
   [on Kubernetes](docs/deploy/kubernetes.md), and on [Google Cloud](docs/deploy/gcp.md),
-  [Azure](docs/deploy/azure.md) and [AWS](docs/deploy/aws.md)
+  [Azure](docs/deploy/azure.md) and [AWS](docs/deploy/aws.md); all of it, or less: an
+  [inventory without the gateway](docs/deploy/kubernetes.md#profiles), or the gateway
+  watching before it enforces
 * [Configuration](docs/configuration.md): every setting, and
   [requirements](docs/requirements.md): versions, resources and network
 * [Agent 365 baseline and parity matrix](docs/baseline-agent365.md)

@@ -1,7 +1,12 @@
 AgentGov {{ .Chart.AppVersion }} is starting in namespace {{ .Release.Namespace }}.
 
 Admin UI and API:  {{ .Values.urls.controlPlane }}/ui
+{{- if .Values.gateway.enabled }}
 MCP gateway:       {{ .Values.urls.gateway }}/mcp/<server>
+{{- else }}
+No gateway (gateway.enabled=false): AgentGov keeps the inventory of your platforms'
+agents, their findings and issues, and enforces nothing on agents' calls.
+{{- end }}
 {{- if .Values.keycloak.enabled }}
 Keycloak:          {{ .Values.urls.keycloak }}  (realm agentgov)
 {{- end }}
@@ -11,7 +16,9 @@ Keycloak:          {{ .Values.urls.keycloak }}  (realm agentgov)
 Nothing is exposed outside the cluster yet. To try it from this machine:
 
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agentgov.name" (list . "control-plane") }} 8000:{{ .Values.controlPlane.service.port }} &
+{{- if .Values.gateway.enabled }}
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agentgov.name" (list . "gateway") }} 8080:{{ .Values.gateway.service.port }} &
+{{- end }}
 {{- if .Values.keycloak.enabled }}
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agentgov.name" (list . "keycloak") }} 8180:8080 &
 {{- end }}

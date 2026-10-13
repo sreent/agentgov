@@ -2,7 +2,8 @@
 
 The Helm chart, [`deploy/helm/agentgov`](../../deploy/helm/agentgov), installs AgentGov on
 any Kubernetes cluster: the control plane, the governance processor, OPA, agentgateway,
-Presidio and the OpenTelemetry Collector, and, for evaluation, PostgreSQL and Keycloak.
+Presidio and the OpenTelemetry Collector, and, for evaluation, PostgreSQL and Keycloak; or
+less of it, from a [profile](#profiles).
 This page covers any cluster; the [Google Cloud](gcp.md), [Azure](azure.md) and
 [AWS](aws.md) guides add each cloud's database, secrets, load balancer and certificates.
 
@@ -47,6 +48,33 @@ act for, signs in to the demo app `agentgov-demo-chat`
 ([local](local.md#signing-in) lists what each may do). The example manifests expect the
 demo's tool server and model beside the chart, as `scripts/ci.sh --kind` sets them up
 ([kind](local.md#kubernetes-with-kind)); with your own, register them instead.
+
+## Profiles
+
+The defaults install everything. To run less, start from a profile, a values file beside
+the chart, and add your values after it:
+
+| Profile | What runs | Requests | For |
+|---|---|---|---|
+| (the defaults) | Everything: the control plane, the gateway and its processor, OPA, Presidio, the OpenTelemetry Collector, PostgreSQL and Keycloak | 810m CPU, 3.1 GiB | Governing agents' calls, and the inventory |
+| [`profiles/monitor.yaml`](../../deploy/helm/agentgov/profiles/monitor.yaml) | The same without Presidio, with every control watching rather than stopping ([starting points](../features.md#starting-points)) | 710m, 1.6 GiB | Seeing what the gateway's controls would do before they do it |
+| [`profiles/inventory.yaml`](../../deploy/helm/agentgov/profiles/inventory.yaml) | The control plane, the OpenTelemetry Collector and PostgreSQL: no gateway, processor, OPA, Presidio or Keycloak | 250m, 576 MiB | The agents on your platforms, their findings and issues, management rules and the evidence ledger, with nothing enforced on agents' calls |
+
+```bash
+helm install agentgov deploy/helm/agentgov -n agentgov --create-namespace --wait \
+  -f deploy/helm/agentgov/profiles/inventory.yaml \
+  --set image.repository=REGISTRY/agentgov --set image.tag=0.1.0
+```
+
+A profile sets values like any other: `gateway.enabled` and `opa.enabled` say whether the
+gateway (with its processor, and Presidio) and OPA run, and `featurePreset` the features'
+starting modes. The gateway needs OPA, and Keycloak (the bundled one or yours) to check
+agents' tokens; without the gateway, neither is needed. Without Keycloak, administrators
+sign in with your identity provider (`AGENTGOV_OIDC_ISSUER` and `AGENTGOV_OIDC_CLIENT_ID` in
+`controlPlane.env`, its client's secret as `oidc-client-secret` in the Secret;
+[Microsoft Entra ID](#signing-in-with-microsoft-entra-id)) or an API token. Moving from the
+inventory to the gateway later is an upgrade with the other values: the registry, its
+findings and the ledger stay; turn the gateway's features on in **Features**.
 
 ## Before others rely on it
 
@@ -223,16 +251,19 @@ The chart always sets `AGENTGOV_OIDC_CLIENT_SECRET` from the Secret, so a value 
 | `bundleSigning.enabled`, `.existingSecret`, `.algorithm` | on, generated, `RS256` | Signed OPA bundles: the chart's key and certificate, or a `kubernetes.io/tls` Secret of yours ([production](../production.md#signed-bundles)) |
 | `podDisruptionBudget.enabled` | `true` | A PodDisruptionBudget for each part running two or more replicas |
 | `features` | — | Features the deployment pins, such as `{least-privilege: monitor}` ([features](../features.md)); administrators choose the rest in the app |
+| `featurePreset` | — | The features' starting modes, applied once: `monitor` or `inventory` ([starting points](../features.md#starting-points)) |
 | `controlPlane.ingress`, `gateway.ingress`, `keycloak.ingress` | off | Ingresses, at the hosts of the addresses above unless `host` is set |
 | `controlPlane.httpRoute`, `gateway.httpRoute`, `keycloak.httpRoute` | off | Gateway API routes instead, attached to the Gateway in `parentRefs`, with optional `timeouts` |
+| `gateway.enabled` | `true` | The gateway and its governance processor (and Presidio): what enforces on agents' calls. Off, AgentGov keeps the inventory, findings and issues ([profiles](#profiles)) |
+| `opa.enabled` | `true` | OPA, which the gateway needs; the control plane asks it about Copilot Studio's tool calls and AuthZEN's questions |
 | `gateway.replicas`, `processor.replicas`, `opa.replicas` | `1` | The decision path; scale them together |
 | `gateway.configInterval` | `5` | Seconds between the gateway's checks for configuration changes |
-| `presidio.enabled` | `true` | Personal-data detection |
+| `presidio.enabled` | `true` | Personal-data detection, for the gateway's processor (it runs with the gateway) |
 | `guardian.url`, `guardian.model`, `guardian.existingSecret` | —, `ibm-granite/granite-guardian-4.1-8b`, — | IBM Granite Guardian, served elsewhere (vLLM, llama.cpp): its API's base URL, the model's name, and a Secret with its API key (key `api-key`) if it needs one. The control plane asks it about agents' instructions and the processor about their traffic ([detection](../detection.md)) |
 | `otelCollector.enabled` | `true` | Receive agents' traces (OTLP) for discovery and activity |
 | `postgresql.enabled` | `true` | The bundled PostgreSQL; otherwise `externalDatabase` |
 | `externalDatabase.existingSecret`, `externalDatabase.key` | —, `database-url` | The Secret with AgentGov's database URL |
-| `keycloak.enabled` | `true` | The bundled Keycloak; otherwise `externalKeycloak` |
+| `keycloak.enabled` | `true` | The bundled Keycloak; otherwise `externalKeycloak`, or, without the gateway, none |
 | `keycloak.mode` | `dev` | `dev` for evaluation, `production` behind TLS with its own database |
 | `keycloak.replicas` | `1` | Keycloaks in production mode |
 | `keycloak.externalDatabase` | — | Keycloak's database with `postgresql.enabled=false`: `url`, `username` (`keycloak`), and the Secret and key with its password |

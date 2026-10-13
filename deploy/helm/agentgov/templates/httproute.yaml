@@ -2,7 +2,7 @@
 {{- /* Gateway API routes, instead of ingresses, to a Gateway you manage. */}}
 {{- $entries := list
   (dict "values" "controlPlane" "component" "control-plane" "route" .Values.controlPlane.httpRoute "url" .Values.urls.controlPlane "port" .Values.controlPlane.service.port)
-  (dict "values" "gateway" "component" "gateway" "route" .Values.gateway.httpRoute "url" .Values.urls.gateway "port" .Values.gateway.service.port)
+  (dict "values" "gateway" "component" "gateway" "route" .Values.gateway.httpRoute "url" .Values.urls.gateway "port" .Values.gateway.service.port "enabled" .Values.gateway.enabled)
   (dict "values" "keycloak" "component" "keycloak" "route" .Values.keycloak.httpRoute "url" .Values.urls.keycloak "port" 8080 "enabled" .Values.keycloak.enabled) }}
 {{- range $entries }}
 {{- if and .route.enabled (ne (toString .enabled) "false") }}

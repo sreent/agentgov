@@ -11,6 +11,13 @@
 [Requirements](../requirements.md) lists what each needs, and
 [configuration](../configuration.md) every setting.
 
+You don't have to run all of it. Without the gateway, AgentGov keeps an inventory of the
+agents on your platforms, their findings and issues, with the control plane and PostgreSQL
+alone; or the gateway can start out watching rather than stopping, without Presidio. The
+chart has these as [profiles](kubernetes.md#profiles), and Compose as
+[an inventory stack](local.md#just-the-inventory) and an
+[override](local.md#optional-without-presidio).
+
 ## What a production deployment looks like
 
 ```mermaid

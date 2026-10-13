@@ -3,6 +3,12 @@
 # (postgresql.enabled=false), run Keycloak in production mode or bring your own, put
 # HTTPS in front (ingress or httpRoute) and turn on the network policies: see
 # docs/deploy/kubernetes.md, and the cloud guides beside it.
+#
+# To run less of it, start from a profile (docs/deploy/kubernetes.md#profiles):
+#   -f profiles/inventory.yaml  the agents on your platforms, their findings and issues;
+#                               no gateway, OPA, Presidio or Keycloak
+#   -f profiles/monitor.yaml    the gateway, with every control watching rather than
+#                               stopping, and no Presidio
 
 image:
   # The AgentGov image: the control plane, the governance processor and the gateway's
@@ -160,6 +166,11 @@ processor:
   affinity: {}
 
 gateway:
+  # The gateway and the governance processor that checks its calls: what AgentGov
+  # enforces on agents' tool, model and agent-to-agent calls. Off, AgentGov keeps the
+  # inventory, its findings and issues, and needs no OPA, Presidio or Keycloak; turn
+  # the gateway's features off too (featurePreset: inventory).
+  enabled: true
   image:
     repository: ghcr.io/agentgateway/agentgateway
     tag: v1.6.0
@@ -194,6 +205,9 @@ gateway:
   affinity: {}
 
 opa:
+  # The policy engine: the gateway's processor asks it about every call, and the control
+  # plane about Copilot Studio's tool calls and AuthZEN's questions. The gateway needs it.
+  enabled: true
   image:
     repository: openpolicyagent/opa
     tag: 1.21.1-static
@@ -207,8 +221,9 @@ opa:
   affinity: {}
 
 presidio:
-  # Personal-data detection. Without it, the processor checks for secrets, prompt
-  # injection and poisoned tools, but not personal data.
+  # Personal-data detection, for the gateway's processor (so it runs with the gateway).
+  # Without it, the processor checks for secrets, prompt injection and poisoned tools, but
+  # not personal data.
   enabled: true
   image:
     repository: ghcr.io/data-privacy-stack/presidio-analyzer
@@ -264,7 +279,10 @@ externalDatabase:
 
 keycloak:
   # Keycloak, with AgentGov's realm imported on its first start. It keeps its data in
-  # the bundled PostgreSQL, or in keycloak.externalDatabase.
+  # the bundled PostgreSQL, or in keycloak.externalDatabase. The gateway needs it, or
+  # your own (externalKeycloak): it checks agents' tokens. Without the gateway, neither is
+  # needed: administrators sign in with your identity provider (controlPlane.env
+  # AGENTGOV_OIDC_ISSUER) or an API token.
   enabled: true
   # dev: development mode (kc.sh start-dev), for evaluation. production: production mode
   # (kc.sh start), behind a load balancer that terminates TLS (keycloak.ingress), at

@@ -51,6 +51,11 @@ isn't there stay as they are: the preview lists both. The deployment's preset is
 once, when the control plane starts with one it hasn't applied yet: administrators'
 changes after that stand when it restarts, and setting another preset applies that one.
 
+The deployment can leave out what a preset turns off: the Helm chart's
+[profiles](deploy/kubernetes.md#profiles) and the
+[inventory Compose stack](deploy/local.md#just-the-inventory) set the preset and run only
+the parts it needs.
+
 ## The features
 
 Modes run from the weakest to the strongest. The default is in bold.
