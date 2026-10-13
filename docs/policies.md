@@ -43,6 +43,13 @@ The decision carries `monitored`, and the ledger records it.
 | Personal data in a tool result, agent lacks the `pii-access: "true"` label | redact `pii` | `data-protection` |
 | Personal data sent to a server whose `trust_level` is not `verified` | redact `pii` | `data-protection` |
 
+Every MCP call goes through these rules except those that set up and keep up the session
+(`initialize`, `ping`, notifications). Reading a prompt or a resource, subscribing to one or
+completing one of its arguments is checked as calling a tool is, by its name. A call about the
+server as a whole, such as listing its prompts or resources or a method MCP adds later, has no
+tool to grant: it gets the rules for the caller, the agent and the server, who the agent acts
+for and its risk, and the lists it gets back aren't filtered as `tools/list` is.
+
 ## What a policy sees
 
 `input` (built by the governance processor):
@@ -50,12 +57,14 @@ The decision carries `monitored`, and the ledger records it.
 ```json
 {
   "phase": "request",                       // or "response"
-  "method": "tools/call",                   // also resources/read, prompts/get
+  "method": "tools/call",                   // or any other MCP method but setting up the session
   "agent": {"client_id": "agent-support-bot", "agent_id": "agt_…", "subject": "…"},
   "user": {"id": "…", "username": "sam", "email": "sam@example.com",   // the person the agent
            "groups": ["/support"], "roles": [], "via": "exchange"},      // acts for, if any
   "chain": [{"type": "person", "id": "5c0b…", "name": "sam"}],          // who handed the work down
-  "resource": {"server": "crm", "name": "delete_customer"},
+  "resource": {"server": "crm", "name": "delete_customer"},  // the tool, prompt or resource;
+                                            // name is null for a call about the server as a
+                                            // whole, such as listing its prompts or resources
   "arguments": {"customer_id": "c-003"},    // request phase only
   "detections": {
     "categories": ["pii"],                  // "secret", "pii"

@@ -86,15 +86,30 @@ def _struct(message: Any) -> dict[str, Any]:
     return json_format.MessageToDict(message)
 
 
+# Requests that only set up or keep up a session: nothing to govern. The gateway doesn't
+# send them here (gateway.GUARDED_METHODS); one that comes anyway passes.
+PLUMBING = ("initialize", "ping")
+# Where a request's arguments are, for masking what data protection masks.
+ARGUMENTS = {
+    "tools/call": "arguments",
+    "prompts/get": "arguments",
+    "completion/complete": "argument",
+}
+
+
 def _target(method: str, params: dict[str, Any]) -> tuple[str | None, Any]:
-    """The governed object of a request and the payload to inspect."""
-    if method == "tools/call":
+    """The tool, prompt or resource a request is about, and what in it to inspect. A
+    request about the server as a whole (listing its prompts or resources, a method MCP
+    adds later) has none: it is still checked, for who may use the server at all."""
+    if method in ("tools/call", "prompts/get"):
         return params.get("name"), params.get("arguments") or {}
-    if method == "prompts/get":
-        return params.get("name"), params.get("arguments") or {}
-    if method == "resources/read":
+    if method in ("resources/read", "resources/subscribe", "resources/unsubscribe"):
         return params.get("uri"), {"uri": params.get("uri")}
-    return None, None
+    if method == "completion/complete":
+        # Completing an argument of a prompt or of a resource template.
+        ref = params.get("ref") if isinstance(params.get("ref"), dict) else {}
+        return ref.get("name") or ref.get("uri"), params.get("argument") or {}
+    return None, {}
 
 
 def _pass_request(context: dict[str, Any] | None = None) -> pb.McpRequestResult:
@@ -369,9 +384,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         meta = _struct(request.metadata_context)
         server = (list(request.service_names) or [meta.get("server")])[0] or "unknown"
         params = json.loads(request.mcp_request) if request.HasField("mcp_request") else {}
-        target, payload = _target(method, params)
-        if target is None:
+        if method in PLUMBING or method.startswith("notifications/"):
             return _pass_request()
+        target, payload = _target(method, params if isinstance(params, dict) else {})
         identity = self._identity(meta)
         person = people.person_of(meta)
         # Work another agent handed down: the chain, and the person at its head.
@@ -382,7 +397,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         inspection = await self._inspect(
             payload, protect=modes["data-protection"] != "off", check_injection=False
         )
-        resource = f"{server}/{target}"
+        resource = f"{server}/{target}" if target is not None else server
         monitored: list[str] = []  # what monitored controls would have done
 
         def finish(
@@ -524,10 +539,10 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         # metadata_context["request"]: the response message itself has no params.
         context = {"agentgov_target": target, "agentgov_method": method}
         redact = set(decision.get("redact") or []) & inspection.scan.categories()
-        if redact and isinstance(payload, dict) and method != "resources/read":
+        if redact and isinstance(payload, dict) and method in ARGUMENTS:
             new_params = {
                 **params,
-                "arguments": detectors.redact(payload, inspection.scan.spans, redact),
+                ARGUMENTS[method]: detectors.redact(payload, inspection.scan.spans, redact),
             }
             finish(
                 "allow",

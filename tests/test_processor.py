@@ -299,11 +299,53 @@ class TestRequests:
         assert reply.WhichOneof("result") == "error"
         assert cp.calls == []
 
-    def test_ungoverned_methods_pass_untouched(self) -> None:
-        req = pb.McpRequest(service_names=["crm"], method="ping", metadata_context=_meta())
-        reply, cp = run(FakeOpa(), request=req)
-        assert reply.WhichOneof("result") == "pass"
-        assert cp.records == []
+    def test_setting_up_the_session_passes_untouched(self) -> None:
+        for method in ("initialize", "ping", "notifications/initialized"):
+            req = pb.McpRequest(service_names=["crm"], method=method, metadata_context=_meta())
+            opa = FakeOpa()
+            reply, cp = run(opa, request=req)
+            assert reply.WhichOneof("result") == "pass"
+            assert cp.records == [] and opa.inputs == []
+
+    def test_a_call_about_the_server_as_a_whole_is_checked(self) -> None:
+        # Listing its prompts or resources, or a method MCP adds later: who calls, and
+        # whether they may use the server at all.
+        opa = FakeOpa(deny(["Agent bot is blocked"]))
+        for method in ("prompts/list", "resources/list", "tasks/get"):
+            req = pb.McpRequest(
+                service_names=["crm"],
+                method=method,
+                metadata_context=_meta(),
+                mcp_request=json.dumps({}).encode(),
+            )
+            reply, cp = run(opa, request=req)
+            assert reply.WhichOneof("result") == "error"
+            assert "Agent bot is blocked" in reply.error.reason
+            assert cp.records[0]["resource"] == "crm"
+        _, inp = opa.inputs[-1]
+        assert inp["method"] == "tasks/get"
+        assert inp["resource"] == {"server": "crm", "name": None}
+
+    def test_completing_an_argument_is_about_its_prompt_and_masked(self) -> None:
+        opa = FakeOpa(
+            lambda inp: {"effect": "allow", "reasons": [], "redact": ["pii"], "agent": AGENT}
+        )
+        params = {
+            "ref": {"type": "ref/prompt", "name": "letter"},
+            "argument": {"name": "to", "value": "ada@example.com"},
+        }
+        req = pb.McpRequest(
+            service_names=["crm"],
+            method="completion/complete",
+            metadata_context=_meta(),
+            mcp_request=json.dumps(params).encode(),
+        )
+        reply, _ = run(opa, presidio=FakePresidio(), request=req)
+        assert opa.inputs[-1][1]["resource"] == {"server": "crm", "name": "letter"}
+        assert reply.WhichOneof("result") == "mutated"
+        mutated = json.loads(reply.mutated)
+        assert mutated["argument"] == {"name": "to", "value": "[REDACTED:EMAIL_ADDRESS]"}
+        assert mutated["ref"] == params["ref"]
 
 
 class TestResponses:

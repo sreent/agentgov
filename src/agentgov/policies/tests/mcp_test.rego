@@ -80,6 +80,44 @@ call(client, server, tool) := {
 	"detections": {"categories": []},
 }
 
+# A call about the server as a whole: listing its prompts or resources, say.
+about_server(client, server, method) := {
+	"phase": "request",
+	"method": method,
+	"agent": {"client_id": client},
+	"resource": {"server": server, "name": null},
+	"arguments": {},
+	"detections": {"categories": []},
+}
+
+test_listing_a_servers_prompts_needs_no_grant if {
+	d := mcp.decision with input as about_server("agent-support-bot", "crm", "prompts/list")
+		with data.registry as registry
+	d.effect == "allow"
+	d.monitored == []
+}
+
+test_calls_about_a_server_get_the_checks_every_call_gets if {
+	unknown := mcp.decision with input as about_server("agent-nobody", "crm", "resources/list")
+		with data.registry as registry
+	"Caller is not a registered agent" in unknown.reasons
+	blocked := mcp.decision with input as about_server("agent-rogue", "crm", "resources/list")
+		with data.registry as registry
+	"Agent rogue is blocked" in blocked.reasons
+	server := mcp.decision with input as about_server("agent-analyst", "shady", "prompts/list")
+		with data.registry as registry
+	"Tool server shady is blocked" in server.reasons
+	risky := mcp.decision with input as about_server("agent-risky", "crm", "a/method-mcp-adds-later")
+		with data.registry as registry
+	risky.effect == "deny"
+}
+
+test_completing_an_argument_of_a_prompt_needs_the_prompt if {
+	inp := object.union(call("agent-support-bot", "crm", "export_all"), {"method": "completion/complete"})
+	d := mcp.decision with input as inp with data.registry as registry
+	"crm/export_all is not granted to agent support-bot" in d.reasons
+}
+
 test_granted_tool_is_allowed if {
 	d := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer")
 		with data.registry as registry

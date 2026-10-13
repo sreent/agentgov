@@ -97,12 +97,20 @@ from agentgov.registry.agents import a2a_published
 
 log = logging.getLogger(__name__)
 
-# What the processor inspects, per MCP method.
+# What the processor inspects, per MCP method. agentgateway takes the exact name first,
+# then a prefix ("notifications/*"), then "*".
 GUARDED_METHODS = {
     "tools/call": "full",  # arguments and results
     "tools/list": "response",  # filter the list per agent, learn the catalog
     "resources/read": "full",
     "prompts/get": "request",
+    # Everything else is checked before it reaches the server: listing its prompts or
+    # resources, completing an argument, a method MCP adds later. Only setting up and
+    # keeping up the session isn't.
+    "*": "request",
+    "initialize": "off",
+    "ping": "off",
+    "notifications/*": "off",
 }
 
 # Context forwarded to the processor, evaluated by agentgateway after it has
