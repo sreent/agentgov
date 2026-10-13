@@ -14,7 +14,7 @@ from agentgov import cli, ids
 from agentgov.config import Settings
 from agentgov.identity import sso as sso_svc
 from agentgov.models import ApprovalRequest, ModelUsage
-from agentgov.registry import findings
+from agentgov.registry import discovery, findings
 from tests.conftest import ADMIN
 from tests.test_cli import _Shared, ok, runner
 from tests.test_sso import (  # noqa: F401 (fixtures)
@@ -473,6 +473,19 @@ class TestReserved:
         assert out.status_code == 403, out.text
         assert client.get("/v1/agents/sales-bot", headers=ADMIN).json()["labels"] == exempt
 
+    def test_nor_from_a_blueprint(self, client, org) -> None:
+        """A blueprint's labels are its agents' too, as the policies read them."""
+        client.post(
+            "/v1/blueprints",
+            json={"name": "pii-bp", "team": "sales", "labels": {"pii-access": "true"}},
+            headers=ADMIN,
+        ).raise_for_status()
+        out = client.patch(
+            "/v1/agents/sales-bot", json={"blueprint": "pii-bp"}, headers=key(client, "admin")
+        )
+        assert out.status_code == 403 and "pii-access" in out.json()["detail"], out.text
+        assert client.get("/v1/agents/sales-bot", headers=ADMIN).json()["blueprint"] is None
+
 
 class TestLoosening:
     """A role for one team changes its agents, but doesn't loosen what governs them: a
@@ -585,6 +598,179 @@ class TestLoosening:
         assert at_once["done"] == [] and "access package" in at_once["left"][0]["why"]
         wider = {"permissions": [{"server": "*", "tools": ["*"]}]}
         assert client.patch("/v1/agents/sales-bot", json=wider, headers=ADMIN).status_code == 200
+
+    def test_not_for_more_people(self, client, org) -> None:
+        """Whom an agent acts for is its blueprint's to say: one for some teams only doesn't
+        switch it to one that acts for more."""
+        for name, acts_for, groups in (
+            ("support-only", "people", ["/support"]),
+            ("support-too", "people", ["support"]),
+            ("all-people", "people", []),
+            ("self-only", "itself", []),
+            ("either-support", "either", ["support"]),
+            ("support-sales", "people", ["support", "sales"]),
+        ):
+            client.post(
+                "/v1/blueprints",
+                json={"name": name, "team": "sales", "acts_for": acts_for, "people_groups": groups},
+                headers=ADMIN,
+            ).raise_for_status()
+        client.patch(
+            "/v1/agents/sales-bot", json={"blueprint": "support-only"}, headers=ADMIN
+        ).raise_for_status()
+        admin = key(client, "admin")
+        for wider, said in (
+            ("all-people", "it would act for anyone, not only people in support"),
+            ("self-only", "it would act on its own behalf"),
+            ("either-support", "it would act on its own behalf"),
+            ("support-sales", "it would act for people in sales, support"),
+            (None, "it would act on its own behalf"),
+        ):
+            out = client.patch("/v1/agents/sales-bot", json={"blueprint": wider}, headers=admin)
+            assert out.status_code == 403, (wider, out.text)
+            assert said in out.json()["detail"], (wider, out.text)
+        at_once = client.post(
+            "/v1/agents/bulk",
+            json={
+                "action": "update",
+                "agents": ["sales-bot"],
+                "fields": {"blueprint": "all-people"},
+            },
+            headers=admin,
+        ).json()
+        assert at_once["done"] == [] and "anyone" in at_once["left"][0]["why"]
+        # The same groups, however they are written, and fewer people, are theirs to choose.
+        same = client.patch(
+            "/v1/agents/sales-bot", json={"blueprint": "support-too"}, headers=admin
+        )
+        assert same.status_code == 200, same.text
+        client.patch(
+            "/v1/agents/sales-bot", json={"blueprint": "all-people"}, headers=ADMIN
+        ).raise_for_status()
+        fewer = client.patch(
+            "/v1/agents/sales-bot", json={"blueprint": "support-only"}, headers=admin
+        )
+        assert fewer.status_code == 200, fewer.text
+        # Adopting it, too.
+        with _rt(client).db.session() as s:
+            assert discovery.observe(s, source="test", name="found-bot") is not None
+        client.patch(
+            "/v1/agents/found-bot",
+            json={"team": "sales", "blueprint": "support-only"},
+            headers=ADMIN,
+        ).raise_for_status()
+        body = {"owner": "cx", "sponsors": ["cx@example.com"], "blueprint": "all-people"}
+        out = client.post("/v1/agents/found-bot/adopt", json=body, headers=admin)
+        assert out.status_code == 403 and "anyone" in out.json()["detail"], out.text
+        body["blueprint"] = "support-only"
+        adopted = client.post("/v1/agents/found-bot/adopt", json=body, headers=admin)
+        assert adopted.json()["status"] == "pending", adopted.text
+
+
+class TestPuttingToWork:
+    """A role for one team puts an agent to work with what its blueprint grants, no more:
+    beyond that, an access package, or an administrator for every team approves it."""
+
+    WITHIN = {
+        "permissions": [{"server": "crm", "tools": ["get_customer"]}],
+        "model_access": [{"provider": "openai", "models": ["gpt-4o"]}],
+        "agent_access": ["billing-eu"],
+    }
+    BEYOND = (
+        ({"permissions": [{"server": "crm", "tools": ["*"]}]}, "tool crm/*"),
+        (
+            {"model_access": [{"provider": "openai", "models": ["big-model"]}]},
+            "model openai/big-model",
+        ),
+        ({"agent_access": ["hr-*"]}, "calls to agents hr-*"),
+    )
+
+    @pytest.fixture(autouse=True)
+    def blueprint(self, client, org) -> None:
+        client.post(
+            "/v1/blueprints",
+            json={
+                "name": "crm-bp",
+                "team": "sales",
+                "permissions": [{"server": "crm", "tools": ["get_*"]}],
+                "model_access": [{"provider": "openai", "models": ["gpt-4*"]}],
+                "agent_access": ["billing-*"],
+            },
+            headers=ADMIN,
+        ).raise_for_status()
+
+    @staticmethod
+    def body(name: str, **fields: Any) -> dict[str, Any]:
+        return {"name": name, "owner": "cx", "sponsors": ["cx@example.com"],
+                "blueprint": "crm-bp", **fields}  # fmt: skip
+
+    @staticmethod
+    def refused(out: Any, gained: str) -> None:
+        assert out.status_code == 403, out.text
+        detail = out.json()["detail"]
+        assert gained in detail and "access package" in detail, detail
+        assert "an administrator for every team approves it" in detail, detail
+
+    def test_registered_and_approved_at_once(self, client) -> None:
+        admin = key(client, "admin")
+        fits = client.post(
+            "/v1/agents",
+            json={**self.body("fit-bot", **self.WITHIN), "approve": True},
+            headers=admin,
+        )
+        assert fits.status_code == 201 and fits.json()["status"] == "active", fits.text
+        for i, (beyond, gained) in enumerate(self.BEYOND):
+            body = {**self.body(f"wide-bot-{i}", **beyond), "approve": True}
+            self.refused(client.post("/v1/agents", json=body, headers=admin), gained)
+            assert client.get(f"/v1/agents/wide-bot-{i}", headers=ADMIN).status_code == 404
+        # Not approved, it waits for approval.
+        waits = client.post(
+            "/v1/agents", json=self.body("wide-bot", **self.BEYOND[0][0]), headers=admin
+        )
+        assert waits.json()["status"] == "pending", waits.text
+
+    def test_approved_after(self, client) -> None:
+        client.post(
+            "/v1/agents", json=self.body("wide-bot", **self.BEYOND[0][0]), headers=ADMIN
+        ).raise_for_status()
+        admin = key(client, "admin")
+        self.refused(
+            client.post("/v1/agents/wide-bot/approve", json={}, headers=admin), "tool crm/*"
+        )
+        at_once = client.post(
+            "/v1/agents/bulk", json={"action": "approve", "agents": ["wide-bot"]}, headers=admin
+        ).json()
+        assert at_once["done"] == [] and "tool crm/*" in at_once["left"][0]["why"]
+        assert client.get("/v1/agents/wide-bot", headers=ADMIN).json()["status"] == "pending"
+        # With no more than its blueprint grants, it is theirs to approve.
+        client.patch(
+            "/v1/agents/wide-bot", json={"permissions": []}, headers=admin
+        ).raise_for_status()
+        approved = client.post("/v1/agents/wide-bot/approve", json={}, headers=admin)
+        assert approved.json()["status"] == "active", approved.text
+        # An administrator for every team approves what goes beyond it.
+        client.post(
+            "/v1/agents", json=self.body("big-bot", **self.BEYOND[1][0]), headers=ADMIN
+        ).raise_for_status()
+        big = client.post("/v1/agents/big-bot/approve", json={}, headers=ADMIN)
+        assert big.json()["status"] == "active", big.text
+
+    def test_registered_while_registration_approval_is_off(self, client) -> None:
+        client.put(
+            "/v1/features/registration-approval", json={"mode": "off"}, headers=ADMIN
+        ).raise_for_status()
+        registrar = key(client, "registrar")
+        fits = client.post(
+            "/v1/agents", json=self.body("fit-bot", **self.WITHIN), headers=registrar
+        )
+        assert fits.json()["status"] == "active", fits.text
+        wide = self.body("wide-bot", **self.BEYOND[2][0])
+        self.refused(
+            client.post("/v1/agents", json=wide, headers=registrar), "calls to agents hr-*"
+        )
+        # A registrar for every team, as before.
+        anyone = client.post("/v1/agents", json=wide, headers=key(client, "registrar", None))
+        assert anyone.json()["status"] == "active", anyone.text
 
 
 class TestHidden:

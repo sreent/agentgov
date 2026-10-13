@@ -139,6 +139,11 @@ def register_agent(
                 admin=principal.is_admin,
             )
         reach.keep(s, principal, agent, "registrar")
+        # Put to work at once by a role for some teams only (an administrator for the team, or
+        # a registrar while registration approval is off): with what its blueprint grants.
+        every_team = principal.is_admin if admin_there else "registrar" in principal.roles
+        if approve and not every_team:
+            reach.within_blueprint(agent)
         if text is not None:
             instructions.report(
                 s,
@@ -463,6 +468,8 @@ def bulk_agents(
                 # What the kill switch lets them do, by their roles where each agent is.
                 def check(agent: Any) -> None:
                     handoff.check_kill_switch(s, reach.here(s, principal, agent), action)
+                    if action == "approve" and not principal.is_admin:
+                        reach.within_blueprint(agent)
             else:
                 handoff.check_kill_switch(s, principal, action)
         elif hold is not None:
@@ -502,6 +509,8 @@ def agent_lifecycle(
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, "secops", ref=ref)
         handoff.check_kill_switch(s, reach.here(s, principal, agent), action)
+        if action == "approve" and not principal.is_admin:
+            reach.within_blueprint(agent)  # an administrator for its team only
         if action == "adopt" and body:
             _exemptions(principal, agent, body)
             hold = reach.Hold(s, principal)

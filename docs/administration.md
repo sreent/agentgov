@@ -266,10 +266,14 @@ Someone with a role for one team:
 - loosens nothing that governs those agents: an edit, one or many at once, is refused if it
   would make a control's mode for an agent weaker (by taking it into an
   [exception's](features.md#exceptions) scope, say, with another environment), take it out
-  of a [management rule's](management-rules.md) scope, or give it tools, models or agents to
-  call that its grants and its blueprint's don't cover already. They narrow an agent's
-  grants; an [access package](access-packages.md) widens them, or an administrator for every
-  team.
+  of a [management rule's](management-rules.md) scope, give it a blueprint that acts for
+  more people or gives it `pii-access`, or give it tools, models or agents to call that its
+  grants and its blueprint's don't cover already. They narrow an agent's grants; an
+  [access package](access-packages.md) widens them, or an administrator for every team.
+- puts an agent to work with no more than its blueprint grants: approving one, at
+  registration too (an admin for the team, or a registrar while `registration-approval` is
+  off), is refused if its own grants reach beyond its blueprint's. An access package gives
+  it more, or an administrator for every team approves it.
 - reads the blueprints and their own teams, and does nothing organisation-wide: features,
   policies, blueprints, teams, tool servers, model providers, identity issuers,
   destinations, platforms, API keys and access, the whole ledger's verification and export,
@@ -484,6 +488,7 @@ up in the next export, so the two ways of working can be mixed.
 What a registrar says of an agent it registers (its team, environment, labels and grants)
 is taken as said, as far as registration approval allows: with `registration-approval` on,
 the default, an administrator sees it before the agent is active; off, the agent is active
-at once. The reserved labels (`agentgov/` and `pii-access`) aren't a registrar's to set,
-and where an agent comes from is AgentGov's to say: registered, through the API or a
-manifest.
+at once (a registrar for one team's, with no more than its blueprint grants: [roles for one
+team](#roles-for-one-team)). The reserved labels (`agentgov/` and `pii-access`) aren't a
+registrar's to set, and where an agent comes from is AgentGov's to say: registered, through
+the API or a manifest.
