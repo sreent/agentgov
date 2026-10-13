@@ -308,12 +308,15 @@ action under their name, and so does the ledger (`platform.agent_blocked`,
    `<AGENTGOV_PUBLIC_URL>/ui/` for coming back after signing out. Under **Certificates &
    secrets**, create a client secret.
 2. Under **App roles**, create the roles AgentGov maps: `agentgov-admin`,
-   `agentgov-approver`, `agentgov-secops`, `agentgov-auditor` and `agentgov-registrar` (the
+   `agentgov-approver`, `agentgov-secops`, `agentgov-auditor`, `agentgov-registrar`, and
+   `agentgov-person` for owners and sponsors who should see only what is sent to them (the
    value is what counts; or map the app roles you have with `AGENTGOV_OIDC_ROLE_MAP`). Then
    assign them to people under **Enterprise applications** > the app > **Users and
-   groups** (assigning groups needs Entra ID P1 or P2). People without a role are turned
-   away, unless the `issues` or `approvals-by-person` feature is on, which lets them sign in
-   to see the issues sent to them and decide what agents acting for them ask.
+   groups** (assigning groups needs Entra ID P1 or P2), and set **Properties** >
+   **Assignment required?** to **Yes**, so that nobody else can sign in ([who can sign
+   in](administration.md#who-can-sign-in)). People without a role are turned away, unless
+   the `issues` or `approvals-by-person` feature is on, which lets them sign in to see the
+   issues sent to them and decide what agents acting for them ask.
 3. Under **API permissions**, add these *delegated* permissions and grant admin consent:
 
    | API | Permission | For |

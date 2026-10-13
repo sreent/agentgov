@@ -123,6 +123,63 @@ one the provider vouches for, beside the roles the provider gives them. Taking i
 (`access.role_granted`, `access.role_revoked`), and each sign-in's `admin.login` entry
 lists the roles given here.
 
+### Who can sign in
+
+Two places decide who uses AgentGov. The identity provider decides who can sign in at all,
+and AgentGov decides what each person may do, from the roles the provider sends and the
+[roles given in AgentGov](#roles-given-in-agentgov).
+
+By default, anyone the provider signs in gets in. Someone with no AgentGov role signs in
+as `person` while issues or approval requests go to people
+([roles](#roles)): they see only what is sent to them, so that agents' owners and
+sponsors can answer it. To keep everyone else out:
+
+* **At the identity provider**, let only the people who should use AgentGov sign in to its
+  application. This stops the others before they reach AgentGov.
+* **In AgentGov**, set `AGENTGOV_OIDC_REQUIRE_ROLE=true`: only people with a role may sign
+  in, and the sessions of people without one end. To let owners and sponsors in to see
+  what is sent to them, give them the `person` role: the provider's `agentgov-person` (or
+  a group mapped to `person` in `AGENTGOV_OIDC_ROLE_MAP`), or `agentgov access grant
+  EMAIL person`. People you don't let in still get their issues by email and in chat, and
+  an issue nobody acknowledges goes on to the next step, up to the team
+  ([issues](issues.md)).
+* `AGENTGOV_OIDC_ALLOWED_DOMAINS` lets in only your organisation's email domains, which
+  keeps out guests from other organisations.
+
+The **Access** page says how AgentGov treats people without a role, and lists everyone who
+signed in or was refused (`admin.login_denied` in the ledger), for access reviews.
+
+#### With Microsoft Entra ID
+
+1. **Only assigned people sign in.** In the Microsoft Entra admin center, **Enterprise
+   applications** > the AgentGov application > **Properties**: set **Assignment
+   required?** to **Yes**. Under **Users and groups**, assign the groups that use
+   AgentGov. Everyone else is stopped at Microsoft's sign-in page (`AADSTS50105`), in the
+   UI, the CLI and the API alike. Assigning groups needs Entra ID P1 or P2, and only a
+   group's direct members count, not those of the groups in it.
+2. **Roles come from app roles.** Create the app roles `agentgov-admin`,
+   `agentgov-approver`, `agentgov-secops`, `agentgov-auditor`, `agentgov-registrar` and
+   `agentgov-person`, and assign them to groups
+   ([setting it up](platforms.md#setting-it-up)). An assignment needs a role, so give
+   agents' owners and sponsors `agentgov-person`.
+3. **How they sign in.** Conditional Access policies for the application (Entra ID P1) can
+   require multifactor authentication or a compliant device, limit where people sign in
+   from, and set how often they sign in again.
+4. **Keep it right.** Access reviews (Entra ID P2, or Entra ID Governance) review the
+   assigned groups. With Privileged Identity Management for Groups, administrators hold
+   `agentgov-admin` only for the hours they ask for: AgentGov reads roles as people sign
+   in, so keep `AGENTGOV_SESSION_HOURS` as short as those hours.
+5. **Taking access away.** Microsoft Entra ID doesn't send back-channel logout, so taking
+   someone's assignment away stops their next sign-in, not the session they have: sign
+   them out on the **Access** page too ([signing out everywhere](#signing-out-everywhere)).
+
+#### What doesn't go through the identity provider
+
+API keys and the bootstrap token don't sign in at the provider. Only administrators
+create API keys, each with one role, and the **Access** page lists them. Keep the
+bootstrap token (`AGENTGOV_ADMIN_TOKEN`) in a vault, for setup and emergencies. To limit
+who can reach AgentGov at all, publish it on your internal network only.
+
 ## Start here
 
 A new AgentGov starts with a question on its **Overview**: where are your agents? Copilot
@@ -159,7 +216,7 @@ answers, and `--hide` hides it; with the API, `GET` and `PUT /v1/start`
 | `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, acknowledge, resolve, dismiss and reopen issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing. They start on **Compliance** |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
-| `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)), and to attest the agents they sponsor; sees nothing else |
+| `person` | Someone without another AgentGov role (given `agentgov-person`, or anyone the provider signs in unless [only people with a role may](#who-can-sign-in)), signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)), and to attest the agents they sponsor; sees nothing else |
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector; with mutual TLS between the components, only on the control plane's internal port ([production](production.md#mutual-tls-between-components)) |
 
 People who sign in with single sign-on get their roles from the identity provider each time

@@ -152,10 +152,11 @@ def _signed_in(rt: Any, token: str | None) -> Principal | None:
             return None
         roles = [r for r in sso.SSO_ROLES if r in (record.roles or [])]
         if not roles:
-            # Someone without an AgentGov role, there for the requests and issues sent to them.
-            if sso.PERSON not in (record.roles or []):
-                return None
+            # Someone without an AgentGov role, there for the requests and issues sent to
+            # them: given the person role, or, while anyone may sign in, with none at all.
             if not sso.people_may_sign_in(session):
+                return None
+            if sso.PERSON not in (record.roles or []) and rt.settings.oidc_require_role:
                 return None
             roles = [sso.PERSON]
         delegations = getattr(rt, "delegations", None)

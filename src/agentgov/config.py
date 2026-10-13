@@ -313,6 +313,11 @@ class Settings:
     # provider signs in to this client). Google's issuer is shared by every Google
     # account, so with Google this is required and checked against the hosted domain.
     oidc_allowed_domains: str = ""
+    # Only people with a role may sign in: one the provider gives (agentgov-admin, ...,
+    # or AGENTGOV_OIDC_ROLE_MAP), or one given in AgentGov. The person role (agentgov-person)
+    # lets owners and sponsors in to see only what is sent to them. Off: anyone the provider
+    # signs in may sign in with that view, while issues or approvals go to people.
+    oidc_require_role: bool = False
     # The longest an administrator's session lasts.
     session_hours: int = 8
     # Act in Microsoft 365 and Power Platform as the administrator who is signed in
@@ -1031,7 +1036,7 @@ class Settings:
         """AGENTGOV_OIDC_ROLE_MAP: each claim value and the AgentGov roles it grants."""
         if not self.oidc_role_map.strip():
             return {}
-        from agentgov.identity.sso import SSO_ROLES
+        from agentgov.identity.sso import GIVABLE
 
         pairs: dict[str, set[str]] = {}
         for item in self.oidc_role_map.split(","):
@@ -1039,10 +1044,10 @@ class Settings:
                 continue
             value, sep, role = item.rpartition("=")
             value, role = value.strip(), role.strip()
-            if not sep or not value or role not in SSO_ROLES:
+            if not sep or not value or role not in GIVABLE:
                 raise ValueError(
                     f"AGENTGOV_OIDC_ROLE_MAP takes value=role pairs, the roles one of "
-                    f"{', '.join(SSO_ROLES)} (got {item.strip()!r})"
+                    f"{', '.join(GIVABLE)} (got {item.strip()!r})"
                 )
             pairs.setdefault(value, set()).add(role)
         return pairs

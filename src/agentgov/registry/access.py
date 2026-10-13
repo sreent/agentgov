@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
-from agentgov.identity.sso import SSO_ROLES
+from agentgov.identity.sso import GIVABLE
 from agentgov.models import AdminSession, LedgerEntry, RoleGrant
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
@@ -169,8 +169,8 @@ def grant(
 ) -> RoleGrant:
     """Give a person an AgentGov role, from their next sign-in."""
     email = _email(email)
-    if role not in SSO_ROLES:
-        raise ValidationError(f"role must be one of {', '.join(SSO_ROLES)}")
+    if role not in GIVABLE:
+        raise ValidationError(f"role must be one of {', '.join(GIVABLE)}")
     existing = session.scalar(
         select(RoleGrant).where(RoleGrant.email == email, RoleGrant.role == role)
     )

@@ -6926,7 +6926,13 @@ function providerSummary(p) {
     ? ` Roles from ${p.roles_claims.join(', ')}: ${p.role_map.map((m) => `${m.value} → ${humanize(m.role)}`).join('; ')}.`
     : ` Roles from ${p.roles_claims.join(', ')}, named ${p.role_prefix}admin, ${p.role_prefix}approver and so on.`;
   const domains = p.allowed_domains?.length ? ` Only ${p.allowed_domains.join(', ')} may sign in.` : '';
-  return `Signing in with ${PROVIDER_NAMES[p.kind] || p.kind}: ${p.issuer}.${roles}${domains}`;
+  // Someone it signs in with no role given to them.
+  const others = p.without_role === 'person'
+    ? ' Anyone else it signs in sees only the issues and requests sent to them.'
+    : p.require_role
+      ? ' Only people with a role may sign in: give the person role to those who should see only what is sent to them.'
+      : ' People without a role are refused.';
+  return `Signing in with ${PROVIDER_NAMES[p.kind] || p.kind}: ${p.issuer}.${roles}${domains}${others}`;
 }
 
 function roleGrantsCard(view) {
@@ -6968,6 +6974,7 @@ async function giveRole() {
           { value: 'secops', label: 'Security operations: triage and contain' },
           { value: 'auditor', label: 'Auditor: read everything, change nothing' },
           { value: 'registrar', label: 'Registrar: register agents and tool servers' },
+          { value: 'person', label: 'Person: only the issues and requests sent to them' },
         ],
       },
       { id: 'reason', label: 'Why', type: 'textarea', hint: 'For the evidence ledger.' },

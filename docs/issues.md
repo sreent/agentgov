@@ -174,9 +174,10 @@ and see only **Your issues**, and their approval requests when
 
 AgentGov knows them by the name they sign in with: their email address when the identity
 provider has verified it, else their user name. Name owners and sponsors the same way, or
-list the people as members of their teams. To keep people without a role out, restrict who
-may sign in to AgentGov at the identity provider (in Microsoft Entra ID, require assignment
-to its enterprise application), or turn issues off.
+list the people as members of their teams. To keep other people out, restrict who may sign
+in to AgentGov at the identity provider (in Microsoft Entra ID, require assignment to its
+enterprise application), or set `AGENTGOV_OIDC_REQUIRE_ROLE` and give owners and sponsors
+the `person` role ([who can sign in](administration.md#who-can-sign-in)).
 
 ## Messages
 

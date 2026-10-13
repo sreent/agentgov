@@ -3207,7 +3207,9 @@ def access_grants() -> None:
 @access_app.command("grant")
 def access_grant(
     email: str = typer.Argument(..., help="The email address they sign in with."),
-    role: str = typer.Argument(..., help="admin, approver, secops, auditor or registrar."),
+    role: str = typer.Argument(
+        ..., help="admin, approver, secops, auditor, registrar, or person (what is sent to them)."
+    ),
     reason: str | None = typer.Option(None, "--reason", help="Why, for the ledger."),
 ) -> None:
     """Give a person an AgentGov role, from their next sign-in: for identity providers whose

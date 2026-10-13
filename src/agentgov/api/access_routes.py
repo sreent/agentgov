@@ -40,6 +40,8 @@ def provider(rt: Any) -> dict[str, Any] | None:
         ],
         "role_prefix": None if client.role_map else settings.oidc_role_prefix,
         "allowed_domains": client.domains,
+        # Only people with a role may sign in (AGENTGOV_OIDC_REQUIRE_ROLE).
+        "require_role": settings.oidc_require_role,
         "problem": problem,
     }
 
@@ -51,6 +53,10 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
     rt = request.app.state.rt
     signing_in = provider(rt)  # may read the provider's discovery document
     with rt.db.session() as s:
+        if signing_in is not None:
+            # What someone gets who signs in with no role given to them: the person role,
+            # or nothing (refused).
+            signing_in["without_role"] = sso.without_role(s, rt.settings)
         return {
             "sso_enabled": rt.settings.sso_enabled,
             "bootstrap_token": bool(rt.settings.admin_token),

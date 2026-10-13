@@ -8,7 +8,6 @@ code and its verifier at ``/auth/cli/token`` for a session token of its own.
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import re
 from typing import Any
@@ -152,13 +151,13 @@ def callback(
         return failed(exc.code)
     refresh_token = tokens.get("refresh_token") if rt.delegations is not None else None
     with rt.db.session() as s:
-        who = sso.with_given_roles(s, who)
-        if not who.roles:
-            if not sso.people_may_sign_in(s):
-                sso.record_denied(s, who)
-                return failed("no_role")
-            # They see the approval requests and the issues sent to them, and nothing else.
-            who = dataclasses.replace(who, roles=[sso.PERSON])
+        admitted = sso.admit(s, rt.settings, sso.with_given_roles(s, who))
+        if admitted is None:
+            sso.record_denied(s, who)
+            return failed("no_role")
+        # Without an AgentGov role, they see the approval requests and the issues sent to
+        # them, and nothing else.
+        who = admitted
         if port:
             try:
                 one_time = sso.cli_signed_in(s, state, who)

@@ -51,6 +51,9 @@ SSO_ROLES = ("admin", "approver", "secops", "auditor", "registrar")
 # Someone without an AgentGov role, signed in to decide the approval requests sent to
 # them (the approvals-by-person feature) or to see the issues sent to them (issues).
 PERSON = "person"
+# The roles the provider (agentgov-person, ...) or AgentGov can give. The person role, given,
+# lets someone in even when only people with a role may sign in (AGENTGOV_OIDC_REQUIRE_ROLE).
+GIVABLE = (*SSO_ROLES, PERSON)
 # The features that let them sign in: while one is on.
 PERSON_FEATURES = ("approvals-by-person", "issues")
 LOGIN_TTL = timedelta(minutes=10)
@@ -142,9 +145,9 @@ def roles_from_claims(
                 found |= role_map.get(item, set())
                 continue
             name = item.lstrip("/")  # group paths, e.g. "/agentgov-admin"
-            if name.startswith(prefix) and name[len(prefix) :] in SSO_ROLES:
+            if name.startswith(prefix) and name[len(prefix) :] in GIVABLE:
                 found.add(name[len(prefix) :])
-    return [role for role in SSO_ROLES if role in found]
+    return [role for role in GIVABLE if role in found]
 
 
 def _true(value: Any) -> bool:
@@ -514,8 +517,36 @@ def with_given_roles(session: Session, who: Identity) -> Identity:
     given = set(session.scalars(select(RoleGrant.role).where(RoleGrant.email == who.email.lower())))
     if not given:
         return who
-    roles = [role for role in SSO_ROLES if role in given or role in who.roles]
-    return replace(who, roles=roles, given=tuple(r for r in SSO_ROLES if r in given))
+    roles = [role for role in GIVABLE if role in given or role in who.roles]
+    return replace(who, roles=roles, given=tuple(r for r in GIVABLE if r in given))
+
+
+def without_role(session: Session, settings: Settings) -> str | None:
+    """What someone gets who signs in with no role given to them: the person role, to see
+    what is sent to them, while issues or approvals go to people; None if they are refused
+    then (AGENTGOV_OIDC_REQUIRE_ROLE)."""
+    if settings.oidc_require_role or not people_may_sign_in(session):
+        return None
+    return PERSON
+
+
+def admit(session: Session, settings: Settings, who: Identity) -> Identity | None:
+    """Who signed in, with the roles they sign in with, or None if they may not sign in.
+
+    Their AgentGov roles, if they have one. Otherwise the person role, while issues or
+    approvals go to people: given to them, by the provider or in AgentGov, or else to anyone
+    the provider signs in, unless only people with a role may sign in. Given, it is stored as
+    their role; unasked, their session has none, so that requiring a role ends it too."""
+    held = [role for role in SSO_ROLES if role in who.roles]
+    if held:
+        return replace(who, roles=held)
+    if not people_may_sign_in(session):
+        return None
+    if PERSON in who.roles:
+        return replace(who, roles=[PERSON])
+    if without_role(session, settings) is None:
+        return None
+    return replace(who, roles=[])
 
 
 def people_may_sign_in(session: Session) -> bool:
@@ -645,13 +676,13 @@ def start_session(
     return token, record
 
 
-def record_denied(session: Session, who: Identity) -> None:
+def record_denied(session: Session, who: Identity, *, reason: str = "no AgentGov role") -> None:
     ledger.append(
         session,
         type="admin.login_denied",
         actor=f"sso:{who.name}",
         severity="warning",
-        reason="no AgentGov role",
+        reason=reason,
         details={"subject": who.subject},
     )
 

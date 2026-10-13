@@ -151,6 +151,9 @@ class TestDiscovery:
             "role_map": [],
             "role_prefix": "agentgov-",
             "allowed_domains": [],
+            # People without a role sign in to see what is sent to them.
+            "require_role": False,
+            "without_role": "person",
             "problem": None,
         }
 
