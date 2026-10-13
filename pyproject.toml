@@ -40,6 +40,8 @@ dependencies = [
   # The database schema's migrations (agentgov/migrations).
   "alembic>=1.16",
   "httpx>=0.27",
+  # The calls-around-the-gateway test's own connections (agentgov.registry.reachability).
+  "httpcore>=1.0",
   # Validates identity-provider tokens for administrator single sign-on.
   "pyjwt[crypto]>=2.10",
   "pyyaml>=6.0",
