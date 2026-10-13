@@ -44,6 +44,8 @@ class Principal:
     microsoft: bool = False
     # For single sign-on: who signed in, as the provider names them (the token's subject).
     subject: str | None = None
+    # For single sign-on: the email address the provider vouches for, if it vouches for one.
+    email: str | None = None
 
     def __post_init__(self) -> None:
         if not self.roles:
@@ -56,6 +58,13 @@ class Principal:
     @property
     def is_admin(self) -> bool:
         return "admin" in self.roles
+
+    @property
+    def person(self) -> str | None:
+        """Who they are as owners, sponsors and teams name people: signed in through single
+        sign-on, the email address their provider vouches for. An API key, a token, or a name
+        the provider doesn't vouch for is no one's, whatever it says (its roles still apply)."""
+        return self.email if self.via == "session" else None
 
     @property
     def teams(self) -> dict[str, frozenset[str]]:
@@ -77,6 +86,8 @@ class Principal:
             "teams": {role: sorted(names) for role, names in sorted(self.teams.items())},
             "actor": self.actor,
             "via": self.via,
+            # Who they are as owners, sponsors and teams name people, if anyone.
+            "person": self.person,
             "microsoft": self.microsoft,
         }
 
@@ -129,6 +140,8 @@ def _principal(request: Request) -> Principal | None:
     settings = rt.settings
     token = bearer_token(request)
     internal = _internal(request)
+    if token and not token.isascii():
+        return None  # no token AgentGov gives out is anything but ASCII
     if token:
         if settings.admin_token and hmac.compare_digest(token, settings.admin_token):
             return Principal("bootstrap", "admin")
@@ -189,6 +202,7 @@ def _signed_in(rt: Any, token: str | None) -> Principal | None:
             session_id=record.id,
             microsoft=delegations is not None and delegations.has(record.id, session=session),
             subject=record.subject,
+            email=record.email,
         )
 
 

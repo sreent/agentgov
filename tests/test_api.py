@@ -31,6 +31,9 @@ class TestAuth:
 
     def test_rejects_unknown_tokens(self, client) -> None:
         assert client.get("/v1/agents", headers={"Authorization": "Bearer nope"}).status_code == 401
+        # Whatever is in it: a token that isn't ASCII is no token either.
+        odd = {"Authorization": "Bearer caf\xe9".encode("latin-1")}
+        assert client.get("/v1/agents", headers=odd).status_code == 401
 
     def test_service_token_cannot_read_the_registry(self, client) -> None:
         assert client.get("/v1/agents", headers=SERVICE).status_code == 403
@@ -66,6 +69,8 @@ class TestAuth:
             "teams": {},
             "actor": "admin:bootstrap",
             "via": "token",
+            # Nobody's owner or sponsor: only a person signed in as themselves is.
+            "person": None,
             "microsoft": False,
             # What is sent to people themselves (docs/issues.md, docs/acting-for-people.md).
             "inbox": {"issues": True, "approvals": False},
@@ -125,20 +130,19 @@ class TestRoles:
         )
 
     def test_only_sponsors_or_admins_attest(self, client) -> None:
+        """Sponsors attest signed in as themselves (tests/test_sso.py): an API key is nobody,
+        whatever its name."""
         seed(client, sponsors=["alice@example.com"])
-        assert (
-            client.post(
-                "/v1/agents/support-bot/attest", json={}, headers=key(client, "approver", "mallory")
-            ).status_code
-            == 403
-        )
+        for name in ("mallory", "alice@example.com"):
+            refused = client.post(
+                "/v1/agents/support-bot/attest", json={}, headers=key(client, "approver", name)
+            )
+            assert refused.status_code == 403, name
         resp = client.post(
-            "/v1/agents/support-bot/attest",
-            json={"note": "still needed"},
-            headers=key(client, "approver", "alice@example.com"),
+            "/v1/agents/support-bot/attest", json={"note": "still needed"}, headers=ADMIN
         )
         assert resp.status_code == 200
-        assert resp.json()["attestation"]["attested_by"] == "approver:alice@example.com"
+        assert resp.json()["attestation"]["attested_by"] == "admin:bootstrap"
 
     def test_auditor_reads_ledger(self, client) -> None:
         seed(client)
@@ -673,12 +677,43 @@ class TestIntegrations:
         assert client.get("/v1/agents/shadow", headers=ADMIN).json()["status"] == "discovered"
 
     def test_discovery_import(self, client) -> None:
-        resp = client.post(
-            "/v1/discovery/import",
-            json={"source": "agt", "items": [{"name": "found-bot"}]},
+        seed(client)
+        scan = {"source": "agt", "items": [{"name": "found-bot"}, {"name": "support-bot"}]}
+        # A registrar reads no agents: it is told how many it sent, not which there are.
+        resp = client.post("/v1/discovery/import", json=scan, headers=key(client, "registrar"))
+        assert resp.json() == {"received": 2}
+        assert client.get("/v1/agents/found-bot", headers=ADMIN).json()["status"] == "discovered"
+        # A registered agent is no scanner's to mark as seen.
+        assert client.get("/v1/agents/support-bot", headers=ADMIN).json()["last_seen_at"] is None
+        again = client.post("/v1/discovery/import", json=scan, headers=ADMIN)
+        assert again.json() == {"created": 0, "matched": 2}
+        assert client.get("/v1/agents/support-bot", headers=ADMIN).json()["last_seen_at"] is None
+        # Discovery off, a scan finds no agents.
+        client.put("/v1/features/discovery", json={"mode": "off"}, headers=ADMIN)
+        scan = {"items": [{"name": "late-bot"}]}
+        assert client.post("/v1/discovery/import", json=scan, headers=ADMIN).json() == {
+            "created": 0,
+            "matched": 0,
+        }
+        assert client.get("/v1/agents/late-bot", headers=ADMIN).status_code == 404
+
+    def test_registrations_say_where_agents_come_from_themselves(self, client) -> None:
+        """An agent registered through the API is a registered one: platform:* is for the
+        connectors that find agents on platforms."""
+        made = client.post(
+            "/v1/agents",
+            json={"name": "x-bot", "sponsors": ["a"], "source": "platform:aws"},
             headers=key(client, "registrar"),
         )
-        assert resp.json() == {"created": 1, "matched": 0}
+        assert made.status_code == 422 and "source" in made.json()["detail"]
+        doc = {
+            "apiVersion": "agentgov/v1alpha1",
+            "kind": "Agent",
+            "metadata": {"name": "y-bot"},
+            "spec": {"sponsors": ["a"], "owner": "cx", "source": "platform:aws"},
+        }
+        client.post("/v1/apply", json={"documents": [doc]}, headers=ADMIN).raise_for_status()
+        assert client.get("/v1/agents/y-bot", headers=ADMIN).json()["source"] == "registered"
 
 
 class TestManifestsOverHttp:

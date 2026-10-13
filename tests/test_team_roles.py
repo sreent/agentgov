@@ -190,10 +190,14 @@ class TestReading:
         for path in ("", "/a2a", "/risk", "/instructions", "/access-packages", "/rules"):
             assert client.get(f"/v1/agents/quote-bot{path}", headers=sales).status_code == 200
             out = client.get(f"/v1/agents/hr-bot{path}", headers=sales)
-            assert out.status_code in (403, 404), (path, out.text)
+            assert out.status_code == 404, (path, out.text)
+        # In the same words as for an agent there isn't.
         assert client.get("/v1/agents/hr-bot", headers=sales).json()["detail"] == (
-            "agent hr-bot not found"
+            "agent 'hr-bot' not found"
         )
+        for path in ("", "/access-packages", "/rules"):
+            out = client.get(f"/v1/agents/{org['hr']['id']}{path}", headers=sales).json()
+            assert out["detail"] == f"agent {org['hr']['id']!r} not found", path
         # The default team's.
         ops = key(client, "auditor", "ops")
         assert names(client.get("/v1/agents", headers=ops).json()) == {"loose-bot"}
@@ -428,6 +432,229 @@ class TestActing:
             "/v1/agents/quote-bot", json={"blueprint": "hr-bp", "team": "sales"}, headers=admin
         )
         assert ok_.status_code == 200, ok_.text
+
+
+class TestReserved:
+    def test_entitlements_are_for_administrators_for_every_team(self, client, org) -> None:
+        """pii-access lets an agent have personal data unmasked (the policies read it): set,
+        changed and removed, as the agentgov/ labels, by administrators for every team."""
+        pii = {"pii-access": "true"}
+        admin = key(client, "admin")
+        out = client.patch("/v1/agents/sales-bot", json={"labels": pii}, headers=admin)
+        assert out.status_code == 403 and "pii-access" in out.json()["detail"], out.text
+        for registrar in (key(client, "registrar"), key(client, "registrar", None)):
+            made = client.post(
+                "/v1/agents",
+                json={"name": "pii-bot", "owner": "cx", "labels": pii},
+                headers=registrar,
+            )
+            assert made.status_code == 422 and "pii-access" in made.json()["detail"], made.text
+        client.patch("/v1/agents/sales-bot", json={"labels": pii}, headers=ADMIN).raise_for_status()
+        for labels in ({}, None, {"pii-access": "false"}):
+            out = client.patch("/v1/agents/sales-bot", json={"labels": labels}, headers=admin)
+            assert out.status_code == 403, labels
+        kept = client.patch(
+            "/v1/agents/sales-bot", json={"labels": {**pii, "app": "crm"}}, headers=admin
+        )
+        assert kept.status_code == 200, kept.text
+        assert client.get("/v1/agents/sales-bot", headers=ADMIN).json()["labels"] == {
+            **pii,
+            "app": "crm",
+        }
+
+    def test_no_labels_is_labels_too(self, client, org) -> None:
+        exempt = {"agentgov/exempt-rules": "true"}
+        client.patch(
+            "/v1/agents/sales-bot", json={"labels": exempt}, headers=ADMIN
+        ).raise_for_status()
+        out = client.patch(
+            "/v1/agents/sales-bot", json={"labels": None}, headers=key(client, "admin")
+        )
+        assert out.status_code == 403, out.text
+        assert client.get("/v1/agents/sales-bot", headers=ADMIN).json()["labels"] == exempt
+
+
+class TestLoosening:
+    """A role for one team changes its agents, but doesn't loosen what governs them: a
+    control's mode, the management rules that look at them, what they may call."""
+
+    def test_not_into_a_controls_weaker_mode(self, client, org) -> None:
+        scopes = [{"mode": "monitor", "scope": {"environments": ["dev"]}}]
+        client.put(
+            "/v1/features/data-protection",
+            json={"mode": "enforce", "scopes": scopes},
+            headers=ADMIN,
+        ).raise_for_status()
+        admin = key(client, "admin")
+        out = client.patch("/v1/agents/sales-bot", json={"environment": "dev"}, headers=admin)
+        assert out.status_code == 403, out.text
+        assert "data-protection" in out.json()["detail"]
+        assert client.get("/v1/agents/sales-bot", headers=ADMIN).json()["environment"] is None
+        at_once = client.post(
+            "/v1/agents/bulk",
+            json={"action": "update", "agents": ["sales-bot"], "fields": {"environment": "dev"}},
+            headers=admin,
+        ).json()
+        assert at_once["done"] == [] and "data-protection" in at_once["left"][0]["why"]
+        # What isn't weaker is theirs to change; an administrator for every team does either.
+        assert (
+            client.patch(
+                "/v1/agents/sales-bot", json={"environment": "test"}, headers=admin
+            ).status_code
+            == 200
+        )
+        client.patch(
+            "/v1/agents/sales-bot", json={"environment": "dev"}, headers=ADMIN
+        ).raise_for_status()
+        back = client.patch("/v1/agents/sales-bot", json={"environment": "prod"}, headers=admin)
+        assert back.status_code == 200, back.text
+
+    def test_not_out_of_a_management_rules_scope(self, client, org) -> None:
+        client.post(
+            "/v1/rules",
+            json={
+                "name": "prod-owners",
+                "conditions": {"missing": ["owner"]},
+                "scope": {"labels": {"tier": "prod"}},
+                "action": "issue",
+            },
+            headers=ADMIN,
+        ).raise_for_status()
+        client.patch(
+            "/v1/agents/sales-bot", json={"labels": {"tier": "prod"}}, headers=ADMIN
+        ).raise_for_status()
+        admin = key(client, "admin")
+        out = client.patch("/v1/agents/sales-bot", json={"labels": {}}, headers=admin)
+        assert out.status_code == 403 and "prod-owners" in out.json()["detail"], out.text
+        # Into a rule's scope is theirs to choose.
+        joined = client.patch(
+            "/v1/agents/quote-bot", json={"labels": {"tier": "prod"}}, headers=admin
+        )
+        assert joined.status_code == 200, joined.text
+
+    def test_grants_only_narrow(self, client, org) -> None:
+        client.patch(
+            "/v1/agents/sales-bot",
+            json={
+                "permissions": [{"server": "crm", "tools": ["get_*", "update_customer"]}],
+                "model_access": [{"provider": "openai", "models": ["gpt-4*"]}],
+                "agent_access": ["billing-*"],
+            },
+            headers=ADMIN,
+        ).raise_for_status()
+        admin = key(client, "admin")
+
+        def edit(**body: Any) -> Any:
+            return client.patch("/v1/agents/sales-bot", json=body, headers=admin)
+
+        for wider in (
+            {"permissions": [{"server": "crm", "tools": ["*"]}]},
+            {"permissions": [{"server": "*", "tools": ["get_*"]}]},
+            {"permissions": [{"server": "hr-db", "tools": ["get_*"]}]},
+            {"model_access": [{"provider": "openai", "models": ["*"]}]},
+            {"model_access": [{"provider": "azure", "models": ["gpt-4o"]}]},
+            {"agent_access": ["*"]},
+            {"agent_access": ["hr-bot"]},
+        ):
+            out = edit(**wider)
+            assert out.status_code == 403, (wider, out.text)
+            assert "access package" in out.json()["detail"]
+        for narrower in (
+            {"permissions": [{"server": "crm", "tools": ["get_customer", "update_customer"]}]},
+            {"model_access": [{"provider": "openai", "models": ["gpt-4o"]}]},
+            {"agent_access": ["billing-eu"]},
+            {"permissions": [], "model_access": [], "agent_access": []},
+        ):
+            assert edit(**narrower).status_code == 200, narrower
+        # A blueprint is its agents' grants too.
+        client.post(
+            "/v1/blueprints",
+            json={
+                "name": "wide-bp",
+                "team": "sales",
+                "permissions": [{"server": "*", "tools": ["*"]}],
+            },
+            headers=ADMIN,
+        ).raise_for_status()
+        assert edit(blueprint="wide-bp").status_code == 403
+        at_once = client.post(
+            "/v1/agents/bulk",
+            json={"action": "update", "agents": ["quote-bot"], "fields": {"blueprint": "wide-bp"}},
+            headers=admin,
+        ).json()
+        assert at_once["done"] == [] and "access package" in at_once["left"][0]["why"]
+        wider = {"permissions": [{"server": "*", "tools": ["*"]}]}
+        assert client.patch("/v1/agents/sales-bot", json=wider, headers=ADMIN).status_code == 200
+
+
+class TestHidden:
+    """What another team's agents are, a role for one team isn't told."""
+
+    def test_in_what_names_its_team_and_its_agents_calls(self, client, org) -> None:
+        client.patch(
+            "/v1/agents/hr-bot",
+            json={
+                "owner": "sales",
+                "agent_access": ["sales-*"],
+                "a2a_url": "https://hr.example.com/a2a",
+            },
+            headers=ADMIN,
+        ).raise_for_status()
+        client.patch(
+            "/v1/agents/sales-bot",
+            json={"agent_access": ["hr-*"], "a2a_url": "https://sales.example.com/a2a"},
+            headers=ADMIN,
+        ).raise_for_status()
+        sales = key(client, "auditor")
+        assert "agent hr-bot" not in client.get("/v1/teams/sales", headers=sales).json()["named_by"]
+        a2a = client.get("/v1/agents/sales-bot/a2a", headers=sales).json()
+        assert "hr-bot" not in a2a["called_by"] + a2a["may_call"]
+        assert "agent hr-bot" in client.get("/v1/teams/sales", headers=ADMIN).json()["named_by"]
+        a2a = client.get("/v1/agents/sales-bot/a2a", headers=ADMIN).json()
+        assert "hr-bot" in a2a["called_by"] and "hr-bot" in a2a["may_call"]
+
+    def test_their_access_packages_arent_there(self, client, org) -> None:
+        client.put("/v1/features/access-packages", json={"mode": "on"}, headers=ADMIN)
+        client.post(
+            "/v1/access-packages",
+            json={"name": "crm-write", "permissions": [{"server": "crm", "tools": ["update"]}]},
+            headers=ADMIN,
+        ).raise_for_status()
+        asked = client.post(
+            "/v1/access-assignments",
+            json={"agent": "hr-bot", "package": "crm-write", "reason": "x"},
+            headers=ADMIN,
+        ).json()
+        for role in ("approver", "registrar"):
+            sales = key(client, role)
+            body = {"agent": "hr-bot", "package": "crm-write", "reason": "x"}
+            assert (
+                client.post("/v1/access-assignments", json=body, headers=sales).status_code == 404
+            )
+            assert (
+                client.get(f"/v1/access-assignments/{asked['id']}", headers=sales).status_code
+                == 404
+            )
+            out = client.post(f"/v1/access-assignments/{asked['id']}/approve", headers=sales)
+            assert out.status_code == 404, (role, out.text)
+
+    def test_nor_who_holds_a_workload_identity(self, client, org) -> None:
+        client.put("/v1/features/workload-identity", json={"mode": "on"}, headers=ADMIN)
+        client.post(
+            "/v1/identity-issuers",
+            json={"name": "cluster", "kind": "kubernetes", "issuer": "https://k8s.example.com"},
+            headers=ADMIN,
+        ).raise_for_status()
+        held = {"issuer": "cluster", "subject": "system:serviceaccount:hr:bot"}
+        client.patch(
+            "/v1/agents/hr-bot", json={"workload_identity": held}, headers=ADMIN
+        ).raise_for_status()
+        out = client.patch(
+            "/v1/agents/sales-bot", json={"workload_identity": held}, headers=key(client, "admin")
+        )
+        assert out.status_code == 409 and "hr-bot" not in out.json()["detail"], out.text
+        out = client.patch("/v1/agents/loose-bot", json={"workload_identity": held}, headers=ADMIN)
+        assert out.status_code == 409 and "hr-bot" in out.json()["detail"], out.text
 
 
 def test_signed_in_ui_reaches_their_pages(sso, provider) -> None:  # noqa: F811

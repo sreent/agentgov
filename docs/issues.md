@@ -109,10 +109,12 @@ them and sends what is due every `AGENTGOV_ISSUES_INTERVAL_SECONDS` (60).
 | Resolve, dismiss | The same | As for any issue. Dismiss is for issues that are wrong, and says why ([dismissing an issue](#dismissing-an-issue)): to live with a real one, accept its risk |
 | Reopen | The same | It starts its chain over |
 
-The people responsible for an agent acknowledge its issues, but don't accept its risks:
-someone who isn't accountable for the agent signs that off. AgentGov refuses an acceptance
-from the agent's owner, its sponsors and the people in its team (its own or its
-blueprint's), whatever their role.
+The people responsible for an agent acknowledge its issues, but don't accept its risks, nor
+dismiss them, which makes them go to nobody as well: someone who isn't accountable for the
+agent signs that off. AgentGov refuses an acceptance or a dismissal from the agent's owner,
+its sponsors and the people in its team (its own or its blueprint's), whatever their role,
+one at a time or many at once. Resolving stays theirs: a resolved issue that still holds is
+raised again at the next check.
 
 Raised again after it was resolved, or when its accepted risk runs out, an issue starts its
 chain over, from the first step.

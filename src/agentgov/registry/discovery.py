@@ -192,25 +192,32 @@ def record_activity(
     row.output_tokens += output_tokens
 
 
-def import_scan(session: Session, items: list[dict[str, Any]], *, source: str) -> dict[str, int]:
-    """Import scanner results: ``[{"name": ..., "framework": ..., "location": ...}]``."""
+def import_scan(
+    session: Session, items: list[dict[str, Any]], *, source: str, discover: bool = True
+) -> dict[str, int]:
+    """Import scanner results: ``[{"name": ..., "framework": ..., "location": ...}]``. One
+    that names an agent there is matched; one that doesn't is recorded as unmanaged while
+    ``discover`` (the discovery feature) is on. A scan sees what is installed, not what
+    runs: it marks only unmanaged agents as seen, never registered ones."""
     created = matched = 0
     for item in items:
         name = item.get("name") or item.get("agent_name")
         if not isinstance(name, str) or not name:
             continue
         existing = find(session, name=name)
-        observe(
+        if existing is not None:
+            matched += 1
+            if existing.status != DISCOVERED:
+                continue
+        details = {k: v for k, v in item.items() if k in ("location", "path", "host", "evidence")}
+        seen = observe(
             session,
             source=source,
             name=name,
             framework=item.get("framework"),
-            details={
-                k: v for k, v in item.items() if k in ("location", "path", "host", "evidence")
-            },
+            details=details,
+            discover=discover,
         )
-        if existing is None:
+        if existing is None and seen is not None:
             created += 1
-        else:
-            matched += 1
     return {"created": created, "matched": matched}

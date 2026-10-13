@@ -128,6 +128,16 @@ class TestRequests:
         row = _ask(client, approver).json()
         refused = client.post(f"/v1/access-assignments/{row['id']}/approve", headers=approver)
         assert refused.status_code == 403 and "someone other" in refused.json()["detail"]
+        dana = _key(client, "approver", "dana")
+        client.post(f"/v1/access-assignments/{row['id']}/deny", headers=dana).raise_for_status()
+        # Nor in another role: who asked is who they are, whichever role they asked in.
+        row = _ask(client, _key(client, "registrar", "Ben")).json()
+        assert row["requested_by"] == "registrar:Ben"
+        as_approver = _key(client, "approver", "ben")
+        refused = client.post(f"/v1/access-assignments/{row['id']}/approve", headers=as_approver)
+        assert refused.status_code == 403 and "someone other" in refused.json()["detail"]
+        waiting = client.get("/v1/inbox", headers=as_approver).json()["kinds"]
+        assert next(k for k in waiting if k["kind"] == "access")["count"] == 0
 
     def test_packages_without_approval_are_granted_at_once(self, client, agent) -> None:
         client.patch("/v1/access-packages/crm-write", json={"approval": False}, headers=ADMIN)

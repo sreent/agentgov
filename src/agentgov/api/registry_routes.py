@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
@@ -27,6 +29,7 @@ from agentgov.registry import (
     policies,
     teams,
     toolservers,
+    validation,
 )
 from agentgov.registry.errors import Conflict, NotFound
 from agentgov.registry.validation import known_fields
@@ -112,7 +115,8 @@ def register_agent(
     admin for some teams only registers into one of them (``team``; their team, when they
     have one), an admin for it approving as admins do."""
     rt = _rt(request)
-    known_fields(body, AGENT_FIELDS | {"name", "source", "approve", "instructions"}, "an agent")
+    # Where it comes from is the server's to say: registered.
+    known_fields(body, AGENT_FIELDS | {"name", "approve", "instructions"}, "an agent")
     requested = bool(body.pop("approve", False))
     text = body.pop("instructions", None)
     with rt.db.session() as s:
@@ -124,10 +128,16 @@ def register_agent(
             name.lower() for name in principal.teams.get("admin", ())
         }
         approve = requested if admin_there else not features.is_on(s, "registration-approval")
-        # The labels that exempt agents from controls: administrators for every team.
-        agent = agents.register(
-            s, rt.settings, body, actor=principal.actor, approve=approve, admin=principal.is_admin
-        )
+        # Its reserved labels: administrators' for every team (admin).
+        with _unnamed(s, principal):
+            agent = agents.register(
+                s,
+                rt.settings,
+                body,
+                actor=principal.actor,
+                approve=approve,
+                admin=principal.is_admin,
+            )
         reach.keep(s, principal, agent, "registrar")
         if text is not None:
             instructions.report(
@@ -180,7 +190,8 @@ def agent_a2a(
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, *READ_ROLES, ref=ref)
-        return agents.a2a_view(s, rt.settings, agent)
+        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        return agents.a2a_view(s, rt.settings, agent, reached=reached)
 
 
 @router.patch("/agents/{ref}", tags=["agents"])
@@ -196,33 +207,51 @@ def update_agent(
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, "admin", ref=ref)
         _exemptions(principal, agent, body)
-        changed = agents.update(s, agent, body, actor=principal.actor, version=if_match(request))
+        hold = reach.Hold(s, principal)
+        hold.before(agent)
+        with _unnamed(s, principal):
+            changed = agents.update(
+                s, agent, body, actor=principal.actor, version=if_match(request)
+            )
         reach.keep(s, principal, agent, "admin")
+        hold.check(agent)
         if set(changed) & agents.RISKY_FIELDS:
             agents.refresh_risk(s, rt.settings, agent)
         return agents.to_dict(agent)
 
 
+@contextmanager
+def _unnamed(session: Any, principal: Principal) -> Iterator[None]:
+    """The agent that already has a workload identity asked for is named only to whoever
+    reaches it."""
+    try:
+        yield
+    except identity_issuers.Taken as exc:
+        if reach.reaches(session, principal, exc.agent, *READ_ROLES):
+            raise
+        raise Conflict("another agent already has this workload identity") from None
+
+
 def _exemptions(principal: Principal, agent: Any, body: dict[str, Any]) -> None:
-    """Refuse an administrator for some teams only a change to the labels that exempt an
-    agent from rules or controls: those are for administrators for every team."""
-    if principal.is_admin or not isinstance(body.get("labels"), dict):
+    """Refuse an administrator for some teams only a change to the reserved labels (those that
+    exempt an agent from rules or controls, and those the policies read as an allowance):
+    those are for administrators for every team. No labels at all removes them too."""
+    if principal.is_admin or "labels" not in body:
         return
-    changed = agents.reserved_changes(agent.labels, body["labels"])
+    changed = agents.reserved_changes(agent.labels, validation.labels(body["labels"]))
     if changed:
         raise HTTPException(
             403,
-            f"label(s) {', '.join(changed)}: labels under {agents.RESERVED_LABELS} are set by "
-            "administrators for every team",
+            f"label(s) {', '.join(changed)}: {agents.RESERVED_WORDS} are set by administrators "
+            "for every team",
         )
 
 
 def _sponsors(agent: Any, principal: Principal) -> bool:
-    """Whether ``principal`` is one of the agent's sponsors: a person signed in, whatever
-    their role, or an approver's key named after them."""
-    if principal.via != "session" and "approver" not in principal.roles:
-        return False
-    return principal.name.lower() in {str(s).lower() for s in agent.sponsors or []}
+    """Whether ``principal`` is one of the agent's sponsors: a person signed in as themselves
+    (Principal.person), whatever their role. An API key is nobody, whatever its name."""
+    person = principal.person
+    return person is not None and person.lower() in {str(s).lower() for s in agent.sponsors or []}
 
 
 @router.post("/agents/{ref}/attest", tags=["agents"])
@@ -427,6 +456,8 @@ def bulk_agents(
         if reach.teams(principal, role) == frozenset():
             raise HTTPException(403, f"role {principal.role!r} may not do this")
         check = None
+        # An edit loosens nothing for a role for some teams only (reach.Hold).
+        hold = reach.Hold(s, principal) if action == "update" else None
         if role == "secops":
             if principal.teams:
                 # What the kill switch lets them do, by their roles where each agent is.
@@ -434,6 +465,14 @@ def bulk_agents(
                     handoff.check_kill_switch(s, reach.here(s, principal, agent), action)
             else:
                 handoff.check_kill_switch(s, principal, action)
+        elif hold is not None:
+            check = hold.before
+
+        def keep(agent: Any) -> None:
+            reach.keep(s, principal, agent, role)
+            if hold is not None:
+                hold.check(agent)
+
         return bulk.agents(
             s,
             rt.settings,
@@ -444,7 +483,7 @@ def bulk_agents(
             fields=body.get("fields"),
             reached=reach.agent_ids(s, principal, role),
             check=check,
-            keep=lambda agent: reach.keep(s, principal, agent, role),
+            keep=keep,
         )
 
 
@@ -465,10 +504,17 @@ def agent_lifecycle(
         handoff.check_kill_switch(s, reach.here(s, principal, agent), action)
         if action == "adopt" and body:
             _exemptions(principal, agent, body)
-            agents.update(
-                s, agent, {k: v for k, v in body.items() if k != "reason"}, actor=principal.actor
-            )
+            hold = reach.Hold(s, principal)
+            hold.before(agent)
+            with _unnamed(s, principal):
+                agents.update(
+                    s,
+                    agent,
+                    {k: v for k, v in body.items() if k != "reason"},
+                    actor=principal.actor,
+                )
             reach.keep(s, principal, agent, "admin")
+            hold.check(agent)
         agents.transition(
             s, rt.settings, agent, action, actor=principal.actor, reason=body.get("reason")
         )
@@ -606,7 +652,8 @@ def get_team(
         team = teams.get(s, ref)
         if mine is not None and team.name.lower() not in {n.lower() for n in mine}:
             raise NotFound(f"team {ref!r} not found")
-        return {**teams.to_dict(team), "named_by": teams.users(s, team.name)}
+        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        return {**teams.to_dict(team), "named_by": teams.users(s, team.name, reached=reached)}
 
 
 @router.patch("/teams/{ref}", tags=["teams"])

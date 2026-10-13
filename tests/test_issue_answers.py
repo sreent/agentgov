@@ -13,16 +13,20 @@ from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.platforms.base import Inventory
 from agentgov.registry import findings
-from tests.conftest import ADMIN
+from tests.conftest import ADMIN, SSO, signed_in
 from tests.test_issues import _raise, _rt, agent  # noqa: F401 (the agent fixture)
 from tests.test_other_platforms import NO_GUARDRAIL, FakeConnector, found
 
 
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """Single sign-on: people sign in as themselves (an API key is nobody, whatever its name)."""
+    return settings.with_overrides(**SSO)
+
+
 def person(client: TestClient, name: str, role: str = "auditor") -> dict[str, str]:
-    """Someone signed in as ``name``: an API key of that name (a role that reads)."""
-    resp = client.post("/v1/apikeys", json={"name": name, "role": role}, headers=ADMIN)
-    assert resp.status_code == 201, resp.text
-    return {"Authorization": f"Bearer {resp.json()['token']}"}
+    """Someone signed in as ``name``, which their provider vouches for, with ``role``."""
+    return signed_in(client, name, role)
 
 
 def finding(client: TestClient, fid: str) -> dict[str, Any]:

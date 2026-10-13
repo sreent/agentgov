@@ -23,14 +23,31 @@ def _rt(request: Request) -> Any:
 
 
 def _responsible(session: Any, principal: Principal, agent: Agent) -> bool:
-    """The agent's owner or a sponsor (or in a team named as either)."""
-    return principal.name.lower() in access_packages.responsible(session, agent)
+    """The agent's owner or a sponsor (or in a team named as either), signed in as
+    themselves (Principal.person)."""
+    person = principal.person
+    return person is not None and person.lower() in access_packages.responsible(session, agent)
 
 
-def _may_read(session: Any, principal: Principal, agent: Agent) -> Principal:
+def _in_reach(
+    session: Any, principal: Principal, agent: Agent, missing: str | None = None
+) -> Principal:
+    """Who ``principal`` is where the agent is (reach.here), if it is in their reach: they read
+    AgentGov there, ask for its access packages, or are its owner or a sponsor. For anyone
+    else it isn't there (``missing`` says what isn't)."""
+    here = reach.here(session, principal, agent)
+    known = set(READ_ROLES) | access_packages.REQUESTERS
+    if not here.roles & known and not _responsible(session, principal, agent):
+        raise NotFound(missing or f"agent {agent.id!r} not found")
+    return here
+
+
+def _may_read(
+    session: Any, principal: Principal, agent: Agent, missing: str | None = None
+) -> Principal:
     """Who reads what the agent holds: everyone who reads AgentGov where it is, and its
     owner and sponsors. Who ``principal`` is there (reach.here)."""
-    here = reach.here(session, principal, agent)
+    here = _in_reach(session, principal, agent, missing)
     if not here.roles & set(READ_ROLES) and not _responsible(session, principal, agent):
         raise HTTPException(403, f"role {principal.role!r} may not do this")
     return here
@@ -130,15 +147,15 @@ def request_package(
     approve = body.get("approve", False) is True
     with _rt(request).db.session() as s:
         agent = agents.get(s, body["agent"])
-        here = reach.here(s, principal, agent)
-        if approve and not here.is_admin:
-            raise HTTPException(403, "only an administrator assigns an access package at once")
-        if not access_packages.may_request(s, here.roles, principal.name, agent):
+        here = _in_reach(s, principal, agent, f"agent {body['agent']!r} not found")
+        if not access_packages.may_request(s, here.roles, principal.person, agent):
             raise HTTPException(
                 403,
                 f"{agent.name}'s owner and sponsors, approvers and administrators ask for its "
                 "access packages",
             )
+        if approve and not here.is_admin:
+            raise HTTPException(403, "only an administrator assigns an access package at once")
         row = access_packages.request(
             s,
             agent=agent,
@@ -157,7 +174,7 @@ def get_assignment(
 ) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         row = access_packages.assignment(s, assignment_id)
-        _may_read(s, principal, _agent(s, row))
+        _may_read(s, principal, _agent(s, row), f"access assignment {assignment_id} not found")
         return access_packages.assignment_dict(s, row)
 
 
@@ -186,7 +203,7 @@ def assignment_action(
         row = access_packages.assignment(s, assignment_id)
         agent = _agent(s, row)
         # Their roles where the agent is: an approver for its team decides.
-        here = reach.here(s, principal, agent)
+        here = _in_reach(s, principal, agent, f"access assignment {assignment_id} not found")
         deciders = bool(here.roles & access_packages.DECIDERS)
         if action in ("approve", "deny"):
             if not deciders:
@@ -220,7 +237,7 @@ def agent_packages(
     """The access packages an agent holds and has asked for, newest first."""
     with _rt(request).db.session() as s:
         agent = agents.get(s, ref)
-        _may_read(s, principal, agent)
+        _may_read(s, principal, agent, f"agent {ref!r} not found")
         return [
             access_packages.assignment_dict(s, r)
             for r in access_packages.assignments(s, agent_id=agent.id)

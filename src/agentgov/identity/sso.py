@@ -692,6 +692,7 @@ def start_session(
         token_hash=token_hash(token),
         subject=who.subject,
         name=who.name,
+        email=who.email,
         roles=who.roles,
         id_token=who.id_token,
         provider_session=who.provider_session,

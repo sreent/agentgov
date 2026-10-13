@@ -20,6 +20,8 @@ from agentgov.runtime import Runtime
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 SERVICE = {"Authorization": "Bearer test-service"}
+# Single sign-on, for settings whose tests sign people in (signed_in).
+SSO = {"oidc_issuer": "https://idp.test/realms/agentgov", "oidc_client_secret": "test-oidc-secret"}
 
 
 def opa_available() -> bool:
@@ -138,3 +140,16 @@ def seed(client: TestClient, *, sponsors: list[str] | None = None) -> dict[str, 
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def signed_in(client: TestClient, email: str, *roles: str) -> dict[str, str]:
+    """A person signed in through single sign-on as ``email``, which their provider vouches
+    for, with ``roles`` (none: someone without a role): the session a sign-in starts
+    (tests/test_sso.py signs in through a provider). The client's settings need SSO."""
+    from agentgov.identity import sso
+
+    rt = client.app.state.rt  # type: ignore[attr-defined]
+    who = sso.Identity(subject=email, name=email, roles=list(roles), id_token="", email=email)
+    with rt.db.session() as s:
+        token, _ = sso.start_session(s, rt.settings, who)
+    return {"Authorization": f"Bearer {token}"}
