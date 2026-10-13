@@ -18,6 +18,7 @@ from agentgov.config import Settings
 from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, IntegrationState, ToolServer
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import (
+    apikeys,
     destinations,
     features,
     findings,
@@ -47,6 +48,7 @@ POSTURE_TYPES = {
     "destination.failing",
     "toolserver.unverified",
     "toolserver.pending_review",
+    apikeys.EXPIRING,
 }
 
 
@@ -259,6 +261,27 @@ def scan(
                 ts.id,
                 "low",
                 f"Tool server {ts.name} is waiting for review",
+            )
+
+    for key in apikeys.list_all(session):
+        # A key in use that stops working soon, or did: what uses it needs a new one.
+        when = apikeys.expiring(key, settings.api_key_max_days, now)
+        if when is not None:
+            past = when <= now
+            flag(
+                apikeys.EXPIRING,
+                key.id,
+                "medium",
+                f"API key {key.name} {'expired' if past else 'expires'} on {when:%Y-%m-%d}",
+                description=(
+                    "Requests made with it are refused"
+                    + (" since then" if past else " from then on")
+                    + f". It was last used {key.last_used_at:%Y-%m-%d}, as {key.role}:{key.name}."
+                ),
+                remediation="Create a new key for what uses it (Access > Create API key, or "
+                "agentgov apikeys create), switch it over, then revoke this one, which closes "
+                "this issue.",
+                details={"key": key.id, "name": key.name, "expires_at": ids.isoformat(when)},
             )
 
     # What this scan looked for resolves when it's gone; what it didn't look for (the

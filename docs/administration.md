@@ -19,6 +19,15 @@ Create API keys on the UI's **Access** page or with `agentgov apikeys create`. T
 shown once; only a hash is stored. Keep the bootstrap token (`AGENTGOV_ADMIN_TOKEN`)
 for setup and emergencies.
 
+API keys expire. A new key works for `AGENTGOV_API_KEY_DAYS` (90 days) unless its creator
+chooses another time (`--expires-in DAYS`), or none (`--no-expiry`). After that, requests
+made with it are refused, with a message saying the key expired. `AGENTGOV_API_KEY_MAX_DAYS`
+is the longest any key may work, keys made before included; with it set, every key has an
+expiry. Two weeks before a key that was used in the last month expires, an issue
+(`apikey.expiring`, medium) tells the catch-all team: create a new key for what uses it,
+switch it over, and revoke the old one, which closes the issue. The **Access** page shows
+when each key expires.
+
 `agentgov login` opens your browser at the identity provider. After you sign in, the
 browser goes back to the CLI, which listens on a loopback address (`127.0.0.1`) for this
 one sign-in. The CLI proves with PKCE that it started the sign-in and gets an AgentGov
@@ -176,7 +185,8 @@ signed in or was refused (`admin.login_denied` in the ledger), for access review
 #### What doesn't go through the identity provider
 
 API keys and the bootstrap token don't sign in at the provider. Only administrators
-create API keys, each with one role, and the **Access** page lists them. Keep the
+create API keys, each with one role and an expiry ([above](#signing-in)), and the
+**Access** page lists them. Keep the
 bootstrap token (`AGENTGOV_ADMIN_TOKEN`) in a vault, for setup and emergencies. To limit
 who can reach AgentGov at all, publish it on your internal network only.
 
@@ -332,7 +342,7 @@ The same list is `agentgov inbox`, with the command that decides each kind, and
 | See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |
 | See the calls between agents, and the chain of agents behind any call | Ledger, type `decision.a2a.*`; an entry's *Chain* | `agentgov ledger tail --type 'decision.a2a.*'` | `GET /v1/ledger?type=decision.a2a.*` (`details.chain`) |
 | Open the trace of a gateway decision | Ledger or an agent's Recent activity → **Open trace** | `agentgov ledger tail --traces` | `trace_url` on `GET /v1/ledger` entries (set `AGENTGOV_TRACE_URL`) |
-| Create, review and revoke API keys | Access → **Create API key**, **Revoke** | `agentgov apikeys create\|list\|revoke` | `POST`/`GET /v1/apikeys`, `DELETE /v1/apikeys/{id}` |
+| Create, review and revoke API keys | Access → **Create API key** (with when it expires), **Revoke** | `agentgov apikeys create NAME --role ROLE [--expires-in DAYS\|--no-expiry]`, `list`, `revoke` | `POST /v1/apikeys` (`expires_in_days`), `GET /v1/apikeys`, `DELETE /v1/apikeys/{id}` |
 | See who has signed in, with which roles | Access → People | `agentgov access list`, `agentgov access sessions` | `GET /v1/access` |
 | Sign someone out | Access → People → **Sign out** | `agentgov access sign-out PERSON`, `agentgov access end-session ID` | `POST /v1/access/people/{subject}/sign-out`, `DELETE /v1/access/sessions/{id}` |
 | See each Microsoft connection and how it is doing | Platforms → Microsoft connections | `agentgov platforms status` | `connections` in `GET /v1/platforms` |

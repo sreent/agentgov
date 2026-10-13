@@ -3121,18 +3121,34 @@ def apikeys_list() -> None:
     """List API keys (never the keys themselves)."""
     rows = _call("GET", "/v1/apikeys")
     for r in rows:
-        r["status"] = "revoked" if r["revoked_at"] else "active"
-    _table(rows, ["id", "name", "role", "prefix", "status", "created_at", "last_used_at"])
+        r["expires_at"] = r.get("expires_at") or "never"
+    _table(
+        rows, ["id", "name", "role", "prefix", "status", "created_at", "last_used_at", "expires_at"]
+    )
 
 
 @apikeys_app.command("create")
 def apikeys_create(
     name: str,
     role: str = typer.Option(..., help="admin, approver, secops, auditor, registrar or service."),
+    expires_in: int | None = typer.Option(
+        None, "--expires-in", help="Days it works (AGENTGOV_API_KEY_DAYS by default)."
+    ),
+    no_expiry: bool = typer.Option(
+        False, "--no-expiry", help="It works until it is revoked, where keys may."
+    ),
 ) -> None:
     """Create a key. It is printed once, on standard output, and only its hash is kept."""
-    key = _call("POST", "/v1/apikeys", json={"name": name, "role": role})
-    typer.echo(f"apikey/{key['id']} ({key['role']}) created for {key['name']}.", err=True)
+    if expires_in is not None and no_expiry:
+        _fail("give --expires-in or --no-expiry, not both")
+    body: dict[str, Any] = {"name": name, "role": role}
+    if no_expiry:
+        body["expires_in_days"] = None
+    elif expires_in is not None:
+        body["expires_in_days"] = expires_in
+    key = _call("POST", "/v1/apikeys", json=body)
+    until = f"until {key['expires_at'][:10]}" if key.get("expires_at") else "with no expiry"
+    typer.echo(f"apikey/{key['id']} ({key['role']}) created for {key['name']}, {until}.", err=True)
     typer.echo("Copy the key now; it cannot be shown again:", err=True)
     typer.echo(key["token"])
 

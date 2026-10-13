@@ -121,10 +121,17 @@ def _principal(request: Request) -> Principal | None:
             return Principal("bootstrap", "admin")
         if settings.service_token and hmac.compare_digest(token, settings.service_token):
             return Principal("internal", "service")
-        with rt.db.session() as session:
-            key = apikeys.authenticate(session, token)
-            if key is not None:
-                return Principal(key.name, key.role, via="api_key")
+        try:
+            with rt.db.session() as session:
+                key = apikeys.authenticate(session, token, max_days=settings.api_key_max_days)
+                if key is not None:
+                    return Principal(key.name, key.role, via="api_key")
+        except apikeys.Expired as exc:
+            raise HTTPException(
+                401,
+                f"{exc}: an administrator creates a new key (Access, or agentgov apikeys create)",
+                headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+            ) from exc
         # A session token from `agentgov login`. Browsers never send these by
         # themselves, so they need no CSRF header.
         return _signed_in(rt, token)

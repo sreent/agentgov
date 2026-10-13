@@ -481,6 +481,7 @@ class TestAccess:
             "people": [],
             "sessions": [],
             "grants": [],
+            "api_keys": {"default_days": 90, "max_days": 0},
         }
 
 

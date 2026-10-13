@@ -242,6 +242,8 @@ The control plane signs people in (administrators, and the people issues and app
 | `AGENTGOV_OIDC_ALLOWED_DOMAINS` | empty | The email domains whose people may sign in, comma-separated (empty: anyone the provider signs in to this client). Google's issuer is shared by every Google account, so with Google this is required and checked against the hosted domain. |
 | `AGENTGOV_OIDC_REQUIRE_ROLE` | `false` | Only people with a role may sign in: one the provider gives (agentgov-admin, ..., or `AGENTGOV_OIDC_ROLE_MAP`), or one given in AgentGov. The person role (agentgov-person) lets owners and sponsors in to see only what is sent to them. Off: anyone the provider signs in may sign in with that view, while issues or approvals go to people. |
 | `AGENTGOV_SESSION_HOURS` | `8` | The longest an administrator's session lasts. |
+| `AGENTGOV_API_KEY_DAYS` | `90` | How many days a new API key works, unless whoever creates it chooses otherwise. |
+| `AGENTGOV_API_KEY_MAX_DAYS` | `0` | The most days an API key may work, keys made before included (0: no limit, and keys may be made that never expire). |
 | `AGENTGOV_MICROSOFT_ADMIN_ACTIONS` | `false` | Act in Microsoft 365 and Power Platform as the administrator who is signed in (quarantine Copilot Studio agents, read the Power Platform inventory, block Microsoft 365 agents): Microsoft accepts these only from a signed-in admin. Needs sign-in through Microsoft Entra ID (`AGENTGOV_OIDC_ISSUER` `https://login.microsoftonline.com/<tenant>/v2.0`) and an app registration with the delegated permissions listed in [platforms](platforms.md). |
 
 ### Microsoft 365 agent inventory

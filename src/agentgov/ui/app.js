@@ -468,6 +468,7 @@ const STATUS = {
   },
   apikey: {
     active: ['good', 'check-circle', 'Active'],
+    expired: ['warning', 'clock', 'Expired'],
     revoked: ['neutral', 'ban', 'Revoked'],
   },
   person: {
@@ -6730,7 +6731,7 @@ async function renderAccess() {
     view.provider?.problem ? callout('critical', 'octagon', h('span', {}, h('strong', {}, "People can't sign in now: "), view.provider.problem)) : null,
     signInsCard(view),
     roleGrantsCard(view),
-    apiKeysCard(keys),
+    apiKeysCard(keys, view.api_keys || {}),
     features['workload-identity'] === 'off' ? callout('warning', 'power', h('span', {},
       h('strong', {}, "Agents' own identities are off: "), 'no issuer is trusted, so agents with a workload identity can\'t authenticate. ',
       h('a', { href: '#/features' }, 'Features'), '.')) : null,
@@ -7011,32 +7012,44 @@ async function signPersonOut(person) {
   await refresh();
 }
 
-function apiKeysCard(keys) {
-  const active = keys.filter((k) => !k.revoked_at).length;
+// How long a key works, as its creator chooses: days, or never (where keys may).
+const KEY_DAYS = [30, 90, 180, 365];
+
+function apiKeysCard(keys, policy) {
+  const active = keys.filter((k) => k.status === 'active').length;
+  const expired = keys.filter((k) => k.status === 'expired').length;
+  const revoked = keys.filter((k) => k.status === 'revoked').length;
+  const counts = [plural(active, 'active key'), expired ? `${fmt(expired)} expired` : null, revoked ? `${fmt(revoked)} revoked` : null].filter(Boolean).join(', ');
+  const lasting = policy.max_days ? ` Keys work for ${plural(policy.max_days, 'day')} at most.` : '';
   return card({
     title: 'API keys',
-    sub: `${plural(active, 'active key')}${keys.length > active ? `, ${fmt(keys.length - active)} revoked` : ''}. Requests made with a key are recorded in the ledger as <role>:<name>.`,
-    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'create-key', onclick: guarded(createApiKey) }, icon('plus'), 'Create API key')] : null,
+    sub: `${counts}. Requests made with a key are recorded in the ledger as <role>:<name>.${lasting} A key in use warns its users two weeks before it expires.`,
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'create-key', onclick: guarded(() => createApiKey(policy)) }, icon('plus'), 'Create API key')] : null,
     flush: keys.length > 0,
     body: keys.length
       ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
         h('caption', { class: 'sr-only' }, 'API keys'),
-        h('thead', {}, h('tr', {}, ['Name', 'Role', 'Key', 'Created', 'Last used', 'Status', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+        h('thead', {}, h('tr', {}, ['Name', 'Role', 'Key', 'Created', 'Last used', 'Expires', 'Status', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
         h('tbody', {}, keys.map((k) => h('tr', {},
           h('td', { 'data-label': 'Name', class: 'break' }, h('span', { class: 'cell-title' }, k.name)),
           h('td', { 'data-label': 'Role' }, humanize(k.role)),
           h('td', { 'data-label': 'Key' }, h('code', { title: 'The first characters of the key' }, `${k.prefix}…`)),
           h('td', { 'data-label': 'Created', class: 'nowrap' }, timeEl(k.created_at)),
           h('td', { 'data-label': 'Last used', class: 'nowrap' }, timeEl(k.last_used_at, { empty: 'Never' })),
-          h('td', { 'data-label': 'Status' }, chip('apikey', k.revoked_at ? 'revoked' : 'active', { title: k.revoked_at ? `Revoked ${fullFmt.format(new Date(k.revoked_at))}` : null })),
-          h('td', { 'data-label': '' }, !k.revoked_at && can('admin')
+          h('td', { 'data-label': 'Expires', class: 'nowrap' }, k.status === 'revoked' ? h('span', { class: 'muted' }, '—') : timeEl(k.expires_at, { empty: 'Never' })),
+          h('td', { 'data-label': 'Status' }, chip('apikey', k.status, { title: k.revoked_at ? `Revoked ${fullFmt.format(new Date(k.revoked_at))}` : k.status === 'expired' ? `Expired ${fullFmt.format(new Date(k.expires_at))}` : null })),
+          h('td', { 'data-label': '' }, k.status !== 'revoked' && can('admin')
             ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `revoke-${k.id}`, onclick: () => revokeApiKey(k) }, icon('ban'), 'Revoke')
             : null))))))
       : emptyState('No API keys', 'Until you create role-scoped keys, the CLI and automation need the bootstrap admin token.'),
   });
 }
 
-async function createApiKey() {
+async function createApiKey(policy) {
+  const max = policy.max_days || 0;
+  const choices = [...new Set([...KEY_DAYS, policy.default_days || 90])].filter((d) => !max || d <= max).sort((a, b) => a - b);
+  const expiries = [...choices.map((d) => ({ value: String(d), label: d % 365 === 0 ? plural(d / 365, 'year') : plural(d, 'day') })),
+    ...(max ? [] : [{ value: 'never', label: 'Never (until it is revoked)' }])];
   const created = await ask({
     title: 'Create an API key',
     text: 'The key is shown once, right after it is created. The control plane keeps only a hash of it.',
@@ -7044,8 +7057,9 @@ async function createApiKey() {
     fields: [
       { id: 'name', label: 'Name', required: true, placeholder: 'ci-pipeline', hint: 'Who or what uses the key. Approver keys named after a sponsor can attest that sponsor\'s agents.' },
       { id: 'role', label: 'Role', type: 'select', value: 'auditor', options: KEY_ROLES.map(([value, label]) => ({ value, label })) },
+      { id: 'expires', label: 'Expires after', type: 'select', value: String(policy.default_days || 90), options: expiries, hint: 'Requests made with it are refused after that. Two weeks before, if it is in use, an issue says so.' },
     ],
-    submit: (v) => api('v1/apikeys', { method: 'POST', body: { name: v.name, role: v.role } }),
+    submit: (v) => api('v1/apikeys', { method: 'POST', body: { name: v.name, role: v.role, expires_in_days: v.expires === 'never' ? null : Number(v.expires) } }),
   });
   if (!created) return;
   const base = API_ROOT.href.replace(/\/$/, '');
@@ -7054,7 +7068,8 @@ async function createApiKey() {
     text: "Copy the key now: it can't be shown again. If it is lost, revoke it and create another.",
     iconName: 'key', confirm: 'Done', cancel: null, wide: true,
     extra: h('div', { class: 'stack', style: 'gap:12px' },
-      facts([['Key', copyable(created.token, 'API key')], ['Role', humanize(created.role)]]),
+      facts([['Key', copyable(created.token, 'API key')], ['Role', humanize(created.role)],
+        ['Expires', created.expires_at ? timeEl(created.expires_at, { absolute: true }) : 'Never']]),
       h('div', { class: 'stack', style: 'gap:6px' }, h('span', { class: 'field-label' }, 'Use it with the CLI'),
         h('pre', { class: 'kv-pre' }, `export AGENTGOV_URL=${base}\nexport AGENTGOV_TOKEN=${created.token}\nagentgov whoami`))),
   });

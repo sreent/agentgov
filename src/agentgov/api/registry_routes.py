@@ -656,25 +656,39 @@ def delete_policy(
 @router.get("/apikeys", tags=["apikeys"])
 def list_apikeys(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
     """Every key's name, role, prefix and use (never the key): readable for access reviews."""
-    with _rt(request).db.session() as s:
-        return [apikeys.to_dict(k) for k in apikeys.list_all(s)]
+    rt = _rt(request)
+    with rt.db.session() as s:
+        return [apikeys.to_dict(k, rt.settings.api_key_max_days) for k in apikeys.list_all(s)]
 
 
 @router.post("/apikeys", status_code=201, tags=["apikeys"])
 def create_apikey(
     request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
 ) -> dict[str, Any]:
-    known_fields(body, {"name", "role"}, "an API key")
-    with _rt(request).db.session() as s:
+    """A new key: ``expires_in_days`` days (AGENTGOV_API_KEY_DAYS when left out; null: it
+    never expires, unless AGENTGOV_API_KEY_MAX_DAYS says keys must)."""
+    known_fields(body, {"name", "role", "expires_in_days"}, "an API key")
+    rt = _rt(request)
+    settings = rt.settings
+    days = apikeys.lifetime(
+        body.get("expires_in_days", settings.api_key_days), max_days=settings.api_key_max_days
+    )
+    with rt.db.session() as s:
         key, token = apikeys.create(
-            s, name=body.get("name", ""), role=body.get("role", ""), actor=principal.actor
+            s,
+            name=body.get("name", ""),
+            role=body.get("role", ""),
+            actor=principal.actor,
+            days=days,
         )
-        return {**apikeys.to_dict(key), "token": token}
+        return {**apikeys.to_dict(key, settings.api_key_max_days), "token": token}
 
 
 @router.delete("/apikeys/{key_id}", tags=["apikeys"])
 def revoke_apikey(
     request: Request, key_id: str, principal: Principal = Depends(admin)
 ) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
-        return apikeys.to_dict(apikeys.revoke(s, key_id, actor=principal.actor))
+    rt = _rt(request)
+    with rt.db.session() as s:
+        key = apikeys.revoke(s, key_id, actor=principal.actor)
+        return apikeys.to_dict(key, rt.settings.api_key_max_days)

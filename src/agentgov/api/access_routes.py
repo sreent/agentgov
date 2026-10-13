@@ -64,6 +64,11 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
             "people": access.people(s),
             "sessions": [access.session_to_dict(r) for r in access.live_sessions(s)],
             "grants": [access.grant_to_dict(g) for g in access.grants(s)],
+            # How long new API keys work by default, and at most (0: no limit).
+            "api_keys": {
+                "default_days": rt.settings.api_key_days,
+                "max_days": rt.settings.api_key_max_days,
+            },
         }
 
 

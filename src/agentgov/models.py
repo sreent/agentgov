@@ -457,6 +457,9 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = _created()
     last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # When it stops working, as its creator chose it (None: never); AGENTGOV_API_KEY_MAX_DAYS
+    # may end it sooner (agentgov.registry.apikeys.expiry).
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 class AdminSession(Base):

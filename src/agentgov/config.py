@@ -320,6 +320,11 @@ class Settings:
     oidc_require_role: bool = False
     # The longest an administrator's session lasts.
     session_hours: int = 8
+    # How many days a new API key works, unless whoever creates it chooses otherwise.
+    api_key_days: int = 90
+    # The most days an API key may work, keys made before included (0: no limit, and keys
+    # may be made that never expire).
+    api_key_max_days: int = 0
     # Act in Microsoft 365 and Power Platform as the administrator who is signed in
     # (quarantine Copilot Studio agents, read the Power Platform inventory, block
     # Microsoft 365 agents): Microsoft accepts these only from a signed-in admin.
@@ -774,6 +779,12 @@ class Settings:
             raise ValueError(
                 f"AGENTGOV_DATA_RETENTION_DAYS is 0 (keep everything) or at least {DATA_MIN_DAYS}"
             )
+        if self.api_key_days < 1 or self.api_key_max_days < 0:
+            raise ValueError(
+                "AGENTGOV_API_KEY_DAYS is 1 or more, and AGENTGOV_API_KEY_MAX_DAYS 0 or more"
+            )
+        if self.api_key_max_days and self.api_key_days > self.api_key_max_days:
+            raise ValueError("AGENTGOV_API_KEY_DAYS can't be more than AGENTGOV_API_KEY_MAX_DAYS")
         if self.session_hours <= 0:
             raise ValueError("AGENTGOV_SESSION_HOURS must be positive")
         if self.trace_url and "{trace_id}" not in self.trace_url:
