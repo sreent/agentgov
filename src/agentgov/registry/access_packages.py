@@ -298,8 +298,18 @@ def responsible(session: Session, agent: Agent) -> set[str]:
     return names
 
 
-def may_request(session: Session, roles: frozenset[str], name: str, agent: Agent) -> bool:
+def may_request(session: Session, roles: frozenset[str], name: str | None, agent: Agent) -> bool:
     return bool(roles & REQUESTERS) or (name or "").lower() in responsible(session, agent)
+
+
+def asked_by(row: AccessAssignment, actor: str) -> bool:
+    """Whether ``actor`` asked for ``row``: the same person or key, whichever role each acted
+    in ("registrar:ann" and "approver:ann")."""
+
+    def who(value: str | None) -> str:
+        return str(value or "").partition(":")[2].strip().lower()
+
+    return bool(who(actor)) and who(actor) == who(row.requested_by)
 
 
 def _resource(row: AccessAssignment, package: AccessPackage, agent: Agent) -> str:
@@ -435,7 +445,7 @@ def decide(
     lock(session, row)
     if row.status != REQUESTED:
         raise InvalidTransition(f"assignment {row.id} is {row.status}, not requested")
-    if actor == row.requested_by:
+    if asked_by(row, actor):
         raise Forbidden("someone other than who asked for it decides a request")
     note = str(note).strip()[:2000] if note else None
     if approve:

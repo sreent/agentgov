@@ -2079,7 +2079,7 @@ async function manyDone(result, verb, noun) {
 const AGENTS_AT_ONCE = {
   approve: { verb: 'Approved', text: 'Each becomes active and can call the tools its blueprint and grants allow. Each needs a sponsor at least: those without one stay pending.' },
   block: { verb: 'Blocked', text: 'This is the kill switch. The gateway refuses every call from them as soon as OPA loads the updated policy bundle, usually within seconds. You can unblock them later.' },
-  unblock: { verb: 'Unblocked', text: 'Calls from them will be evaluated against policy again.' },
+  unblock: { verb: 'Unblocked', text: 'Each goes back to what it was when it was blocked: active, with its calls evaluated against policy again, waiting for approval, or unmanaged.' },
   delete: { verb: 'Deleted', text: 'They leave the inventory and policy denies all of their calls. Deleted agents can be restored.' },
   restore: { verb: 'Restored', text: 'They come back as pending approval. Approve them to make them active again.' },
 };
@@ -2346,9 +2346,20 @@ const PLATFORM_LIFECYCLE = {
   adopt: (p) => ({ text: `Adopting brings this ${p} agent under governance as a pending registration. Give it an owner and at least one sponsor, then approve it.` }),
 };
 
+// Unblocked, an agent is what it was when it was blocked: one that waited for approval waits
+// again, and an unmanaged one is still unmanaged.
+const UNBLOCKED_TO = {
+  pending: 'It goes back to waiting for an administrator\u2019s approval, as it was when it was blocked: its calls are refused until then.',
+  discovered: 'It goes back to being unmanaged, as it was when it was blocked.',
+};
+
 function lifecycleSpec(a, action) {
   const p = platformOf(a);
-  return p && PLATFORM_LIFECYCLE[action] ? { ...LIFECYCLE[action], ...PLATFORM_LIFECYCLE[action](p) } : LIFECYCLE[action];
+  const spec = p && PLATFORM_LIFECYCLE[action] ? { ...LIFECYCLE[action], ...PLATFORM_LIFECYCLE[action](p) } : LIFECYCLE[action];
+  const back = action === 'unblock' ? UNBLOCKED_TO[a.blocked_from] : null;
+  if (!back) return spec;
+  // Not active again: say what it is, rather than that its calls are evaluated again.
+  return { ...spec, text: p ? `${spec.text} ${back}` : back };
 }
 
 const ACTIONS_BY_STATUS = {
@@ -2412,12 +2423,13 @@ function agentHeader(a) {
     agentToolbar(a));
 }
 
-// Sponsors attest their own agents, whatever their role (signed in, or with an approver's
-// key named after them); admins any agent.
+// Sponsors attest their own agents, whatever their role: signed in as themselves, by the
+// email address their provider vouches for (me.person; an API key is nobody); admins any agent.
 function mayAttest(a) {
   if (!ATTESTABLE.has(a.status)) return false;
-  const sponsor = (a.sponsors || []).some((s) => String(s).toLowerCase() === String(me?.name || '').toLowerCase());
-  return can('admin', a) || (sponsor && (me?.via === 'session' || can('approve', a)));
+  const person = String(me?.person || '').toLowerCase();
+  const sponsor = Boolean(person) && (a.sponsors || []).some((s) => String(s).toLowerCase() === person);
+  return can('admin', a) || sponsor;
 }
 
 function agentToolbar(a) {
@@ -4202,7 +4214,7 @@ async function serverAction(ts, action) {
   const specs = {
     approve: { title: `Approve ${ts.name}?`, text: 'Agents whose grants cover this server can call its tools through the gateway.', confirm: 'Approve server', tone: 'primary', icon: 'check', done: `Approved ${ts.name}.` },
     block: { title: `Block ${ts.name}?`, text: "Every agent's calls to this server are refused once OPA loads the updated bundle. Its catalog is kept, and you can unblock it later.", confirm: 'Block server', tone: 'danger', icon: 'power', done: `Blocked ${ts.name}. Calls to it are refused.` },
-    unblock: { title: `Unblock ${ts.name}?`, text: 'Calls to this server will be evaluated against policy again.', confirm: 'Unblock server', tone: 'primary', icon: 'undo', done: `Unblocked ${ts.name}.` },
+    unblock: { title: `Unblock ${ts.name}?`, text: ts.blocked_from === 'pending' ? 'It goes back to waiting for an administrator\u2019s approval, as it was when it was blocked.' : 'Calls to this server will be evaluated against policy again.', confirm: 'Unblock server', tone: 'primary', icon: 'undo', done: `Unblocked ${ts.name}.` },
   };
   const spec = specs[action];
   const ok = await ask({ title: spec.title, text: spec.text, confirm: spec.confirm, tone: spec.tone, iconName: spec.icon });

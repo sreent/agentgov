@@ -114,8 +114,11 @@ Write the issuer as the provider's tokens name it; a trailing slash may be left 
 the provider vouches for is in one of those domains, and with Google, only accounts of
 your organisation (its hosted domain). A person's name in AgentGov is that email address,
 which issues and approvals are addressed to; Microsoft Entra ID's people are named by their
-email address or else their user principal name. Some providers, Google among them, have
-no sign-out endpoint: signing out then ends the AgentGov session, not the provider's.
+email address or else their user principal name. Someone whose email address the provider
+doesn't vouch for signs in with their roles, but by no name an agent's owner, sponsors or
+team give: nothing is sent to them, and they attest nothing (`GET /v1/me` says who someone
+is as a person, `person`, if anyone). Some providers, Google among them, have no sign-out
+endpoint: signing out then ends the AgentGov session, not the provider's.
 
 A provider that only speaks SAML, or a directory (Active Directory, LDAP), signs people in
 through Keycloak, which brokers it: connect it to the realm as an identity provider or
@@ -187,7 +190,8 @@ signed in or was refused (`admin.login_denied` in the ledger), for access review
 
 API keys and the bootstrap token don't sign in at the provider. Only administrators
 create API keys, each with one role and an expiry ([above](#signing-in)), and the
-**Access** page lists them. Keep the
+**Access** page lists them. A key acts in its role and never as a person, whatever its
+name: it is nobody's owner or sponsor, and is sent no issues. Keep the
 bootstrap token (`AGENTGOV_ADMIN_TOKEN`) in a vault, for setup and emergencies. To limit
 who can reach AgentGov at all, publish it on your internal network only.
 
@@ -259,11 +263,24 @@ Someone with a role for one team:
   have one team).
 - keeps what they change within their teams: a change that would take an agent to another
   team, its own or its blueprint's, is refused.
+- loosens nothing that governs those agents: an edit, one or many at once, is refused if it
+  would make a control's mode for an agent weaker (by taking it into an
+  [exception's](features.md#exceptions) scope, say, with another environment), take it out
+  of a [management rule's](management-rules.md) scope, give it a blueprint that acts for
+  more people or gives it `pii-access`, or give it tools, models or agents to call that its
+  grants and its blueprint's don't cover already. They narrow an agent's grants; an
+  [access package](access-packages.md) widens them, or an administrator for every team.
+- puts an agent to work with no more than its blueprint grants: approving one, at
+  registration too (an admin for the team, or a registrar while `registration-approval` is
+  off), is refused if its own grants reach beyond its blueprint's. An access package gives
+  it more, or an administrator for every team approves it.
 - reads the blueprints and their own teams, and does nothing organisation-wide: features,
   policies, blueprints, teams, tool servers, model providers, identity issuers,
   destinations, platforms, API keys and access, the whole ledger's verification and export,
   compliance reports and the register stay with roles for every team. So do deleting an
-  agent for good and the `agentgov/` labels that exempt agents from rules and controls.
+  agent for good, the `agentgov/` labels that exempt agents from rules and controls, and the
+  `pii-access` label, which lets an agent have personal data unmasked
+  ([policies](policies.md)).
 
 | Where it comes from | How |
 |---|---|
@@ -431,7 +448,9 @@ Tick the agents to act on, or all of those shown (the box in the table's header;
 
 - **Approve**, **Block**, **Unblock**, **Delete** and **Restore**, each agent on its own: one
   that can't be (approved without a sponsor, say) is left as it was, and AgentGov lists those
-  left, with why. The reason you give is recorded for each of them in the ledger.
+  left, with why. The reason you give is recorded for each of them in the ledger. Unblocked,
+  an agent is what it was when it was blocked: one that waited for approval waits again, and
+  an unmanaged one is still unmanaged (tool servers too).
 - **Edit…**: an owner, a team, sponsors to add or to take off (someone who left, say), a
   blueprint. Only what you fill in changes.
 - **Adopt**, for those found on platforms: each with its maker as owner and sponsor where
@@ -465,3 +484,11 @@ agents and tool servers for review, with `agentgov agents create` and `agentgov
 toolservers create`.) Applying is idempotent: unchanged resources are reported as
 unchanged. Changes made in the UI show
 up in the next export, so the two ways of working can be mixed.
+
+What a registrar says of an agent it registers (its team, environment, labels and grants)
+is taken as said, as far as registration approval allows: with `registration-approval` on,
+the default, an administrator sees it before the agent is active; off, the agent is active
+at once (a registrar for one team's, with no more than its blueprint grants: [roles for one
+team](#roles-for-one-team)). The reserved labels (`agentgov/` and `pii-access`) aren't a
+registrar's to set, and where an agent comes from is AgentGov's to say: registered, through
+the API or a manifest.

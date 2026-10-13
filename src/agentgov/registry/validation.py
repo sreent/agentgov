@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from typing import Any
 from urllib.parse import urlsplit
@@ -252,6 +253,22 @@ def merge_grants(*grant_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
             tools = merged.setdefault(grant["server"], [])
             tools.extend(t for t in grant["tools"] if t not in tools)
     return [{"server": server, "tools": tools} for server, tools in merged.items()]
+
+
+# What makes a pattern more than names and "*": AgentGov reads only "*" and plain names.
+_GLOB_MARKS = frozenset("?[]{}!\\")
+
+
+def covers(pattern: str, other: str) -> bool:
+    """Whether every name the pattern ``other`` matches, ``pattern`` matches too (as the
+    policies match grants: "*" spans every character). Only for patterns of names and "*":
+    any other pattern covers only itself, and "*" everything."""
+    if pattern in (other, "*"):
+        return True
+    if _GLOB_MARKS & set(pattern + other):
+        return False
+    # Each name ``other`` matches has its text but "*"s, in order: what ``pattern`` asks for.
+    return fnmatch.fnmatchcase(other, pattern)
 
 
 def is_broad(grants: list[dict[str, Any]]) -> bool:

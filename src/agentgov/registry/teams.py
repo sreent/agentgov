@@ -228,21 +228,25 @@ def update_team(
     return changed
 
 
-def users(session: Session, name: str) -> list[str]:
+def users(session: Session, name: str, *, reached: set[str] | None = None) -> list[str]:
     """The blueprints and agents that name a team (as their team, owner or sponsor), and
-    the controls' exceptions and management rules."""
-    found = scopes.naming(session, "teams", name)
+    the controls' exceptions and management rules. ``reached``: the agents (by ID) of a role
+    for some teams only, which reads only those, and no exceptions or rules."""
+    found = scopes.naming(session, "teams", name) if reached is None else []
     found += [
         f"blueprint {b}"
         for b in session.scalars(select(Blueprint.name).where(Blueprint.team == name))
     ]
     rows = session.execute(
-        select(Agent.name, Agent.team, Agent.owner, Agent.sponsors).where(Agent.status != DELETED)
+        select(Agent.id, Agent.name, Agent.team, Agent.owner, Agent.sponsors).where(
+            Agent.status != DELETED
+        )
     )
     found += [
         f"agent {agent}"
-        for agent, team, owner, sponsors in rows
-        if name in (team, owner) or name in (sponsors or [])
+        for agent_id, agent, team, owner, sponsors in rows
+        if (name in (team, owner) or name in (sponsors or []))
+        and (reached is None or agent_id in reached)
     ]
     return sorted(found)
 

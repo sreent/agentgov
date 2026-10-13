@@ -59,11 +59,10 @@ def gather(
     kind("calls", "Calls held for a decision", calls, approvals.to_dict)
 
     if held & DECIDERS:
-        mine = {principal.actor, principal.name}
         asked = [
             r
             for r in access_packages.assignments(session, status=access_packages.REQUESTED)
-            if r.requested_by not in mine and at(r.agent_id) & DECIDERS
+            if not access_packages.asked_by(r, principal.actor) and at(r.agent_id) & DECIDERS
         ]
         kind(
             "access",

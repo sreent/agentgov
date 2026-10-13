@@ -265,9 +265,11 @@ def _toolserver(session: Session, settings: Settings, spec: dict[str, Any], acto
         toolservers.set_status(session, ts, "block", actor=actor)
         action = "configured"
     elif desired == "approved" and ts.status != "approved":
-        toolservers.set_status(
-            session, ts, "approve" if ts.status == PENDING else "unblock", actor=actor
-        )
+        if ts.status == BLOCKED:
+            # Unblocked, it is as it was when it was blocked: pending, it is approved next.
+            toolservers.set_status(session, ts, "unblock", actor=actor)
+        if ts.status == PENDING:
+            toolservers.set_status(session, ts, "approve", actor=actor)
         action = "configured"
     return action
 
@@ -362,8 +364,11 @@ def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: st
     if classified is not None and classification.classify(session, agent, classified, actor=actor):
         action = "configured"
     if desired == ACTIVE and agent.status in (PENDING, BLOCKED):
-        verb = "approve" if agent.status == PENDING else "unblock"
-        agents.transition(session, settings, agent, verb, actor=actor, reason="manifest")
+        if agent.status == BLOCKED:
+            # Unblocked, it is as it was when it was blocked: pending, it is approved next.
+            agents.transition(session, settings, agent, "unblock", actor=actor, reason="manifest")
+        if agent.status == PENDING:
+            agents.transition(session, settings, agent, "approve", actor=actor, reason="manifest")
         action = "configured"
     elif desired == BLOCKED and agent.status in (PENDING, ACTIVE):
         agents.transition(session, settings, agent, "block", actor=actor, reason="manifest")

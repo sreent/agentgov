@@ -295,8 +295,9 @@ blueprint an exception names can't be deleted until the exception changes.
 An administrator can also exempt one agent: its label `agentgov/exempt-controls` names the
 controls (`least-privilege,tool-integrity`), or all of them (`*`), that are monitored for
 it while they are enforced for others. Labels under `agentgov/`, this one and
-`agentgov/exempt-rules`, are set by administrators only: registering an agent with one
-takes the administrator role.
+`agentgov/exempt-rules`, are set by administrators for every team only, and so is
+`pii-access`, which lets an agent have personal data unmasked ([policies](policies.md)):
+registering an agent with one takes the administrator role.
 
 Every change to a control's exceptions is a `feature.changed` entry in the ledger, a
 warning when it weakens the control for some agents. A feature the deployment pins
@@ -306,7 +307,9 @@ monitors the exceptions that enforce a control.
 
 Scopes match what an agent's registration says (its blueprint, team, environment and
 labels), and registrars choose those when they register an agent: with
-`registration-approval` on, an administrator sees them before the agent is active. The
+`registration-approval` on, an administrator sees them before the agent is active. After
+that, a role for one team can't edit its agents into an exception whose mode is weaker
+([roles for one team](administration.md#roles-for-one-team)). The
 gateway can't tell agents apart, so it is set up for the strictest mode any agent has:
 `AGENTGOV_GATEWAY_FAILURE_MODE=modes` refuses what it can't check while a control is
 enforced for any agent, and the Features page judges each feature by the strictest mode

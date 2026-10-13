@@ -17,12 +17,13 @@ from sqlalchemy import select
 
 from agentgov import ids, ledger
 from agentgov.api.app import create_app
+from agentgov.api.auth import Principal
 from agentgov.config import Settings
 from agentgov.models import Destination, LedgerEntry
 from agentgov.registry import destinations, findings, manifests, posture
-from agentgov.registry.errors import ValidationError
+from agentgov.registry.errors import Forbidden, ValidationError
 from agentgov.runtime import Runtime
-from agentgov.secops import delivery, formats, ocsf
+from agentgov.secops import delivery, formats, handoff, ocsf
 from tests.conftest import ADMIN, SERVICE, seed
 from tests.test_api import key
 from tests.test_cli import _Shared, ok, runner
@@ -380,6 +381,55 @@ class TestHandoff:
         assert client.delete("/v1/toolservers/crm", headers=soc).status_code == 403
         blocked = client.get("/v1/ledger", params={"type": "agent.block"}, headers=ADMIN).json()
         assert blocked[0]["actor"] == "secops:soc"
+
+    def test_blocking_then_unblocking_approves_nothing(self, client) -> None:
+        """Unblocked, an agent or a tool server is as it was when it was blocked: one that
+        waited for an administrator's approval waits again."""
+        registrar = key(client, "registrar", "ci")
+        made = client.post(
+            "/v1/agents",
+            json={"name": "new-bot", "sponsors": ["a@example.com"], "owner": "cx"},
+            headers=registrar,
+        ).json()
+        ts = client.post(
+            "/v1/toolservers", json={"name": "byo", "url": "http://byo/mcp"}, headers=registrar
+        ).json()
+        assert (made["status"], ts["status"]) == ("pending", "pending")
+        soc = key(client, "secops", "soc")
+        level(client, "contain")
+        for path in ("/v1/agents/new-bot", "/v1/toolservers/byo"):
+            assert client.post(f"{path}/approve", headers=soc).status_code == 403, path
+            assert client.post(f"{path}/block", headers=soc).json()["status"] == "blocked"
+            assert client.post(f"{path}/unblock", headers=soc).json()["status"] == "pending"
+        waiting = {
+            k["kind"]: k["count"] for k in client.get("/v1/inbox", headers=ADMIN).json()["kinds"]
+        }
+        assert (waiting["agents"], waiting["toolservers"]) == (1, 1)
+
+    def test_security_for_one_team_is_held_to_the_hand_off(self, client) -> None:
+        """Security for one team (secops@sales) is security: the hand-off applies to it. And
+        only administrators and security use the kill switch: anyone else is refused."""
+        rt = client.app.state.rt  # type: ignore[attr-defined]
+
+        def who(*roles: str) -> Principal:
+            return Principal("x", roles[0], frozenset(roles))
+
+        with rt.db.session() as s:
+            assert handoff.acting_as_secops(who("secops@sales"))
+            with pytest.raises(Forbidden, match="triage"):
+                handoff.check(s, who("secops@sales"), handoff.TRIAGE)
+            for roles in (("secops@sales",), ("approver",), ("auditor",), ("admin@sales",)):
+                with pytest.raises(Forbidden):
+                    handoff.check_kill_switch(s, who(*roles), "block")
+            handoff.check_kill_switch(s, who("admin"), "block")
+        level(client, "contain")
+        with rt.db.session() as s:
+            handoff.check_kill_switch(s, who("secops@sales"), "unblock")
+            with pytest.raises(Forbidden, match="nothing else"):
+                handoff.check_kill_switch(s, who("secops@sales"), "approve")
+            for roles in (("approver",), ("registrar",), ("admin@sales", "auditor")):
+                with pytest.raises(Forbidden):
+                    handoff.check_kill_switch(s, who(*roles), "block")
 
     def test_decide_lets_it_decide_approvers_requests(self, client) -> None:
         agent = seed(client)

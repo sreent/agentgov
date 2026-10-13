@@ -638,16 +638,49 @@ class TestSponsorsAttest:
         sign_in(sso, provider, sub="user-2", roles=[], email="bob@example.com")
         assert sso.post("/v1/agents/support-bot/attest", json={}, headers=CSRF).status_code == 403
         assert sso.post("/v1/agents/nobody/attest", json={}, headers=CSRF).status_code == 403
-        # A key that isn't an approver's attests nothing, whatever its name.
-        auditor = sso.post(
-            "/v1/apikeys", json={"name": "alice@example.com", "role": "auditor"}, headers=ADMIN
-        ).json()["token"]
-        refused = sso.post(
-            "/v1/agents/support-bot/attest",
-            json={},
-            headers={"Authorization": f"Bearer {auditor}"},
-        )
-        assert refused.status_code == 403
+        # A key attests nothing, whatever its name and its role: a key is nobody.
+        for role in ("auditor", "approver"):
+            token = sso.post(
+                "/v1/apikeys", json={"name": "alice@example.com", "role": role}, headers=ADMIN
+            ).json()["token"]
+            refused = sso.post(
+                "/v1/agents/support-bot/attest",
+                json={},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert refused.status_code == 403, role
+
+
+class TestWhoAPersonIs:
+    def test_a_name_the_provider_doesnt_vouch_for_is_nobodys(self, sso, provider) -> None:
+        """Owners, sponsors and teams name people by the email address the provider vouches
+        for. Someone it names otherwise (here by a user name that looks like someone's
+        address) signs in with their roles, and is nobody's owner or sponsor."""
+        agent = seed(sso, sponsors=["alice@example.com"])
+        sso.patch(
+            "/v1/agents/support-bot", json={"owner": "alice@example.com"}, headers=ADMIN
+        ).raise_for_status()
+        rt = sso.app.state.rt
+        with rt.db.session() as s:
+            findings.raise_finding(
+                s,
+                type="agent.attestation_due",
+                severity="medium",
+                subject=agent["id"],
+                agent_id=agent["id"],
+                title="support-bot is due for review",
+            )
+        rt.run_issues()
+        claims = {"email_verified": False, "preferred_username": "alice@example.com"}
+        sign_in(sso, provider, sub="mallory", roles=[], email="mal@example.com", id_claims=claims)
+        assert sso.get("/v1/me").json()["name"] == "alice@example.com"
+        assert sso.get("/v1/me/issues").json() == []
+        assert sso.post("/v1/agents/support-bot/attest", json={}, headers=CSRF).status_code == 403
+        assert sso.get("/v1/agents/support-bot/access-packages").status_code == 404
+        assert sso.get("/v1/agents/support-bot/rules").status_code == 404
+        # The address vouched for: the same person is the sponsor.
+        sign_in(sso, provider, sub="user-1", roles=[])
+        assert sso.post("/v1/agents/support-bot/attest", json={}, headers=CSRF).status_code == 200
 
 
 class TestAccessPackagesForPeople:
@@ -681,8 +714,25 @@ class TestAccessPackagesForPeople:
             headers=ADMIN,
         ).raise_for_status()
         other = {**body, "agent": "other-bot"}
-        assert sso.post("/v1/access-assignments", json=other, headers=CSRF).status_code == 403
-        assert sso.get("/v1/agents/other-bot/access-packages").status_code == 403
+        assert sso.post("/v1/access-assignments", json=other, headers=CSRF).status_code == 404
+        assert sso.get("/v1/agents/other-bot/access-packages").status_code == 404
+
+    def test_who_asked_doesnt_decide_in_another_role(self, sso, provider) -> None:
+        seed(sso)
+        sso.patch(
+            "/v1/agents/support-bot", json={"owner": "alice@example.com"}, headers=ADMIN
+        ).raise_for_status()
+        sso.post(
+            "/v1/access-packages",
+            json={"name": "crm-write", "permissions": [{"server": "crm", "tools": ["update_*"]}]},
+            headers=ADMIN,
+        ).raise_for_status()
+        sign_in(sso, provider, sub="user-1", roles=[])
+        body = {"agent": "support-bot", "package": "crm-write", "reason": "Incident INC-1"}
+        asked = sso.post("/v1/access-assignments", json=body, headers=CSRF).json()
+        sign_in(sso, provider, sub="user-1", roles=["agentgov-approver"])
+        refused = sso.post(f"/v1/access-assignments/{asked['id']}/approve", headers=CSRF)
+        assert refused.status_code == 403 and "someone other" in refused.json()["detail"]
 
 
 class TestCliSignIn:

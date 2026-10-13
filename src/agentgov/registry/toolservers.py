@@ -267,7 +267,16 @@ def set_status(session: Session, ts: ToolServer, action: str, *, actor: str) -> 
         raise InvalidTransition("tool server is not blocked")
     if action == "approve" and ts.status != PENDING:
         raise InvalidTransition("tool server is not pending approval")
-    previous, ts.status = ts.status, targets[action]
+    previous, target = ts.status, targets[action]
+    if action == "unblock":
+        # As it was when it was blocked: blocking then unblocking approves nothing.
+        target = ts.blocked_from or target
+    if target == BLOCKED:
+        # Blocked again, it was still what it was before the first block.
+        ts.blocked_from = ts.blocked_from if previous == BLOCKED else previous
+    else:
+        ts.blocked_from = None
+    ts.status = target
     ledger.append(
         session,
         type=f"toolserver.{action}",
@@ -434,6 +443,8 @@ def to_dict(ts: ToolServer, gateway_url: str | None = None) -> dict[str, Any]:
         "description": ts.description,
         "owner": ts.owner,
         "status": ts.status,
+        # Blocked, what unblocking gives back.
+        "blocked_from": ts.blocked_from,
         "trust_level": ts.trust_level,
         "data_classification": ts.data_classification,
         "labels": ts.labels or {},

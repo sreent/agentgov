@@ -72,8 +72,10 @@ agent that holds it. A package can't be deleted while an agent holds it or asks 
 | The `secops` role, from the contain level on | Revoke ([security operations](secops.md)) |
 
 A request says why the agent needs it, and for how many days. Someone other than the person
-who asked decides it: approvers can't approve their own requests. An agent asks for a package
-once at a time.
+who asked decides it: approvers can't approve their own requests, whichever role they asked
+in (as an owner, a registrar or an approver) or decide in. An agent asks for a package once
+at a time. The owners and sponsors who ask are people signed in as themselves, by the email
+address their identity provider vouches for: an API key asks in its role, never as a person.
 
 Asking again for a package the agent holds is a renewal. Once approved, it carries on from
 then for the days asked, and never ends sooner than the one it replaces would have.

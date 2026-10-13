@@ -1521,7 +1521,8 @@ def agents_block(
 def agents_unblock(
     refs: list[str] = AGENT_REFS, reason: str | None = REASON, in_platform: bool = IN_PLATFORM
 ) -> None:
-    """Unblock agents: their calls are evaluated against policy again."""
+    """Unblock agents: each is again what it was when it was blocked: active (its calls
+    evaluated against policy again), pending approval or discovered."""
     if in_platform and len(refs) > 1:
         _fail("--in-platform unblocks one agent at a time")
     # AgentGov first: if it refuses (an agent needs a sponsor), the platform keeps it blocked.
@@ -2161,7 +2162,8 @@ def toolservers_block(name: str) -> None:
 
 @toolservers_app.command("unblock")
 def toolservers_unblock(name: str) -> None:
-    """Allow calls to a blocked server again."""
+    """Allow calls to a blocked server again (one blocked while pending approval is pending
+    again)."""
     _server_action(name, "unblock")
 
 

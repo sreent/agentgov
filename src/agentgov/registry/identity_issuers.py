@@ -255,6 +255,15 @@ def delete(session: Session, issuer: IdentityIssuer, *, actor: str) -> None:
     mark_changed(session, "issuers")
 
 
+class Taken(Conflict):
+    """A workload identity another agent has (``agent``): the API names it only to whoever
+    reaches that agent."""
+
+    def __init__(self, agent: Agent) -> None:
+        super().__init__(f"agent {agent.name!r} already has this workload identity")
+        self.agent = agent
+
+
 def workload_identity(session: Session, agent: Agent, value: Any) -> tuple[str, str] | None:
     """Check an agent's workload identity, ``{"issuer": name, "subject": sub}`` or null."""
     if value is None:
@@ -277,7 +286,7 @@ def workload_identity(session: Session, agent: Agent, value: Any) -> tuple[str, 
         )
     )
     if taken is not None:
-        raise Conflict(f"agent {taken.name!r} already has this workload identity")
+        raise Taken(taken)
     return issuer.name, subject
 
 

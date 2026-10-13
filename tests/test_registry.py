@@ -158,6 +158,35 @@ class TestLifecycle:
                 agents.transition(s, settings, agent, action, actor="test")
                 assert agent.status == expected
 
+    def test_unblocking_puts_back_what_blocking_found(self, rt, settings) -> None:
+        """Blocking then unblocking approves nothing: a pending agent waits again, an
+        unmanaged one stays unmanaged (and a pending tool server waits again)."""
+        with rt.db.session() as s:
+            _blueprint(s)
+            pending = _agent(s, settings, name="waiting", approve=False)
+            active = _agent(s, settings, name="running")
+            found = discovery.observe(s, source="otel", name="shadow")
+            for agent, before in ((pending, PENDING), (active, ACTIVE), (found, DISCOVERED)):
+                agents.transition(s, settings, agent, "block", actor="test")
+                assert agent.status == BLOCKED
+                agents.transition(s, settings, agent, "unblock", actor="test")
+                assert agent.status == before, agent.name
+            waiting = pending.id
+            ts = toolservers.create(
+                s, {"name": "byo", "url": "http://byo/mcp"}, actor="t", approve=False
+            )
+            toolservers.set_status(s, ts, "block", actor="t")
+            toolservers.set_status(s, ts, "block", actor="t")  # again: still what it was before
+            toolservers.set_status(s, ts, "unblock", actor="t")
+            assert ts.status == "pending"
+        with rt.db.session() as s:
+            entry = s.scalars(
+                select(LedgerEntry).where(
+                    LedgerEntry.type == "agent.unblock", LedgerEntry.agent_id == waiting
+                )
+            ).one()
+            assert entry.details == {"from": BLOCKED, "to": PENDING}
+
     @pytest.mark.parametrize(
         ("start", "action"),
         [

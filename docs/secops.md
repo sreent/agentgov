@@ -44,10 +44,14 @@ the UI, `agentgov secops level contain`, `PUT /v1/features/security-operations` 
 change is a `feature.changed` entry in the ledger.
 
 Administrators and approvers do what their roles allow whatever the level: the level only
-limits the `secops` role. Some things it never does at any level: delete or edit anything,
-change policies, blueprints or grants, approve agents or tool servers, or decide requests
-sent to the person an agent acted for. Everything it does is in the ledger under its name,
-`secops:<key or person>`, and an administrator can undo all of it (unblock, reopen).
+limits the `secops` role, held for every team or for one team's agents (`secops@sales`,
+[roles for one team](administration.md#roles-for-one-team)) alike. Some things it never does
+at any level: delete or edit anything, change policies, blueprints or grants, approve
+agents or tool servers, or decide requests sent to the person an agent acted for. Unblocking
+approves nothing either: an agent or a tool server is then what it was when it was blocked,
+and one that waited for an administrator's approval waits again. Everything it does is in
+the ledger under its name, `secops:<key or person>`, and an administrator can undo all of
+it (unblock, reopen).
 
 ## The secops role
 

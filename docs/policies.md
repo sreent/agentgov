@@ -43,6 +43,10 @@ The decision carries `monitored`, and the ledger records it.
 | Personal data in a tool result, agent lacks the `pii-access: "true"` label | redact `pii` | `data-protection` |
 | Personal data sent to a server whose `trust_level` is not `verified` | redact `pii` | `data-protection` |
 
+The `pii-access` label, an agent's own or its blueprint's, is an allowance: like the labels
+under `agentgov/`, only administrators for every team set, change or remove it
+([roles for one team](administration.md#roles-for-one-team)).
+
 Every MCP call goes through these rules except those that set up and keep up the session
 (`initialize`, `ping`, notifications). Reading a prompt or a resource, subscribing to one or
 completing one of its arguments is checked as calling a tool is, by its name. A call about the
