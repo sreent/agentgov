@@ -51,7 +51,7 @@ from agentgov.models import (
     Team,
     ToolServer,
 )
-from agentgov.registry import features, posture
+from agentgov.registry import classification, features, posture
 from agentgov.registry import scopes as scope_rules
 
 # CONFIGURED: set up, but nothing in the period shows it working (no call through the
@@ -744,6 +744,54 @@ def _interaction(f: Facts) -> Assessment:
     return a
 
 
+def _classification(f: Facts) -> Assessment:
+    classified = [a for a in f.agents if a.classification]
+    by = Counter(a.classification["category"] for a in classified)
+    unclassified = [a for a in f.agents if not a.classification]
+    a = Assessment(
+        IN_PLACE,
+        "Each agent is classified under the EU AI Act: whether it is an AI system and at "
+        "which level of risk, the organisation's role for it (provider, deployer), why, and "
+        "what it is for. The register lists them, with who classified each and when.",
+        [
+            _row(
+                "Agents classified",
+                f"{len(classified)} of {len(f.agents)}",
+                "#/ledger/register",
+            ),
+            _row("High-risk", by["high-risk"], "#/ledger/register?category=high-risk"),
+            _row(
+                "With transparency obligations",
+                by["transparency"],
+                "#/ledger/register?category=transparency",
+            ),
+            _row("Minimal risk", by["minimal"], "#/ledger/register?category=minimal"),
+            _row("Prohibited practices", by["prohibited"], "#/ledger/register?category=prohibited"),
+            _row("Not classified", len(unclassified), "#/ledger/register?category=none"),
+        ],
+    )
+    if f.agents and not classified:
+        a.status = NOT_SET_UP
+        a.gaps.append("No agent is classified yet: classify them in Ledger > Register.")
+    elif unclassified:
+        a.status = PARTLY
+        found = sum(1 for x in unclassified if x.status == DISCOVERED)
+        a.gaps.append(
+            f"{len(unclassified)} agent(s) not classified"
+            + (f", {found} of them found and not reviewed yet" if found else "")
+            + "."
+        )
+    banned = sorted(
+        x.name
+        for x in classified
+        if x.classification["category"] == "prohibited" and x.status == ACTIVE
+    )
+    if banned:
+        a.status = ATTENTION
+        a.gaps.append(f"Classified as a prohibited practice, and active: {', '.join(banned)}.")
+    return a
+
+
 def _outside(what: str) -> Callable[[Facts], Assessment]:
     def assess(f: Facts) -> Assessment:
         return Assessment(OUTSIDE, what)
@@ -765,6 +813,10 @@ CONTROLS: dict[str, tuple[Control, ...]] = {
                 "the AI literacy of their staff.",
                 _outside("Training people is the organisation's. AgentGov's issues, "
                          "approvals and previews put the people responsible in the loop.")),
+        Control("Art. 5, 6, 50", "Classification", "Which obligations apply to an AI system "
+                "follows from what it is (a prohibited practice, high-risk, or with "
+                "transparency obligations) and from whether you are its provider or its "
+                "deployer.", _classification),
         Control("Art. 9", "Risk management system", "A continuous, iterative process that "
                 "identifies, evaluates and mitigates risks throughout the lifecycle.", _risk),
         Control("Art. 12", "Record-keeping", "High-risk AI systems record logs automatically "
@@ -821,6 +873,9 @@ CONTROLS: dict[str, tuple[Control, ...]] = {
                 _inventory),
         Control("GOVERN 2.1", "Roles and responsibilities", "Roles, responsibilities and "
                 "lines of communication for AI risks are documented.", _roles),
+        Control("MAP 1.1", "Intended purpose and context", "Intended purposes, beneficial "
+                "uses, the laws and norms that apply, and where the system is deployed are "
+                "understood and documented.", _classification),
         Control("MAP 4.1", "Third-party risks", "Risks from third-party data, software and "
                 "AI technologies are mapped and controlled.", _third_parties),
         Control("MEASURE 2.4", "Monitored in production", "The AI system's functionality "
@@ -981,6 +1036,9 @@ checkpoints/*.sigstore.json
                                --origin <the log's name, in transparency-log/log.json> \\
                                --key transparency-log/agentgov.pub
 inventory.json             The agents, with their owners, sponsors, teams, status and risk.
+register.csv, .json        The classification register: each agent's classification under
+                           the EU AI Act (category, role, basis, purpose), who classified it
+                           and when.
 manifests.yaml             The registry as code: blueprints, tool servers, policies, rules...
 features.json              Which of AgentGov's features are on, and how strictly.
 """
@@ -1022,11 +1080,32 @@ def pack(session: Session, settings: Settings, days: int) -> SpooledTemporaryFil
         for name, content in _transparency_log(settings).items():
             z.writestr(f"transparency-log/{name}", content)
         z.writestr("inventory.json", json.dumps([_agent(a) for a in f.agents], indent=2))
+        rows = [classification.row(a) for a in f.agents]
+        z.writestr("register.json", json.dumps(rows, indent=2))
+        z.writestr("register.csv", _csv(rows))
         z.writestr("manifests.yaml", manifests.dump(manifests.export(session)))
         z.writestr("features.json", json.dumps(f.modes, indent=2, sort_keys=True))
         z.writestr("feature-exceptions.json", json.dumps(f.exceptions, indent=2, sort_keys=True))
     out.seek(0)
     return out
+
+
+def _csv(rows: list[dict[str, Any]]) -> str:
+    """The register as a spreadsheet: a header, then a line each. A cell a spreadsheet
+    would take for a formula (names come from the platforms) is kept as text."""
+    import csv
+    import io
+
+    def cell(value: Any) -> str:
+        text = "" if value is None else str(value)
+        return f"'{text}" if text.startswith(("=", "+", "-", "@", "\t", "\r")) else text
+
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(classification.COLUMNS)
+    for r in rows:
+        writer.writerow([cell(r.get(c)) for c in classification.COLUMNS])
+    return out.getvalue()
 
 
 def _transparency_log(settings: Settings) -> dict[str, str]:

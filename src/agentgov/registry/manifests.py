@@ -49,6 +49,7 @@ from agentgov.registry import (
     access_packages,
     agents,
     blueprints,
+    classification,
     destinations,
     features,
     finding_types,
@@ -336,18 +337,26 @@ def _instructions(
 def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", ACTIVE)
     text = spec.pop("instructions", None)
+    # Its classification, when the manifest gives one (none: it is left as it is).
+    classified = spec.pop("classification", None)
     if desired not in (ACTIVE, PENDING, BLOCKED):
         raise ValidationError(f"agent {spec['name']}: status must be active, pending or blocked")
+    if classified is not None:
+        classification.normalize(classified)  # before anything is changed
     try:
         agent = agents.get(session, spec["name"])
     except NotFound:
         agent = agents.register(session, settings, spec, actor=actor, approve=desired == ACTIVE)
         _instructions(session, settings, agent, text, actor)
+        if classified is not None:
+            classification.classify(session, agent, classified, actor=actor)
         if desired == BLOCKED:
             agents.transition(session, settings, agent, "block", actor=actor, reason="manifest")
         return "created"
     action = "configured" if agents.update(session, agent, spec, actor=actor) else "unchanged"
     if _instructions(session, settings, agent, text, actor):
+        action = "configured"
+    if classified is not None and classification.classify(session, agent, classified, actor=actor):
         action = "configured"
     if desired == ACTIVE and agent.status in (PENDING, BLOCKED):
         verb = "approve" if agent.status == PENDING else "unblock"
@@ -457,6 +466,10 @@ def export(session: Session) -> list[dict[str, Any]]:
         if d["workload_identity"]:
             spec["workload_identity"] = d["workload_identity"]
         spec["status"] = agent.status
+        if agent.classification:
+            spec["classification"] = {
+                k: agent.classification.get(k, "") for k in classification.FIELDS
+            }
         registered = session.get(AgentInstructions, f"{agent.id}:registered")
         if registered is not None and not registered.truncated:
             spec["instructions"] = registered.text

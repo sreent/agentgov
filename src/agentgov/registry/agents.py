@@ -615,6 +615,7 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         "models": agent.models or [],
         "environment": agent.environment,
         "risk_tier": agent.risk_tier,
+        "classification": agent.classification,
         "risk": {
             "score": agent.risk_score,
             "level": agent.risk_level,

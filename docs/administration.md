@@ -87,7 +87,7 @@ answers, and `--hide` hides it; with the API, `GET` and `PUT /v1/start`
 | Role | Can |
 |---|---|
 | `admin` | Everything below, plus agent lifecycle, blueprints, access packages, [management rules](management-rules.md), tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations, teams and which [features](features.md) are used |
-| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks, but not those of agents they are accountable for; attest the agents it sponsors |
+| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks, but not those of agents they are accountable for; attest the agents it sponsors; classify agents for the [classification register](evidence.md#a-classification-register) |
 | `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings, acknowledge issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing. They start on **Ledger** → *Compliance* |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
@@ -170,6 +170,8 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Keep a checkpoint of the ledger, and get its time-stamp | Ledger → *Checkpoints and retention* → **Make a checkpoint**, **Time-stamp** | `agentgov ledger checkpoint`, `ledger checkpoints`, `ledger proof SEQ` | `POST`/`GET /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp` |
 | See how long things are kept, and run retention now | Ledger → *Checkpoints and retention* | `agentgov ledger retention [--run]` | `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run` |
 | Read a compliance report, and download the evidence pack | Ledger → *Compliance* → **Evidence pack** | `agentgov evidence report --framework F`, `agentgov evidence pack -o FILE` | `GET /v1/evidence/report`, `GET /v1/evidence/pack` |
+| Classify agents under the EU AI Act, one or many ([classification register](evidence.md#a-classification-register)) | Agent → *Classification* → **Classify**; Ledger → *Register* → **Classify**; Agents → tick them → **Classify…** | `agentgov agents classify REF [REF ...] --category C --role R [--basis B] [--purpose P]` (`--clear` to undo) | `PUT`/`DELETE /v1/agents/{ref}/classification`; `POST /v1/agents/bulk`, `action: classify` |
+| See the classification register, and download it as a spreadsheet | Ledger → *Register* → **Download CSV** | `agentgov evidence register [--csv]` | `GET /v1/evidence/register` |
 | See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |
 | See the calls between agents, and the chain of agents behind any call | Ledger, type `decision.a2a.*`; an entry's *Chain* | `agentgov ledger tail --type 'decision.a2a.*'` | `GET /v1/ledger?type=decision.a2a.*` (`details.chain`) |
 | Open the trace of a gateway decision | Ledger or an agent's Recent activity → **Open trace** | `agentgov ledger tail --traces` | `trace_url` on `GET /v1/ledger` entries (set `AGENTGOV_TRACE_URL`) |
@@ -226,11 +228,13 @@ Tick the agents to act on, or all of those shown (the box in the table's header;
   blueprint. Only what you fill in changes.
 - **Adopt**, for those found on platforms: each with its maker as owner and sponsor where
   AgentGov knows them.
+- **Classify…**: their classification under the EU AI Act, for the
+  [classification register](evidence.md#a-classification-register).
 
 Blocking or deleting an agent found on a platform changes AgentGov's registry, not the
 platform: the dialog says which of them run where, to block them there too. Administrators
 do all of these; the security team's role blocks and unblocks once the
-[hand-off](secops.md) has reached *contain*.
+[hand-off](secops.md) has reached *contain*; approvers classify.
 
 In the CLI, name the agents: `agentgov agents block bot-a bot-b --reason "Incident 42"`, or
 `agentgov agents update bot-a bot-b --remove-sponsor alice@example.com --add-sponsor
@@ -240,8 +244,9 @@ agents as they were says which, and why, and exits with 1.
 
 The API takes up to 500 agents a call: `POST /v1/agents/bulk` with `action`, `agents` (names
 or IDs), `reason` and, for `update`, `fields`: `owner`, `team`, `sponsors` (instead of each
-one's own), `add_sponsors`, `remove_sponsors`, `blueprint`, `environment` and `risk_tier`. It
-answers with the agents `done`, and those `left`, each with `why`.
+one's own), `add_sponsors`, `remove_sponsors`, `blueprint`, `environment` and `risk_tier`;
+for `classify`, `fields`: `category`, `role`, `basis` and `purpose`. It answers with the
+agents `done`, and those `left`, each with `why`.
 
 ## Registry as code
 

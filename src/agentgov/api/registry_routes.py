@@ -17,6 +17,7 @@ from agentgov.registry import (
     apikeys,
     blueprints,
     bulk,
+    classification,
     features,
     identity_issuers,
     instructions,
@@ -286,17 +287,44 @@ def adopt_agents(
         )
 
 
+@router.put("/agents/{ref}/classification", tags=["agents"])
+def classify_agent(
+    request: Request,
+    ref: str,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(require("approver")),
+) -> dict[str, Any]:
+    """Classify an agent under the EU AI Act: ``category``, ``role``, ``basis`` and
+    ``purpose`` (docs/evidence.md#a-classification-register). Approvers and administrators."""
+    with _rt(request).db.session() as s:
+        agent = agents.get(s, ref)
+        classification.classify(s, agent, body, actor=principal.actor)
+        return agents.to_dict(agent)
+
+
+@router.delete("/agents/{ref}/classification", tags=["agents"])
+def unclassify_agent(
+    request: Request, ref: str, principal: Principal = Depends(require("approver"))
+) -> dict[str, Any]:
+    """The agent is no longer classified: it shows as such in the register."""
+    with _rt(request).db.session() as s:
+        agent = agents.get(s, ref)
+        classification.classify(s, agent, None, actor=principal.actor)
+        return agents.to_dict(agent)
+
+
 @router.post("/agents/bulk", tags=["agents"])
 def bulk_agents(
     request: Request,
     body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(kill_switch),
+    principal: Principal = Depends(require("secops", "approver")),
 ) -> dict[str, Any]:
     """Do one thing to many agents (``agents``, by name or ID) at once: a lifecycle
-    ``action`` (approve, block, unblock, delete or restore), or ``update`` with ``fields``
+    ``action`` (approve, block, unblock, delete or restore); ``update`` with ``fields``
     (owner, team, sponsors, add_sponsors, remove_sponsors, blueprint, environment,
-    risk_tier). Each on its own: those it can't do are ``left``, each with why. The secops
-    role blocks and unblocks, as far as the hand-off lets it."""
+    risk_tier); or ``classify`` with ``fields`` (category, role, basis, purpose). Each on
+    its own: those it can't do are ``left``, each with why. The secops role blocks and
+    unblocks, as far as the hand-off lets it; approvers classify."""
     unknown = sorted(set(body) - {"action", "agents", "reason", "fields"})
     if unknown:
         raise HTTPException(
@@ -311,7 +339,12 @@ def bulk_agents(
         if action == "update":
             if not principal.is_admin:
                 raise HTTPException(403, "administrators edit agents")
+        elif action == "classify":
+            if not principal.roles & {"admin", "approver"}:
+                raise HTTPException(403, "approvers and administrators classify agents")
         elif action in bulk.AGENT_ACTIONS:
+            if not principal.roles & {"admin", "secops"}:
+                raise HTTPException(403, f"role {principal.role!r} may not do this")
             handoff.check_kill_switch(s, principal, action)
         return bulk.agents(
             s,

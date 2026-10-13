@@ -1525,6 +1525,43 @@ def agents_lifecycle(
     _lifecycle(ref, action, reason)
 
 
+@agents_app.command("classify")
+def agents_classify(
+    refs: list[str] = AGENT_REFS,
+    category: str | None = typer.Option(
+        None,
+        help="prohibited, high-risk, transparency (Art. 50 obligations), minimal or not-ai-system.",
+    ),
+    role: str | None = typer.Option(
+        None, help="The organisation's role for it: provider, deployer or provider-and-deployer."
+    ),
+    basis: str | None = typer.Option(
+        None, help="Why: the Annex III area, say, or the Article 5 practice."
+    ),
+    purpose: str | None = typer.Option(None, help="What it is for."),
+    clear: bool = typer.Option(False, "--clear", help="It is no longer classified."),
+) -> None:
+    """Classify agents under the EU AI Act, for the classification register
+    (docs/evidence.md#a-classification-register)."""
+    if clear:
+        for ref in refs:
+            agent = _call("DELETE", f"/v1/agents/{ref}/classification")
+            _done("agent", agent["name"], "not classified")
+        return
+    if not category or not role:
+        _fail("give its --category and --role (or --clear)")
+    fields = _given(category=category, role=role, basis=basis, purpose=purpose)
+    if len(refs) > 1:
+        _many(
+            "agent",
+            _at_once("agent", {"action": "classify", "agents": refs, "fields": fields}),
+            "classified",
+        )
+        return
+    agent = _call("PUT", f"/v1/agents/{refs[0]}/classification", json=fields)
+    _done("agent", agent["name"], f"classified {agent['classification']['category']}")
+
+
 @agents_app.command("purge")
 def agents_purge(ref: str, yes: bool = YES) -> None:
     """Remove a deleted agent and its OAuth client permanently."""
@@ -4669,6 +4706,22 @@ def evidence_report(
     for c in report["controls"]:
         for gap in c["gaps"]:
             typer.echo(f"{c['id']}: {gap}")
+
+
+REGISTER_COLUMNS = ["agent", "status", "category", "role", "owner", "purpose", "classified_at"]
+
+
+@evidence_app.command("register")
+def evidence_register(as_csv: bool = AS_CSV) -> None:
+    """The classification register: each agent's classification under the EU AI Act, who
+    classified it and when."""
+    rows = _call("GET", "/v1/evidence/register")
+    if as_csv:
+        _csv(rows, [*REGISTER_COLUMNS[:6], "basis", "classified_by", "classified_at", "id"])
+        return
+    for r in rows:
+        r["category"] = r["category"] or "(not classified)"
+    _table(rows, REGISTER_COLUMNS)
 
 
 @evidence_app.command("pack")

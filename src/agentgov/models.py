@@ -139,6 +139,9 @@ class Agent(Base):
 
     # Declared risk tier (e.g. from an AI Act style assessment) vs computed risk.
     risk_tier: Mapped[str] = mapped_column(String(16), default="medium")
+    # Its classification under the EU AI Act: category, role, basis, purpose, and who
+    # classified it, when (agentgov.registry.classification). None: not classified yet.
+    classification: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     risk_score: Mapped[int] = mapped_column(Integer, default=0)
     risk_level: Mapped[str] = mapped_column(String(16), default="low")
     risk_factors: Mapped[list[Any]] = mapped_column(JSON, default=list)

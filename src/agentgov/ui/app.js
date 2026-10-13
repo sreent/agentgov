@@ -440,6 +440,14 @@ const STATUS = {
     monitored: ['neutral', 'eye', 'Would have acted'],
     off: ['neutral', 'minus', 'Off'],
   },
+  classification: {
+    'high-risk': ['serious', 'triangle', 'High-risk'],
+    transparency: ['warning', 'eye', 'Transparency obligations'],
+    minimal: ['good', 'check-circle', 'Minimal risk'],
+    prohibited: ['critical', 'octagon', 'Prohibited practice'],
+    'not-ai-system': ['neutral', 'minus', 'Not an AI system'],
+    none: ['neutral', 'info', 'Not classified'],
+  },
   compliance: {
     in_place: ['good', 'check-circle', 'In place'],
     partly: ['warning', 'alert-circle', 'Partly'],
@@ -929,6 +937,7 @@ const PAGES = [
   { re: /^\/policies$/, nav: 'policies', title: 'Policies', render: renderPolicies },
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
   { re: /^\/ledger\/compliance$/, nav: 'ledger', title: 'Compliance', render: renderCompliance },
+  { re: /^\/ledger\/register$/, nav: 'ledger', title: 'Register', render: renderRegister },
   { re: /^\/access$/, nav: 'access', title: 'Access', render: renderAccess },
   { re: /^\/platforms$/, nav: 'platforms', title: 'Platforms', render: renderPlatforms },
   { re: /^\/features$/, nav: 'features', title: 'Features', render: renderFeatures },
@@ -1806,7 +1815,7 @@ async function renderAgents({ params }) {
   let agents = await load(state.q);
   // Those chosen for an action on many at once, by ID: only ever among those shown.
   const selected = new Set();
-  const selecting = can('admin') || can('contain');
+  const selecting = can('admin') || can('contain') || can('approve');
   let shown = [];
 
   const tableHost = h('div', {});
@@ -2020,6 +2029,10 @@ function agentBulkBar(rows, selected, onSelect, clear) {
     buttons.push(h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'many-edit', onclick: guarded(() => agentsAtOnce(chosen, 'edit')) },
       icon('edit'), 'Edit…'));
   }
+  if (can('approve') && chosen.some((a) => a.status !== 'deleted')) {
+    buttons.push(h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'many-classify', onclick: guarded(() => agentsAtOnce(chosen, 'classify')) },
+      icon('shield-check'), 'Classify…'));
+  }
   if (contain) offer('block', 'Block', 'power', 'btn--danger');
   if (contain) offer('unblock', 'Unblock', 'undo');
   if (admin) offer('delete', 'Delete', 'trash', 'btn--danger-quiet');
@@ -2039,6 +2052,10 @@ async function agentsAtOnce(chosen, action) {
   const fits = chosen.filter((a) => (ACTIONS_BY_STATUS[a.status] || []).includes(action));
   if (action === 'adopt') return adoptMany(fits);
   if (action === 'edit') return editMany(chosen.filter((a) => a.status !== 'deleted'));
+  if (action === 'classify') {
+    if (await classifyAgents(chosen.filter((a) => a.status !== 'deleted'))) await refresh();
+    return undefined;
+  }
   const spec = LIFECYCLE[action];
   const verb = spec.label.replace(' (kill switch)', '');
   let text = AGENTS_AT_ONCE[action].text;
@@ -2291,7 +2308,7 @@ async function renderAgent({ match }) {
     h('div', { class: 'detail-grid' },
       h('div', { class: 'stack' }, main, instructionsCard(agent, instructions), agentLedgerCard(agent, entries),
         views.length ? null : agentCardCard(agent)),
-      h('div', { class: 'stack' }, riskCard(agent, enforced), peopleCard(agent), attestationCard(agent), identityCard(agent),
+      h('div', { class: 'stack' }, riskCard(agent, enforced), peopleCard(agent), attestationCard(agent), classificationCard(agent), identityCard(agent),
         entra instanceof Error || !entra ? null : entraAccessCard(agent, entra),
         agentRulesCard(matchedRules),
         agentFindingsCard(openFindings))));
@@ -6184,7 +6201,148 @@ async function renderLedger({ params }) {
 function ledgerTabs(current) {
   return h('nav', { class: 'tabs', 'aria-label': 'Ledger views' },
     h('a', { class: 'tab', href: '#/ledger', 'aria-current': current === 'entries' ? 'page' : null }, 'Entries'),
-    h('a', { class: 'tab', href: '#/ledger/compliance', 'aria-current': current === 'compliance' ? 'page' : null }, 'Compliance'));
+    h('a', { class: 'tab', href: '#/ledger/compliance', 'aria-current': current === 'compliance' ? 'page' : null }, 'Compliance'),
+    h('a', { class: 'tab', href: '#/ledger/register', 'aria-current': current === 'register' ? 'page' : null }, 'Register'));
+}
+
+/* -------------------------------------------------- classification register */
+
+// Each agent's classification under the EU AI Act (docs/evidence.md#a-classification-register).
+const CLASSIFICATION_CATEGORIES = [
+  ['high-risk', 'High-risk (Art. 6: Annex I or Annex III)'],
+  ['transparency', 'Transparency obligations (Art. 50)'],
+  ['minimal', 'Minimal risk'],
+  ['prohibited', 'A prohibited practice (Art. 5)'],
+  ['not-ai-system', 'Not an AI system (Art. 3(1))'],
+];
+const CLASSIFICATION_ROLES = [['deployer', 'Deployer'], ['provider', 'Provider'], ['provider-and-deployer', 'Provider and deployer']];
+const roleWord = (role) => (CLASSIFICATION_ROLES.find(([k]) => k === role) || [])[1] || role || '';
+
+// Classify one agent, or several alike at once; resolves to whether it was done.
+async function classifyAgents(list) {
+  if (!list.length) return false;
+  const one = list.length === 1 ? list[0] : null;
+  const c = one?.classification || {};
+  const result = await ask({
+    title: one ? `Classify ${one.name}` : `Classify ${plural(list.length, 'agent')}`,
+    text: 'Under the EU AI Act. Whether it is high-risk, and whether you are its provider or its deployer, decides which obligations apply to it. AgentGov keeps what you decide, who decided and when.',
+    iconName: 'shield-check', confirm: 'Classify', busy: 'Saving…', wide: !one,
+    extra: one ? null : nameList(list.map((a) => a.name)),
+    fields: [
+      { type: 'row', fields: [
+        { id: 'category', label: 'Category', type: 'select', required: true, value: c.category || '',
+          options: [{ value: '', label: 'Choose one' }, ...CLASSIFICATION_CATEGORIES.map(([value, label]) => ({ value, label }))] },
+        { id: 'role', label: 'Your role for it', type: 'select', required: true, value: c.role || 'deployer',
+          options: CLASSIFICATION_ROLES.map(([value, label]) => ({ value, label })) },
+      ] },
+      { id: 'basis', label: 'Why', type: 'textarea', value: c.basis || null, hint: 'Needed for high-risk or prohibited: the Annex III area (4(a), recruitment, say) or the Article 5 practice.' },
+      { id: 'purpose', label: 'What it is for', type: 'textarea', value: c.purpose || null, hint: 'Its intended purpose, as you would put it to an assessor.' },
+    ],
+    submit: (v) => {
+      const fields = { category: v.category, role: v.role, basis: v.basis, purpose: v.purpose };
+      return one
+        ? api(`v1/agents/${encodeURIComponent(one.id)}/classification`, { method: 'PUT', body: fields })
+        : inTurns('v1/agents/bulk', { action: 'classify', agents: list.map((a) => a.id), fields }, 'agents');
+    },
+  });
+  if (!result) return false;
+  if (one) toast(`Classified ${one.name}.`);
+  else await manyDone(result, 'Classified', 'agent');
+  return true;
+}
+
+function classificationCard(a) {
+  const c = a.classification;
+  const change = can('approve') && a.status !== 'deleted'
+    ? h('button', {
+      type: 'button', class: 'btn btn--sm', 'data-focus-key': 'classify',
+      onclick: guarded(async () => { if (await classifyAgents([a])) await refresh(); }),
+    }, icon('shield-check'), c ? 'Change' : 'Classify')
+    : null;
+  return card({
+    title: 'Classification', sub: 'Under the EU AI Act', actions: change ? [change] : null,
+    body: c
+      ? [h('div', { class: 'chip-row' }, chip('classification', c.category)), facts([
+        ['Your role', roleWord(c.role)],
+        c.basis ? ['Why', c.basis] : null,
+        c.purpose ? ['What it is for', c.purpose] : null,
+        ['Classified by', h('span', {}, `${(c.by || 'unknown').replace(/^[a-z]+:/, '')} `, timeEl(c.at))],
+      ].filter(Boolean))]
+      : h('p', { class: 'muted' }, 'Not classified yet: whether it is high-risk, and your role for it, decide which obligations apply to it.'),
+  });
+}
+
+const REGISTER_CSV = [
+  ['Agent', (r) => r.agent],
+  ['Status', (r) => r.status],
+  ['Category', (r) => r.category || 'not classified'],
+  ['Role', (r) => r.role],
+  ['Why', (r) => r.basis],
+  ['What it is for', (r) => r.purpose],
+  ['Owner', (r) => r.owner],
+  ['Where', (r) => PLATFORM_SOURCES[r.source] || r.source],
+  ['Classified by', (r) => r.classified_by],
+  ['Classified', (r) => r.classified_at],
+  ['ID', (r) => r.id],
+];
+
+async function renderRegister({ params }) {
+  const rows = await api('v1/evidence/register');
+  const state = { category: params.get('category') || '' };
+  const host = h('div', {});
+  const countEl = h('p', { class: 'result-count', 'aria-live': 'polite' });
+  const counts = countBy(rows, (r) => r.category || 'none');
+  const select = h('select', { id: 'register-category', 'data-focus-key': 'register-category' },
+    [['', `Every agent (${fmt(rows.length)})`], ['none', `Not classified (${fmt(counts.none || 0)})`],
+      ...CLASSIFICATION_CATEGORIES.map(([k]) => [k, `${statusMeta('classification', k)[2]} (${fmt(counts[k] || 0)})`])]
+      .map(([value, label]) => h('option', { value, selected: value === state.category }, label)));
+  let shown = [];
+  const csvButton = h('button', {
+    type: 'button', class: 'btn btn--sm btn--ghost', 'data-focus-key': 'register-csv',
+    onclick: () => saveCsv('agentgov-register', REGISTER_CSV, shown),
+  }, icon('download'), 'Download CSV');
+  function apply() {
+    shown = rows.filter((r) => !state.category || (state.category === 'none' ? !r.category : r.category === state.category));
+    countEl.textContent = plural(shown.length, 'agent');
+    csvButton.disabled = !shown.length;
+    host.replaceChildren(shown.length ? registerTable(shown) : emptyState('No agents here', 'Try another category.'));
+  }
+  select.addEventListener('change', () => { state.category = select.value; apply(); setHashQuiet('/ledger/register', { category: state.category }); });
+  apply();
+  return h('div', { class: 'page', 'data-title': 'Register' },
+    pageHead({
+      title: 'Classification register',
+      sub: 'Each agent\u2019s classification under the EU AI Act: whether it is an AI system and at which level of risk, your role for it, why, and what it is for, with who classified it and when. It goes in the evidence pack.',
+    }),
+    ledgerTabs('register'),
+    h('div', { class: 'chip-row' }, Object.entries(counts).map(([k, n]) => chip('classification', k, { extra: n }))),
+    h('div', { class: 'filters' },
+      h('div', { class: 'field', style: 'flex:0 1 300px' }, h('label', { for: 'register-category', class: 'sr-only' }, 'Category'), select),
+      countEl, csvButton),
+    h('section', { class: 'card', 'aria-label': 'Classification register' }, host));
+}
+
+function registerTable(rows) {
+  const classify = can('approve');
+  return h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('thead', {}, h('tr', {}, ['Agent', 'Category', 'Your role', 'What it is for', 'Classified', classify ? '' : null]
+      .filter((t) => t !== null).map((t) => h('th', { scope: 'col' }, t)))),
+    h('tbody', {}, rows.map((r) => h('tr', {},
+      h('td', { 'data-label': 'Agent' }, agentLink(r.id, r.agent), h('div', { class: 'cell-sub' }, humanize(r.status), r.owner ? ` \u00b7 ${r.owner}` : '')),
+      h('td', { 'data-label': 'Category' }, chip('classification', r.category || 'none')),
+      h('td', { 'data-label': 'Your role' }, roleWord(r.role) || h('span', { class: 'muted' }, '\u2014')),
+      h('td', { 'data-label': 'What it is for', class: 'break' }, r.purpose ? h('div', { class: 'clamp-2' }, r.purpose) : h('span', { class: 'muted' }, '\u2014'),
+        r.basis ? h('div', { class: 'cell-sub clamp-2' }, r.basis) : null),
+      h('td', { 'data-label': 'Classified', class: 'nowrap' }, r.classified_at
+        ? [timeEl(r.classified_at), h('div', { class: 'cell-sub' }, (r.classified_by || '').replace(/^[a-z]+:/, ''))]
+        : h('span', { class: 'muted' }, 'Not yet')),
+      classify ? h('td', { 'data-label': '' }, r.status === 'deleted' ? null : h('button', {
+        type: 'button', class: 'btn btn--sm', 'data-focus-key': `classify-${r.id}`,
+        onclick: guarded(async () => {
+          const agent = { id: r.id, name: r.agent, classification: r.category ? { category: r.category, role: r.role, basis: r.basis, purpose: r.purpose } : null };
+          if (await classifyAgents([agent])) await refresh();
+        }),
+      }, r.category ? 'Change' : 'Classify')) : null)))));
 }
 
 /* -------------------------------------------------------------- compliance */

@@ -14,12 +14,12 @@ from agentgov import ids
 from agentgov.config import Settings
 from agentgov.models import Agent, Finding
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import blueprints, issues, platforms, teams, validation
+from agentgov.registry import blueprints, classification, issues, platforms, teams, validation
 from agentgov.registry import findings as findings_svc
 from agentgov.registry.errors import NotFound, RegistryError, ValidationError
 
 MAX = 500
-AGENT_ACTIONS = ("approve", "block", "unblock", "delete", "restore", "update")
+AGENT_ACTIONS = ("approve", "block", "unblock", "delete", "restore", "update", "classify")
 FINDING_ACTIONS = ("acknowledge", "resolve", "reopen", "dismiss", "accept")
 # What one edit may change on many agents at once: who is accountable for them, and how
 # they are governed. Sponsors are replaced, or added to and taken from each one's own.
@@ -109,16 +109,24 @@ def agents(
     reason: str | None = None,
     fields: Any = None,
 ) -> dict[str, Any]:
-    """Approve, block, unblock, delete or restore many agents, or ``update`` them with
-    ``fields`` (see EDITS). ``done`` lists those it did, with their platform for those
-    found on one (blocking or deleting them here doesn't stop them there); ``left`` those
-    it couldn't, each with why."""
+    """Approve, block, unblock, delete or restore many agents, ``update`` them with
+    ``fields`` (see EDITS), or ``classify`` them with ``fields`` (a classification: see
+    agentgov.registry.classification). ``done`` lists those it did, with their platform for
+    those found on one (blocking or deleting them here doesn't stop them there); ``left``
+    those it couldn't, each with why."""
     if action not in AGENT_ACTIONS:
         raise ValidationError(f"action is {', '.join(AGENT_ACTIONS)}")
     if action == "update":
         change = edit(session, fields)
+    elif action == "classify":
+        # One classification for them all, checked once.
+        if not fields:
+            raise ValidationError(
+                "say how to classify them (fields): category, role, basis, purpose"
+            )
+        given = classification.normalize(fields)
     elif fields:
-        raise ValidationError("fields go with update")
+        raise ValidationError("fields go with update and classify")
     names = _refs(refs, "agents")
     done: list[tuple[int, dict[str, Any]]] = []
     left: list[tuple[int, dict[str, Any]]] = []
@@ -140,6 +148,8 @@ def agents(
                     )
                     if set(changed) & agents_svc.RISKY_FIELDS:
                         agents_svc.refresh_risk(session, settings, agent)
+                elif action == "classify":
+                    classification.classify(session, agent, given, actor=actor)
                 else:
                     agents_svc.transition(
                         session, settings, agent, action, actor=actor, reason=reason

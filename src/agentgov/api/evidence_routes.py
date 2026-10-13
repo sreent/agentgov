@@ -183,6 +183,16 @@ def evidence_report(
         return compliance.report(compliance.facts(s, rt.settings, _days(days)), framework)
 
 
+@router.get("/evidence/register")
+def classification_register(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+    """The classification register: every agent but deleted ones, with its classification
+    under the EU AI Act (category, role, basis, purpose), who classified it and when."""
+    from agentgov.registry import agents, classification
+
+    with _rt(request).db.session() as s:
+        return [classification.row(a) for a in agents.list_agents(s)]
+
+
 @router.get("/evidence/pack")
 def evidence_pack(
     request: Request, days: int = 90, _: Principal = Depends(read)
