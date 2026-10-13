@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.db import mark_changed
-from agentgov.models import Agent, ModelUsage
+from agentgov.models import Agent, IdentityIssuer, ModelUsage
 from agentgov.registry import discovery, model_providers
 from agentgov.telemetry import attrs_of
 
@@ -99,11 +99,30 @@ def _int(value: Any) -> int:
         return 0
 
 
+def _metered(
+    session: Session,
+    agent_id: Any,
+    client_id: Any,
+    issuer: Any,
+    subject: Any,
+) -> Agent | None:
+    """The agent a model call was made by, as the gateway's access log names it."""
+    if agent_id or client_id:
+        return discovery.find(session, agent_id=agent_id, client_id=client_id)
+    if not (issuer and subject):
+        return None
+    return session.scalar(
+        select(Agent)
+        .join(IdentityIssuer, IdentityIssuer.name == Agent.workload_issuer)
+        .where(IdentityIssuer.issuer == str(issuer), Agent.workload_subject == str(subject))
+    )
+
+
 def ingest_logs(session: Session, payload: dict[str, Any]) -> dict[str, int]:
     """Meter the model calls in agentgateway's access logs (OTLP logs)."""
     stats = {"records": 0, "model_calls": 0, "unidentified": 0}
     providers = {p.name: p for p in model_providers.list_all(session)}
-    agents: dict[tuple[str | None, str | None], Agent | None] = {}
+    agents: dict[tuple[str | None, ...], Agent | None] = {}
     spent: dict[tuple[str, str], int] = {}  # tokens per (agent, day) in this batch
     for attrs, record in iter_log_records(payload):
         stats["records"] += 1
@@ -117,13 +136,16 @@ def ingest_logs(session: Session, payload: dict[str, Any]) -> dict[str, int]:
         tokens_out = _int(attrs.get("gen_ai.usage.output_tokens"))
         status = _int(attrs.get("http.response.status_code"))
         when = _when(record)
-        identity = (attrs.get("agentgov.agent_id"), attrs.get("agentgov.client_id"))
+        # The agent or client AgentGov's own token names, or the workload identity (issuer,
+        # subject) another issuer's names, whose token the gateway took.
+        identity = (
+            attrs.get("agentgov.agent_id"),
+            attrs.get("agentgov.client_id"),
+            attrs.get("agentgov.issuer"),
+            attrs.get("agentgov.subject"),
+        )
         if identity not in agents:
-            agents[identity] = (
-                discovery.find(session, agent_id=identity[0], client_id=identity[1])
-                if any(identity)
-                else None
-            )
+            agents[identity] = _metered(session, *identity)
         agent = agents[identity]
         if agent is None:
             stats["unidentified"] += 1

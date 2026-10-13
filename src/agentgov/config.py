@@ -258,8 +258,13 @@ class Settings:
     # was changed in Keycloak itself. The passes between, every minute and after each
     # change, sync only the agents whose clients should change. 0: every pass is full.
     identity_full_sync_seconds: int = 900
-    # Audience every agent token carries; the gateway requires it.
+    # Audience every agent token carries; the gateway requires it. So do the tokens of the
+    # identity issuers the gateway trusts, unless an issuer names an audience of its own.
     gateway_audience: str = "agentgov-gateway"
+    # Seconds between fetches of the signing keys of the identity issuers the gateway
+    # trusts, which rotate them (docs/agent-identity.md#straight-to-the-gateway). 0: only
+    # when an issuer is added or changed, or an administrator asks.
+    issuer_keys_interval_seconds: int = 300
     # Keycloak clients of the apps people sign in to and use agents from (comma-separated
     # client IDs). Each agent that acts for people has a client scope named after its
     # client ID, which these apps may request: the person's token is then one the agent
@@ -650,6 +655,10 @@ class Settings:
         if self.platform_sync_interval_seconds < 0:
             raise ValueError(
                 "AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS must be 0 (on demand only) or more"
+            )
+        if self.issuer_keys_interval_seconds < 0:
+            raise ValueError(
+                "AGENTGOV_ISSUER_KEYS_INTERVAL_SECONDS must be 0 (on changes only) or more"
             )
         for region in self.aws_region_list():
             if not AWS_REGION.match(region):

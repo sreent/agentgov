@@ -383,7 +383,8 @@ class TestManifestsAndCli:
         ok(agentgov("issuers", "create", "entra", "--kind", "oidc", "--issuer", ENTRA["issuer"],
                     "--audience", "api://agentgov", "--allow-reuse"))  # fmt: skip
         listed = ok(agentgov("issuers", "list"))
-        assert "cluster" in listed and "waiting" in listed  # not in Keycloak yet
+        # No Keycloak here: nothing waits for it.
+        assert "cluster" in listed and "waiting" not in listed
         entra = json.loads(ok(agentgov("issuers", "get", "entra")))
         assert (entra["audience"], entra["allow_reuse"]) == ("api://agentgov", True)
         ok(agentgov("issuers", "update", "entra", "--audience", "", "--no-reuse"))

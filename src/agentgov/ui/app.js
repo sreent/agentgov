@@ -2790,6 +2790,26 @@ async function agentSignIn(a) {
     toast(err.message, { tone: 'critical' });
     return;
   }
+  // Straight to the gateway, where it takes the issuer's tokens itself
+  // (docs/agent-identity.md#straight-to-the-gateway).
+  const direct = creds.gateway ? [
+    h('h3', { class: 'dialog-section' }, 'Straight to the gateway'),
+    h('p', { class: 'muted' }, "The gateway takes the issuer's tokens itself: the agent calls it with its token for this audience as the bearer token, without Keycloak."),
+    facts([
+      ['Issuer', creds.gateway.issuer],
+      ['Subject', copyable(creds.subject, 'subject')],
+      ["Its token's audience", copyable(creds.gateway.audience, 'audience')],
+      ['Gateway', copyable(creds.gateway.url, 'gateway URL')],
+    ]),
+  ] : [];
+  if (!creds.token_endpoint) {
+    await ask({
+      title: `How ${a.name} authenticates`,
+      text: `With a token from ${creds.issuer} whose subject is its own, instead of a client secret.`,
+      iconName: 'key', confirm: 'Done', cancel: null, wide: true, extra: direct,
+    });
+    return;
+  }
   const request = [
     `POST ${creds.token_endpoint}`,
     'grant_type=client_credentials',
@@ -2810,6 +2830,7 @@ async function agentSignIn(a) {
         ['Gateway audience', copyable(creds.audience, 'gateway audience')],
       ]),
       h('pre', { class: 'kv-pre', tabindex: '0' }, request),
+      ...direct,
     ],
   });
 }
@@ -3056,7 +3077,9 @@ function identityCard(a) {
     h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'show-credentials', onclick: guarded(() => agentCredentials(a, false)) }, icon('key'), 'Show secret'),
     h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': 'rotate-credentials', onclick: guarded(() => agentCredentials(a, true)) }, icon('refresh'), 'Rotate'),
   ] : null;
-  if (credentialActions && workload) {
+  // Its issuer's token authenticates it: through Keycloak, or straight to a gateway that
+  // takes the issuer's tokens (without Keycloak, it has no client there).
+  if (workload && can('admin', a) && a.status === 'active') {
     credentialActions = [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'show-sign-in', onclick: guarded(() => agentSignIn(a)) }, icon('key'), 'How it authenticates')];
   }
   const isPublic = a.client_type === 'public';
@@ -6767,8 +6790,8 @@ const KEY_ROLES = [
 ];
 
 async function renderAccess() {
-  const [view, keys, issuers, features] = await Promise.all([
-    api('v1/access'), api('v1/apikeys'), api('v1/identity-issuers'), featureModes().catch(() => ({})),
+  const [view, keys, issuers, features, info] = await Promise.all([
+    api('v1/access'), api('v1/apikeys'), api('v1/identity-issuers'), featureModes().catch(() => ({})), getInfo(),
   ]);
   return h('div', { class: 'page' },
     pageHead({
@@ -6785,7 +6808,7 @@ async function renderAccess() {
     features['workload-identity'] === 'off' ? callout('warning', 'power', h('span', {},
       h('strong', {}, "Agents' own identities are off: "), 'no issuer is trusted, so agents with a workload identity can\'t authenticate. ',
       h('a', { href: '#/features' }, 'Features'), '.')) : null,
-    issuersCard(issuers));
+    issuersCard(issuers, Boolean(info?.identity_provider)));
 }
 
 /* ------------------------------------------------- agents' own identities */
@@ -6797,7 +6820,7 @@ const ISSUER_KINDS = {
   oidc: ['OpenID Connect', '6f1c5e1a-…', 'https://login.microsoftonline.com/<tenant>/v2.0'],
 };
 const ISSUER_KEYS_HINT = {
-  kubernetes: "The cluster's issuer discovery URL, when Keycloak can't read its keys from the issuer itself. Empty: Keycloak's own cluster.",
+  kubernetes: "The cluster's issuer discovery URL, when Keycloak, or AgentGov for the gateway, can't read its keys at the issuer itself. Empty: at the issuer (for Keycloak's own cluster, with Keycloak's service account).",
   spiffe: 'The SPIFFE bundle endpoint (from SPIRE, say) with the trust domain\'s keys.',
   oidc: "The JWKS URL. Empty: found from the issuer's discovery document.",
 };
@@ -6817,10 +6840,31 @@ function issuerSync(i) {
   return h('span', { class: 'muted', title: 'Keycloak gets it within seconds when the control plane is connected to it' }, 'Not yet');
 }
 
-function issuersCard(issuers) {
+// Whether the gateway takes an issuer's tokens itself (docs/agent-identity.md#straight-to-the-gateway).
+function issuerGateway(i) {
+  const g = i.gateway || {};
+  if (!g.trusted) return h('span', { class: 'muted', title: "Its agents get AgentGov's tokens from Keycloak" }, 'Through Keycloak');
+  if (g.error && !g.keys) {
+    return [plainChip("Can't take tokens", { tone: 'critical', iconName: 'octagon', title: g.error }),
+      h('div', { class: 'cell-sub break' }, g.error)];
+  }
+  if (!g.keys) return h('span', { class: 'muted', title: 'AgentGov fetches them within seconds' }, 'Fetching its keys');
+  const taking = g.taking
+    ? plainChip('Takes its tokens', { tone: 'good', iconName: 'check-circle', title: `With ${plural(g.keys, 'key')} AgentGov fetched from it` })
+    : i.status === 'blocked'
+      ? plainChip('Not while blocked', { tone: 'warning', iconName: 'ban' })
+      : plainChip("Not while agents' own identities are off", { tone: 'warning', iconName: 'power' });
+  return [taking, h('div', { class: 'cell-sub' }, plural(g.keys, 'key'), g.keys_at ? [' · ', timeEl(g.keys_at)] : null),
+    g.error ? h('div', { class: 'cell-sub break' }, `Last fetch failed: ${g.error}`) : null];
+}
+
+// keycloak: whether AgentGov sets agents up in Keycloak; without it, the gateway alone
+// takes issuers' tokens.
+function issuersCard(issuers, keycloak) {
+  const columns = ['Issuer', 'Status', 'Agents', keycloak ? 'In Keycloak' : null, 'At the gateway', ''].filter((t) => t !== null);
   const body = issuers.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
     h('caption', { class: 'sr-only' }, 'Identity issuers'),
-    h('thead', {}, h('tr', {}, ['Issuer', 'Status', 'Agents', 'In Keycloak', ''].map((t) => h('th', { scope: 'col', class: t === 'Agents' ? 'num' : null }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+    h('thead', {}, h('tr', {}, columns.map((t) => h('th', { scope: 'col', class: t === 'Agents' ? 'num' : null }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
     h('tbody', {}, issuers.map((i) => h('tr', { 'data-issuer': i.name },
       h('td', { 'data-label': 'Issuer', class: 'break' }, h('span', { class: 'cell-title' }, i.name),
         h('div', { class: 'cell-sub' }, `${issuerKind(i.kind)}: `, h('code', {}, i.issuer)),
@@ -6828,16 +6872,20 @@ function issuersCard(issuers) {
         i.description ? h('div', { class: 'cell-sub' }, i.description) : null),
       h('td', { 'data-label': 'Status' }, chip('server', i.status)),
       h('td', { 'data-label': 'Agents', class: 'num' }, fmt(i.agents || 0)),
-      h('td', { 'data-label': 'In Keycloak' }, issuerSync(i)),
+      keycloak ? h('td', { 'data-label': 'In Keycloak' }, issuerSync(i)) : null,
+      h('td', { 'data-label': 'At the gateway' }, issuerGateway(i)),
       h('td', { 'data-label': '' }, can('contain') ? h('div', { class: 'btn-row' },
         can('admin') ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `issuer-edit-${i.name}`, onclick: guarded(() => issuerForm(i)) }, icon('edit'), 'Edit') : null,
+        can('admin') && i.gateway?.trusted ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `issuer-keys-${i.name}`, title: 'Fetch its signing keys for the gateway now', onclick: guarded(() => fetchIssuerKeys(i)) }, icon('refresh'), 'Fetch keys') : null,
         h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `issuer-block-${i.name}`, onclick: guarded(() => blockIssuer(i)) },
           icon(i.status === 'blocked' ? 'undo' : 'ban'), i.status === 'blocked' ? 'Unblock' : 'Block'),
         can('admin') ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `issuer-delete-${i.name}`, onclick: guarded(() => deleteIssuer(i)) }, icon('trash'), 'Delete') : null) : null))))))
     : emptyState('No identity issuers', 'Add one, and agents can authenticate with an identity they already have, such as a Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID, instead of a client secret.');
   return card({
     title: 'Agent identity issuers',
-    sub: "Agents that run where they already have an identity authenticate with their issuer's tokens: there's no secret to store, leak or rotate. Blocking an issuer stops all of its agents authenticating.",
+    sub: keycloak
+      ? "Agents that run where they already have an identity authenticate with their issuer's tokens: there's no secret to store, leak or rotate. Keycloak trades them for AgentGov's tokens; an issuer the gateway trusts has its tokens taken there too. Blocking an issuer stops all of its agents authenticating."
+      : "Agents that run where they already have an identity call the gateway with their issuer's tokens, where it trusts the issuer: there's no secret to store, leak or rotate. Blocking an issuer stops all of its agents authenticating.",
     actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'add-issuer', onclick: guarded(() => issuerForm(null)) }, icon('plus'), 'Add issuer')] : null,
     flush: issuers.length > 0,
     body,
@@ -6847,11 +6895,19 @@ function issuersCard(issuers) {
 async function issuerForm(i) {
   const editing = Boolean(i);
   const oidcOnly = (field) => !editing || i.kind === 'oidc' ? field : null;
+  const info = await getInfo();
+  // The audience of the tokens agents call the gateway with themselves.
+  const audience = info?.audience || 'agentgov-gateway';
+  const gatewayHint = (kind) => kind === 'oidc'
+    ? `Agents then call the gateway with their own token, without Keycloak: one for the audience above, else ${audience}. AgentGov fetches the issuer's keys for the gateway.`
+    : `Agents then call the gateway with their own service account token, without Keycloak: a projected one for the audience ${audience}. AgentGov fetches the cluster's keys for the gateway.`;
   const saved = await ask({
     title: editing ? `Edit ${i.name}` : 'Add an identity issuer',
     text: editing
-      ? `A ${issuerKind(i.kind)} issuer. Keycloak gets the change within seconds; it is recorded in the evidence ledger.`
-      : "AgentGov makes it an identity provider in Keycloak. Each agent then names its subject there, and authenticates with the issuer's token for that subject.",
+      ? `A ${issuerKind(i.kind)} issuer. The change takes effect within seconds; it is recorded in the evidence ledger.`
+      : info?.identity_provider
+        ? "AgentGov makes it an identity provider in Keycloak. Each agent then names its subject there, and authenticates with the issuer's token for that subject."
+        : "Each agent then names its subject there, and calls the gateway with the issuer's token for that subject, once the gateway takes the issuer's tokens.",
     iconName: editing ? 'edit' : 'key', confirm: editing ? 'Save changes' : 'Add issuer', wide: true,
     fields: [
       editing ? null : { id: 'name', label: 'Name', required: true, mono: true, placeholder: 'prod-cluster', hint: NAME_HINT },
@@ -6872,6 +6928,10 @@ async function issuerForm(i) {
         hint: "Only when its tokens can't carry Keycloak's realm URL as their audience: the one they carry. Microsoft Entra ID's name an app, such as api://agentgov.",
       }),
       oidcOnly({ id: 'allow_reuse', label: 'A token may authenticate more than once', type: 'checkbox', value: i?.allow_reuse || false, hint: "Otherwise Keycloak takes each token once, so a stolen one is worth less. Tokens without a jti claim, such as Microsoft Entra ID's, need it." }),
+      editing && i.kind === 'spiffe' ? null : {
+        id: 'gateway', label: 'The gateway takes its tokens itself', type: 'checkbox', value: i?.gateway?.trusted || false,
+        hint: gatewayHint(i?.kind || 'kubernetes'),
+      },
       { id: 'description', label: 'Description', type: 'textarea', value: i?.description || '' },
       { id: 'labels', label: 'Labels', value: formatLabels(i?.labels), placeholder: 'env=prod', mono: true },
     ].filter(Boolean),
@@ -6884,6 +6944,12 @@ async function issuerForm(i) {
         const hint = field('keys_url')?.querySelector('.hint');
         if (hint) hint.textContent = ISSUER_KEYS_HINT[kind];
         for (const id of ['audience', 'allow_reuse']) if (field(id)) field(id).hidden = kind !== 'oidc';
+        // SPIFFE's JWT-SVIDs reach the gateway as AgentGov's tokens, through Keycloak.
+        if (field('gateway')) {
+          field('gateway').hidden = kind === 'spiffe';
+          const gatewayHintEl = field('gateway').querySelector('.hint');
+          if (gatewayHintEl && kind !== 'spiffe') gatewayHintEl.textContent = gatewayHint(kind);
+        }
       };
       controls.kind.addEventListener('change', show);
       show();
@@ -6893,6 +6959,7 @@ async function issuerForm(i) {
       const body = {
         issuer: v.issuer, keys_url: orNull(v.keys_url), description: v.description, labels: parseLabels(v.labels),
         ...(kind === 'oidc' ? { audience: orNull(v.audience), allow_reuse: v.allow_reuse } : {}),
+        ...(kind !== 'spiffe' ? { gateway: Boolean(v.gateway) } : {}),
       };
       if (editing) return api(`v1/identity-issuers/${encodeURIComponent(i.name)}`, { method: 'PATCH', body, ifMatch: i.version });
       return api('v1/identity-issuers', { method: 'POST', body: { name: v.name, kind, ...body } });
@@ -6900,21 +6967,41 @@ async function issuerForm(i) {
   });
   if (!saved) return;
   toast(editing ? `Saved ${saved.name}.` : `Added ${saved.name}. Give agents a workload identity from it on their edit form.`);
+  const g = saved.gateway || {};
+  if (g.trusted && g.error) toast(`The gateway can't take ${saved.name}'s tokens yet: ${g.error}`, { tone: 'critical' });
   await refresh();
 }
 
 async function blockIssuer(i) {
   const block = i.status !== 'blocked';
+  const stops = [];
+  if ((await getInfo())?.identity_provider) stops.push(`Keycloak stops taking its tokens within seconds, so ${plural(i.agents || 0, 'agent')} can't get a new access token; the ones they have expire within minutes.`);
+  if (i.gateway?.trusted) stops.push("The gateway stops taking its tokens within seconds: calls with them come from callers AgentGov can't tell, refused unless unknown callers are only monitored.");
   const done = await ask({
     title: block ? `Block ${i.name}?` : `Unblock ${i.name}?`,
     text: block
-      ? `Keycloak stops taking its tokens within seconds, so ${plural(i.agents || 0, 'agent')} can't get a new access token; the ones they have expire within minutes.`
+      ? stops.join(' ') || `${plural(i.agents || 0, 'agent')} can't authenticate with its tokens.`
       : 'Its agents can authenticate with its tokens again.',
     tone: block ? 'danger' : 'primary', iconName: block ? 'ban' : 'undo', confirm: block ? 'Block' : 'Unblock',
     submit: () => api(`v1/identity-issuers/${encodeURIComponent(i.name)}/${block ? 'block' : 'unblock'}`, { method: 'POST' }),
   });
   if (!done) return;
   toast(block ? `Blocked ${i.name}.` : `Unblocked ${i.name}.`);
+  await refresh();
+}
+
+// Fetch the keys of an issuer the gateway trusts now, as when it rotated them early.
+async function fetchIssuerKeys(i) {
+  let saved;
+  try {
+    saved = await api(`v1/identity-issuers/${encodeURIComponent(i.name)}/keys`, { method: 'POST' });
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+    return;
+  }
+  const g = saved.gateway || {};
+  if (g.error) toast(`Couldn't fetch ${saved.name}'s keys: ${g.error}`, { tone: 'critical' });
+  else toast(`Fetched ${plural(g.keys, 'key')} from ${saved.name}.`);
   await refresh();
 }
 

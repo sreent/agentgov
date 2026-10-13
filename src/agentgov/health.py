@@ -26,7 +26,14 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.config import FAILURE_SETTINGS, Settings
-from agentgov.models import ApprovedConnector, ComponentReport, Destination, PlatformSync, Team
+from agentgov.models import (
+    ApprovedConnector,
+    ComponentReport,
+    Destination,
+    IdentityIssuer,
+    PlatformSync,
+    Team,
+)
 from agentgov.registry import features
 from agentgov.registry.errors import ValidationError
 
@@ -185,6 +192,9 @@ class Situation:
     approved_connectors: int = 0
     # Whether a team takes the issues nobody else does (docs/issues.md).
     default_team: bool = True
+    # The identity issuers the gateway is to take tokens from: name, how many keys AgentGov
+    # has of theirs, and why the last fetch of them failed.
+    gateway_issuers: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def fresh(self) -> list[dict[str, Any]]:
@@ -225,6 +235,14 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
         ),
         approved_connectors=len(list(session.scalars(select(ApprovedConnector.connector_id)))),
         default_team=session.scalar(select(Team.name).where(Team.is_default.is_(True))) is not None,
+        gateway_issuers=[
+            {"name": i.name, "keys": len(i.gateway_keys or []), "error": i.keys_error}
+            for i in session.scalars(
+                select(IdentityIssuer)
+                .where(IdentityIssuer.gateway.is_(True))
+                .order_by(IdentityIssuer.name)
+            )
+        ],
     )
 
 
@@ -511,6 +529,32 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
                     f"Issues reach the people responsible {seen}: no mail server "
                     "(AGENTGOV_SMTP_URL), chat channel or service desk (Security operations) "
                     "is set up to tell them.",
+                )
+            )
+    elif key == "workload-identity":
+        # Issuers the gateway is to take tokens from, with the keys AgentGov fetches
+        # (docs/agent-identity.md#straight-to-the-gateway).
+        for issuer in s.gateway_issuers:
+            if not issuer["error"]:
+                continue
+            if issuer["keys"]:
+                message = (
+                    f"AgentGov can't fetch {issuer['name']}'s keys again ({issuer['error']}): "
+                    "the gateway takes its tokens with the keys fetched before, and refuses "
+                    "those signed with a newer key."
+                )
+            else:
+                message = f"The gateway can't take {issuer['name']}'s tokens: {issuer['error']}."
+            out.append((LIMITED, message))
+        if s.gateway_issuers and s.modes.get("developer-sign-in") == features.ON:
+            names = ", ".join(i["name"] for i in s.gateway_issuers)
+            out.append(
+                (
+                    LIMITED,
+                    "While developers sign in at the gateway, tool servers there take only "
+                    "Keycloak's tokens: agents with tokens of the issuers the gateway trusts "
+                    f"({names}) get AgentGov tokens from Keycloak for them. Models and other "
+                    "agents take their own tokens.",
                 )
             )
     elif key == "security-operations" and not s.destinations:

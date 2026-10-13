@@ -107,7 +107,7 @@ class A2AGuard:
         rpc_id = rpc.get("id")
         params = rpc.get("params") if isinstance(rpc.get("params"), dict) else {}
         message = params.get("message") if isinstance(params.get("message"), dict) else {}
-        identity = ModelGuard._identity(headers)
+        identity = await self.p.caller(ModelGuard._identity(headers))
         person = ModelGuard._person(headers)
         trace_id = trace_id_from([headers.get("traceparent") or ""])
         parts = message.get("parts") if isinstance(message.get("parts"), list) else []

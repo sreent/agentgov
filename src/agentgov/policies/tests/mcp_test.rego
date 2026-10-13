@@ -525,3 +525,30 @@ test_policies_can_ask_who_the_person_is if {
 	ctx.user.via == "exchange" with input as for_alice({})
 	not ctx.user with input as {"user": {}}
 }
+
+# A token of an identity issuer the gateway trusts names the agent by its workload identity
+# (docs/agent-identity.md#straight-to-the-gateway).
+with_workloads := object.union(registry, {"workloads": {"https://login.example.com/tenant/v2.0": {"sp-support": "agt_support"}}})
+
+by_workload(issuer, subject) := object.union(
+	call("ignored", "crm", "lookup_customer"),
+	{"agent": {"issuer": issuer, "subject": subject}},
+)
+
+test_a_trusted_issuers_token_names_the_agent_by_its_workload_identity if {
+	d := mcp.decision with input as by_workload("https://login.example.com/tenant/v2.0", "sp-support")
+		with data.registry as with_workloads
+	d.effect == "allow"
+	d.agent.name == "support-bot"
+	ctx.workload_agent == "agt_support" with input as by_workload("https://login.example.com/tenant/v2.0", "sp-support")
+		with data.registry as with_workloads
+}
+
+test_another_subject_or_issuer_is_no_registered_agent if {
+	stranger := mcp.decision with input as by_workload("https://login.example.com/tenant/v2.0", "sp-other")
+		with data.registry as with_workloads
+	"Caller is not a registered agent" in stranger.reasons
+	elsewhere := mcp.decision with input as by_workload("https://evil.example.com", "sp-support")
+		with data.registry as with_workloads
+	"Caller is not a registered agent" in elsewhere.reasons
+}

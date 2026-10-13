@@ -32,6 +32,7 @@ from agentgov import ids
 from agentgov.db import Database
 from agentgov.models import (
     DELETED,
+    DISCOVERED,
     Agent,
     ApprovedConnector,
     Blueprint,
@@ -41,7 +42,14 @@ from agentgov.models import (
 )
 from agentgov.opa import WHAT_IF
 from agentgov.opa.signing import SIGNATURES, Signer
-from agentgov.registry import access_packages, features, model_providers, model_usage, scopes
+from agentgov.registry import (
+    access_packages,
+    features,
+    identity_issuers,
+    model_providers,
+    model_usage,
+    scopes,
+)
 from agentgov.registry import agents as agents_svc
 
 log = logging.getLogger(__name__)
@@ -101,6 +109,12 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
     agents: dict[str, Any] = {}
     clients: dict[str, str] = {}
     names: dict[str, str] = {}
+    # Who calls with a token of an identity issuer the gateway takes tokens from: the agent
+    # whose workload identity it names, by the issuer as tokens name it and the subject
+    # (docs/agent-identity.md#straight-to-the-gateway). A blocked issuer's agents, and
+    # agents not adopted yet, are callers AgentGov can't tell.
+    takers = {i.name: i.issuer for i in identity_issuers.at_the_gateway(session)}
+    workloads: dict[str, dict[str, str]] = {}
     used = model_usage.tokens_used(session)
     held = access_packages.held(session)
     current = features.modes(session)
@@ -145,6 +159,9 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
         names[agent.name] = agent.id
         if agent.client_id:
             clients[agent.client_id] = agent.id
+        taker = takers.get(agent.workload_issuer or "")
+        if taker and agent.workload_subject and agent.status != DISCOVERED:
+            workloads.setdefault(taker, {})[agent.workload_subject] = agent.id
     servers: dict[str, Any] = {}
     # Servers only for developers never reach the gateway, so OPA never decides on them;
     # it does on those agents get identity assertions for (agentgov.idjag).
@@ -189,6 +206,7 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
     return {
         "agents": agents,
         "clients": clients,
+        "workloads": workloads,
         "agent_names": names,
         "toolservers": servers,
         "model_providers": providers,

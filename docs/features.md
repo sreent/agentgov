@@ -119,7 +119,7 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 
 | Feature | Modes | What it does |
 |---|---|---|
-| `workload-identity` | off, **on** | Agents authenticate with an identity they already have, such as a Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID, from the identity issuers an administrator approves, instead of a client secret ([agents' own identities](agent-identity.md)). Off, no issuer is trusted: agents with a workload identity can't authenticate until it is on again. Needs Keycloak 26.6 or later, and Keycloak's `spiffe` preview feature for SPIFFE issuers |
+| `workload-identity` | off, **on** | Agents authenticate with an identity they already have, such as a Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID, from the identity issuers an administrator approves, instead of a client secret ([agents' own identities](agent-identity.md)). Off, no issuer is trusted, in Keycloak or at the gateway: agents with a workload identity can't authenticate until it is on again. Needs Keycloak 26.6 or later, and Keycloak's `spiffe` preview feature for SPIFFE issuers |
 | `identity-assertions` | **off**, on | Agents get identity assertions (ID-JAG, MCP's enterprise-managed authorization) at `<control plane>/oauth2/token` for the MCP servers outside the gateway registered with an authorization server, as their grants and blueprints allow, and trade them there for access tokens ([acting for people](acting-for-people.md#mcp-servers-outside-the-gateway)). The ledger records each one given or refused. Off, none are given. Needs the service token, Keycloak's issuer and keys, and OPA, where the control plane runs |
 
 ### Lifecycle
@@ -201,6 +201,7 @@ in a row, or three minutes, whichever is longer, is out of touch and doesn't cou
 | `authzen-decision-point`, `copilot-studio-threat-detection` | OPA unreachable from the control plane: failing |
 | `connector-allowlist` | Copilot Studio threat detection off: inactive, since calls aren't checked as they run; in monitor mode: limited; an empty allowlist: inactive; OPA unreachable from the control plane: failing |
 | `developer-sign-in`, `identity-assertions`, `approvals-by-person` | Keycloak's keys unreachable from the control plane: limited |
+| `workload-identity` | an issuer the gateway trusts whose keys AgentGov can't fetch: limited, since the gateway takes none of its tokens, or only those signed with the keys fetched before; `developer-sign-in` on: limited, since tool servers then take only Keycloak's tokens ([agents' own identities](agent-identity.md#straight-to-the-gateway)) |
 | The Microsoft connections | not set up, or the app lacks the permission: inactive; the last sync failed: limited |
 | The other platforms | not configured: inactive; the last sync didn't read everything: limited |
 | `issues` | no catch-all team: limited, since issues nobody else takes reach no one |

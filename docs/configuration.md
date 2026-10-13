@@ -220,7 +220,8 @@ never in a values file you share.
 | `AGENTGOV_KEYCLOAK_ISSUER` | — | Issuer that appears in agent tokens (Keycloak's frontend URL + realm). |
 | `AGENTGOV_KEYCLOAK_JWKS_URL` | — | JWKS URL the gateway uses to validate agent tokens. |
 | `AGENTGOV_IDENTITY_FULL_SYNC_SECONDS` | `900` | Seconds between passes that sync every agent with Keycloak, which also repair what was changed in Keycloak itself. The passes between, every minute and after each change, sync only the agents whose clients should change. 0: every pass is full. |
-| `AGENTGOV_GATEWAY_AUDIENCE` | `agentgov-gateway` | Audience every agent token carries; the gateway requires it. |
+| `AGENTGOV_GATEWAY_AUDIENCE` | `agentgov-gateway` | Audience every agent token carries; the gateway requires it. So do the tokens of the identity issuers the gateway trusts, unless an issuer names an audience of its own. |
+| `AGENTGOV_ISSUER_KEYS_INTERVAL_SECONDS` | `300` | Seconds between fetches of the signing keys of the identity issuers the gateway trusts, which rotate them ([agent-identity](agent-identity.md#straight-to-the-gateway)). 0: only when an issuer is added or changed, or an administrator asks. |
 | `AGENTGOV_PEOPLE_APP_CLIENTS` | empty | Keycloak clients of the apps people sign in to and use agents from (comma-separated client IDs). Each agent that acts for people has a client scope named after its client ID, which these apps may request: the person's token is then one the agent can exchange for a token of its own, on the person's behalf. |
 | `AGENTGOV_ASSERTION_LIFETIME_SECONDS` | `300` | Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers outside the gateway last, at most 300: the agent trades one for an access token at once ([acting-for-people](acting-for-people.md#mcp-servers-outside-the-gateway)). |
 

@@ -24,6 +24,7 @@ from agentgov.config import Settings
 from agentgov.coordination import Coordinator
 from agentgov.db import Database
 from agentgov.gateway import GatewayConfigWriter
+from agentgov.identity import issuer_keys
 from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
@@ -134,6 +135,7 @@ class Runtime:
         tsa_http: httpx.Client | None = None,
         tlog_http: httpx.Client | None = None,
         platforms_http: httpx.Client | None = None,
+        issuer_http: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
         # This component's certificate, for mutual TLS with the others (agentgov.tls).
@@ -258,6 +260,14 @@ class Runtime:
             if settings.issues_interval_seconds > 0
             else None
         )
+        # The signing keys of the identity issuers the gateway trusts, which rotate them.
+        self.issuer_http = issuer_http or httpx.Client(timeout=10)
+        self._issuer_keys_worker = _Worker(
+            "issuer-keys",
+            self._scheduled_issuer_keys,
+            settings.issuer_keys_interval_seconds or 365 * 24 * 3600,
+            leading=leading,
+        )
         # Whatever connectors there are when it runs: one may be added after this.
         self._platforms_worker = (
             _Worker(
@@ -282,6 +292,7 @@ class Runtime:
             self._issues_worker,
             self._tickets_worker,
             self._platforms_worker,
+            self._issuer_keys_worker,
         ]
         return [w for w in workers if w is not None]
 
@@ -367,9 +378,13 @@ class Runtime:
         identity = {"agents", "blueprints", "issuers", "feature:workload-identity"}
         if self.identity is not None and topics & identity:
             self.identity.trigger()
-        # Agents publish A2A routes, so their changes reach the gateway's configuration too.
-        if topics & {"toolservers", "features", "agents"} and self.settings.gateway_config_path:
+        # Agents publish A2A routes, so their changes reach the gateway's configuration too;
+        # and the issuers it trusts, with their keys.
+        gateway = {"toolservers", "features", "agents", "issuers", "issuer-keys"}
+        if topics & gateway and self.settings.gateway_config_path:
             self._gateway_worker.trigger()
+        if "issuers" in topics:
+            self._issuer_keys_worker.trigger()
         if "feature:instruction-checks" in topics:
             self._recheck_worker.trigger()
         if topics & {"toolservers", "feature:mcp-discovery"}:
@@ -702,6 +717,19 @@ class Runtime:
         and tell the desks what changed (docs/tickets.md)."""
         with self.coordination.job("tickets"):
             return self.ticketing.run()
+
+    def refresh_issuer_keys(self, names: list[str] | None = None) -> dict[str, list[str]]:
+        """Fetch the signing keys of the identity issuers the gateway trusts (all, or those
+        ``names``), outside any transaction, and keep them (agentgov.identity.issuer_keys)."""
+        with self.db.session() as session:
+            wanted = issuer_keys.targets(session, names)
+        found = issuer_keys.fetch_all(wanted, self.issuer_http)
+        with self.db.session() as session:
+            return issuer_keys.store(session, found)
+
+    def _scheduled_issuer_keys(self) -> None:
+        with self.coordination.job("issuer-keys"):
+            self.refresh_issuer_keys()
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;

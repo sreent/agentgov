@@ -138,6 +138,15 @@ def _headers(headers: pb.HttpHeaders) -> dict[str, str]:
     }
 
 
+def _identity(meta: dict[str, Any]) -> dict[str, Any]:
+    """The caller, as the gateway names it (agentgov.gateway._answer_checks): the agent and
+    client AgentGov's own tokens name, or another issuer's token's issuer and subject."""
+    found = {k: meta[k] for k in ("agent_id", "client_id", "issuer") if meta.get(k)}
+    if found.get("issuer") and meta.get("subject"):
+        found["subject"] = meta["subject"]
+    return found
+
+
 class AnswerChecks(pb_grpc.ExternalProcessorServicer):
     """agentgateway's external processing on the A2A routes: answers, as they come; and
     while a2a-masking is enforced, the messages sent (requests), to mask them."""
@@ -209,8 +218,16 @@ class Message:
         self.held = b""
         self.ended = False
         self.target = meta.get("agent") or "unknown"
-        self.identity = {k: meta[k] for k in ("agent_id", "client_id") if meta.get(k)}
+        self.identity = _identity(meta)
+        self._resolved = False
         self.person = _person(meta)
+
+    async def _caller(self) -> dict[str, Any]:
+        """The caller, with its agent's ID where its token names its workload identity
+        (GovernanceProcessor.caller): looked up once."""
+        if not self._resolved:
+            self.identity, self._resolved = await self.p.caller(self.identity), True
+        return self.identity
 
     async def feed(self, data: bytes, end: bool) -> bytes:
         """What passes on of the message, given its next piece."""
@@ -253,7 +270,7 @@ class Message:
         parts = message.get("parts") if message is not None else None
         if not isinstance(parts, list) or not parts:
             return body
-        modes = await self.p.features.for_caller(self.identity)
+        modes = await self.p.features.for_caller(await self._caller())
         if modes["a2a-masking"] != "enforce" or modes["data-protection"] == "off":
             return body
         inspection = await self.p._inspect(parts, protect=True, check_injection=False)
@@ -304,9 +321,17 @@ class Answer:
         # A withheld answer, or event, ends what passes on.
         self.closed = False
         self.target = meta.get("agent") or "unknown"
-        self.identity = {k: meta[k] for k in ("agent_id", "client_id") if meta.get(k)}
+        self.identity = _identity(meta)
+        self._resolved = False
         self.person = _person(meta)
         self.trace_id = trace_id_from([meta.get("traceparent") or ""])
+
+    async def _caller(self) -> dict[str, Any]:
+        """The caller, with its agent's ID where its token names its workload identity
+        (GovernanceProcessor.caller): looked up once."""
+        if not self._resolved:
+            self.identity, self._resolved = await self.p.caller(self.identity), True
+        return self.identity
 
     async def start(self) -> list[str]:
         """The headers to remove from the answer before it passes on."""
@@ -363,7 +388,7 @@ class Answer:
     async def _withheld_unchecked(self) -> bool:
         """Whether an answer that can't be checked is withheld: while a control that
         looks at answers is enforced, unless AGENTGOV_GATEWAY_FAILURE_MODE is open."""
-        modes = await self.p.features.for_caller(self.identity)
+        modes = await self.p.features.for_caller(await self._caller())
         enforced = "enforce" in (modes["data-protection"], modes["prompt-injection"])
         return enforced and not self.p.unchecked(modes)
 
@@ -419,7 +444,7 @@ class Answer:
         rpc = value if isinstance(value, dict) else {}
         key = next((k for k in ("result", "error") if k in rpc), None)
         content = value[key] if key else value
-        modes = await self.p.features.for_caller(self.identity)
+        modes = await self.p.features.for_caller(await self._caller())
         inspection = await self.p._inspect(
             content,
             protect=modes["data-protection"] != "off",

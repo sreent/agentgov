@@ -223,6 +223,8 @@ def internal_observe(
             name=body.get("name"),
             details=body.get("details"),
             discover=features.is_on(s, "discovery"),
+            issuer=body.get("issuer"),
+            subject=body.get("subject"),
         )
         return {"agent": agent.id if agent else None}
 
