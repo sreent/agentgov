@@ -24,6 +24,7 @@ LEDGER_MIN_DAYS = 183
 DATA_MIN_DAYS = 30
 # Starting points for the features' modes (agentgov.registry.features.PRESETS).
 FEATURE_PRESETS = ("monitor", "inventory")
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 # What the governance processor does when what it depends on fails, which it tells the
 # control plane (docs/features.md#when-something-is-down).
 FAILURE_SETTINGS = (
@@ -156,6 +157,14 @@ class Settings:
     # Days a threat finding stays open without happening again before it is resolved (it
     # opens again if it happens again). 0 keeps threats open until someone closes them.
     threat_finding_days: int = 30
+    # The time of day, HH:MM, a digest of their open issues goes to each address and team
+    # chat that has some: one message a day, those issues below
+    # AGENTGOV_ISSUES_NOTIFY_SEVERITY included (docs/issues.md#a-daily-digest). Empty: none.
+    issues_digest_at: str | None = None
+    # The time zone of AGENTGOV_ISSUES_DIGEST_AT, such as Europe/London.
+    issues_digest_timezone: str = "UTC"
+    # The days the digest goes out: mon to sun, separated by commas.
+    issues_digest_days: str = "mon,tue,wed,thu,fri"
     # The mail server for issues' emails: smtp://host:587 (STARTTLS) or smtps://host:465
     # (TLS). Without it, issues reach people in AgentGov and in their teams' chats only.
     smtp_url: str | None = None
@@ -570,6 +579,10 @@ class Settings:
             )
         if self.threat_finding_days < 0:
             raise ValueError("AGENTGOV_THREAT_FINDING_DAYS must be 0 (never) or more")
+        if self.issues_digest_at:
+            self.digest_time()
+            self.digest_zone()
+            self.digest_days()
         if self.component_report_seconds < 0:
             raise ValueError("AGENTGOV_COMPONENT_REPORT_SECONDS must be 0 (none) or more")
         if self.platform_sync_interval_seconds < 0:
@@ -825,6 +838,38 @@ class Settings:
             except ValueError as exc:
                 raise ValueError(f"bad AGENTGOV_PII_ENTITIES entry {item!r}") from exc
         return thresholds
+
+    def digest_time(self) -> tuple[int, int] | None:
+        """When the daily digest of open issues goes out: (hour, minute), or None."""
+        if not self.issues_digest_at:
+            return None
+        match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", self.issues_digest_at.strip())
+        if match is None:
+            raise ValueError("AGENTGOV_ISSUES_DIGEST_AT is a time of day, HH:MM, such as 08:30")
+        return int(match[1]), int(match[2])
+
+    def digest_zone(self) -> Any:
+        """The time zone of the daily digest (a ZoneInfo)."""
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            return ZoneInfo(self.issues_digest_timezone.strip() or "UTC")
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError(
+                "AGENTGOV_ISSUES_DIGEST_TIMEZONE is a time zone's name, such as Europe/London "
+                f"(not {self.issues_digest_timezone!r})"
+            ) from None
+
+    def digest_days(self) -> set[int]:
+        """The days of the week the digest goes out, Monday 0."""
+        days = [d.strip().lower()[:3] for d in self.issues_digest_days.split(",") if d.strip()]
+        unknown = sorted(set(days) - set(WEEKDAYS))
+        if unknown or not days:
+            raise ValueError(
+                "AGENTGOV_ISSUES_DIGEST_DAYS lists days of the week: mon, tue, wed, thu, fri, "
+                "sat, sun"
+            )
+        return {WEEKDAYS.index(d) for d in days}
 
     def escalation_delays(self) -> dict[str, float]:
         """Hours an issue of each severity waits at a step of its chain."""

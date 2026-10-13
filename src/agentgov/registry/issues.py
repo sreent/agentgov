@@ -198,11 +198,11 @@ def _quiet(settings: Settings, finding: Finding) -> str | None:
     return None
 
 
-def _queue(
-    session: Session, settings: Settings, finding: Finding, level: str, people: list[Recipient]
-) -> int:
-    """Queue the messages for the people at this step: email to their addresses (with a
-    mail server), and their teams' chats."""
+def addresses(
+    session: Session, settings: Settings, people: list[Recipient]
+) -> list[tuple[str, str]]:
+    """Where messages for these people and teams go, as (channel, recipient): email to
+    their addresses (with a mail server), and their teams' chats."""
     wanted: list[tuple[str, str]] = []
     for person in people:
         if settings.smtp_url:
@@ -211,8 +211,15 @@ def _queue(
             destination = session.scalar(select(Destination).where(Destination.name == name))
             if destination is not None:
                 wanted.append((destination.kind, name))
+    return list(dict.fromkeys(wanted))
+
+
+def _queue(
+    session: Session, settings: Settings, finding: Finding, level: str, people: list[Recipient]
+) -> int:
+    """Queue the messages for the people at this step."""
     count = 0
-    for channel, to in dict.fromkeys(wanted):
+    for channel, to in addresses(session, settings, people):
         exists = session.scalar(
             select(Notification.id).where(
                 Notification.finding_id == finding.id,

@@ -121,7 +121,7 @@ def _text(what: str, names: set[str]) -> str:
     what = re.sub(r"(?<![`/])\bhttps?://[^\s`]+?(?=[.,;:)]*(?:\s|$))", r"`\g<0>`", what)
     what = re.sub(r"(?<!`)\bAGENTGOV_[A-Z0-9_]+\b(?!`)", r"`\g<0>`", what)
     what = re.sub(r"(?<![`\w])[a-z0-9]+(?:_[a-z0-9]+)+\b(?!`)", variable, what)
-    what = re.sub(r"\bdocs/([a-z0-9-]+)\.md", r"[\1](\1.md)", what)
+    what = re.sub(r"\bdocs/([a-z0-9-]+)\.md(#[a-z0-9-]+)?", r"[\1](\1.md\2)", what)
     # Outside code, < and > would read as HTML.
     parts = what.split("`")
     for i in range(0, len(parts), 2):

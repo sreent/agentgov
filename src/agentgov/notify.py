@@ -4,7 +4,9 @@
 A notification is tried until it goes, waiting longer after each failure, and given up
 after MAX_ATTEMPTS; each one sent, and each one given up on, is in the ledger. Control-plane
 replicas share the work: each claims a notification for a minute before it sends it.
-Nothing is sent while the issues feature is off.
+With AGENTGOV_ISSUES_DIGEST_AT, each address and team chat with open issues also gets a
+digest of them once a day (agentgov.registry.digest). Nothing is sent while the issues
+feature is off.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import smtplib
 import ssl
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -24,8 +26,8 @@ from sqlalchemy import select, update
 from agentgov import ids
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.models import Agent, Destination, Finding, Notification
-from agentgov.registry import features, findings
+from agentgov.models import SEVERITIES, Agent, Destination, Finding, Notification
+from agentgov.registry import digest, features, findings
 from agentgov.registry.destinations import ACTIVE, SecretError
 from agentgov.registry.issues import EMAIL, OWNER, SPONSORS, SYSTEM
 from agentgov.secops import formats
@@ -63,6 +65,25 @@ class _Due:
 
 def _who(level: str) -> str:
     return _LEVELS.get(level, "the team it escalates to")
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
+def _new(line: digest.Line) -> str:
+    return " (new)" if line.new else ""
+
+
+def _further(line: digest.Line, now: datetime) -> str:
+    """When an issue nobody took on goes on to the next people responsible for it."""
+    if line.goes_further is None:
+        return ""
+    hours = (line.goes_further - now).total_seconds() / 3600
+    if hours <= 1:
+        return ". It goes further within the hour unless someone takes it on"
+    when = f"{round(hours)} hours" if hours < 48 else f"{round(hours / 24)} days"
+    return f". It goes further in {when} unless someone takes it on"
 
 
 class Notifier:
@@ -189,6 +210,118 @@ class Notifier:
             else:
                 n.next_attempt_at = ids.utcnow() + backoff(n.attempts)
 
+    # -- the daily digest -------------------------------------------------------------
+    def digest(self, now: datetime | None = None) -> dict[str, int]:
+        """Send the day's digests that are due and haven't gone yet; returns how many went
+        and how many failed (each tried again a little later)."""
+        now = now or ids.utcnow()
+        day = digest.due(self.settings, now)
+        if day is None:
+            return {}
+        with self.db.session() as s:
+            if not features.is_on(s, "issues"):
+                return {}
+            state = digest.start(s, day, now)
+            todo = {
+                target: lines
+                for target, lines in digest.gather(
+                    s, self.settings, digest.since(state, now)
+                ).items()
+                if digest.waiting(state, target, now)
+            }
+        sent = failed = 0
+        for target, lines in todo.items():
+            error = None
+            try:
+                if target[0] == EMAIL:
+                    self._digest_email(target[1], lines, now)
+                else:
+                    self._digest_chat(target[1], lines, now)
+            except (NotifyError, DeliveryError, SecretError) as exc:
+                log.warning("digest to %s: %s", target[1], exc)
+                error = str(exc)
+                failed += 1
+            else:
+                sent += 1
+            with self.db.session() as s:
+                digest.record(s, day, target, lines, now=now, error=error)
+        return {"digests_sent": sent, "digests_failed": failed} if todo else {}
+
+    def _ui(self, path: str) -> str:
+        return f"{self.settings.public_url.rstrip('/')}/ui/#/{path}"
+
+    def _digest_email(self, to: str, lines: list[digest.Line], now: datetime) -> None:
+        if not self.settings.smtp_url or not self.settings.smtp_from:
+            raise NotifyError("no mail server: set AGENTGOV_SMTP_URL and AGENTGOV_SMTP_FROM")
+        waiting = [x for x in lines if not x.taken_on]
+        message = EmailMessage()
+        message["From"] = self.settings.smtp_from
+        message["To"] = to
+        them = "it" if len(waiting) == 1 else "them"
+        message["Subject"] = f"[AgentGov] {_count(len(lines), 'open issue')} with you" + (
+            f", {len(waiting)} waiting for someone to take {them} on" if waiting else ""
+        )
+        body = ["The issues with you in AgentGov today, the most pressing first.", ""]
+        shown = lines[: digest.LISTED]
+        for heading, part in (
+            ("Waiting for someone to take them on", [x for x in shown if not x.taken_on]),
+            ("Taken on, not fixed yet", [x for x in shown if x.taken_on]),
+        ):
+            if not part:
+                continue
+            body += [f"{heading}:", ""]
+            for x in part:
+                about = f", agent {x.agent}" if x.agent else ""
+                body.append(
+                    f"- {x.severity.capitalize()}: {x.title}{about}{_new(x)}{_further(x, now)}"
+                )
+                body.append(f"  {self._link(x.finding_id)}")
+            body.append("")
+        if len(lines) > len(shown):
+            body += [f"And {_count(len(lines) - len(shown), 'more issue')}.", ""]
+        body += [
+            "All of them, and what you can do about each (take it on, say it isn't yours, ask "
+            "for an exception, or say you fixed it):",
+            self._ui("findings?status=mine"),
+            "",
+            "You get this once a day, as the owner, a sponsor or the team of the agents they "
+            f"are about. Issues of {self.settings.issues_notify_severity} severity and above "
+            "are also sent one by one as they come.",
+        ]
+        message.set_content("\n".join(body))
+        try:
+            with self._smtp() as client:
+                client.send_message(message)
+        except (OSError, smtplib.SMTPException) as exc:
+            raise NotifyError(f"couldn't send the email: {type(exc).__name__}: {exc}") from None
+
+    def _digest_chat(self, name: str, lines: list[digest.Line], now: datetime) -> None:
+        target = self._destination(name)
+        waiting = [x for x in lines if not x.taken_on]
+        worst = max(lines, key=lambda x: SEVERITIES.index(x.severity)).severity
+        text = "\n".join(
+            f"{x.severity.capitalize()}: {x.title}"
+            + (f" ({x.agent})" if x.agent else "")
+            + (" (taken on)" if x.taken_on else "")
+            for x in lines[:10]
+        )
+        if len(lines) > 10:
+            text += f"\nAnd {_count(len(lines) - 10, 'more')}."
+        self.delivery.post_alert(
+            target,
+            formats.Alert(
+                title=f"{_count(len(lines), 'open issue')} with this team's people",
+                text=text[:1500],
+                severity=worst,
+                facts=[
+                    ("Waiting to be taken on", str(len(waiting))),
+                    ("Taken on", str(len(lines) - len(waiting))),
+                ],
+                link=self._ui("findings"),
+                link_label="Open in AgentGov",
+            ),
+        )
+
     # -- sending ----------------------------------------------------------------------
     def _link(self, finding_id: str) -> str:
         return f"{self.settings.public_url.rstrip('/')}/ui/#/findings/{finding_id}"
@@ -249,14 +382,17 @@ class Notifier:
             client.login(self.settings.smtp_username, self.settings.smtp_password or "")
         return client
 
-    def _chat(self, item: _Due) -> None:
+    def _destination(self, name: str) -> SimpleNamespace:
         with self.db.session() as s:
-            row = s.scalar(select(Destination).where(Destination.name == item.recipient))
+            row = s.scalar(select(Destination).where(Destination.name == name))
             if row is None:
-                raise NotifyError(f"destination {item.recipient!r} no longer exists")
+                raise NotifyError(f"destination {name!r} no longer exists")
             if row.status != ACTIVE:
-                raise NotifyError(f"destination {item.recipient!r} is paused")
-            target = SimpleNamespace(name=row.name, kind=row.kind, url=row.url)
+                raise NotifyError(f"destination {name!r} is paused")
+            return SimpleNamespace(name=row.name, kind=row.kind, url=row.url)
+
+    def _chat(self, item: _Due) -> None:
+        target = self._destination(item.recipient)
         facts = [("Severity", item.severity)]
         if item.agent:
             facts.insert(0, ("Agent", item.agent))

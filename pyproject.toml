@@ -47,6 +47,8 @@ dependencies = [
   # Governance processor: agentgateway's ExtMcp gRPC protocol.
   "grpcio>=1.84",
   "protobuf>=7.35.1,<8",
+  # Time zones for the issues' daily digest, where the system has none (slim images).
+  "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

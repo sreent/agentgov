@@ -579,7 +579,7 @@ class Runtime:
         """Expire access packages and raise their reminders and reviews; route findings to
         the people responsible, escalate those nobody acknowledged, open accepted risks
         whose time ran out, resolve threats that haven't happened for a while, and send
-        what is due."""
+        what is due, the day's digests included."""
         with self.coordination.job("issues"):
             with self.db.session() as session:
                 access = access_packages.check(session, self.settings)
@@ -595,6 +595,7 @@ class Runtime:
                 **access,
                 **routed,
                 **self.notifier.run(),
+                **self.notifier.digest(),
             }
 
     def refresh_developer_mcp(self) -> int:

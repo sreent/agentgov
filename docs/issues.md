@@ -220,6 +220,28 @@ Not every issue needs to reach an inbox:
   finding that comes back after it was resolved.
 * **Types turned off** reach no one at all ([below](#kinds-of-findings)).
 
+### A daily digest
+
+What can't wait comes one message at a time; the rest can come together, once a day. With
+`AGENTGOV_ISSUES_DIGEST_AT` set (`08:30`, say, in `AGENTGOV_ISSUES_DIGEST_TIMEZONE`, such as
+`Europe/London`, on the days in `AGENTGOV_ISSUES_DIGEST_DAYS`: Monday to Friday by
+default), each address and team chat with open issues gets one message a day that lists
+them. Those waiting for someone to take them on come first, then those taken on and not
+fixed yet, the most severe first. Each has a link to it, says when it goes further unless
+someone takes it on, and is marked new if it was found since the last digest. An email lists
+25 and counts the rest; a chat message lists 10, and links to the findings in AgentGov.
+
+Issues below `AGENTGOV_ISSUES_NOTIFY_SEVERITY` are in it too. So with
+`AGENTGOV_ISSUES_NOTIFY_SEVERITY=high` and a digest, critical and high issues are sent as
+they come, and everything else once a day.
+
+The digest goes where an issue's messages go: to the people at the step of its chain it is
+at. An issue that went on to its sponsors is in their digest, not its owner's. Each digest
+sent is an `issues.digest_sent` entry in the ledger, with how many issues it listed. One
+that can't be sent is tried again a little later, waiting longer each time; after six tries
+it is an `issues.digest_failed` warning, and waits for the next day's. With several
+replicas, the one that leads sends it, once.
+
 ## Kinds of findings
 
 Every check raises findings of its own types, such as `agent.no_owner`,
@@ -339,6 +361,8 @@ the findings shown as a spreadsheet: who each is with, how often it was seen, wh
 | `finding_type.changed` | A type was turned off or on, or given a severity |
 | `finding.notified` | A message went, to whom and how |
 | `finding.notification_failed` (warning) | A message was given up on after retrying |
+| `issues.digest_sent` | The day's digest went to an address or a chat, with how many issues it listed ([a daily digest](#a-daily-digest)) |
+| `issues.digest_failed` (warning) | The day's digest couldn't be sent, after retrying |
 | `team.created`, `team.updated`, `team.deleted` | A team changed |
 
 These go to the security team's tools like every ledger entry

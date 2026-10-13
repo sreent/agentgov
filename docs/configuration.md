@@ -187,6 +187,9 @@ never in a values file you share.
 | `AGENTGOV_ISSUES_NOTIFY_SEVERITY` | `medium` | Issues below this severity reach people in AgentGov only, without an email or a chat message: by default, low and info ones wait there. info: every issue is sent. |
 | `AGENTGOV_ISSUES_QUIET_FIRST_SYNC` | `true` | What a platform's first sync finds reaches people in AgentGov only, without an email or a chat message: what was there before AgentGov looked doesn't flood inboxes. Found again after it is resolved, it is sent as any other. |
 | `AGENTGOV_THREAT_FINDING_DAYS` | `30` | Days a threat finding stays open without happening again before it is resolved (it opens again if it happens again). 0 keeps threats open until someone closes them. |
+| `AGENTGOV_ISSUES_DIGEST_AT` | — | The time of day, HH:MM, a digest of their open issues goes to each address and team chat that has some: one message a day, those issues below `AGENTGOV_ISSUES_NOTIFY_SEVERITY` included ([issues](issues.md#a-daily-digest)). Empty: none. |
+| `AGENTGOV_ISSUES_DIGEST_TIMEZONE` | `UTC` | The time zone of `AGENTGOV_ISSUES_DIGEST_AT`, such as Europe/London. |
+| `AGENTGOV_ISSUES_DIGEST_DAYS` | `mon,tue,wed,thu,fri` | The days the digest goes out: mon to sun, separated by commas. |
 | `AGENTGOV_SMTP_URL` | — | The mail server for issues' emails: smtp://host:587 (STARTTLS) or smtps://host:465 (TLS). Without it, issues reach people in AgentGov and in their teams' chats only. |
 | `AGENTGOV_SMTP_FROM` | — | The sender of issues' emails, such as agentgov@example.com. |
 | `AGENTGOV_SMTP_USERNAME`<br>`AGENTGOV_SMTP_PASSWORD` (secret) | —<br>— | The mail server's user and password, if it needs them. |
@@ -218,7 +221,7 @@ never in a values file you share.
 | `AGENTGOV_IDENTITY_FULL_SYNC_SECONDS` | `900` | Seconds between passes that sync every agent with Keycloak, which also repair what was changed in Keycloak itself. The passes between, every minute and after each change, sync only the agents whose clients should change. 0: every pass is full. |
 | `AGENTGOV_GATEWAY_AUDIENCE` | `agentgov-gateway` | Audience every agent token carries; the gateway requires it. |
 | `AGENTGOV_PEOPLE_APP_CLIENTS` | empty | Keycloak clients of the apps people sign in to and use agents from (comma-separated client IDs). Each agent that acts for people has a client scope named after its client ID, which these apps may request: the person's token is then one the agent can exchange for a token of its own, on the person's behalf. |
-| `AGENTGOV_ASSERTION_LIFETIME_SECONDS` | `300` | Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers outside the gateway last, at most 300: the agent trades one for an access token at once ([acting-for-people](acting-for-people.md)#mcp-servers-outside-the-gateway). |
+| `AGENTGOV_ASSERTION_LIFETIME_SECONDS` | `300` | Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers outside the gateway last, at most 300: the agent trades one for an access token at once ([acting-for-people](acting-for-people.md#mcp-servers-outside-the-gateway)). |
 
 ### Administrator single sign-on (OIDC)
 
@@ -301,7 +304,7 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Micro
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_OPA_URL` | — | Where the processor asks OPA for decisions, and the control plane for What if, such as `http://opa:8181`. |
-| `AGENTGOV_AUTHZEN_URL` | — | An AuthZEN decision point of your own (OpenID AuthZEN Authorization API 1.0), which the processor also asks about the calls AgentGov's policies let through, as the external-decision-point feature says: its base URL, such as `https://pdp.example.com` ([policies](policies.md)#authzen). |
+| `AGENTGOV_AUTHZEN_URL` | — | An AuthZEN decision point of your own (OpenID AuthZEN Authorization API 1.0), which the processor also asks about the calls AgentGov's policies let through, as the external-decision-point feature says: its base URL, such as `https://pdp.example.com` ([policies](policies.md#authzen)). |
 | `AGENTGOV_AUTHZEN_TOKEN` (secret) | — | The bearer token it asks for, if it asks for one. |
 | `AGENTGOV_AUTHZEN_TIMEOUT_SECONDS` | `2.0` | Seconds to wait for its answer. |
 | `AGENTGOV_AUTHZEN_FAILURE_MODE` | `closed` | When it can't be asked while the external-decision-point feature is enforced: `closed` refuses the call; `open` lets AgentGov's own decision stand. Monitored, it never stops a call. |
