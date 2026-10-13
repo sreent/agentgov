@@ -35,7 +35,7 @@ from agentgov.models import (
     ToolServer,
 )
 from agentgov.registry import finding_types, findings, teams
-from agentgov.registry.errors import InvalidTransition, ValidationError
+from agentgov.registry.errors import Forbidden, InvalidTransition, ValidationError
 
 OWNER, SPONSORS, TEAM = "owner", "sponsors", "team"
 LEVELS = (OWNER, SPONSORS, TEAM)
@@ -326,12 +326,54 @@ def parse_until(value: Any, now: datetime | None = None) -> datetime:
     return until
 
 
-def accept(session: Session, finding: Finding, *, reason: Any, until: Any, actor: str) -> Finding:
+def accountable(session: Session, agent: Agent, name: str | None) -> str | None:
+    """How the person ``name`` (an email address or user name) is accountable for
+    ``agent``, in words, or None: they own it, sponsor it, or are in its team (its own or
+    its blueprint's; not the default team, which only gets what nobody else does)."""
+    key = (name or "").strip().lower()
+    if not key:
+        return None
+    d = Directory(session)
+    blueprint = agent.blueprint
+    team = agent.team or (blueprint.team if blueprint else None)
+    for names, as_person, as_team in (
+        ([agent.owner], "own", "are in the team that owns"),
+        ([str(s) for s in agent.sponsors or []], "sponsor", "are in a team that sponsors"),
+        ([team], "", "are in the team of"),
+    ):
+        for found in (d.recipient(n) for n in names):
+            if found is None:
+                continue
+            people = {p.lower() for p in (*found.emails, *found.members)}
+            if found.kind == "person":
+                people.add(found.name.lower())
+            if key in people:
+                return f"you {as_person if found.kind == 'person' else as_team} {agent.name}"
+    return None
+
+
+def accept(
+    session: Session,
+    finding: Finding,
+    *,
+    reason: Any,
+    until: Any,
+    actor: str,
+    by: str | None = None,
+) -> Finding:
     """Accept the risk until a date, for a reason: the finding stops going to anyone until
-    then, and opens again at that date if it still holds."""
+    then, and opens again at that date if it still holds. ``by``, the person accepting it,
+    mustn't be accountable for the agent it is about: someone else signs that off."""
     lock(session, finding)
     if finding.status not in ("open", "accepted"):
         raise InvalidTransition(f"finding is {finding.status}: only open findings are accepted")
+    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
+    why = accountable(session, agent, by) if agent is not None else None
+    if why:
+        raise Forbidden(
+            f"{why[0].upper()}{why[1:]}: someone who isn't accountable for it accepts its "
+            "risks (another approver, an administrator or the security team)"
+        )
     reason = str(reason or "").strip()
     if not reason:
         raise ValidationError("say why the risk is acceptable (reason)")

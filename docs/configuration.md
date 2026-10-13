@@ -161,6 +161,7 @@ never in a values file you share.
 | `AGENTGOV_ADMIN_TOKEN` (secret) | — | Bootstrap administrator bearer token for the admin API and UI. |
 | `AGENTGOV_DEV_MODE` | `false` | Development only: without an admin token, the control plane makes one up and logs it. |
 | `AGENTGOV_SERVICE_TOKEN` (secret) | — | Shared token for internal components (OPA, governance processor, OTel collector) calling the control plane. |
+| `AGENTGOV_SIGNING_SECRET` (secret) | — | The secret the keys AgentGov signs delegations and ID-JAGs with derive from. Only the control plane and the processor hold it; without it, the keys derive from the service token, which OPA and the OTel Collector hold too. |
 | `AGENTGOV_FEATURES` | empty | Features pinned by the deployment, e.g. `least-privilege=monitor,discovery=off` ([features](features.md)). Administrators choose the others in the app. |
 | `AGENTGOV_FEATURE_PRESET` | empty | A starting point for the features' modes, applied once, when the control plane starts with one it hasn't applied yet: `monitor` (every control records what it would do and stops nothing) or `inventory` (no gateway: AgentGov finds agents and checks them). Administrators change the modes from there; pinned features keep their pins. |
 | `AGENTGOV_APPROVAL_TTL_SECONDS` | `86400` | How long an approval request waits for a decision before it expires. |

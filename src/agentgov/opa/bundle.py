@@ -39,6 +39,7 @@ from agentgov.models import (
     Policy,
     ToolServer,
 )
+from agentgov.opa import WHAT_IF
 from agentgov.opa.signing import SIGNATURES, Signer
 from agentgov.registry import access_packages, features, model_providers, model_usage, scopes
 from agentgov.registry import agents as agents_svc
@@ -59,27 +60,20 @@ OPA_STATUS = "opa-status"
 # An instance not heard from for this long drops off the list.
 OPA_FORGET = timedelta(days=1)
 
-# Decision-log hygiene, evaluated by OPA itself: never log raw tool arguments,
-# and skip gateway decisions on tool and model calls (the governance processor
-# records those in the ledger with richer context) and reads of registry data
-# (the processor reads the feature modes). In-process (agentos) decisions are logged.
-SYSTEM_LOG_REGO = """package system.log
+# Decision-log hygiene, evaluated by OPA itself: never log raw tool arguments, and log
+# only the decisions of agents that ask OPA themselves (agentos, the Agent Governance
+# Toolkit). The processor and the control plane record the decisions they ask for in the
+# ledger with richer context, and their reads of the registry and the feature modes aren't
+# decisions. Nor are what-if questions from the policies page (WHAT_IF in their input).
+SYSTEM_LOG_REGO = f"""package system.log
 
 mask contains "/input/arguments"
 
 mask contains "/input/tool_args"
 
-drop if startswith(input.path, "agentgov/mcp")
+drop if not startswith(input.path, "agentos")
 
-drop if startswith(input.path, "agentgov/models")
-
-drop if startswith(input.path, "agentgov/a2a")
-
-drop if startswith(input.path, "agentgov/idjag")
-
-drop if startswith(input.path, "registry")
-
-drop if startswith(input.path, "agentgov/context")
+drop if input.input.{WHAT_IF} == true
 """
 
 

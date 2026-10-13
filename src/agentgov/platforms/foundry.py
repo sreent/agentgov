@@ -613,7 +613,7 @@ def foundry_agent(
                 + ", ".join(sorted({kind for kind, _ in risky}))
                 + ".",
                 "Keep these tools to agents that need them, behind a guardrail, or confirm the "
-                "agent needs them and dismiss this finding.",
+                "agent needs them and ask an approver to accept its risk.",
                 {"tools": sorted({kind for kind, _ in risky})},
             )
         )
@@ -651,7 +651,7 @@ def foundry_agent(
                 + ".",
                 "Have the connections sign each user in (OAuth identity passthrough) or sign in as "
                 "the agent (Microsoft Entra agent identity), or confirm the shared access is "
-                "intended and dismiss this finding.",
+                "intended and ask an approver to accept its risk.",
                 {"connections": sorted({conn for _, conn, _ in shared})},
             )
         )
@@ -678,7 +678,7 @@ def foundry_agent(
                 "It is published to Microsoft 365 and Teams for the whole organisation "
                 "(BotServiceTenant), so anyone in the tenant may chat with it.",
                 "Publish it to the people who need it (BotServiceRbac, which checks their Foundry "
-                "role), or confirm everyone should have it and dismiss this finding.",
+                "role), or confirm everyone should have it and ask an approver to accept its risk.",
                 {"scheme": "BotServiceTenant"},
             )
         )

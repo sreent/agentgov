@@ -126,7 +126,7 @@ def create_app(
             s.execute(text("SELECT 1"))
         return {"status": "ready", "version": __version__}
 
-    delegation_keys = chains.keys(settings.service_token)
+    delegation_keys = chains.keys(settings.key_secret)
 
     @app.get("/v1/info", tags=["health"])
     def info() -> dict[str, Any]:

@@ -96,11 +96,11 @@ async def opa_decision_logs(request: Request, _: Principal = Depends(service)) -
     if not isinstance(events, list):
         raise HTTPException(400, "expected a JSON array of decision events")
 
-    def store() -> int:
+    def store() -> dict[str, int]:
         with rt.db.session() as s:
             return decisions.record_opa_decisions(s, events)
 
-    return {"stored": await anyio.to_thread.run_sync(store)}
+    return await anyio.to_thread.run_sync(store)
 
 
 @router.post("/v1/opa/status", tags=["opa"])
@@ -174,7 +174,12 @@ def internal_decisions(
     records = body.get("records") or []
     if not isinstance(records, list):
         raise ValidationError("records must be a list")
+    dropped = body.get("dropped") or 0
+    if not isinstance(dropped, int) or dropped < 0:
+        raise ValidationError("dropped must be a count")
     with rt.db.session() as s:
+        if dropped:
+            decisions.record_dropped(s, dropped)
         return {"stored": decisions.record_mcp_decisions(s, rt.settings, records)}
 
 

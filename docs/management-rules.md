@@ -193,7 +193,8 @@ monitored:
 In step 19 of the demo, `python examples/agents/demo_agent.py`, an administrator previews
 a rule that deletes agents blocked for 30 days, which matches the demo agent (blocked in
 step 13). Enforced, it raises its issue at once, for the agent's owner, cx-platform, and
-its sponsor, alice. alice accepts the risk until a date, and the rule leaves the agent be.
+its sponsor, alice. alice can't accept its risk, being accountable for the agent; an
+administrator accepts it until a date, and the rule leaves the agent be.
 
 ## In the ledger
 

@@ -2059,26 +2059,59 @@ def _with(f: dict[str, Any]) -> str:
     return f"{who}, acknowledged" if f.get("acknowledged_at") else who
 
 
-def _list_findings(status: str, mine: bool = False) -> None:
-    path = "/v1/me/issues" if mine else "/v1/findings"
-    rows = _call("GET", path, params={"status": status})
+FINDING_TYPE = typer.Option(None, "--type", help="Only findings of this type.")
+FINDING_SEVERITY = typer.Option(None, help="Only findings of this severity.")
+FINDING_LIMIT = typer.Option(500, help="At most this many, newest first (up to 2000).")
+
+
+def _list_findings(
+    status: str,
+    mine: bool = False,
+    type_: str | None = None,
+    severity: str | None = None,
+    limit: int = 500,
+) -> None:
+    if mine:
+        rows = _call("GET", "/v1/me/issues", params={"status": status})
+    else:
+        params = {"status": status, "type": type_, "severity": severity, "limit": limit}
+        rows = _call("GET", "/v1/findings", params={k: v for k, v in params.items() if v})
     for row in rows:
         row["with"] = _with(row)
         if row.get("verified") is False:
             row["status"] = f"{row['status']} (unverified)"
     _table(rows, ["id", "severity", "status", "type", "with", "title"])
+    if not mine and len(rows) == limit:
+        typer.echo(
+            f"The newest {limit}: there may be more. Narrow them with --type or --severity, "
+            "or raise --limit.",
+            err=True,
+        )
 
 
 @findings_app.callback()
-def findings_main(ctx: typer.Context, status: str = FINDING_STATUS, mine: bool = MINE) -> None:
+def findings_main(
+    ctx: typer.Context,
+    status: str = FINDING_STATUS,
+    mine: bool = MINE,
+    type_: str | None = FINDING_TYPE,
+    severity: str | None = FINDING_SEVERITY,
+    limit: int = FINDING_LIMIT,
+) -> None:
     if ctx.invoked_subcommand is None:
-        _list_findings(status, mine)
+        _list_findings(status, mine, type_, severity, limit)
 
 
 @findings_app.command("list")
-def findings_list(status: str = FINDING_STATUS, mine: bool = MINE) -> None:
-    """List findings."""
-    _list_findings(status, mine)
+def findings_list(
+    status: str = FINDING_STATUS,
+    mine: bool = MINE,
+    type_: str | None = FINDING_TYPE,
+    severity: str | None = FINDING_SEVERITY,
+    limit: int = FINDING_LIMIT,
+) -> None:
+    """List findings, newest first."""
+    _list_findings(status, mine, type_, severity, limit)
 
 
 @findings_app.command("get")

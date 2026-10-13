@@ -631,7 +631,7 @@ def evaluate(session: Session) -> int:
                 description="These tools run with the maker's credentials for every user, so "
                 "users reach data with the maker's access: " + ", ".join(maker) + ".",
                 remediation="Switch the tools to user-provided connections in Copilot Studio, or "
-                "confirm the shared access is intended and dismiss this finding.",
+                "confirm the shared access is intended and ask an approver to accept its risk.",
                 details={"operations": maker},
             )
         if data.get("shared_with_everyone"):
@@ -641,7 +641,7 @@ def evaluate(session: Session) -> int:
                 "medium",
                 f"{record.name} is shared with the whole organisation",
                 remediation="Share it with the groups that need it, or confirm that everyone "
-                "should have it and dismiss this finding.",
+                "should have it and ask an approver to accept its risk.",
             )
     findings.resolve_absent(
         session,

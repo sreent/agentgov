@@ -23,8 +23,9 @@ does, while the identity-assertions feature is on:
 * the ID-JAG (``typ`` ``oauth-id-jag+jwt``, at most five minutes) names the person, or
   the agent acting on its own (``sub``), the authorization server (``aud``), the client
   the agent is there (``client_id``), the server (``resource``), and the agent
-  (``act``); AgentGov signs it with a P-256 key it derives from the service token and
-  publishes (``/oauth2/jwks``). Every assertion given, or refused, is in the ledger.
+  (``act``); AgentGov signs it with a P-256 key it derives from the signing secret (or
+  else the service token) and publishes (``/oauth2/jwks``). Every assertion given, or
+  refused, is in the ledger.
 """
 
 from __future__ import annotations
@@ -80,8 +81,9 @@ class Refused(Exception):
 
 
 def signing_key(secret: str | None) -> ec.EllipticCurvePrivateKey | None:
-    """The key AgentGov signs ID-JAGs with, derived from the service token (None without
-    one), apart from the one it signs delegations with."""
+    """The key AgentGov signs ID-JAGs with, derived from ``secret``: the signing secret, or
+    else the service token (None without either); apart from the one it signs delegations
+    with."""
     return chains.derive_key(secret, b"agentgov-id-jag-es256-v1") if secret else None
 
 

@@ -101,6 +101,7 @@ The defaults are for evaluation. For an installation others use:
   |---|---|
   | `admin-token` | The bootstrap administrator's token |
   | `service-token` | AgentGov's parts calling the control plane |
+  | `signing-secret` | The keys the control plane and the processor sign delegations and ID-JAGs with. Optional: without it, they derive from `service-token`, which OPA and the collector hold too |
   | `keycloak-client-secret` | The control plane's Keycloak client, `agentgov-control-plane` |
   | `oidc-client-secret` | Administrators' single sign-on: the client `agentgov-admin`, or your Entra ID app |
   | `keycloak-admin-password` | The bundled Keycloak's first administrator |

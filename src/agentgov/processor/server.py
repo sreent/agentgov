@@ -211,7 +211,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         self.classifier = traffic_classifier
         self.features = FeatureModes(opa)
         # Signs and checks the delegations agents carry from agent to agent.
-        self.chain_keys = chains.keys(settings.service_token)
+        self.chain_keys = chains.keys(settings.key_secret)
         self._background: set[asyncio.Task[Any]] = set()
 
     # ------------------------------------------------------------------ helpers

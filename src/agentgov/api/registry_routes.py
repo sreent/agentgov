@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from agentgov import ledger
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.api.versions import if_match
 from agentgov.identity.keycloak import KeycloakError
 from agentgov.models import ACTIVE
@@ -23,7 +23,7 @@ from agentgov.registry import (
     teams,
     toolservers,
 )
-from agentgov.registry.errors import Conflict
+from agentgov.registry.errors import Conflict, NotFound
 from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1")
@@ -137,18 +137,34 @@ def update_agent(
         return agents.to_dict(agent)
 
 
+def _sponsors(agent: Any, principal: Principal) -> bool:
+    """Whether ``principal`` is one of the agent's sponsors: a person signed in, whatever
+    their role, or an approver's key named after them."""
+    if principal.via != "session" and "approver" not in principal.roles:
+        return False
+    return principal.name.lower() in {str(s).lower() for s in agent.sponsors or []}
+
+
 @router.post("/agents/{ref}/attest", tags=["agents"])
 def attest_agent(
     request: Request,
     ref: str,
     body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(require("approver")),
+    principal: Principal = Depends(signed_in),
 ) -> dict[str, Any]:
-    """A sponsor confirms the agent is still needed (periodic access review)."""
+    """A sponsor confirms the agent is still needed (periodic access review): its sponsors,
+    whatever their role in AgentGov, and administrators."""
+    refused = "only the agent's sponsors or an admin can attest"
     with _rt(request).db.session() as s:
-        agent = agents.get(s, ref)
-        if not principal.is_admin and principal.name not in (agent.sponsors or []):
-            raise HTTPException(403, "only the agent's sponsors or an admin can attest")
+        try:
+            agent = agents.get(s, ref)
+        except NotFound:
+            # Which agents exist is for those who may read them.
+            if principal.roles & set(READ_ROLES):
+                raise
+            raise HTTPException(403, refused) from None
+        if not principal.is_admin and not _sponsors(agent, principal):
+            raise HTTPException(403, refused)
         agents.attest(s, agent, actor=principal.actor, note=body.get("note"))
         return agents.to_dict(agent)
 

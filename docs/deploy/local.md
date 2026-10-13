@@ -309,11 +309,15 @@ people responsible, AgentGov needs neither the gateway nor what checks its calls
 control plane and PostgreSQL do, in about 200 MB of memory:
 
 ```bash
+echo "AGENTGOV_ADMIN_TOKEN=$(openssl rand -hex 32)" >> deploy/compose/.env
 docker compose -f deploy/compose/docker-compose.inventory.yml up -d --build --wait
 ```
 
-Open <http://localhost:8000/ui> with the token `dev-admin-token` (`AGENTGOV_ADMIN_TOKEN`).
-On its first start the control plane applies the inventory starting point: the gateway's
+Open <http://localhost:8000/ui> with that token (`grep ADMIN_TOKEN deploy/compose/.env`).
+Unlike the full stack, this one has no token everybody knows: it won't start without one.
+It listens on this machine only. To reach it from others, put HTTPS in front of it (a
+reverse proxy on the same machine), or set `AGENTGOV_LISTEN_ADDRESS=0.0.0.0` in `.env` to
+take connections on every address, in plain HTTP. On its first start the control plane applies the inventory starting point: the gateway's
 features off, and discovery, posture checks, issues, management rules and the platforms on
 ([starting points](../features.md#starting-points)). Every setting in `deploy/compose/.env`
 reaches the control plane: the platforms' credentials

@@ -402,7 +402,9 @@ evaluator.add_backend(
 Plain tool names are matched against grants for the pseudo-server `local`
 (`{"server": "local", "tools": ["search_docs"]}`); names written `server/tool` match that
 server's grants. OPA's decision logs for these calls are recorded in the ledger as
-`decision.inprocess`.
+`decision.inprocess`. OPA logs no other decisions: the processor and the control plane
+record the ones they ask it for themselves, and what-if questions from the policies page
+aren't decisions.
 
 Things to know, verified against AGT 5.0.0:
 

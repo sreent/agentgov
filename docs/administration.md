@@ -60,11 +60,11 @@ page.
 | Role | Can |
 |---|---|
 | `admin` | Everything below, plus agent lifecycle, blueprints, access packages, [management rules](management-rules.md), tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations, teams and which [features](features.md) are used |
-| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks; attest the agents it sponsors |
+| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks, but not those of agents they are accountable for; attest the agents it sponsors |
 | `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings, acknowledge issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
-| `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)); sees nothing else |
+| `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)), and to attest the agents they sponsor; sees nothing else |
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector; with mutual TLS between the components, only on the control plane's internal port ([production](production.md#mutual-tls-between-components)) |
 
 People who sign in with single sign-on get their roles from the identity provider each time
@@ -86,7 +86,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Approve, block, unblock, delete, restore | Agent toolbar | `agentgov agents approve\|block\|unblock\|delete\|restore REF` | `POST /v1/agents/{ref}/{action}` |
 | Adopt a discovered agent | Agent → **Adopt** | `agentgov agents lifecycle REF adopt` | `POST /v1/agents/{ref}/adopt` |
 | Delete a deleted agent permanently (otherwise it is purged after `AGENTGOV_SOFT_DELETE_RETENTION_DAYS`, 30 by default) | Agent → **Delete permanently** | `agentgov agents purge REF` | `DELETE /v1/agents/{ref}` |
-| Attest an agent | Agent → **Attest** | `agentgov agents attest REF` | `POST /v1/agents/{ref}/attest` |
+| Attest an agent: its sponsors, whatever their role, and administrators | Agent → **Attest**, or **Attest** on the issue that its review is due | `agentgov agents attest REF` | `POST /v1/agents/{ref}/attest` |
 | Show or rotate an agent's client secret | Agent → Identity → **Show secret** / **Rotate** | `agentgov agents credentials REF [--rotate]` | `POST /v1/agents/{ref}/credentials` |
 | Approve, edit, block, delete identity issuers ([agents' own identities](agent-identity.md)) | Access → *Agent identity issuers* → **Add issuer**, **Edit**, **Block**/**Unblock**, **Delete** | `agentgov issuers create\|update\|block\|unblock\|delete` | `POST /v1/identity-issuers`, `PATCH`/`DELETE /v1/identity-issuers/{name}`, `POST /v1/identity-issuers/{name}/block\|unblock` |
 | Give an agent its own identity instead of a client secret | Agent → **Edit** → *Authentication* | `agentgov agents update REF --workload-identity ISSUER:SUBJECT` (`--no-workload-identity` to go back) | `workload_identity` in `PATCH /v1/agents/{ref}` |
@@ -123,6 +123,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Resolve, dismiss, reopen findings | Findings | `agentgov findings resolve\|dismiss\|reopen ID` | `POST /v1/findings/{id}/{action}` |
 | See who an issue is with, its messages and its history ([issues](issues.md)) | Findings → **Details** | `agentgov findings get ID` | `GET /v1/findings/{id}` |
 | See the issues sent to you, as an owner, a sponsor or a team member | Findings → *Yours* (people without a role: *Your issues*) | `agentgov findings list --mine` | `GET /v1/me/issues` |
+| List findings, a page at a time, by type and severity | Findings: the type and severity filters, and **Show more** | `agentgov findings list --type T --severity S --limit N` | `GET /v1/findings?type=&severity=&limit=&offset=` (`X-Total-Count` says how many in all) |
 | Acknowledge an issue, or accept its risk until a date | Findings → **Acknowledge**, **Accept risk** | `agentgov findings acknowledge ID`, `agentgov findings accept ID --reason R --until DATE` | `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` |
 | Add, edit and delete teams, and choose the default team | Findings → Teams | `agentgov teams create\|update\|delete`, `agentgov teams list` | `POST /v1/teams`, `PATCH`/`DELETE /v1/teams/{name}` |
 | Add, edit and delete access packages ([access packages](access-packages.md)) | Policies → *Access packages* | `agentgov access-packages create\|update\|delete`, `agentgov access-packages list` | `POST /v1/access-packages`, `PATCH`/`DELETE /v1/access-packages/{name}` |

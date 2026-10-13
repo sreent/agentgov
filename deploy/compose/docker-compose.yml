@@ -90,6 +90,8 @@ services:
       AGENTGOV_DATABASE_URL: postgresql+psycopg://agentgov:${POSTGRES_PASSWORD:-agentgov}@postgres:5432/agentgov
       AGENTGOV_PUBLIC_URL: ${AGENTGOV_PUBLIC_URL:-http://localhost:8000}
       AGENTGOV_ADMIN_TOKEN: ${AGENTGOV_ADMIN_TOKEN:-dev-admin-token}
+      # The keys it and the processor sign delegations and ID-JAGs with derive from it.
+      AGENTGOV_SIGNING_SECRET: ${AGENTGOV_SIGNING_SECRET:-dev-signing-secret}
       AGENTGOV_KEYCLOAK_URL: http://keycloak:8080
       AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
       AGENTGOV_KEYCLOAK_ISSUER: http://localhost:8180/realms/agentgov
@@ -233,6 +235,7 @@ services:
     command: ["processor"]
     environment:
       <<: *agentgov-env
+      AGENTGOV_SIGNING_SECRET: ${AGENTGOV_SIGNING_SECRET:-dev-signing-secret}
       AGENTGOV_CONTROL_PLANE_URL: https://control-plane:8443
       AGENTGOV_PRESIDIO_URL: http://presidio-analyzer:3000
       # IBM Granite Guardian's second opinion on traffic (docs/detection.md).

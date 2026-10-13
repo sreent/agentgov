@@ -887,8 +887,16 @@ async function refreshBadges() {
       updateBadges({ pendingApprovals: pending.length, findings: summarizeFindings(issues) });
       return;
     }
-    const [pending, open] = await Promise.all([api('v1/approvals?status=pending'), api('v1/findings?status=open')]);
-    updateBadges({ pendingApprovals: pending.length, findings: summarizeFindings(open) });
+    // How many are open, and whether any is critical or high: counted by the control
+    // plane, however many there are.
+    const count = async (query) => {
+      const res = await api(`v1/findings?status=open&limit=1${query}`, { raw: true });
+      return Number(res.headers.get('X-Total-Count') || 0);
+    };
+    const [pending, open, critical, high] = await Promise.all([
+      api('v1/approvals?status=pending'), count(''), count('&severity=critical'), count('&severity=high'),
+    ]);
+    updateBadges({ pendingApprovals: pending.length, findings: { open, by_severity: { critical, high } } });
   } catch { /* badges are a convenience; the pages show the real state */ }
 }
 
@@ -1209,6 +1217,19 @@ async function start() {
 
 /* ---------------------------------------------------------------- overview */
 
+// An agent another platform runs, which AgentGov read from it (not through the gateway).
+function isPlatformAgent(a) {
+  return (a.source || '').startsWith('platform:');
+}
+
+// What the unmanaged agents are: found on platforms, seen in traffic, or both.
+function unmanagedNote(all, onPlatforms) {
+  if (!all) return 'No unregistered agents seen';
+  if (onPlatforms === all) return 'Found on your platforms, not reviewed yet';
+  if (!onPlatforms) return 'Seen at runtime, never registered';
+  return `${fmt(onPlatforms)} found on your platforms, ${fmt(all - onPlatforms)} seen at runtime`;
+}
+
 async function renderOverview() {
   const [ov, info, features] = await Promise.all([api('v1/overview'), getInfo(), api('v1/features').then((v) => v.features).catch(() => null)]);
   updateBadges({ pendingApprovals: ov.approvals?.pending ?? 0, findings: ov.findings });
@@ -1256,12 +1277,12 @@ function kpiTiles(ov) {
     { label: 'Total agents', value: agents.total, note: statusNote, href: '#/agents' },
     {
       label: 'Agents without owners', value: agents.without_owner, href: '#/agents?owner=none',
-      note: agents.without_owner ? 'Assign an owning team or person' : 'Every managed agent has an owner',
+      note: agents.without_owner ? 'Assign an owning team or person' : 'Every agent has an owner',
       tone: agents.without_owner ? 'warning' : null,
     },
     {
       label: 'Unmanaged agents', value: agents.unmanaged, href: '#/agents?status=discovered',
-      note: agents.unmanaged ? 'Seen at runtime, never registered' : 'No unregistered agents seen',
+      note: unmanagedNote(agents.unmanaged || 0, agents.on_platforms || 0),
       tone: agents.unmanaged ? 'serious' : null,
     },
     {
@@ -1644,7 +1665,7 @@ async function renderAgents({ params }) {
       h('button', { type: 'button', 'aria-label': `Remove filter: ${label}`, onclick: () => { clear(); apply(); sync(); search.focus(); } }, icon('x')))));
 
     let rows = agents.filter((a) => (state.status === 'all' ? a.status !== 'deleted' : a.status === state.status));
-    if (state.owner === 'none') rows = rows.filter((a) => !a.owner && a.status !== 'discovered');
+    if (state.owner === 'none') rows = rows.filter((a) => !a.owner && (a.status !== 'discovered' || isPlatformAgent(a)));
     if (state.risk === 'elevated') rows = rows.filter((a) => ['high', 'critical'].includes(a.risk?.level));
     if (state.source) rows = rows.filter((a) => a.source === state.source);
     countEl.textContent = plural(rows.length, 'agent');
@@ -1830,10 +1851,12 @@ function agentHeader(a) {
     agentToolbar(a));
 }
 
-// Sponsors attest their own agents; admins any agent.
+// Sponsors attest their own agents, whatever their role (signed in, or with an approver's
+// key named after them); admins any agent.
 function mayAttest(a) {
   if (!ATTESTABLE.has(a.status)) return false;
-  return can('admin') || (can('approve') && (a.sponsors || []).includes(me?.name));
+  const sponsor = (a.sponsors || []).some((s) => String(s).toLowerCase() === String(me?.name || '').toLowerCase());
+  return can('admin') || (sponsor && (me?.via === 'session' || can('approve')));
 }
 
 function agentToolbar(a) {
@@ -3523,31 +3546,62 @@ async function renderFindings({ params }) {
     status: statuses.some(([k]) => k === params.get('status')) ? params.get('status') : 'open',
     severity: params.get('severity') || '',
     category: params.get('category') || '',
+    type: params.get('type') || '',
   };
-  // People without a role see the issues sent to them; everyone else, every finding, or theirs.
-  const source = (status) => (person ? `v1/me/issues?status=${encodeURIComponent(status)}`
-    : status === 'mine' ? 'v1/me/issues?status=open' : `v1/findings?status=${encodeURIComponent(status)}`);
-  const [initial, agents] = await Promise.all([
-    api(source(state.status)),
+  // People without a role see the issues sent to them; everyone else, every finding, or
+  // theirs. Findings come a page at a time, newest first; the control plane says how many
+  // there are in all.
+  const PAGE = 500;
+  const source = (status, offset) => (person ? `v1/me/issues?status=${encodeURIComponent(status)}`
+    : status === 'mine' ? 'v1/me/issues?status=open'
+    : `v1/findings?status=${encodeURIComponent(status)}&limit=${PAGE}&offset=${offset}${state.type ? `&type=${encodeURIComponent(state.type)}` : ''}`);
+  async function fetchPage(status, offset = 0) {
+    const res = await api(source(status, offset), { raw: true });
+    const rows = await res.json();
+    const counted = res.headers.get('X-Total-Count');
+    return { rows, total: counted === null ? offset + rows.length : Number(counted) };
+  }
+  const [initial, agents, types] = await Promise.all([
+    fetchPage(state.status),
     person ? [] : api('v1/agents?include_deleted=true').catch(() => []),
+    person ? [] : api('v1/finding-types').catch(() => []),
   ]);
-  let list = initial;
+  let list = initial.rows;
+  let total = initial.total;
   const agentsById = new Map(agents.map((a) => [a.id, a]));
-  const badge = () => { if (state.status === 'open') updateBadges({ findings: summarizeFindings(list) }); };
+  // The page may hold only the newest of them: the badge counts them all.
+  const badge = () => { if (state.status === 'open') refreshBadges(); };
   badge();
 
   const statusHost = h('div', { class: 'seg', role: 'group', 'aria-label': 'Finding status' });
   const sevHost = h('div', { class: 'seg', role: 'group', 'aria-label': 'Severity' });
   const category = h('select', { id: 'finding-category', 'data-focus-key': 'finding-category' },
     [['', 'All categories'], ['threat', 'Threats'], ['posture', 'Posture']].map(([v, l]) => h('option', { value: v, selected: v === state.category }, l)));
+  const typeSelect = person ? null : h('select', { id: 'finding-type', 'data-focus-key': 'finding-type' },
+    h('option', { value: '' }, 'All types'),
+    types.filter((t) => t.total || t.type === state.type).map((t) => h('option', { value: t.type, selected: t.type === state.type },
+      t.open ? `${t.type} (${fmt(t.open)} open)` : t.type)));
   const countEl = h('p', { class: 'result-count', 'aria-live': 'polite' });
+  const more = h('button', {
+    type: 'button', class: 'btn btn--sm btn--ghost',
+    onclick: async () => {
+      try {
+        const page = await fetchPage(state.status, list.length);
+        list = list.concat(page.rows);
+        total = page.total;
+        apply();
+      } catch (err) {
+        toast(err.message, { tone: 'critical' });
+      }
+    },
+  });
   const listHost = h('div', { class: 'finding-list' });
   const listTitle = h('h2', { class: 'sr-only', tabindex: '-1', id: 'finding-list-title' }, 'Findings');
 
-  const sync = () => setHashQuiet('/findings', { status: state.status === 'open' ? '' : state.status, severity: state.severity, category: state.category });
+  const sync = () => setHashQuiet('/findings', { status: state.status === 'open' ? '' : state.status, severity: state.severity, category: state.category, type: state.type });
 
   async function reload() {
-    list = await api(source(state.status));
+    ({ rows: list, total } = await fetchPage(state.status));
     badge();
   }
 
@@ -3599,7 +3653,13 @@ async function renderFindings({ params }) {
       .sort((x, y) => SEVERITY_ORDER.indexOf(x.severity) - SEVERITY_ORDER.indexOf(y.severity) || String(y.last_seen).localeCompare(String(x.last_seen)));
     const word = person || state.status === 'mine' ? 'issue' : 'finding';
     const which = ['all', 'mine'].includes(state.status) ? '' : `${statusMeta('finding', state.status)[2].toLowerCase()} `;
-    countEl.textContent = plural(rows.length, `${which}${word}`);
+    // Counted among those loaded: say so when there are more.
+    const capped = total > list.length;
+    countEl.textContent = !capped ? plural(rows.length, `${which}${word}`)
+      : rows.length === list.length ? `The newest ${fmt(list.length)} of ${plural(total, `${which}${word}`)}`
+        : `${plural(rows.length, `${which}${word}`)} among the newest ${fmt(list.length)} of ${fmt(total)}`;
+    more.hidden = !capped;
+    more.textContent = `Show ${fmt(Math.min(PAGE, total - list.length))} more`;
     const yours = person || state.status === 'mine';
     listHost.replaceChildren(...(rows.length
       ? rows.map((f) => findingCard(f, agentsById, (action) => act(f, action, rows), { yours }))
@@ -3607,6 +3667,12 @@ async function renderFindings({ params }) {
   }
 
   category.addEventListener('change', () => { state.category = category.value; apply(); sync(); });
+  typeSelect?.addEventListener('change', async () => {
+    state.type = typeSelect.value;
+    sync();
+    try { await reload(); } catch (err) { toast(err.message, { tone: 'critical' }); }
+    apply();
+  });
   apply();
   return h('div', { class: 'page', 'data-title': person ? 'Your issues' : 'Findings' },
     pageHead({
@@ -3618,8 +3684,9 @@ async function renderFindings({ params }) {
     }),
     findingTabs('findings'),
     h('div', { class: 'filters' }, statusHost,
-      h('div', { class: 'field', style: 'flex:0 1 180px' }, h('label', { for: 'finding-category', class: 'sr-only' }, 'Category'), category)),
-    h('div', { class: 'filters' }, sevHost, countEl),
+      h('div', { class: 'field', style: 'flex:0 1 180px' }, h('label', { for: 'finding-category', class: 'sr-only' }, 'Category'), category),
+      typeSelect ? h('div', { class: 'field', style: 'flex:0 1 260px' }, h('label', { for: 'finding-type', class: 'sr-only' }, 'Type'), typeSelect) : null),
+    h('div', { class: 'filters' }, sevHost, countEl, more),
     listTitle,
     listHost);
 }
@@ -3756,9 +3823,35 @@ async function renderFinding({ match }) {
         h('div', { class: 'btn-row' }, findingActions(f, act, { yours: f.yours, detail: true }))),
     }),
     f.type.startsWith('access.') ? await findingAccessCard(f) : null,
+    findingAttestCard(f),
     chainCard(f),
     notificationsCard(f),
     historyCard(f));
+}
+
+// An issue that an agent's review is due: its sponsors attest it from here, whatever their
+// role (the people the issue reached see this page, not the agent's).
+function findingAttestCard(f) {
+  if (!f.type.startsWith('agent.attestation') || !f.agent_id || f.status !== 'open') return null;
+  if (!f.yours && !can('admin')) return null;
+  const attest = guarded(async () => {
+    const values = await ask({
+      title: 'Attest this agent?',
+      text: 'Confirm that it is still needed and that its access is still right. Its sponsors do this.',
+      iconName: 'shield-check', confirm: 'Attest',
+      fields: [{ id: 'note', label: 'Note (optional)', type: 'textarea', hint: 'Recorded in the evidence ledger.' }],
+    });
+    if (!values) return;
+    const updated = await api(`v1/agents/${encodeURIComponent(f.agent_id)}/attest`, { method: 'POST', body: values.note ? { note: values.note } : {} });
+    const due = updated.attestation?.expires_at;
+    toast(due ? `Attested: reviewed again on ${due.slice(0, 10)}. The issue closes at the next check.` : 'Attested. The issue closes at the next check.');
+  });
+  return card({
+    title: 'Is it still needed?',
+    body: h('div', { class: 'stack' },
+      h('p', {}, 'One of its sponsors confirms that it is still needed and that its access is still right. If it isn\'t needed, say so to an administrator, who deletes it.'),
+      h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn--primary btn--sm', onclick: attest }, icon('shield-check'), 'Attest'))),
+  });
 }
 
 // An issue about an access package: what it is, and renewing, keeping or removing it.

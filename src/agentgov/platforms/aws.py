@@ -650,7 +650,7 @@ def _tool_risk(name: str, risky: list[tuple[str, str]]) -> list[Risk]:
             + ", ".join(tool for tool, _ in risky)
             + ".",
             "Keep these tools to agents that need them, behind a guardrail, or confirm the agent "
-            "needs them and dismiss this finding.",
+            "needs them and ask an approver to accept its risk.",
             {"tools": [tool for tool, _ in risky]},
         )
     ]
@@ -754,7 +754,7 @@ def bedrock_agent(
                 "Nothing filters what the agent is asked or answers: harmful content, prompt "
                 "attacks or sensitive information.",
                 "Associate an Amazon Bedrock guardrail with the agent, or confirm none is "
-                "needed and dismiss this finding.",
+                "needed and ask an approver to accept its risk.",
             )
         )
     return Found(
@@ -1206,7 +1206,7 @@ def quick_agent(
                 + ", ".join(namespaces)
                 + ".",
                 "Share it with the users and groups that need it, or confirm everyone should "
-                "have it and dismiss this finding.",
+                "have it and ask an approver to accept its risk.",
                 {"namespaces": namespaces},
             )
         )
@@ -1257,7 +1257,7 @@ def quick_agent(
                 + ", ".join(sorted(shared))
                 + ".",
                 "Use connectors that sign in as each user (OAuth authorization code), or confirm "
-                "the shared access is intended and dismiss this finding.",
+                "the shared access is intended and ask an approver to accept its risk.",
                 {"connectors": sorted(shared)},
             )
         )

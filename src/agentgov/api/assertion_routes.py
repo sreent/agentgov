@@ -51,7 +51,7 @@ def metadata(request: Request) -> dict[str, Any]:
 def jwks(request: Request) -> JSONResponse:
     """The public key authorization servers check AgentGov's assertions with. Served with
     the feature off too, while assertions given before may still be traded."""
-    key = assertions.signing_key(_rt(request).settings.service_token)
+    key = assertions.signing_key(_rt(request).settings.key_secret)
     return JSONResponse(assertions.jwks(key), headers={"Cache-Control": "public, max-age=300"})
 
 
@@ -141,7 +141,7 @@ def _exchange(rt: Any, body: bytes, kind: str) -> dict[str, Any]:
             "invalid_request", "send the request as a form (application/x-www-form-urlencoded)"
         )
     request = assertions.parse(assertions.form(body))
-    key = assertions.signing_key(settings.service_token)
+    key = assertions.signing_key(settings.key_secret)
     if key is None or not (settings.keycloak_issuer and settings.keycloak_jwks_url):
         raise assertions.Refused(
             "temporarily_unavailable", "AgentGov isn't set up to give identity assertions", 503

@@ -103,8 +103,9 @@ def scan(
                 "medium",
                 f"Attestation for {agent.name} expired",
                 agent_id=agent.id,
-                remediation="A sponsor should confirm the agent is still needed "
-                "(POST /v1/agents/{id}/attest) or delete it.",
+                remediation="One of its sponsors confirms it is still needed: Attest, on its "
+                "issue or its page in AgentGov, or `agentgov agents attest NAME`. If it isn't "
+                "needed, an administrator deletes it.",
             )
         stale_cutoff = now - timedelta(days=settings.stale_agent_days)
         last = agent.last_seen_at or agent.created_at

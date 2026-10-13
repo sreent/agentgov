@@ -198,7 +198,8 @@ the gateway. It shows each control in turn:
     alice, in cx-platform, sees them in AgentGov and acknowledges one.
 19. **Management rules**: a rule that deletes agents blocked for 30 days matches the demo
     agent, blocked in step 13. Enforced, it tells the agent's owner and sponsor first, with
-    the date; alice accepts the risk until a later one, and the rule leaves the agent be.
+    the date. alice, its sponsor, can't accept the risk; an administrator accepts it until
+    a later date, and the rule leaves the agent be.
 20. **Evidence**: every decision is in a ledger whose hash chain verifies. An
     administrator keeps a checkpoint of it, which a time-stamping authority signs (the
     sink stands in for one) and OpenSSL verifies, and which goes into a transparency log

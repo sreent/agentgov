@@ -103,6 +103,10 @@ class Settings:
     # Shared token for internal components (OPA, governance processor, OTel
     # collector) calling the control plane.
     service_token: str | None = None
+    # The secret the keys AgentGov signs delegations and ID-JAGs with derive from. Only the
+    # control plane and the processor hold it; without it, the keys derive from the service
+    # token, which OPA and the OTel Collector hold too.
+    signing_secret: str | None = None
     # Features pinned by the deployment, e.g. "least-privilege=monitor,discovery=off"
     # (docs/features.md). Administrators choose the others in the app.
     features: str = ""
@@ -859,6 +863,12 @@ class Settings:
     @property
     def keycloak_enabled(self) -> bool:
         return bool(self.keycloak_url and self.keycloak_client_secret)
+
+    @property
+    def key_secret(self) -> str | None:
+        """What AgentGov's signing keys derive from: the signing secret, or else the
+        service token."""
+        return self.signing_secret or self.service_token
 
     @property
     def sso_enabled(self) -> bool:

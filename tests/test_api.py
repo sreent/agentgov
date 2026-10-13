@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.opa import WHAT_IF
+from agentgov.registry import findings
 from tests.conftest import ADMIN, SERVICE, seed
 
 
@@ -433,6 +435,41 @@ class TestGovernance:
             == "open"
         )
 
+    def test_findings_come_a_page_at_a_time_with_their_total(self, client) -> None:
+        seed(client)
+        rt = client.app.state.rt
+        with rt.db.session() as s:
+            for n in range(3):
+                findings.raise_finding(
+                    s, type="destination.failing", severity="high", subject=f"d{n}", title=f"d{n}"
+                )
+            findings.raise_finding(
+                s, type="opa.bundle_error", severity="low", subject="o", title="o"
+            )
+        first = client.get("/v1/findings", params={"limit": 2}, headers=ADMIN)
+        assert (len(first.json()), first.headers["x-total-count"]) == (2, "4")
+        rest = client.get("/v1/findings", params={"limit": 2, "offset": 2}, headers=ADMIN).json()
+        assert {f["id"] for f in first.json()}.isdisjoint(f["id"] for f in rest)
+        assert len(rest) == 2
+        failing = client.get("/v1/findings", params={"type": "destination.failing"}, headers=ADMIN)
+        assert (len(failing.json()), failing.headers["x-total-count"]) == (3, "3")
+        assert client.get("/v1/findings", params={"limit": 0}, headers=ADMIN).status_code == 422
+        assert client.get("/v1/findings", params={"offset": -1}, headers=ADMIN).status_code == 422
+
+    def test_the_overview_counts_imported_agents_without_owners(self, client) -> None:
+        """Agents found on platforms arrive without an owner: the overview says so, and
+        says they were found there rather than seen in traffic."""
+        seed(client)  # support-bot, which has an owner
+        imported = [
+            {"name": f"bot-{n}", "type": "microsoft.copilotstudio/agents", "properties": {}}
+            for n in (1, 2)
+        ]
+        client.post(
+            "/v1/platforms/copilot-studio/import", json=imported, headers=ADMIN
+        ).raise_for_status()
+        agents = client.get("/v1/overview", headers=ADMIN).json()["agents"]
+        assert (agents["without_owner"], agents["unmanaged"], agents["on_platforms"]) == (2, 2, 2)
+
     def test_overview_and_graph(self, client) -> None:
         agent = seed(client)
         client.post(
@@ -519,7 +556,7 @@ class TestIntegrations:
             content=gzip.compress(json.dumps(events).encode()),
             headers={**SERVICE, "Content-Encoding": "gzip", "Content-Type": "application/json"},
         )
-        assert resp.json() == {"stored": 1}
+        assert resp.json() == {"stored": 1, "skipped": 0}
         entry = client.get(
             "/v1/ledger", params={"type": "decision.inprocess"}, headers=ADMIN
         ).json()[0]
@@ -528,6 +565,40 @@ class TestIntegrations:
             "deny",
             "shell",
         )
+
+    def test_decision_records_a_processor_lost_are_in_the_ledger(self, client) -> None:
+        resp = client.post(
+            "/v1/internal/decisions", json={"records": [], "dropped": 7}, headers=SERVICE
+        )
+        assert resp.status_code == 200, resp.text
+        [entry] = client.get(
+            "/v1/ledger", params={"type": "decisions.dropped"}, headers=ADMIN
+        ).json()
+        assert (entry["severity"], entry["details"]["count"]) == ("warning", 7)
+        odd = client.post(
+            "/v1/internal/decisions", json={"records": [], "dropped": "x"}, headers=SERVICE
+        )
+        assert odd.status_code == 422
+
+    def test_opa_decision_logs_keep_only_agents_own_decisions(self, client) -> None:
+        """OPA can still send the decisions the processor and the control plane asked for
+        (a bundle from before it dropped them), and what-if questions: none is an agent's
+        own decision, and an AuthZEN permit is no denial."""
+        seed(client)
+        tool_call = {"agent_id": "support-bot", "action_type": "tool_call", "tool_name": "shell"}
+        events = [
+            {"path": "agentgov/authzen/evaluation", "result": {"decision": True}, "input": {}},
+            {"path": "agentgov/copilotstudio/decision", "result": {"allow": False}},
+            {"path": "registry/features", "result": {"data-protection": "enforce"}},
+            {"path": "agentos/allow", "result": False, "input": {**tool_call, WHAT_IF: True}},
+            {"decision_id": "d2", "path": "agentos/allow", "result": True, "input": tool_call},
+        ]
+        resp = client.post("/v1/opa/logs", json=events, headers=SERVICE)
+        assert resp.json() == {"stored": 1, "skipped": 4}
+        entries = client.get(
+            "/v1/ledger", params={"type": "decision.inprocess"}, headers=ADMIN
+        ).json()
+        assert [e["decision"] for e in entries] == ["allow"]
 
     def test_opa_status_errors_raise_a_finding(self, client) -> None:
         status = {

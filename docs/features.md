@@ -246,6 +246,11 @@ The processor knows the modes from OPA, and from the control plane's answer to e
 reports, so it still knows them while OPA is down; until it has heard from either, it takes
 the features' defaults, in which most controls are enforced.
 
+While the control plane is down, calls are still decided: each processor keeps their
+records, up to 10,000, and sends them once it is back. Should more pile up, the oldest are
+lost, and the ledger says how many with a warning (`decisions.dropped`) as soon as the
+control plane is back: the gap is in the evidence, not hidden.
+
 The Features page shows what each processor does when something is down, beside what it
 can reach.
 

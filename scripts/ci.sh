@@ -268,7 +268,9 @@ lint_docs() {
 lint_compose() {
   local file
   for file in docker-compose.yml docker-compose.inventory.yml; do
-    docker compose -f "deploy/compose/$file" config --quiet || return 1
+    # The inventory stack refuses to start without an admin token of its own.
+    AGENTGOV_ADMIN_TOKEN=lint docker compose -f "deploy/compose/$file" config --quiet ||
+      return 1
   done
   for file in deploy/compose/docker-compose.*.yml; do
     case "$file" in */docker-compose.inventory.yml) continue ;; esac
@@ -544,14 +546,20 @@ inventory_end_to_end() {
     echo "port 8000 in use. Stop the stack that has it first"
     return 1
   fi
-  if ! "${compose[@]}" up -d --no-build --wait --wait-timeout 300 >/dev/null; then
+  # It has no token everybody knows: without one of its own, it doesn't start.
+  if AGENTGOV_ADMIN_TOKEN= "${compose[@]}" config --quiet >/dev/null 2>&1; then
+    echo "the inventory stack starts without an admin token"
+    return 1
+  fi
+  local token
+  token=$(python -c 'import secrets; print(secrets.token_hex(16))')
+  if ! AGENTGOV_ADMIN_TOKEN=$token "${compose[@]}" up -d --no-build --wait --wait-timeout 300 >/dev/null; then
     "${compose[@]}" logs --no-color --tail 100 || true
     "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
     return 1
   fi
-  AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=dev-admin-token \
-    python scripts/check-inventory.py &&
-    AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=dev-admin-token agentgov ledger verify ||
+  AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=$token python scripts/check-inventory.py &&
+    AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=$token agentgov ledger verify ||
     rc=1
   [ "$rc" = 0 ] || "${compose[@]}" logs --no-color --tail 100 || true
   "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true

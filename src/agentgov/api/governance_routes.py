@@ -11,7 +11,7 @@ from typing import Any
 
 import anyio.to_thread
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 
@@ -27,6 +27,7 @@ from agentgov.models import (
     LedgerEntry,
     ToolServer,
 )
+from agentgov.opa import WHAT_IF
 from agentgov.opa.bundle import opa_status
 from agentgov.registry import (
     access_packages,
@@ -139,25 +140,44 @@ def configure_finding_type(
         return finding_types.configure(s, type_, body, actor=principal.actor)
 
 
+MAX_FINDINGS_PAGE = 2000
+
+
 @router.get("/findings", tags=["findings"])
 def list_findings(
     request: Request,
+    response: Response,
     status: str | None = "open",
     severity: str | None = None,
     type: str | None = None,
     agent: str | None = None,
+    limit: int = 500,
+    offset: int = 0,
     _: Principal = Depends(read),
 ) -> list[dict[str, Any]]:
+    """The findings, newest first, a page at a time (``limit``, at most 2000, from
+    ``offset``); ``X-Total-Count`` says how many there are in all."""
+    if not 1 <= limit <= MAX_FINDINGS_PAGE or offset < 0:
+        raise ValidationError(f"limit is 1 to {MAX_FINDINGS_PAGE}, and offset 0 or more")
     with _rt(request).db.session() as s:
-        stmt = select(Finding).order_by(Finding.last_seen.desc()).limit(500)
+        conditions = []
         if status and status != "all":
-            stmt = stmt.where(Finding.status == status)
+            conditions.append(Finding.status == status)
         if severity:
-            stmt = stmt.where(Finding.severity == severity)
+            conditions.append(Finding.severity == severity)
         if type:
-            stmt = stmt.where(Finding.type == type)
+            conditions.append(Finding.type == type)
         if agent:
-            stmt = stmt.where(Finding.agent_id == agents.get(s, agent).id)
+            conditions.append(Finding.agent_id == agents.get(s, agent).id)
+        total = s.scalar(select(func.count()).select_from(Finding).where(*conditions))
+        response.headers["X-Total-Count"] = str(total or 0)
+        stmt = (
+            select(Finding)
+            .where(*conditions)
+            .order_by(Finding.last_seen.desc(), Finding.id)
+            .limit(limit)
+            .offset(offset)
+        )
         return [findings.to_dict(f) for f in s.scalars(stmt)]
 
 
@@ -234,7 +254,12 @@ def accept_finding(
         handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
         finding = findings.get(s, finding_id)
         accepted = issues.accept(
-            s, finding, reason=body.get("reason"), until=body.get("until"), actor=principal.actor
+            s,
+            finding,
+            reason=body.get("reason"),
+            until=body.get("until"),
+            actor=principal.actor,
+            by=principal.name,
         )
         return findings.to_dict(accepted)
 
@@ -379,10 +404,18 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
             "agents": {
                 "total": len(all_agents),
                 "by_status": dict(by_status),
+                # Agents found on platforms count: who owns them is the question. Agents
+                # seen in traffic are unmanaged, whose owner comes with adopting them.
                 "without_owner": sum(
-                    1 for a in all_agents if not a.owner and a.status != DISCOVERED
+                    1
+                    for a in all_agents
+                    if not a.owner and (a.status != DISCOVERED or a.on_platform)
                 ),
                 "unmanaged": by_status.get(DISCOVERED, 0),
+                # Of those, the ones found on platforms rather than seen in traffic.
+                "on_platforms": sum(
+                    1 for a in all_agents if a.status == DISCOVERED and a.on_platform
+                ),
                 "at_risk": len(risky),
             },
             "toolservers": {
@@ -544,9 +577,13 @@ def evaluate_policy(
     if not isinstance(path, str) or not path.replace("/", "").replace("_", "").isalnum():
         raise ValidationError("path must look like agentgov/mcp/decision")
     try:
+        question = body.get("input", {})
+        if isinstance(question, dict):
+            # Not a decision anyone made: OPA doesn't log it (agentgov.opa.bundle).
+            question = {**question, WHAT_IF: True}
         resp = httpx.post(
             f"{rt.settings.opa_url.rstrip('/')}/v1/data/{path}",
-            json={"input": body.get("input", {})},
+            json={"input": question},
             timeout=5,
             verify=rt.tls.client_context() if rt.tls else True,
         )
