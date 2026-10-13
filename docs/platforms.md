@@ -162,20 +162,22 @@ connector is approved, nothing is flagged. After that, every agent that uses a c
 not on the list gets a `platform.unapproved_connector` finding. Approving or removing a
 connector is recorded in the ledger and takes effect at once.
 
-On its own, the allowlist reports; it does not enforce. Two optional connections make it
-enforce:
+### When an agent uses a connector that isn't approved
 
-* **Push to Power Platform** (`agentgov platforms push-connector-policy`) makes Power
-  Platform block every other connector, as an [advanced connector
-  policy](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform)
-  on the environments an admin picks. It applies to apps and flows as well as agents, so
-  AgentGov shows what it would do first.
-* [Copilot Studio threat
-  detection](microsoft-connections.md#copilot-studio-threat-detection) blocks a tool call
-  that uses a connector not on the list, when Copilot Studio names the connector.
+What AgentGov does is yours to choose, from telling the agent's people to stopping it:
 
-Without either, use Power Platform data policies (DLP) and keep them consistent with the
-allowlist.
+| What happens | When | How to choose |
+|---|---|---|
+| **It is flagged.** A `platform.unapproved_connector` finding, high severity, goes to the agent's owner, then its sponsors, then its team, by email and in their chats | At each inventory sync, once the allowlist lists a connector | On unless you turn the finding type off or change its severity ([kinds of findings](issues.md#kinds-of-findings)); who gets a message is up to the [issues](issues.md#fewer-messages) settings |
+| **Its calls through that connector are refused** as they happen | Each tool call, while [Copilot Studio threat detection](microsoft-connections.md#copilot-studio-threat-detection) is enforced | The `connector-allowlist` control: enforce (the default) refuses them, monitor lets them through and records them, off doesn't check. It can differ for some agents ([exceptions](features.md#exceptions)), such as monitored in a pilot environment and enforced elsewhere |
+| **It is blocked**, so it makes no tool calls at all | A management rule's days of notice after the rule told the agent's people | A rule on the finding, such as the example `unapproved-connectors` ([management rules](management-rules.md#examples)). It blocks Copilot Studio agents while threat detection is enforced, since Copilot Studio then asks AgentGov before each call; otherwise its issue says to quarantine the agent |
+| **It is quarantined**: it stops working in every channel, though its makers can still test it | When an administrator does it | By hand: **Quarantine** on the agent's page, for an administrator signed in through Microsoft Entra ID ([below](#acting-as-the-signed-in-admin)), or in the Power Platform admin center. Microsoft's quarantine API takes a signed-in administrator only, so AgentGov can't quarantine an agent on its own |
+| **Makers can't use the connector** in the first place | Once pushed | **Push to Power Platform** (`agentgov platforms push-connector-policy`): Power Platform blocks every other connector, as an [advanced connector policy](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform), on the environments an admin picks. It applies to apps and flows as well as agents, so AgentGov shows what it would do first |
+
+Without threat detection or the pushed policy, the allowlist flags agents but stops
+nothing: use Power Platform data policies (DLP) as well, and keep them consistent with the
+allowlist. The **Connectors** table on the Platforms page says what happens to calls
+through connectors that aren't approved, as things are set now.
 
 ## Acting as the signed-in admin
 

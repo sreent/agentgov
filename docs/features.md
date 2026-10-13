@@ -144,6 +144,7 @@ describes. Turning one off stops it even where it is configured.
 | `defender` | off, **on** | Turns Defender's alerts about agents into findings |
 | `entra-access-packages` | off, **inform**, manage | Reads the access packages Microsoft Entra ID Governance assigns agents' Entra identities, and raises an [issue](issues.md) before one expires. Managed, administrators also assign and remove them from AgentGov; informed, nothing is written into Entra ([Entra access packages](microsoft-connections.md#microsoft-entra-access-packages)) |
 | `copilot-studio-threat-detection` | **off**, monitor, enforce | Answers Copilot Studio before each tool call its agents make. Monitor tells Copilot Studio to go ahead and records what would have been blocked. Off, AgentGov's endpoint refuses Copilot Studio's calls. Needs `AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS` and the tenant ID, and OPA to enforce |
+| `connector-allowlist` | off, monitor, **enforce** | What Copilot Studio threat detection does with a tool call through a connector that isn't on the allowlist: refuses it, lets it through and records it, or doesn't check. Agents that use such a connector are flagged in any mode. Takes [exceptions](#exceptions) ([platforms](platforms.md#when-an-agent-uses-a-connector-that-isnt-approved)) |
 
 ### Other platforms
 
@@ -197,6 +198,7 @@ in a row, or three minutes, whichever is longer, is out of touch and doesn't cou
 | `external-decision-point` | no `AGENTGOV_AUTHZEN_URL` where the processor runs: inactive; unreachable: failing while enforced with `AGENTGOV_AUTHZEN_FAILURE_MODE=closed`, limited otherwise |
 | `token-budgets` | no `AGENTGOV_GATEWAY_OTLP_ENDPOINT`: inactive, since usage isn't metered |
 | `authzen-decision-point`, `copilot-studio-threat-detection` | OPA unreachable from the control plane: failing |
+| `connector-allowlist` | Copilot Studio threat detection off: inactive, since calls aren't checked as they run; in monitor mode: limited; an empty allowlist: inactive; OPA unreachable from the control plane: failing |
 | `developer-sign-in`, `identity-assertions`, `approvals-by-person` | Keycloak's keys unreachable from the control plane: limited |
 | The Microsoft connections | not set up, or the app lacks the permission: inactive; the last sync failed: limited |
 | The other platforms | not configured: inactive; the last sync didn't read everything: limited |
@@ -260,9 +262,9 @@ can reach.
 
 ## Exceptions
 
-A control at the gateway can have another mode for some agents: enforced for one team
-while the rest are monitored, or monitored for a team that isn't ready yet while the rest
-are enforced. Each exception is a mode and a scope, which names agents as
+A control at the gateway, or the `connector-allowlist` for Copilot Studio's agents, can
+have another mode for some agents: enforced for one team while the rest are monitored, or
+monitored for a team that isn't ready yet while the rest are enforced. Each exception is a mode and a scope, which names agents as
 [management rules](management-rules.md#which-agents) do: by blueprint, team (the agent's
 own, or its blueprint's), environment, the platform it runs on (`gateway` for agents
 AgentGov's gateway serves) and labels; every key a scope has must match. An agent takes

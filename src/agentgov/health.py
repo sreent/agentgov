@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.config import FAILURE_SETTINGS, Settings
-from agentgov.models import ComponentReport, Destination, PlatformSync
+from agentgov.models import ApprovedConnector, ComponentReport, Destination, PlatformSync
 from agentgov.registry import features
 from agentgov.registry.errors import ValidationError
 
@@ -179,6 +179,8 @@ class Situation:
     # The other platforms: whether each is configured, and its last sync.
     platforms: dict[str, dict[str, Any]] = field(default_factory=dict)
     destinations: int = 0
+    # Connectors on the allowlist (Platforms, Connectors).
+    approved_connectors: int = 0
 
     @property
     def fresh(self) -> list[dict[str, Any]]:
@@ -208,6 +210,7 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
         connections={row["key"]: row for row in connections.state(session, settings)},
         platforms=rows,
         destinations=len(list(session.scalars(select(Destination.id)))),
+        approved_connectors=len(list(session.scalars(select(ApprovedConnector.connector_id)))),
     )
 
 
@@ -432,13 +435,34 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
             )
         )
     elif key in ("authzen-decision-point", "copilot-studio-threat-detection"):
-        opa = s.control_plane.get("opa") or check(False)
-        if opa["configured"] and not opa["ok"]:
+        out += _opa_down(s)
+    elif key == "connector-allowlist":
+        detection = s.modes.get("copilot-studio-threat-detection")
+        if detection == features.OFF:
             out.append(
                 (
-                    FAILING,
-                    f"OPA isn't reachable from the control plane{_with(opa['detail'])}: "
-                    "decisions that need it fail until it is.",
+                    INACTIVE,
+                    "Copilot Studio threat detection is off, so nothing checks agents' tool "
+                    "calls as they run: agents that use a connector not on the allowlist are "
+                    "flagged only.",
+                )
+            )
+        else:
+            if detection == features.MONITOR:
+                out.append(
+                    (
+                        LIMITED,
+                        "Copilot Studio threat detection is in monitor mode, so calls through "
+                        "connectors not on the allowlist are recorded, not refused.",
+                    )
+                )
+            out += _opa_down(s)
+        if not s.approved_connectors:
+            out.append(
+                (
+                    INACTIVE,
+                    "The allowlist has no connector yet, so no connector is checked: approve "
+                    "the ones your organisation allows (Platforms, Connectors).",
                 )
             )
     elif key in ("developer-sign-in", "identity-assertions", "approvals-by-person"):
@@ -463,6 +487,19 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
     elif key in s.platforms:
         out += _platform(key, s.platforms[key])
     return out
+
+
+def _opa_down(s: Situation) -> list[tuple[str, str]]:
+    opa = s.control_plane.get("opa") or check(False)
+    if opa["configured"] and not opa["ok"]:
+        return [
+            (
+                FAILING,
+                f"OPA isn't reachable from the control plane{_with(opa['detail'])}: "
+                "decisions that need it fail until it is.",
+            )
+        ]
+    return []
 
 
 def _connection(row: dict[str, Any]) -> list[tuple[str, str]]:

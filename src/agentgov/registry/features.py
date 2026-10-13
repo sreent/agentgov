@@ -660,6 +660,22 @@ CATALOG: tuple[Feature, ...] = (
         needs="AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS and the tenant ID (and OPA to enforce)",
     ),
     Feature(
+        "connector-allowlist",
+        "Connector allowlist",
+        "microsoft",
+        "What Copilot Studio threat detection does with a tool call through a connector that "
+        "isn't on the allowlist (Platforms, Connectors), once the allowlist lists one. Agents "
+        "that use such a connector are flagged in any mode (platform.unapproved_connector).",
+        CONTROL,
+        ENFORCE,
+        {
+            ENFORCE: "The call is refused.",
+            MONITOR: "The call goes through; that AgentGov would have refused it is recorded.",
+            OFF: "The call goes through.",
+        },
+        needs="Copilot Studio threat detection, to check calls as they run",
+    ),
+    Feature(
         "aws",
         "AWS agents",
         "platforms",
@@ -769,8 +785,12 @@ GATEWAY_CONTROLS = (
 )
 GATEWAYS = ("mcp-gateway", "model-gateway", "a2a-gateway")
 # The controls whose mode can differ for some agents (docs/features.md#exceptions): every
-# control at the gateway but unknown-callers, whose callers aren't agents.
-SCOPABLE = tuple(key for key in GATEWAY_CONTROLS if key != "unknown-callers")
+# control at the gateway but unknown-callers, whose callers aren't agents, and the connector
+# allowlist, which Copilot Studio's agents' tool calls are checked against.
+SCOPABLE = (
+    *(key for key in GATEWAY_CONTROLS if key != "unknown-callers"),
+    "connector-allowlist",
+)
 # A label administrators put on an agent to exempt it from controls: "*", or the controls'
 # keys, comma-separated. For that agent, an enforced control it names is monitored.
 EXEMPT_LABEL = "agentgov/exempt-controls"
