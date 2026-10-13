@@ -140,7 +140,9 @@ The gateway also tells the agent called, in plain headers:
 | `X-AgentGov-Chain` | The chain so far, such as `sam > support-bot` |
 
 AgentGov sets all four on every call it passes on, over any a caller sent, so an agent
-called through the gateway can rely on them. Agents can carry the delegation without
+called through the gateway can rely on them: the gateway drops the plain ones a caller
+sends as the call arrives, and with them every other header named as AgentGov's (those
+it tells its processor, from the caller's token). Agents can carry the delegation without
 reading it, as OAuth
 [transaction tokens](https://datatracker.ietf.org/doc/draft-ietf-oauth-transaction-tokens/)
 carry the context of a request between workloads: it is a JWT that AgentGov's processors
@@ -379,7 +381,8 @@ demo cluster) that looks customers up in the CRM through the gateway. The
 * A call the gateway can't check (the processor or OPA down) goes through unchecked while
   no control at the gateway is enforced, or while `AGENTGOV_GATEWAY_FAILURE_MODE` is open
   ([when something is down](features.md#when-something-is-down)). It carries no
-  delegation from AgentGov, so agents that refuse calls without one refuse it too.
+  delegation from AgentGov for the agent called (only the caller's own, if it sent one)
+  and none of the plain headers, so agents that refuse calls without one refuse it too.
 * A delegation is a bearer token: whoever holds one can present it until it expires. The
   agent it was given to holds it, and sends it with its calls through the gateway; the
   `iat` check above keeps an agent from taking it as proof for a later call.

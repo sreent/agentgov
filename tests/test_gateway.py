@@ -12,7 +12,13 @@ import yaml
 from fastapi.testclient import TestClient
 
 from agentgov.config import Settings
-from agentgov.gateway import render, to_yaml, with_available_keys, write_if_changed
+from agentgov.gateway import (
+    identity_headers,
+    render,
+    to_yaml,
+    with_available_keys,
+    write_if_changed,
+)
 from agentgov.models import Agent, ModelProvider, ToolServer
 
 IMAGE = "ghcr.io/agentgateway/agentgateway:v1.6.0"
@@ -105,6 +111,19 @@ def test_every_route_is_authenticated_and_governed() -> None:
     assert processor["metadata"]["groups"] == "jwt.groups"
     assert processor["metadata"]["act"] == "jwt.act"
     assert "authorization" in processor["requestHeaders"]["disallowed"]
+
+
+def test_callers_cannot_send_agentgovs_headers_on() -> None:
+    """The gateway drops, as a request arrives, every header that only AgentGov sets: the
+    ones the processor is told (computed from the token) and the ones a called agent is."""
+    config = render(servers(), SETTINGS, providers=providers())
+    listener = config["binds"][0]["listeners"][0]
+    dropped = set(listener["policies"]["transformations"]["request"]["remove"])
+    told = set(identity_headers(SETTINGS)) | {"x-agentgov-issuer", "x-agentgov-path"}
+    assert told | {"x-agentgov-provider", "x-agentgov-model"} <= dropped
+    assert {"x-agentgov-caller", "x-agentgov-on-behalf-of", "x-agentgov-chain"} <= dropped
+    # The delegation goes on, for the processor to check (it is signed).
+    assert "x-agentgov-delegation" not in dropped
 
 
 def test_monitor_mode_relaxes_authentication() -> None:

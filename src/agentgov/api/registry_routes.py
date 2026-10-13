@@ -40,8 +40,10 @@ router = APIRouter(prefix="/v1")
 read = require(*READ_ROLES)
 admin = require("admin")
 # Kill switches: administrators, and the security team's tools as far as the hand-off lets them
-# (for the agents of their teams, when their role is for some teams only).
+# (for the agents of their teams, when their role is for some teams only). A tool server,
+# which every team's agents use, only by roles for every team.
 kill_switch = reach.require("secops")
+org_kill_switch = require("secops")
 
 
 def _rt(request: Request) -> Any:
@@ -701,7 +703,7 @@ def approve_tool(
 
 @router.post("/toolservers/{ref}/{action}", tags=["toolservers"])
 def toolserver_action(
-    request: Request, ref: str, action: str, principal: Principal = Depends(kill_switch)
+    request: Request, ref: str, action: str, principal: Principal = Depends(org_kill_switch)
 ) -> dict[str, Any]:
     """approve (pending approval), block, unblock."""
     rt = _rt(request)

@@ -58,7 +58,9 @@ token:
                       which the processor couldn't read.
 
 Agents carry their delegation (``X-AgentGov-Delegation``) on the calls they make for the
-work they were handed, to tools and models too: the processor reads it there as well.
+work they were handed, to tools and models too: the processor reads it there as well. The
+listener drops every other header named as AgentGov's that a caller sends (``DROPPED``),
+before any route's policies: only AgentGov sets those.
 
 agentgateway watches the file and reloads it, so it only has to be rewritten
 atomically when tool servers or model providers change. The control plane serves
@@ -176,6 +178,24 @@ OWN_HEADERS = frozenset(
         "x-agentgov-act",
         "x-agentgov-sign-in",
     }
+)
+
+
+# The headers named as AgentGov's that only AgentGov sets. Those a caller sends never reach
+# the processor (agentgateway passes it only those it computes from the token), and the
+# gateway drops them as a request arrives, before any route's checks: so no agent, tool
+# server or model provider called takes a caller's for AgentGov's, even for a call let
+# through unchecked (the processor's answer sets who called an agent, after the drop). The
+# delegation a caller carries goes on, for the processor to check: it is signed.
+DROPPED = (
+    *sorted(PERSON_HEADERS.keys() | OWN_HEADERS),
+    "x-agentgov-issuer",
+    "x-agentgov-provider",
+    "x-agentgov-model",
+    "x-agentgov-path",
+    chains.CALLER_HEADER,
+    chains.PERSON_HEADER,
+    chains.CHAIN_HEADER,
 )
 
 
@@ -620,7 +640,11 @@ def render(
                 "otlp": {"host": host, "protocol": "grpc"},
             },
         }
-    config["binds"] = [{"port": settings.gateway_port, "listeners": [{"routes": routes}]}]
+    listener = {
+        "policies": {"transformations": {"request": {"remove": list(DROPPED)}}},
+        "routes": routes,
+    }
+    config["binds"] = [{"port": settings.gateway_port, "listeners": [listener]}]
     return config
 
 

@@ -204,8 +204,10 @@ def signed_in(request: Request) -> Principal:
     return principal
 
 
-def require(*roles: str) -> Callable[[Request], Principal]:
-    allowed = set(roles) | {"admin"}
+def require(*roles: str, admin: bool = True) -> Callable[[Request], Principal]:
+    """Whoever holds one of ``roles`` for every team, or is an administrator (unless
+    ``admin`` is false: then ``roles`` alone)."""
+    allowed = set(roles) | ({"admin"} if admin else set())
 
     def dependency(request: Request) -> Principal:
         principal = authenticate(request)
