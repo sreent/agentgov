@@ -262,6 +262,9 @@ organisation that doesn't act on some of them, or judges them otherwise, says so
 * **A severity of its own.** For what the type finds from then on, and what it found that is
   still open; `default` (null) goes back to its checks' own.
 
+Two types can't be turned off: `ledger.rewound` and `ledger.archive_failed`, which say the
+evidence ledger lost entries or can't be archived ([evidence](evidence.md)).
+
 ```console
 $ agentgov issues type platform.shared_with_everyone --severity low
 finding-type/platform.shared_with_everyone: on, severity low

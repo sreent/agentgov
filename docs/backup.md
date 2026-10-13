@@ -83,7 +83,10 @@ the ledger's head in a file of its own, `AGENTGOV_LEDGER_WITNESS_FILE`, on stora
 restoring the database doesn't touch, and compares the two when it starts and every hour:
 
 * **Entries are missing:** the database's ledger ends before the head in the file.
-* **Another history:** the database's entry at that place isn't the one the file names.
+* **Another history:** the database's entry at that place isn't the one the file names, or
+  it is gone and no archive accounts for it: an archive takes an entry only where the chain
+  says one did (`ledger.archived`), and only once it is older than the least retention
+  period, six months, which the file says (it keeps when that entry was written).
 
 Either is a critical issue (`ledger.rewound`), sent to the default team like any other
 ([issues](issues.md)); **Ledger** says what is missing, the overview's control plane shows
@@ -101,6 +104,11 @@ and when they were written. If nobody restored the database, find out who change
 The checkpoints' time-stamps and the transparency log show it too, outside AgentGov: a
 checkpoint the log holds that the database doesn't was written by a ledger longer than the
 one restored ([evidence](evidence.md)).
+
+Without the file, nothing in AgentGov notices a restore, nor entries removed from the end
+of the ledger, its head moved back with them; a chain rewritten with every hash worked out
+again shows only as checkpoints whose time-stamps vouch from later than their entries.
+**Features** → *What AgentGov can reach* says when no file keeps the head.
 
 | Where | How |
 |---|---|

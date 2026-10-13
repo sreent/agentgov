@@ -50,7 +50,12 @@ def list_components(request: Request, _: Principal = Depends(read)) -> dict[str,
     reaches, with whether it is in touch."""
     rt = request.app.state.rt
     with rt.db.session() as s:
-        return {"control_plane": rt.health.get(), "processors": health.reports(s)}
+        return {
+            "control_plane": rt.health.get(),
+            "processors": health.reports(s),
+            # What vouches for the evidence ledger outside its database.
+            "ledger": health.ledger_checks(rt.settings),
+        }
 
 
 @router.get("/feature-presets")

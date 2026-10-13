@@ -8,7 +8,9 @@ the head it last saw in a file, on storage that restoring the database doesn't t
 
 * the database's ledger ends before the head in the file: entries are missing (``behind``);
 * its entry at that place isn't the one the file names: its history isn't the one AgentGov
-  wrote (``forked``).
+  wrote (``forked``); nor is it when that entry is gone and no archive accounts for it:
+  only one the chain vouches for (agentgov.ledger.vouched_floor) takes entries, and only
+  those older than the least retention period.
 
 Either is a critical finding, and the file is left as it is, until an administrator who
 knows why (a restore, after a failed upgrade, say) accepts it: AgentGov then writes what
@@ -22,13 +24,15 @@ import json
 import os
 import tempfile
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agentgov import ids
+from agentgov import ids, ledger
+from agentgov.config import LEDGER_MIN_DAYS
 from agentgov.models import Finding, LedgerCheckpoint, LedgerEntry, LedgerHead
 
 OK, BEHIND, FORKED, NEW = "ok", "behind", "forked", "new"
@@ -47,9 +51,13 @@ class Status:
     file: str
     head_seq: int
     head_hash: str | None
+    # When the database's last entry was written, kept in the file with its head.
+    head_ts: str | None = None
     witness_seq: int | None = None
     witness_hash: str | None = None
     witness_at: str | None = None
+    # The entry the file names is gone from the database, and no archive accounts for it.
+    gone: bool = False
     # Where the database's ledger ended when AgentGov first noticed (entries written since,
     # the finding about it among them, are another history).
     restored_at: int | None = None
@@ -75,6 +83,13 @@ class Status:
                 f"{gap[0]} to {gap[1]} aren't in it. It was restored from an older backup, or "
                 "rolled back."
             )
+        if self.gone:
+            return (
+                f"The ledger's entry {self.witness_seq}, which AgentGov wrote "
+                f"({self.witness_at}), is gone from the database, and no archive accounts for "
+                "it: entries were removed, and the database holds another history than the one "
+                "it kept."
+            )
         if self.rewound:
             return (
                 f"The ledger's entry {self.witness_seq} isn't the one AgentGov wrote "
@@ -96,19 +111,30 @@ def read(path: str) -> dict[str, Any] | None:
         raise WitnessError(f"can't read {path}: {exc.strerror}") from None
     try:
         data = json.loads(text)
-        return {"seq": int(data["seq"]), "hash": str(data["hash"]), "at": str(data.get("at"))}
-    except (ValueError, KeyError, TypeError):
+        written = data.get("ts")
+        return {
+            "seq": int(data["seq"]),
+            "hash": str(data["hash"]),
+            "at": str(data.get("at")),
+            # When that entry was written (files from before AgentGov kept it have none).
+            "ts": datetime.fromisoformat(written.replace("Z", "+00:00")) if written else None,
+        }
+    except (ValueError, KeyError, TypeError, AttributeError):
         raise WitnessError(f"{path} isn't AgentGov's ledger head") from None
 
 
-def write(path: str, seq: int, hash_: str | None) -> None:
-    """Keep the head, replacing the file whole (never half written)."""
+def write(path: str, seq: int, hash_: str | None, ts: str | None = None) -> None:
+    """Keep the head, and when its entry was written, replacing the file whole (never half
+    written)."""
     target = Path(path)
+    head = {"seq": seq, "hash": hash_, "at": ids.isoformat(ids.utcnow())}
+    if ts is not None:
+        head["ts"] = ts
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(dir=target.parent, prefix=".ledger-head-")
         with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump({"seq": seq, "hash": hash_, "at": ids.isoformat(ids.utcnow())}, out)
+            json.dump(head, out)
             out.write("\n")
         os.replace(temp, target)
     except OSError as exc:
@@ -120,10 +146,16 @@ def head(session: Session) -> tuple[int, str | None]:
     return (row.last_seq, row.last_hash) if row is not None else (0, None)
 
 
+def written(session: Session, seq: int) -> str | None:
+    """When the database's entry ``seq`` was written, if it has it."""
+    entry = session.get(LedgerEntry, seq) if seq else None
+    return ids.isoformat(entry.ts) if entry is not None else None
+
+
 def compare(session: Session, path: str) -> Status:
     """The database's ledger against the file."""
     seq, hash_ = head(session)
-    status = Status(NEW, path, seq, hash_)
+    status = Status(NEW, path, seq, hash_, written(session, seq))
     try:
         kept = read(path)
     except WitnessError as exc:
@@ -142,10 +174,10 @@ def compare(session: Session, path: str) -> Status:
         entry = session.get(LedgerEntry, kept["seq"])
         if entry is not None:
             status.state = OK if entry.hash == kept["hash"] else FORKED
+        elif _archived(session, kept):
+            status.state = OK
         else:
-            # Archived since (retention): its checkpoint, if any, still names it.
-            point = session.get(LedgerCheckpoint, kept["seq"])
-            status.state = FORKED if point is not None and point.hash != kept["hash"] else OK
+            status.state, status.gone = FORKED, True
     if status.rewound:
         # Noticed before, about this same head (whatever became of the finding since: it is
         # kept until an administrator accepts the restore, which writes a new head).
@@ -154,6 +186,21 @@ def compare(session: Session, path: str) -> Status:
         if details.get("witness") == kept_head(status):
             status.restored_at = details.get("restored_at")
     return status
+
+
+def _archived(session: Session, kept: dict[str, Any]) -> bool:
+    """Whether the entry the file names, gone from the database, went with an archive: at
+    or before where the chain in the database starts, as the chain itself says, the
+    checkpoint there (if any) naming it; and written before the least retention period, as
+    the file says, when it says."""
+    floor = ledger.vouched_floor(session)
+    if floor is None or kept["seq"] > floor[0]:
+        return False
+    point = session.get(LedgerCheckpoint, kept["seq"])
+    if point is not None and point.hash != kept["hash"]:
+        return False
+    oldest = ids.utcnow() - timedelta(days=LEDGER_MIN_DAYS)
+    return kept.get("ts") is None or kept["ts"] < oldest
 
 
 def kept_head(status: Status) -> dict[str, Any]:

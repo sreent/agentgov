@@ -549,6 +549,11 @@ class TestDestinations:
         assert (
             client.post("/v1/destinations/siem/resume", headers=ADMIN).json()["status"] == "active"
         )
+        # Replay sends again what was sent: it goes back, never on past what wasn't.
+        with client.app.state.rt.db.session() as s:  # type: ignore[attr-defined]
+            s.scalar(select(Destination).where(Destination.name == "siem")).cursor = 5
+        forward = client.post("/v1/destinations/siem/replay", json={"after": 8}, headers=ADMIN)
+        assert forward.status_code == 422 and "goes back" in forward.text
         replayed = client.post("/v1/destinations/siem/replay", json={"after": 3}, headers=ADMIN)
         assert replayed.json()["delivery"]["cursor"] == 3
         assert client.post("/v1/destinations/soc/replay", json={}, headers=ADMIN).status_code == 422
@@ -700,6 +705,30 @@ class TestDelivery:
         sent = sink.json()["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
         assert [r["body"]["kvlistValue"]["values"] for r in sent]
         assert len(sent) == 1
+
+    def test_rows_past_the_head_are_never_sent(self, secops, sink, secrets) -> None:
+        """A row stored past the chain's head isn't the ledger's: sent, it would also move the
+        SIEM's place past every entry still to come."""
+        from tests.test_ledger import past_the_head
+
+        destination(
+            secops, name="collector", kind="otlp", url="http://otel-collector:4318", backfill=True
+        )
+        seed(secops)
+        level(secops, "inform")
+        rt = rt_of(secops)
+        past_the_head(rt)
+        head = secops.get("/v1/ledger/verify", headers=ADMIN).json()["checked"]
+        assert rt.delivery.run() == {"collector": {"sent": head}}
+        assert (
+            secops.get("/v1/destinations/collector", headers=ADMIN).json()["delivery"]["cursor"]
+            == head
+        )
+        events = secops.get("/v1/secops/events", params={"limit": 500}, headers=ADMIN).json()
+        assert events["next"] == head
+        # What happens next still goes.
+        secops.post("/v1/toolservers/crm/block", headers=ADMIN).raise_for_status()
+        assert rt.delivery.run() == {"collector": {"sent": 1}}
 
     def test_splunk_and_webhooks(self, secops, sink, secrets) -> None:
         destination(
@@ -1023,6 +1052,8 @@ class TestCli:
         assert "no secret file" in listing and "siem" in listing
         ok(agentgov("destinations", "pause", "siem"))
         ok(agentgov("destinations", "resume", "siem"))
+        with secops.app.state.rt.db.session() as s:  # sent up to entry 4, say
+            s.scalar(select(Destination).where(Destination.name == "siem")).cursor = 4
         assert "from after entry 0" in ok(agentgov("destinations", "replay", "siem", "--yes"))
         failed = agentgov("destinations", "test", "soc")
         assert failed.exit_code != 0 and "no secret file" in failed.output

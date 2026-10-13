@@ -528,7 +528,12 @@ def list_ledger(
     """The newest entries first: for someone with roles for some teams only, those about
     their agents."""
     with _rt(request).db.session() as s:
-        stmt = select(LedgerEntry).order_by(LedgerEntry.seq.desc()).limit(min(max(limit, 1), 500))
+        stmt = (
+            select(LedgerEntry)
+            .where(ledger.in_chain())
+            .order_by(LedgerEntry.seq.desc())
+            .limit(min(max(limit, 1), 500))
+        )
         reached = reach.agent_ids(s, principal, *READ_ROLES)
         if reached is not None:
             stmt = stmt.where(LedgerEntry.agent_id.in_(reached))
@@ -552,8 +557,9 @@ def list_ledger(
 
 @router.get("/ledger/verify", tags=["ledger"])
 def verify_ledger(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
-        return ledger.verify(s)
+    rt = _rt(request)
+    with rt.db.session() as s:
+        return ledger.verify(s, settings=rt.settings)
 
 
 @router.get("/ledger/export", tags=["ledger"])
@@ -563,7 +569,7 @@ def export_ledger(request: Request, _: Principal = Depends(read)) -> StreamingRe
 
     def lines() -> Iterator[bytes]:
         with db.session() as s:
-            for entry in ledger.iter_entries(s):
+            for entry in ledger.iter_entries(s, until=ledger.head_seq(s)):
                 yield (json.dumps(ledger.to_dict(entry), sort_keys=True) + "\n").encode()
 
     return StreamingResponse(lines(), media_type="application/x-ndjson")
@@ -636,7 +642,9 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
         decisions = s.execute(
             select(LedgerEntry.decision, func.count())
             .where(
-                LedgerEntry.type == "decision.request", LedgerEntry.ts >= now - timedelta(hours=24)
+                LedgerEntry.type == "decision.request",
+                LedgerEntry.ts >= now - timedelta(hours=24),
+                ledger.in_chain(),
             )
             .group_by(LedgerEntry.decision)
         ).all()
@@ -646,6 +654,7 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
             .where(
                 LedgerEntry.type.like("decision.%"),
                 LedgerEntry.decision.in_(("deny", "require_approval")),
+                ledger.in_chain(),
             )
             .order_by(LedgerEntry.seq.desc())
             .limit(10)
@@ -736,7 +745,9 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
         since = ids.utcnow() - timedelta(days=30)
         usage_rows = s.execute(
             select(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision, func.count())
-            .where(LedgerEntry.type == "decision.request", LedgerEntry.ts >= since)
+            .where(
+                LedgerEntry.type == "decision.request", LedgerEntry.ts >= since, ledger.in_chain()
+            )
             .group_by(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision)
         ).all()
         usage: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
@@ -746,7 +757,11 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
         # Calls between agents, by caller and the called agent's name.
         a2a_rows = s.execute(
             select(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision, func.count())
-            .where(LedgerEntry.type == "decision.a2a.request", LedgerEntry.ts >= since)
+            .where(
+                LedgerEntry.type == "decision.a2a.request",
+                LedgerEntry.ts >= since,
+                ledger.in_chain(),
+            )
             .group_by(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision)
         ).all()
         a2a_usage: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)

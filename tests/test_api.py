@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -588,6 +589,61 @@ class TestIntegrations:
             "/v1/internal/decisions", json={"records": [], "dropped": "x"}, headers=SERVICE
         )
         assert odd.status_code == 422
+
+    def test_a_record_the_ledger_cant_take_doesnt_lose_its_batch(self, client) -> None:
+        """One record the database couldn't store as it came (NUL in a tool's name, half a
+        surrogate pair, a list where an object goes) failed its whole batch, which the
+        processor then sent again for ever: each record is stored on its own, cleaned, and
+        those that still can't be are counted in the ledger as lost."""
+        call = {"phase": "request", "method": "tools/call", "identity": {"client_id": "a"}}
+        records = [
+            {**call, "resource": "crm/get\u0000x", "effect": "deny"},
+            {**call, "method": "m" * 300, "resource": "crm/x\ud800", "effect": "deny"},
+            {**call, "agent": ["not", "an", "object"], "effect": "allow"},
+            "not a record",
+            {**call, "resource": "crm/get_customer", "effect": "allow"},
+        ]
+        resp = client.post(
+            "/v1/internal/decisions",
+            content=json.dumps({"records": records}),
+            headers={**SERVICE, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"stored": 3, "rejected": 2}
+        entries = client.get("/v1/ledger", params={"type": "decision.*"}, headers=ADMIN).json()
+        assert {e["resource"] for e in entries} == {
+            "crm/get\ufffdx",
+            "crm/x\ufffd",
+            "crm/get_customer",
+        }
+        [lost] = client.get(
+            "/v1/ledger", params={"type": "decisions.dropped"}, headers=ADMIN
+        ).json()
+        assert lost["details"] == {"count": 2, "rejected": 2}
+        assert client.get("/v1/ledger/verify", headers=ADMIN).json()["valid"] is True
+        # OPA's decision logs, the same: an agent's own OPA sends what the agent gives it.
+        odd = {"path": "agentos/allow", "result": True, "input": {"tool_name": {"a": 1}}}
+        resp = client.post("/v1/opa/logs", json=[odd, "not an event"], headers=SERVICE)
+        assert resp.json() == {"stored": 1, "skipped": 1}
+        assert client.get("/v1/ledger/verify", headers=ADMIN).json()["valid"] is True
+
+    def test_records_lost_are_recorded_whatever_becomes_of_the_batch(
+        self, client, monkeypatch
+    ) -> None:
+        from agentgov.registry import decisions
+
+        def fails(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("the database went away")
+
+        monkeypatch.setattr(decisions, "record_mcp_decisions", fails)
+        with pytest.raises(RuntimeError):
+            client.post(
+                "/v1/internal/decisions", json={"records": [{}], "dropped": 5}, headers=SERVICE
+            )
+        [entry] = client.get(
+            "/v1/ledger", params={"type": "decisions.dropped"}, headers=ADMIN
+        ).json()
+        assert entry["details"]["count"] == 5
 
     def test_opa_decision_logs_keep_only_agents_own_decisions(self, client) -> None:
         """OPA can still send the decisions the processor and the control plane asked for

@@ -96,6 +96,12 @@ AgentGov's examples. On one server, `docker-compose.server.yml` does most of wha
 * Back up PostgreSQL, before every upgrade too (upgrades migrate its schema), export the
   ledger regularly (`GET /v1/ledger/export`) and store the exports somewhere the platform
   cannot modify.
+* Have the ledger's checkpoints time-stamped (`AGENTGOV_LEDGER_TSA_URL`), with the
+  authority's certificates in `AGENTGOV_LEDGER_TSA_CA_FILE`, and keep the ledger's head
+  outside the database (`AGENTGOV_LEDGER_WITNESS_FILE`), on storage that the database's
+  administrators can't write: whoever can write to the database can otherwise rewrite the
+  ledger, every hash worked out again, and only copies kept outside AgentGov show it
+  ([evidence](docs/evidence.md)).
 * If you connect AgentGov's app registration to Microsoft, grant it only the application
   permissions of the [connections](docs/microsoft-connections.md) you use
   (`CopilotPackages.Read.All`, `AgentIdentity.Read.All`, `AuditLogsQuery.Read.All`,

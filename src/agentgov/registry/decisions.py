@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -14,6 +15,25 @@ from agentgov.models import Agent
 from agentgov.opa import WHAT_IF
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings, risk
+from agentgov.registry.errors import ValidationError
+
+log = logging.getLogger(__name__)
+# The longest text a component's record keeps in any field: a decision record is a few
+# hundred bytes, and the ledger is evidence, not storage.
+MAX_TEXT = 4000
+
+
+def clean(value: Any) -> Any:
+    """What a component sent, as the database can store it: text without NUL or halves of
+    surrogate pairs, cut to MAX_TEXT, at any depth (the ledger cleans its own columns the
+    same way, agentgov.ledger.storable)."""
+    if isinstance(value, str):
+        return ledger.storable(value, MAX_TEXT)
+    if isinstance(value, dict):
+        return {ledger.storable(str(k), MAX_TEXT): clean(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [clean(v) for v in value]
+    return value
 
 
 def _trace_id(value: Any) -> str | None:
@@ -33,151 +53,174 @@ def _parse_ts(value: Any) -> datetime:
 
 
 def record_mcp_decisions(
-    session: Session, settings: Settings, records: list[dict[str, Any]]
-) -> int:
+    session: Session, settings: Settings, records: list[Any]
+) -> tuple[int, int]:
     """Store decision records sent by the governance processor: on tool calls, and on
-    model calls (``kind: "model"``), whose activity the gateway's access logs count."""
+    model calls (``kind: "model"``), whose activity the gateway's access logs count. Each
+    record on its own, cleaned first (:func:`clean`): one the database still can't take is
+    left out, logged and counted as lost in the ledger, and doesn't cost the others
+    theirs. Returns how many were stored, and how many left out."""
     touched: dict[str, Agent] = {}
+    stored = rejected = 0
     for rec in records:
-        kind = rec.get("kind")
-        if kind == "classifier":
-            touched |= {a.id: a for a in _classified(session, rec)}
+        try:
+            with session.begin_nested():
+                if not isinstance(rec, dict):
+                    raise ValidationError("a decision record is a JSON object")
+                found = _record_mcp(session, clean(rec))
+                # What it wrote fails here, with it, rather than with a later one.
+                session.flush()
+        except Exception as exc:  # one record never costs the others theirs
+            rejected += 1
+            log.warning("a decision record couldn't be stored: %s: %s", type(exc).__name__, exc)
             continue
-        model_call = kind == "model"
-        a2a = kind == "a2a"
-        agent_info = rec.get("agent") or {}
-        agent = session.get(Agent, agent_info.get("id")) if agent_info.get("id") else None
-        identity = rec.get("identity") or {}
-        # The person the agent acted for, if it acted for one.
-        user = rec["user"] if isinstance(rec.get("user"), dict) else None
-        phase = rec.get("phase", "request")
-        effect = rec.get("effect")
-        detections = rec.get("detections") or {}
-        categories = set(detections.get("categories") or [])
-        when = _parse_ts(rec.get("ts"))
-        resource = rec.get("resource")
-        # What controls in monitor mode would have done (the call went through).
-        monitored = [str(m) for m in rec.get("monitored") or []]
-        # Why the call couldn't be checked, when it went through unchecked
-        # (AGENTGOV_GATEWAY_FAILURE_MODE).
-        unchecked = str(rec["unchecked"])[:500] if rec.get("unchecked") else None
-        actor = (
-            f"agent:{agent.name}" if agent else f"client:{identity.get('client_id') or 'unknown'}"
-        )
-        reason = "; ".join(rec.get("reasons") or []) or None
-        if reason is None and monitored:
-            reason = "monitored: " + "; ".join(monitored)
-        delegation = rec["delegation"] if isinstance(rec.get("delegation"), dict) else None
-        ledger.append(
-            session,
-            type=f"decision.{kind}.{phase}" if model_call or a2a else f"decision.{phase}",
-            actor=actor,
-            agent=agent,
-            agent_name=None if agent else identity.get("client_id"),
-            severity="warning"
-            if effect in ("deny", "require_approval") or monitored or unchecked
-            else "info",
-            action=rec.get("method"),
-            resource=resource,
-            decision=effect,
-            reason=reason,
-            details={
-                "redacted": rec.get("redacted") or [],
-                "monitored": monitored,
-                "detections": {
-                    k: detections.get(k)
-                    for k in (
-                        "categories",
-                        "entities",
-                        "prompt_injection",
-                        "injection_score",
-                        "injection_reasons",
-                        "jailbreak",
-                        "jailbreak_reasons",
-                        "classifier",
-                        "truncated",
-                    )
-                    if k in detections
-                },
-                **({"unchecked": unchecked} if unchecked else {}),
-                "approval_id": rec.get("approval_id"),
-                "opa_decision_id": rec.get("opa_decision_id"),
-                "latency_ms": rec.get("latency_ms"),
-                "identity": identity,
-                **({"user": user} if user else {}),
-                # A call between agents: whom it called.
-                **({"a2a": rec["a2a"]} if a2a and isinstance(rec.get("a2a"), dict) else {}),
-                # Work another agent handed down: the chain, from its head to this call.
-                **(_chain(delegation, agent, identity, rec) if delegation else {}),
-            },
-            trace_id=_trace_id(rec.get("trace_id")),
-            on_behalf_of=people.name_of(user),
-            ts=when,
-        )
-        if agent is None:
-            continue
-        agent.last_seen_at = when
-        touched[agent.id] = agent
-        if model_call:
-            _model_signals(session, agent, phase, effect, detections, resource, user)
-        elif a2a and phase == "response":
-            answered = _answer_signals(session, agent, rec, effect, detections, resource)
-            if answered is not None:
-                touched[answered.id] = answered
-        elif a2a:
-            discovery.record_activity(
-                session, agent.id, when=when, tool_calls=0, denied=1 if effect == "deny" else 0
-            )
-            if effect == "deny":
-                risk.add_signal(session, agent.id, "policy_denied", resource)
-        elif phase == "request":
-            discovery.record_activity(
-                session, agent.id, when=when, tool_calls=1, denied=1 if effect == "deny" else 0
-            )
-            if effect == "deny":
-                risk.add_signal(session, agent.id, "policy_denied", resource)
-            if "secret" in categories:
-                risk.add_signal(session, agent.id, "secret_detected", resource)
-                findings.raise_finding(
-                    session,
-                    type="agent.credential_exfiltration_attempt",
-                    severity="high",
-                    subject=agent.id,
-                    agent_id=agent.id,
-                    category=findings.THREAT,
-                    title=f"{agent.name} tried to send credentials to a tool",
-                    description=f"Credentials ({', '.join(detections.get('entities') or [])}) were "
-                    f"found in arguments for {resource}; "
-                    + (
-                        "the call was blocked."
-                        if effect == "deny"
-                        else "the call went through: data protection is not enforced."
-                    ),
-                    remediation="Check the agent's prompt and context sources for leaked secrets "
-                    "and rotate them.",
-                )
-        elif detections.get("prompt_injection"):
-            risk.add_signal(session, agent.id, "prompt_injection", resource)
-            findings.raise_finding(
-                session,
-                type="toolserver.prompt_injection",
-                severity="high",
-                subject=str(resource),
-                category=findings.THREAT,
-                title=f"Prompt-injection payload returned by {resource}",
-                description="A tool result contained instructions aimed at the agent ("
-                + ", ".join(detections.get("injection_reasons") or [])
-                + (
-                    "). It was withheld."
-                    if effect == "deny"
-                    else "). It reached the agent: prompt-injection defence is not enforced."
-                ),
-                remediation="Find where the tool's data came from; untrusted content may be "
-                "targeting your agents.",
-            )
+        stored += 1
+        touched |= found
+    if rejected:
+        record_dropped(session, rejected, rejected=True)
     for agent in touched.values():
         agents_svc.refresh_risk(session, settings, agent)
-    return len(records)
+    return stored, rejected
+
+
+def _record_mcp(session: Session, rec: dict[str, Any]) -> dict[str, Agent]:
+    """One decision record into the ledger, the agent's activity and risk signals: the
+    agents it touched."""
+    touched: dict[str, Agent] = {}
+    kind = rec.get("kind")
+    if kind == "classifier":
+        return {a.id: a for a in _classified(session, rec)}
+    model_call = kind == "model"
+    a2a = kind == "a2a"
+    agent_info = rec.get("agent") or {}
+    agent = session.get(Agent, agent_info.get("id")) if agent_info.get("id") else None
+    identity = rec.get("identity") or {}
+    # The person the agent acted for, if it acted for one.
+    user = rec["user"] if isinstance(rec.get("user"), dict) else None
+    phase = rec.get("phase", "request")
+    effect = rec.get("effect")
+    detections = rec.get("detections") or {}
+    categories = set(detections.get("categories") or [])
+    when = _parse_ts(rec.get("ts"))
+    resource = rec.get("resource")
+    # What controls in monitor mode would have done (the call went through).
+    monitored = [str(m) for m in rec.get("monitored") or []]
+    # Why the call couldn't be checked, when it went through unchecked
+    # (AGENTGOV_GATEWAY_FAILURE_MODE).
+    unchecked = str(rec["unchecked"])[:500] if rec.get("unchecked") else None
+    actor = f"agent:{agent.name}" if agent else f"client:{identity.get('client_id') or 'unknown'}"
+    reason = "; ".join(rec.get("reasons") or []) or None
+    if reason is None and monitored:
+        reason = "monitored: " + "; ".join(monitored)
+    delegation = rec["delegation"] if isinstance(rec.get("delegation"), dict) else None
+    ledger.append(
+        session,
+        type=f"decision.{kind}.{phase}" if model_call or a2a else f"decision.{phase}",
+        actor=actor,
+        agent=agent,
+        agent_name=None if agent else identity.get("client_id"),
+        severity="warning"
+        if effect in ("deny", "require_approval") or monitored or unchecked
+        else "info",
+        action=rec.get("method"),
+        resource=resource,
+        decision=effect,
+        reason=reason,
+        details={
+            "redacted": rec.get("redacted") or [],
+            "monitored": monitored,
+            "detections": {
+                k: detections.get(k)
+                for k in (
+                    "categories",
+                    "entities",
+                    "prompt_injection",
+                    "injection_score",
+                    "injection_reasons",
+                    "jailbreak",
+                    "jailbreak_reasons",
+                    "classifier",
+                    "truncated",
+                )
+                if k in detections
+            },
+            **({"unchecked": unchecked} if unchecked else {}),
+            "approval_id": rec.get("approval_id"),
+            "opa_decision_id": rec.get("opa_decision_id"),
+            "latency_ms": rec.get("latency_ms"),
+            "identity": identity,
+            **({"user": user} if user else {}),
+            # A call between agents: whom it called.
+            **({"a2a": rec["a2a"]} if a2a and isinstance(rec.get("a2a"), dict) else {}),
+            # Work another agent handed down: the chain, from its head to this call.
+            **(_chain(delegation, agent, identity, rec) if delegation else {}),
+        },
+        trace_id=_trace_id(rec.get("trace_id")),
+        on_behalf_of=people.name_of(user),
+        ts=when,
+    )
+    if agent is None:
+        return touched
+    agent.last_seen_at = when
+    touched[agent.id] = agent
+    if model_call:
+        _model_signals(session, agent, phase, effect, detections, resource, user)
+    elif a2a and phase == "response":
+        answered = _answer_signals(session, agent, rec, effect, detections, resource)
+        if answered is not None:
+            touched[answered.id] = answered
+    elif a2a:
+        discovery.record_activity(
+            session, agent.id, when=when, tool_calls=0, denied=1 if effect == "deny" else 0
+        )
+        if effect == "deny":
+            risk.add_signal(session, agent.id, "policy_denied", resource)
+    elif phase == "request":
+        discovery.record_activity(
+            session, agent.id, when=when, tool_calls=1, denied=1 if effect == "deny" else 0
+        )
+        if effect == "deny":
+            risk.add_signal(session, agent.id, "policy_denied", resource)
+        if "secret" in categories:
+            risk.add_signal(session, agent.id, "secret_detected", resource)
+            findings.raise_finding(
+                session,
+                type="agent.credential_exfiltration_attempt",
+                severity="high",
+                subject=agent.id,
+                agent_id=agent.id,
+                category=findings.THREAT,
+                title=f"{agent.name} tried to send credentials to a tool",
+                description=f"Credentials ({', '.join(detections.get('entities') or [])}) were "
+                f"found in arguments for {resource}; "
+                + (
+                    "the call was blocked."
+                    if effect == "deny"
+                    else "the call went through: data protection is not enforced."
+                ),
+                remediation="Check the agent's prompt and context sources for leaked secrets "
+                "and rotate them.",
+            )
+    elif detections.get("prompt_injection"):
+        risk.add_signal(session, agent.id, "prompt_injection", resource)
+        findings.raise_finding(
+            session,
+            type="toolserver.prompt_injection",
+            severity="high",
+            subject=str(resource),
+            category=findings.THREAT,
+            title=f"Prompt-injection payload returned by {resource}",
+            description="A tool result contained instructions aimed at the agent ("
+            + ", ".join(detections.get("injection_reasons") or [])
+            + (
+                "). It was withheld."
+                if effect == "deny"
+                else "). It reached the agent: prompt-injection defence is not enforced."
+            ),
+            remediation="Find where the tool's data came from; untrusted content may be "
+            "targeting your agents.",
+        )
+    return touched
 
 
 def _chain(
@@ -469,18 +512,25 @@ def _model_signals(
         )
 
 
-def record_dropped(session: Session, count: int) -> None:
-    """A governance processor lost decision records: its queue overflowed while the control
-    plane couldn't take them. The calls were decided; the ledger misses their records, and
-    says so."""
+def record_dropped(session: Session, count: int, *, rejected: bool = False) -> None:
+    """Decision records the ledger misses: lost by a governance processor whose queue
+    overflowed while the control plane couldn't take them, or (``rejected``) sent but not
+    storable, even cleaned, which the control plane logged. The calls were decided; the
+    ledger says how many of their records it misses."""
+    reason = (
+        f"{count} decision record(s) the control plane couldn't store, even cleaned: its log "
+        "says why"
+        if rejected
+        else f"{count} decision record(s) lost: the processor's queue overflowed while the "
+        "control plane couldn't take them"
+    )
     ledger.append(
         session,
         type="decisions.dropped",
         actor="service:processor",
         severity="warning",
-        reason=f"{count} decision record(s) lost: the processor's queue overflowed while the "
-        "control plane couldn't take them",
-        details={"count": count},
+        reason=reason,
+        details={"count": count, **({"rejected": count} if rejected else {})},
     )
 
 
@@ -495,39 +545,56 @@ def in_process(event: Any) -> bool:
     return not (isinstance(inp, dict) and inp.get(WHAT_IF) is True)
 
 
-def record_opa_decisions(session: Session, events: list[dict[str, Any]]) -> dict[str, int]:
+def record_opa_decisions(session: Session, events: list[Any]) -> dict[str, int]:
     """Store OPA decision-log events of in-process enforcement (the toolkit's); skip the
-    rest."""
-    stored = skipped = 0
+    rest. Each on its own, cleaned first, as decision records are: what an agent gives its
+    OPA is in them."""
+    stored = skipped = rejected = 0
     for event in events:
         if not in_process(event):
             skipped += 1
             continue
-        inp = event.get("input") or {}
-        result = event.get("result")
-        agent = discovery.find(session, name=inp.get("agent_id")) if inp.get("agent_id") else None
-        allowed = result is True or (isinstance(result, dict) and result.get("allow") is True)
-        ledger.append(
-            session,
-            type="decision.inprocess",
-            actor="service:opa",
-            agent=agent,
-            agent_name=None if agent else inp.get("agent_id"),
-            severity="info" if allowed else "warning",
-            action=inp.get("action_type") or event.get("path"),
-            resource=inp.get("tool_name"),
-            decision="allow" if allowed else "deny",
-            details={
-                "path": event.get("path"),
-                "opa_decision_id": event.get("decision_id"),
-                "bundles": event.get("bundles"),
-                "masked": event.get("masked"),
-            },
-            ts=_parse_ts(event.get("timestamp")),
-        )
-        if agent is not None:
-            discovery.record_activity(session, agent.id, tool_calls=1, denied=0 if allowed else 1)
-            if not allowed:
-                risk.add_signal(session, agent.id, "policy_denied", inp.get("tool_name"))
+        try:
+            with session.begin_nested():
+                _record_opa(session, clean(event))
+                session.flush()
+        except Exception as exc:  # one event never costs the others theirs
+            rejected += 1
+            log.warning("an OPA decision log couldn't be stored: %s: %s", type(exc).__name__, exc)
+            continue
         stored += 1
-    return {"stored": stored, "skipped": skipped}
+    if rejected:
+        record_dropped(session, rejected, rejected=True)
+    return {"stored": stored, "skipped": skipped, **({"rejected": rejected} if rejected else {})}
+
+
+def _record_opa(session: Session, event: dict[str, Any]) -> None:
+    """One in-process decision into the ledger, the agent's activity and risk signals. What
+    the agent gave its OPA (the input) is whatever it chose to send: taken as text."""
+    inp = event.get("input") or {}
+    result = event.get("result")
+    name, tool = ledger.storable(inp.get("agent_id")), ledger.storable(inp.get("tool_name"))
+    agent = discovery.find(session, name=name) if name else None
+    allowed = result is True or (isinstance(result, dict) and result.get("allow") is True)
+    ledger.append(
+        session,
+        type="decision.inprocess",
+        actor="service:opa",
+        agent=agent,
+        agent_name=None if agent else name,
+        severity="info" if allowed else "warning",
+        action=inp.get("action_type") or event.get("path"),
+        resource=tool,
+        decision="allow" if allowed else "deny",
+        details={
+            "path": event.get("path"),
+            "opa_decision_id": event.get("decision_id"),
+            "bundles": event.get("bundles"),
+            "masked": event.get("masked"),
+        },
+        ts=_parse_ts(event.get("timestamp")),
+    )
+    if agent is not None:
+        discovery.record_activity(session, agent.id, tool_calls=1, denied=0 if allowed else 1)
+        if not allowed:
+            risk.add_signal(session, agent.id, "policy_denied", tool)

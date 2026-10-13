@@ -210,11 +210,19 @@ in a row, or three minutes, whichever is longer, is out of touch and doesn't cou
 A mode a feature can't use yet, for want of a setting, makes it inactive too, and says
 which setting.
 
+*What AgentGov can reach* also says what vouches for the evidence ledger outside its
+database ([evidence](evidence.md)): whether the checkpoints' time-stamps are checked
+against the authority's certificates (`AGENTGOV_LEDGER_TSA_CA_FILE`), and whether a file
+keeps the ledger's head (`AGENTGOV_LEDGER_WITNESS_FILE`). Without that file, a database
+restored from an older backup, or entries removed from its end, go unnoticed, and a chain
+rewritten with every hash worked out again shows only as checkpoints that vouch from later
+than their entries ([backing up and restoring](backup.md#a-rewound-ledger)).
+
 | | Where |
 |---|---|
 | Admin UI | **Features**: a status on each feature that isn't fully working, with why, and **What AgentGov can reach** |
 | CLI | `agentgov features list` (its `status` column), `agentgov components` |
-| API | `status` and `problems` in `GET /v1/features`; `GET /v1/components` |
+| API | `status` and `problems` in `GET /v1/features`; `GET /v1/components` (the ledger's in `ledger`) |
 
 ## When something is down
 
@@ -252,7 +260,13 @@ the features' defaults, in which most controls are enforced.
 While the control plane is down, calls are still decided: each processor keeps their
 records, up to 10,000, and sends them once it is back. Should more pile up, the oldest are
 lost, and the ledger says how many with a warning (`decisions.dropped`) as soon as the
-control plane is back: the gap is in the evidence, not hidden.
+control plane is back: the gap is in the evidence, not hidden. The control plane stores
+each record on its own, its text cleaned of what a database can't hold (NUL, halves of
+surrogate pairs) and cut to a few thousand characters: one it still can't store is left
+out, logged, and counted in a `decisions.dropped` of its own, rather than failing the
+others. A batch the control plane refuses as it is isn't sent again either: its records
+count as lost. When the processor stops, it waits ten seconds at most for what it holds to
+go.
 
 The Features page shows what each processor does when something is down, beside what it
 can reach.

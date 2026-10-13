@@ -137,7 +137,8 @@ hasn't got yet stay in the database until it has ([evidence](evidence.md#retenti
   [posture check](features.md) raises a `destination.failing` issue (high), which the
   other destinations hear about; it resolves once sending works again.
 * **Pause** stops sending; **Resume** sends what it missed. **Replay** sends a SIEM the
-  ledger again from after an entry you choose (`0`: from its start).
+  ledger again from after an entry you choose (`0`: from its start), before where it has
+  got to: it only goes back, so that no entry is skipped.
 * **Test** sends a test event or message now, whatever the level, and records the
   outcome (`destination.tested`).
 * With the feature off nothing is sent; destinations keep their place, and turning it on

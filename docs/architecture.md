@@ -196,13 +196,18 @@ last row a transaction locks, so two transactions that lock the same rows in ano
 take turns rather than deadlock. Each edit's entry says what it changed, from what to what
 (`details.changes`; text longer than a thousand characters by its length and SHA-256), and
 a policy's holds the policy as it then became, so the ledger keeps every version that was in
-force. `GET /v1/ledger/verify` recomputes the chain and reports the first broken entry
-(edited, deleted or truncated). A chain rewritten with every hash worked out again would
-still link up, so it also checks the entries against the checkpoints made before, and each
-checkpoint's time-stamp against its statement. The overview's integrity badge checks new entries as they
-arrive and re-verifies the whole chain every five minutes. `GET /v1/ledger/export`
-streams the ledger as JSON Lines for offline verification
-(`agentgov ledger verify --file`). Every day the chain's head is kept as a checkpoint,
+force. An entry's values are taken as their columns store them (text for a number, a
+time without a zone as UTC), so what is hashed is what is stored. `GET /v1/ledger/verify`
+recomputes the chain and reports every broken entry (edited, deleted or truncated: the
+first fifty, and how many more), then checks the head, where the chain starts and the
+checkpoints, whatever broke before them. A chain rewritten with every hash worked out
+again would still link up, so it also checks the entries against the checkpoints made
+before, each checkpoint's time-stamp against its statement and the authority's signature,
+and the time-stamps the ledger recorded. The chain ends at its head: a checkpoint beyond it
+breaks it, and a row stored past it isn't the ledger's, so nothing lists, exports, packs,
+counts or sends it. The overview's integrity badge checks new entries as they arrive and
+re-verifies the whole chain every five minutes. `GET /v1/ledger/export` streams the ledger
+as JSON Lines for offline verification (`agentgov ledger verify --file`). Every day the chain's head is kept as a checkpoint,
 which a time-stamping authority signs when one is set (RFC 3161), and which goes into a
 transparency log (Sigstore Rekor) when one is set; with a retention period,
 older entries are archived, checked link by link, before they leave the database, and the

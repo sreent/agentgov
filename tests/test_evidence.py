@@ -18,9 +18,9 @@ from typing import Any
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 
-from agentgov import ids, ledger, retention
+from agentgov import compliance, ids, ledger, retention
 from agentgov import timestamping as tsp
 from agentgov.api.app import create_app
 from agentgov.config import Settings
@@ -31,6 +31,7 @@ from agentgov.models import (
     Finding,
     LedgerCheckpoint,
     LedgerEntry,
+    LedgerHead,
     ModelUsage,
     Notification,
     RiskSignal,
@@ -38,68 +39,24 @@ from agentgov.models import (
 from agentgov.registry import features, findings
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN, seed
+from tests.timestamps import Authority, FakeTSA, authority, query, unsigned_reply
 
-# ------------------------------------------------------------------ a fake TSA
-
-
-def _query(data: bytes) -> tuple[bytes, int]:
-    """The digest and nonce of a TimeStampReq."""
-    req = tsp._children(data, tsp._read(data, 0))
-    imprint = tsp._children(data, req[1])
-    digest = data[imprint[1].value : imprint[1].end]
-    return digest, tsp._int_value(data, req[2])
-
-
-def tsa_reply(digest: bytes, nonce: int | None, *, status: int = 0) -> bytes:
-    """A TimeStampResp as an authority writes one (unsigned: AgentGov leaves the signature
-    to whoever verifies it)."""
-    if status not in (0, 1):
-        why = tsp.tlv(0x30, tsp.tlv(0x0C, b"unsupported algorithm"))
-        return tsp.tlv(0x30, tsp.tlv(0x30, tsp.integer(status) + why))
-    imprint = tsp.tlv(0x30, tsp.SHA256 + tsp.tlv(0x04, digest))
-    info = tsp.tlv(
-        0x30,
-        tsp.integer(1)
-        + tsp.oid("1.2.3.4.1")
-        + imprint
-        + tsp.integer(7)
-        + tsp.tlv(0x18, b"20261011120000Z")
-        + tsp.tlv(0x30, tsp.integer(1))  # accuracy
-        + (tsp.integer(nonce) if nonce is not None else b""),
-    )
-    encap = tsp.tlv(0x30, tsp.oid("1.2.840.113549.1.9.16.1.4") + tsp.tlv(0xA0, tsp.tlv(0x04, info)))
-    signed = tsp.tlv(0x30, tsp.integer(3) + tsp.tlv(0x31, b"") + encap + tsp.tlv(0x31, b""))
-    content = tsp.tlv(0x30, tsp.oid("1.2.840.113549.1.7.2") + tsp.tlv(0xA0, signed))
-    return tsp.tlv(0x30, tsp.tlv(0x30, tsp.integer(status)) + content)
-
-
-class FakeTSA:
-    def __init__(self) -> None:
-        self.status = 0
-        self.wrong_nonce = False
-        self.requests: list[bytes] = []
-
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        assert request.headers["content-type"] == tsp.QUERY
-        self.requests.append(request.content)
-        digest, nonce = _query(request.content)
-        body = tsa_reply(digest, nonce + 1 if self.wrong_nonce else nonce, status=self.status)
-        return httpx.Response(200, content=body, headers={"content-type": tsp.REPLY})
+# ------------------------------------------------------------------ time-stamps
 
 
 class TestTimestamping:
     def test_a_granted_stamp(self) -> None:
         tsa = FakeTSA()
-        got = tsp.stamp(
-            "https://tsa.test/", b"statement", http=httpx.Client(transport=httpx.MockTransport(tsa))
-        )
+        got = tsp.stamp("https://tsa.test/", b"statement", http=tsa.client())
         assert got.time.isoformat() == "2026-10-11T12:00:00+00:00"
-        digest, _ = _query(tsa.requests[0])
+        # Checked against the certificate it carries only: no authority's were given.
+        assert got.authority is False
+        digest, _ = query(tsa.requests[0])
         assert digest == hashlib.sha256(b"statement").digest()
 
     def test_refusals_and_mismatches(self) -> None:
         tsa = FakeTSA()
-        http = httpx.Client(transport=httpx.MockTransport(tsa))
+        http = tsa.client()
         tsa.status = 2
         with pytest.raises(tsp.TimestampError, match=r"refused it \(rejection: unsupported"):
             tsp.stamp("https://tsa.test/", b"x", http=http)
@@ -107,13 +64,51 @@ class TestTimestamping:
         with pytest.raises(tsp.TimestampError, match="nonce"):
             tsp.stamp("https://tsa.test/", b"x", http=http)
         digest = hashlib.sha256(b"x").digest()
+        signer = authority()
         with pytest.raises(tsp.TimestampError, match="another hash"):
-            tsp.read_response(tsa_reply(hashlib.sha256(b"y").digest(), 1), digest, 1)
+            tsp.read_response(signer.reply(hashlib.sha256(b"y").digest(), 1), digest, 1)
         with pytest.raises(tsp.TimestampError, match="cut short"):
-            tsp.read_response(tsa_reply(digest, 1)[:40], digest, 1)
+            tsp.read_response(signer.reply(digest, 1)[:40], digest, 1)
         down = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(503)))
         with pytest.raises(tsp.TimestampError, match="HTTP 503"):
             tsp.stamp("https://tsa.test/", b"x", http=down)
+
+    def test_the_authoritys_signature_is_checked(self, tmp_path: Path) -> None:
+        """Anyone can write a time-stamp with the right hash: only the authority's
+        signature shows that it gave it."""
+        digest = hashlib.sha256(b"x").digest()
+        signer = authority()
+        with pytest.raises(tsp.TimestampError, match="isn't signed"):
+            tsp.read_response(unsigned_reply(digest, 1), digest, 1)
+        with pytest.raises(tsp.TimestampError, match="signature is on another time-stamp"):
+            tsp.read_response(signer.reply(digest, 1, tamper=True), digest, 1)
+        with pytest.raises(tsp.TimestampError, match="doesn't carry the certificate"):
+            tsp.read_response(signer.reply(digest, 1, carry=False), digest, 1)
+        # Against the authority's certificates: its own, or a root it leads to.
+        assert tsp.read_response(signer.reply(digest, 1), digest, 1, roots=[signer.root]).authority
+        chained = Authority("Chained TSA", chained=True)
+        assert tsp.read_response(
+            chained.reply(digest, 1), digest, 1, roots=[chained.root]
+        ).authority
+        other = Authority("Another TSA")
+        with pytest.raises(tsp.TimestampError, match="doesn't lead to the authority's"):
+            tsp.read_response(other.reply(digest, 1), digest, 1, roots=[signer.root])
+        # Its certificate alone, without the token's: found among the authority's.
+        alone = tsp.read_response(
+            signer.reply(digest, 1, carry=False), digest, 1, roots=[signer.root]
+        )
+        assert alone.authority
+        # Asked for one: a forged answer is an error, and nothing comes back to keep.
+        tsa = FakeTSA()
+        tsa.forge = True
+        with pytest.raises(tsp.TimestampError, match="isn't signed"):
+            tsp.stamp("https://tsa.test/", b"x", http=tsa.client())
+        # The authority's certificates, from a file.
+        pem = tmp_path / "tsa-ca.pem"
+        pem.write_bytes(chained.pem)
+        assert tsp.trust(str(pem)).roots == (chained.root,)
+        assert "can't be read" in (tsp.trust(str(tmp_path / "missing.pem")).error or "")
+        assert tsp.trust(None) == tsp.Trust()
 
     @pytest.mark.skipif(shutil.which("openssl") is None, reason="needs the openssl command")
     def test_with_an_openssl_authority(self, tmp_path: Path) -> None:
@@ -134,7 +129,7 @@ class TestTimestamping:
             "accuracy = secs:1\nordering = yes\ness_cert_id_alg = sha256\n"
         )
 
-        def authority(request: httpx.Request) -> httpx.Response:
+        def openssl_authority(request: httpx.Request) -> httpx.Response:
             (tmp_path / "q.tsq").write_bytes(request.content)
             subprocess.run(
                 ["openssl", "ts", "-reply", "-config", config, "-queryfile", tmp_path / "q.tsq",
@@ -144,12 +139,13 @@ class TestTimestamping:
             return httpx.Response(200, content=(tmp_path / "r.tsr").read_bytes())
 
         statement = ledger.statement(42, "ab" * 32)
-        got = tsp.stamp(
-            "https://tsa.test/",
-            statement,
-            http=httpx.Client(transport=httpx.MockTransport(authority)),
-        )
+        http = httpx.Client(transport=httpx.MockTransport(openssl_authority))
+        got = tsp.stamp("https://tsa.test/", statement, http=http, roots=tsp.load_roots(cert))
         assert abs((got.time - ids.utcnow()).total_seconds()) < 120
+        # Its RSA signature checks out against its certificate, as OpenSSL's does below.
+        assert got.authority is True
+        with pytest.raises(tsp.TimestampError, match="doesn't lead to the authority's"):
+            tsp.stamp("https://tsa.test/", statement, http=http, roots=[authority().root])
         (tmp_path / "statement.txt").write_bytes(statement)
         (tmp_path / "stamp.tsr").write_bytes(got.response)
         verified = subprocess.run(
@@ -210,19 +206,39 @@ class TestCheckpoints:
             point = s.get(LedgerCheckpoint, 2)
             assert point.timestamped_at.isoformat() == "2026-10-11T12:00:00+00:00"
             response = base64.b64decode(point.timestamp)
-        digest, _ = _query(tsa.requests[0])
+        digest, _ = query(tsa.requests[0])
         assert digest == hashlib.sha256(ledger.statement(2, point.hash)).digest()
         assert tsp.read_response(response, digest, None).time == point.timestamped_at
-        # A refusal is kept on the checkpoint, and tried again.
-        tsa.status = 2
-        _old_entries(runtime, 1, 1)
+        # The chain records it: a time-stamp replaced later shows.
         with runtime.db.session() as s:
-            ledger.checkpoint(s)
-        assert runtime.stamp_checkpoints() == 0
+            recorded = s.get(LedgerEntry, 3)
+            assert recorded.type == "ledger.timestamped"
+            assert recorded.details == {
+                "checkpoint": 2,
+                "hash": point.hash,
+                "token": hashlib.sha256(response).hexdigest(),
+                "time": "2026-10-11T12:00:00Z",
+                "tsa": "https://tsa.test/",
+                "authority": False,
+            }
+        # A refusal is kept on the checkpoint, and tried again; so is an answer that isn't
+        # the authority's (no signature): it isn't kept.
+        for refuse in ("status", "forge"):
+            setattr(tsa, refuse, 2 if refuse == "status" else True)
+            _old_entries(runtime, 1, 1)
+            with runtime.db.session() as s:
+                seq = ledger.checkpoint(s).seq
+            assert runtime.stamp_checkpoints() == 0
+            with runtime.db.session() as s:
+                point = s.get(LedgerCheckpoint, seq)
+                assert point.timestamp is None
+                assert (
+                    "refused" if refuse == "status" else "isn't signed"
+                ) in point.timestamp_error
+            setattr(tsa, refuse, 0 if refuse == "status" else False)
+            assert runtime.stamp_checkpoints() == 1
         with runtime.db.session() as s:
-            assert "refused" in s.get(LedgerCheckpoint, 3).timestamp_error
-        tsa.status = 0
-        assert runtime.stamp_checkpoints() == 1
+            assert ledger.verify(s, settings=runtime.settings)["valid"] is True
         runtime.db.dispose()
 
 
@@ -246,7 +262,125 @@ class TestRewrites:
         with runtime.db.session() as s:
             result = ledger.verify(s)
         assert result["valid"] is False
-        assert result["problem"].startswith("checkpoint 3's time-stamp doesn't cover it")
+        assert result["problem"].startswith(
+            "checkpoint 3's time-stamp doesn't check out: the authority time-stamped another hash"
+        )
+        runtime.db.dispose()
+
+    def _stamped(self, settings: Settings, tsa: FakeTSA, **overrides: Any) -> Runtime:
+        runtime = Runtime(
+            settings.with_overrides(ledger_tsa_url="https://tsa.test/", **overrides),
+            tsa_http=tsa.client(),
+        )
+        runtime.init_db()
+        _old_entries(runtime, 3, 1)
+        assert runtime.run_retention()["timestamped"] == 1  # checkpoint 3, recorded at 4
+        _old_entries(runtime, 2, 1)
+        return runtime
+
+    def test_a_time_stamp_made_up_or_replaced_shows(self, settings: Settings) -> None:
+        """A rewritten chain's checkpoints need new time-stamps: one written by anyone but
+        the authority doesn't verify, and one the authority gives again, for the rewritten
+        statement, isn't the one the chain recorded."""
+        from tests.test_ledger import _rewrite
+
+        tsa = FakeTSA()
+        runtime = self._stamped(settings, tsa)
+        with runtime.db.session() as s:
+            _rewrite(s, 2, "edited")
+            point = s.get(LedgerCheckpoint, 3)
+            point.hash = s.get(LedgerEntry, 3).hash
+            digest = hashlib.sha256(ledger.statement(3, point.hash)).digest()
+            point.timestamp = base64.b64encode(unsigned_reply(digest, None)).decode()
+        with runtime.db.session() as s:
+            result = ledger.verify(s)
+        assert "checkpoint 3's time-stamp doesn't check out: the time-stamp isn't signed" in [
+            p["problem"] for p in result["problems"]
+        ]
+        # Taken away, it is asked for again: the authority signs the rewritten statement.
+        with runtime.db.session() as s:
+            s.get(LedgerCheckpoint, 3).timestamp = None
+        assert runtime.stamp_checkpoints() == 1
+        with runtime.db.session() as s:
+            result = ledger.verify(s)
+        assert result["valid"] is False
+        assert any(
+            p["problem"].startswith("checkpoint 3 was time-stamped again at entry")
+            for p in result["problems"]
+        )
+        runtime.db.dispose()
+
+    def test_a_time_stamp_taken_away_or_swapped_shows(self, settings: Settings) -> None:
+        tsa = FakeTSA()
+        runtime = self._stamped(settings, tsa)
+        with runtime.db.session() as s:
+            s.get(LedgerCheckpoint, 3).timestamp = None
+        with runtime.db.session() as s:
+            problem = ledger.verify(s)["problem"]
+        assert problem == "checkpoint 3's time-stamp, recorded at entry 4, is gone"
+        # Another genuine one, from the same authority: not the one recorded.
+        with runtime.db.session() as s:
+            point = s.get(LedgerCheckpoint, 3)
+            digest = hashlib.sha256(ledger.statement(3, point.hash)).digest()
+            point.timestamp = base64.b64encode(tsa.signer.reply(digest, None)).decode()
+        with runtime.db.session() as s:
+            problem = ledger.verify(s)["problem"]
+        assert problem.startswith("checkpoint 3's time-stamp isn't the one recorded at entry 4")
+        with runtime.db.session() as s:
+            s.delete(s.get(LedgerCheckpoint, 3))
+        with runtime.db.session() as s:
+            assert ledger.verify(s)["problem"] == "checkpoint 3, time-stamped at entry 4, is gone"
+        runtime.db.dispose()
+
+    def test_a_late_time_stamp_vouches_only_from_its_time(self, settings: Settings) -> None:
+        """A time-stamp proves the chain existed when the authority signed: given days after
+        its entry, it says nothing about the days before."""
+        tsa = FakeTSA()
+        tsa.gen_time = (ids.utcnow() + timedelta(days=3)).strftime("%Y%m%d%H%M%SZ").encode()
+        runtime = self._stamped(settings, tsa)
+        with runtime.db.session() as s:
+            result = ledger.verify(s, settings=runtime.settings)
+        assert result["valid"] is True
+        assert result["warnings"][0].startswith("checkpoint 3 vouches only from ")
+        runtime.db.dispose()
+
+    def test_the_authority_is_checked_against_its_certificates(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        tsa = FakeTSA()
+        runtime = self._stamped(settings, tsa)
+        with runtime.db.session() as s:
+            result = ledger.verify(s, settings=runtime.settings)
+        assert result["valid"] is True
+        assert result["warnings"][-1].startswith(
+            "the authority isn't checked: without AGENTGOV_LEDGER_TSA_CA_FILE"
+        )
+        runtime.db.dispose()
+        # With the authority's certificates: no warning, and only its time-stamps are kept.
+        ca = tmp_path / "tsa-ca.pem"
+        ca.write_bytes(tsa.signer.pem)
+        runtime = Runtime(
+            runtime.settings.with_overrides(ledger_tsa_ca_file=str(ca)), tsa_http=tsa.client()
+        )
+        point = runtime.make_checkpoint()
+        assert point is not None and point["timestamped"]
+        with runtime.db.session() as s:
+            result = ledger.verify(s, settings=runtime.settings)
+            assert (result["valid"], result["warnings"]) == (True, [])
+            recorded = s.scalar(
+                select(LedgerEntry)
+                .where(LedgerEntry.type == "ledger.timestamped")
+                .order_by(LedgerEntry.seq.desc())
+                .limit(1)
+            )
+            assert recorded.details["authority"] is True
+        impostor = FakeTSA(Authority("Impostor TSA"))
+        runtime._tsa_http = impostor.client()
+        with runtime.db.session() as s:
+            seq = ledger.checkpoint(s).seq
+        assert runtime.stamp_checkpoints() == 0
+        with runtime.db.session() as s:
+            assert "doesn't lead to the authority's" in s.get(LedgerCheckpoint, seq).timestamp_error
         runtime.db.dispose()
 
     def test_the_evidence_pack_is_checked_against_its_checkpoints(
@@ -304,6 +438,119 @@ class TestRewrites:
         assert out.exit_code == 2 and "doesn't match checkpoint" in out.output
         runtime.db.dispose()
 
+    def test_the_pack_verifier_checks_what_verify_does(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        """Offline, without AgentGov: the time-stamps' signatures, the authority's when its
+        certificates are given; time-stamps the ledger recorded; where the pack's entries
+        start; and checkpoints beyond them."""
+        import zipfile
+
+        from agentgov import cli
+        from tests.test_cli import runner
+
+        tsa = FakeTSA()
+        runtime = self._stamped(settings, tsa)  # checkpoint 3, recorded at 4; entries to 6
+
+        def pack(name: str) -> Path:
+            with runtime.db.session() as s:
+                zipped = compliance.pack(s, runtime.settings, 30)
+            folder = tmp_path / name
+            with zipfile.ZipFile(zipped) as z:
+                z.extractall(folder)
+            return folder
+
+        def verify(folder: Path, *more: str) -> Any:
+            return runner.invoke(cli.app, ["ledger", "verify", "--pack", str(folder), *more])
+
+        good = pack("good")
+        out = verify(good)
+        assert out.exit_code == 0, out.output
+        assert "1 checkpoint vouches for these entries, up to entry 3" in out.output
+        assert "the authority isn't checked" in out.output
+        ca = tmp_path / "tsa-ca.pem"
+        ca.write_bytes(tsa.signer.pem)
+        out = verify(good, "--tsa-ca", str(ca))
+        assert out.exit_code == 0 and "the authority isn't checked" not in out.output
+        assert "check out against the authority's certificates" in out.output
+        out = verify(good, "--tsa-ca", str(tmp_path / "missing.pem"))
+        assert out.exit_code != 0 and "can't be read" in out.output
+        # A time-stamp anyone could write: no signature.
+        forged = tmp_path / "forged"
+        shutil.copytree(good, forged)
+        statement = (forged / "checkpoints" / "3.txt").read_bytes()
+        (forged / "checkpoints" / "3.tsr").write_bytes(
+            unsigned_reply(hashlib.sha256(statement).digest(), None)
+        )
+        out = verify(forged)
+        assert out.exit_code == 2 and "time-stamp isn't signed" in out.output
+        # The authority's, for the same statement, but not the one the ledger recorded.
+        (forged / "checkpoints" / "3.tsr").write_bytes(
+            tsa.signer.reply(hashlib.sha256(statement).digest(), None, b"20261012120000Z")
+        )
+        out = verify(forged)
+        assert out.exit_code == 2 and "isn't the one recorded at entry 4" in out.output
+        # Cut back to before the checkpoint, the head with it: the checkpoint says it was
+        # longer.
+        with runtime.db.session() as s:
+            keep = s.get(LedgerEntry, 2)
+            s.execute(delete(LedgerEntry).where(LedgerEntry.seq > 2))
+            s.execute(
+                update(LedgerHead).where(LedgerHead.id == 1).values(last_seq=2, last_hash=keep.hash)
+            )
+        out = verify(pack("cut"))
+        assert out.exit_code == 2
+        assert "checkpoint 3 is beyond the last entry here (2)" in out.output
+        runtime.db.dispose()
+
+    def test_the_pack_verifier_finds_entries_removed_behind_a_made_up_archive(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        import zipfile
+
+        from agentgov import cli
+        from tests.test_cli import runner
+
+        tsa = FakeTSA()
+        runtime = self._stamped(settings, tsa)
+        with runtime.db.session() as s:
+            ledger.checkpoint(s)  # 6
+        _old_entries(runtime, 2, 1)
+        # Marked as archived, and the entries before it removed.
+        with runtime.db.session() as s:
+            s.get(LedgerCheckpoint, 6).pruned_at = ids.utcnow()
+            s.execute(delete(LedgerEntry).where(LedgerEntry.seq <= 6))
+        with runtime.db.session() as s:
+            zipped = compliance.pack(s, runtime.settings, 30)
+        folder = tmp_path / "pack"
+        with zipfile.ZipFile(zipped) as z:
+            z.extractall(folder)
+        out = runner.invoke(cli.app, ["ledger", "verify", "--pack", str(folder)])
+        assert out.exit_code == 2, out.output
+        assert "no ledger.archived entry here says they were archived" in out.output
+        # The time-stamped checkpoint of the entries that went: said, not skipped.
+        assert "checkpoint 3 is for entries these files don't hold" in out.output
+        runtime.db.dispose()
+
+    def test_a_late_time_stamp_shows_offline_too(self, settings: Settings, tmp_path: Path) -> None:
+        import zipfile
+
+        from agentgov import cli
+        from tests.test_cli import runner
+
+        tsa = FakeTSA()
+        tsa.gen_time = (ids.utcnow() + timedelta(days=3)).strftime("%Y%m%d%H%M%SZ").encode()
+        runtime = self._stamped(settings, tsa)
+        with runtime.db.session() as s:
+            zipped = compliance.pack(s, runtime.settings, 30)
+        folder = tmp_path / "pack"
+        with zipfile.ZipFile(zipped) as z:
+            z.extractall(folder)
+        out = runner.invoke(cli.app, ["ledger", "verify", "--pack", str(folder)])
+        assert out.exit_code == 0, out.output
+        assert "checkpoint 3 vouches only from" in out.output
+        runtime.db.dispose()
+
 
 class TestArchives:
     def test_old_entries_are_archived_then_removed(self, archiving: Runtime) -> None:
@@ -327,8 +574,50 @@ class TestArchives:
             assert (result["valid"], result["from"], result["checked"]) == (True, 5, 8)
             archived = s.scalar(select(LedgerEntry).where(LedgerEntry.type == "ledger.archived"))
             assert archived.details["sha256"] == out["sha256"]
+            # The chain says which entries left, up to which hash, going on from which.
+            assert archived.details["follows"] == ledger.GENESIS
+            assert (archived.details["from"], archived.details["to"]) == (1, 5)
             # The next archive goes on from this one.
             assert retention.archive(s, rt.settings) is None
+        # Nothing that left with it may still be in the database.
+        records[2]["details"] = {}
+        with rt.db.session() as s:
+            s.add(LedgerEntry(**{**records[2], "ts": ids.utcnow()}))
+        with rt.db.session() as s:
+            assert ledger.verify(s)["problem"] == (
+                "entry 3 is still in the database, though the entries up to 5 left it with an "
+                "archive"
+            )
+
+    def test_an_archive_already_there_is_left_as_it_is(self, archiving: Runtime) -> None:
+        """Archives are evidence: one already there, with other entries in it, isn't
+        written over; with the same ones (an earlier round that didn't finish), it is kept."""
+        rt = archiving
+        _old_entries(rt, 5, 300)
+        directory = Path(rt.settings.ledger_archive_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        there = directory / "ledger-000000000001-000000000005.jsonl.gz"
+        there.write_bytes(gzip.compress(b'{"seq": 1, "reason": "another history"}\n'))
+        with rt.db.session() as s:
+            out = retention.archive(s, rt.settings)
+        assert "already there" in out["error"]
+        assert gzip.decompress(there.read_bytes()) == b'{"seq": 1, "reason": "another history"}\n'
+        with rt.db.session() as s:
+            assert s.get(LedgerEntry, 1) is not None and ledger.verify(s)["from"] == 0
+            failed = s.scalar(select(Finding).where(Finding.type == retention.ARCHIVE_FAILED))
+            assert failed.status == "open" and "already there" in failed.description
+        # The same entries, from a round whose transaction didn't commit: kept as they are.
+        with rt.db.session() as s:
+            lines = [
+                json.dumps(ledger.to_dict(e), sort_keys=True) + "\n"
+                for e in ledger.iter_entries(s, until=5)
+            ]
+        there.write_bytes(gzip.compress("".join(lines).encode(), mtime=0))
+        kept = there.read_bytes()
+        with rt.db.session() as s:
+            out = retention.archive(s, rt.settings)
+        assert out["to"] == 5 and there.read_bytes() == kept
+        assert out["sha256"] == hashlib.sha256(kept).hexdigest()
 
     def test_what_a_destination_wasnt_sent_stays(self, archiving: Runtime) -> None:
         rt = archiving
@@ -621,3 +910,12 @@ class TestCompliance:
         out = runner.invoke(cli.app, ["evidence", "pack", "--days", "7", "-o", str(target)])
         assert out.exit_code == 0, out.output
         assert zipfile.is_zipfile(target)
+
+
+def test_record_keeping_says_when_the_authority_isnt_checked(settings: Settings) -> None:
+    with TestClient(
+        create_app(settings.with_overrides(ledger_tsa_url="https://tsa.test/"), background=False)
+    ) as client:
+        report = client.get("/v1/evidence/report", params={"days": 7}, headers=ADMIN).json()
+    art12 = next(c for c in report["controls"] if c["id"] == "Art. 12")
+    assert art12["status"] == "partly" and "AGENTGOV_LEDGER_TSA_CA_FILE" in art12["gaps"][0]

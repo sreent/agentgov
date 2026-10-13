@@ -439,4 +439,16 @@ class TestForAssessors:
             } <= names
             assert "cosign verify-blob" in z.read("README.txt").decode()
             assert json.loads(z.read("transparency-log/log.json"))["origin"] == ORIGIN
+            z.extractall(tmp_path / "pack")
         assert compliance.README.count("verify-log-entry") == 1
+        # agentgov ledger verify --pack checks each entry too, with the keys in the pack.
+        verified = runner.invoke(cli.app, ["ledger", "verify", "--pack", str(tmp_path / "pack")])
+        assert verified.exit_code == 0, verified.output
+        bundle = tmp_path / "pack" / "checkpoints" / f"{seq}.sigstore.json"
+        found = json.loads(bundle.read_text())
+        found["verificationMaterial"]["tlogEntries"][0]["logIndex"] = "7"
+        bundle.write_text(json.dumps(found))
+        broken = runner.invoke(cli.app, ["ledger", "verify", "--pack", str(tmp_path / "pack")])
+        assert (
+            broken.exit_code == 2 and "transparency log's entry doesn't check out" in broken.output
+        )

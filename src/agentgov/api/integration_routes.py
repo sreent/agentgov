@@ -182,12 +182,15 @@ def internal_decisions(
     if not isinstance(records, list):
         raise ValidationError("records must be a list")
     dropped = body.get("dropped") or 0
-    if not isinstance(dropped, int) or dropped < 0:
+    if isinstance(dropped, bool) or not isinstance(dropped, int) or dropped < 0:
         raise ValidationError("dropped must be a count")
-    with rt.db.session() as s:
-        if dropped:
+    if dropped:
+        # In a transaction of its own: recorded whatever becomes of the batch.
+        with rt.db.session() as s:
             decisions.record_dropped(s, dropped)
-        return {"stored": decisions.record_mcp_decisions(s, rt.settings, records)}
+    with rt.db.session() as s:
+        stored, rejected = decisions.record_mcp_decisions(s, rt.settings, records)
+    return {"stored": stored, **({"rejected": rejected} if rejected else {})}
 
 
 @router.post("/v1/internal/components", tags=["internal"])

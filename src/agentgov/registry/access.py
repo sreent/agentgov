@@ -60,7 +60,9 @@ def people(session: Session) -> list[dict[str, Any]]:
         by_subject[record.subject].append(record)
     found: dict[str, dict[str, Any]] = {}
     entries = session.scalars(
-        select(LedgerEntry).where(LedgerEntry.type.in_(SIGN_IN_EVENTS)).order_by(LedgerEntry.seq)
+        select(LedgerEntry)
+        .where(LedgerEntry.type.in_(SIGN_IN_EVENTS), ledger.in_chain())
+        .order_by(LedgerEntry.seq)
     )
     for entry in entries:
         subject = (entry.details or {}).get("subject")
