@@ -35,6 +35,7 @@ from agentgov.registry import (
     access_packages,
     entra_access,
     features,
+    findings,
     instructions,
     issues,
     mcp_sightings,
@@ -498,16 +499,24 @@ class Runtime:
     def run_issues(self) -> dict[str, Any]:
         """Expire access packages and raise their reminders and reviews; route findings to
         the people responsible, escalate those nobody acknowledged, open accepted risks
-        whose time ran out, and send what is due."""
+        whose time ran out, resolve threats that haven't happened for a while, and send
+        what is due."""
         with self.coordination.job("issues"):
             with self.db.session() as session:
                 access = access_packages.check(session, self.settings)
             with self.db.session() as session:
                 reopened = issues.reopen_accepted(session)
+                stale = findings.close_stale_threats(session, self.settings.threat_finding_days)
                 if not features.is_on(session, "issues"):
-                    return {"reopened": reopened, **access}
+                    return {"reopened": reopened, "stale_threats": stale, **access}
                 routed = issues.route(session, self.settings)
-            return {"reopened": reopened, **access, **routed, **self.notifier.run()}
+            return {
+                "reopened": reopened,
+                "stale_threats": stale,
+                **access,
+                **routed,
+                **self.notifier.run(),
+            }
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;
@@ -560,7 +569,7 @@ class Runtime:
                     found[package_id] = declarative_instructions(self.m365.package(package_id))
                 except PlatformError as exc:
                     log.warning("could not read package %s: %s", package_id, exc)
-            with self.db.session() as session:
+            with self.db.session() as session, platforms.first_sync(session, "microsoft-365"):
                 counts = platforms.record_microsoft_365(
                     session,
                     packages,
@@ -660,7 +669,7 @@ class Runtime:
                 with self.db.session() as session:
                     platforms.sync_failed(session, source, str(exc), actor=actor)
                 raise
-            with self.db.session() as session:
+            with self.db.session() as session, platforms.first_sync(session, source):
                 counts = platforms.record_inventory(
                     session, source, inventory, actor=actor, classify=self.guardian is not None
                 )
@@ -688,7 +697,7 @@ class Runtime:
         except PlatformError as exc:
             self._failed("entra-agent-id", exc, actor)
             raise
-        with self.db.session() as session:
+        with self.db.session() as session, platforms.first_sync(session, "entra-agent-id"):
             counts = platforms.record_agent_identities(session, identities, actor=actor)
             platforms.refresh_risk(session, self.settings)
             return counts

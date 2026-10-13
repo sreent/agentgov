@@ -2092,7 +2092,8 @@ def findings_get(finding_id: str) -> None:
     if f.get("remediation"):
         typer.echo(f"\nWhat to do: {f['remediation']}")
     if f.get("verified") is False:
-        typer.echo("\nUnverified: the sync that checks it failed; it may no longer hold.")
+        why = f.get("unverified_reason") or "the sync that checks it failed"
+        typer.echo(f"\nUnverified: {why}; it may no longer hold.")
     if f.get("status") == "accepted":
         typer.echo(f"\nRisk accepted until {f['accepted_until']}: {f['accepted_reason']}")
     if f.get("acknowledged_at"):
@@ -2154,6 +2155,45 @@ def findings_dismiss(finding_id: str) -> None:
 def findings_reopen(finding_id: str) -> None:
     """Reopen a resolved, dismissed or accepted finding."""
     _finding_action(finding_id, "reopen")
+
+
+@findings_app.command("types")
+def findings_types() -> None:
+    """Each type of finding: on or off, its severity if set here, and how many are open."""
+    rows = _call("GET", "/v1/finding-types")
+    for row in rows:
+        row["severity"] = row["severity"] or "(its checks')"
+    _table(rows, ["type", "mode", "severity", "open", "total"])
+
+
+@findings_app.command("type")
+def findings_type(
+    type_: str = typer.Argument(..., metavar="TYPE", help="Such as agent.no_owner."),
+    on: bool | None = typer.Option(
+        None, "--on/--off", help="Raise it, or keep what it finds dismissed."
+    ),
+    severity: str | None = typer.Option(
+        None, help="info, low, medium, high or critical; 'default' for its checks' own."
+    ),
+    yes: bool = YES,
+) -> None:
+    """Set how a type of finding is handled here."""
+    body: dict[str, Any] = {}
+    if on is not None:
+        body["mode"] = "on" if on else "off"
+    if severity is not None:
+        body["severity"] = None if severity == "default" else severity
+    if not body:
+        _fail("give --on, --off or --severity")
+    if body.get("mode") == "off":
+        _confirm(
+            f"Turn {type_} off? Its open findings are dismissed, and what it finds is kept "
+            "dismissed.",
+            yes,
+        )
+    out = _call("PUT", f"/v1/finding-types/{quote(type_)}", json=body)
+    severity_text = f"severity {out['severity']}" if out["severity"] else "its checks' severity"
+    _done("finding-type", type_, f"{out['mode']}, {severity_text}")
 
 
 # -------------------------------------------------------------------- ledger

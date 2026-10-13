@@ -28,7 +28,7 @@ from agentgov import ids, ledger
 from agentgov.db import mark_changed
 from agentgov.models import Agent, AgentInstructions, Finding
 from agentgov.processor import detectors
-from agentgov.registry import features, findings
+from agentgov.registry import features, finding_types, findings
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 from agentgov.scanners import guardian
 from agentgov.scanners import instructions as rules
@@ -271,6 +271,8 @@ def evaluate(session: Session, agent: Agent) -> Finding | None:
         existing is not None
         and existing.status == "dismissed"
         and (existing.details or {}).get("fingerprint") != fingerprint
+        # Dismissed because its type is off: raise_finding decides.
+        and finding_types.SUPPRESSED not in (existing.details or {})
     ):
         # Dismissing accepted the problems found then; new ones are asked about again.
         findings.set_status(session, existing.id, "open", SYSTEM_ACTOR)

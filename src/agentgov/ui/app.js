@@ -903,6 +903,7 @@ const PAGES = [
   { re: /^\/toolservers$/, nav: 'toolservers', title: 'Tool servers', render: renderToolservers },
   { re: /^\/findings$/, nav: 'findings', title: 'Findings', render: renderFindings },
   { re: /^\/findings\/teams$/, nav: 'findings', title: 'Teams', render: renderTeams },
+  { re: /^\/findings\/types$/, nav: 'findings', title: 'Finding types', render: renderFindingTypes },
   { re: /^\/findings\/([^/]+)$/, nav: 'findings', title: 'Finding', render: renderFinding },
   { re: /^\/policies$/, nav: 'policies', title: 'Policies', render: renderPolicies },
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
@@ -3511,7 +3512,8 @@ function findingTabs(current) {
   if (isPerson()) return null;
   return h('nav', { class: 'tabs', 'aria-label': 'Finding views' },
     h('a', { class: 'tab', href: '#/findings', 'aria-current': current === 'findings' ? 'page' : null }, 'Findings'),
-    h('a', { class: 'tab', href: '#/findings/teams', 'aria-current': current === 'teams' ? 'page' : null }, 'Teams'));
+    h('a', { class: 'tab', href: '#/findings/teams', 'aria-current': current === 'teams' ? 'page' : null }, 'Teams'),
+    h('a', { class: 'tab', href: '#/findings/types', 'aria-current': current === 'types' ? 'page' : null }, 'Types'));
 }
 
 async function renderFindings({ params }) {
@@ -3698,7 +3700,7 @@ function findingCard(f, agentsById, act, { yours = false } = {}) {
     h('div', { class: 'finding-main' },
       h('div', { class: 'finding-top' }, chip('severity', f.severity), plainChip(humanize(f.category)),
         f.status !== 'open' ? chip('finding', f.status) : null,
-        f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle', title: 'The sync that checks it failed: it may no longer hold.' }) : null,
+        f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle', title: `${cap(f.unverified_reason || 'the sync that checks it failed')}: it may no longer hold.` }) : null,
         h('span', { class: 'ledger-type muted' }, f.type)),
       h('h3', { id: headingId, class: 'break' }, f.title),
       f.description ? h('p', { class: 'finding-desc small' }, f.description) : null,
@@ -3738,7 +3740,7 @@ async function renderFinding({ match }) {
     h('div', { class: 'chip-row' }, chip('severity', f.severity), chip('finding', f.status), plainChip(humanize(f.category)),
       f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle' }) : null),
     f.verified === false ? callout('warning', 'triangle', h('span', {}, h('strong', {}, 'Unverified: '),
-      'the latest sync that checks it failed, so it may no longer hold. It stays open until a sync succeeds.')) : null,
+      `${f.unverified_reason || 'the latest sync that checks it failed'}, so it may no longer hold. It stays open until its check runs again.`)) : null,
     card({
       title: 'What it is',
       body: h('div', { class: 'stack' },
@@ -3924,6 +3926,76 @@ async function deleteTeam(t) {
   });
   if (!done) return;
   toast(`Deleted team ${t.name}.`);
+  await refresh();
+}
+
+/* ----------------------------------------------------------- finding types */
+
+// Which types of findings are raised here, and how severe each is (docs/issues.md).
+async function renderFindingTypes() {
+  if (isPerson()) { location.replace('#/findings'); return h('div'); }
+  const types = await api('v1/finding-types');
+  const admin = can('admin');
+  const off = types.filter((t) => t.mode === 'off');
+  const body = types.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('caption', { class: 'sr-only' }, 'Types of findings'),
+    h('thead', {}, h('tr', {}, ['Type', 'Raised', 'Severity', 'Open', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+    h('tbody', {}, types.map((t) => h('tr', { 'data-type': t.type },
+      h('td', { 'data-label': 'Type', class: 'break' }, h('span', { class: 'cell-title mono' }, t.type),
+        t.changed_by ? h('div', { class: 'cell-sub' }, `Set by ${t.changed_by.replace(/^[a-z]+:/, '')} `, timeEl(t.changed_at)) : null),
+      h('td', { 'data-label': 'Raised' }, t.mode === 'off'
+        ? plainChip('Off', { tone: 'warning', iconName: 'minus', title: 'Checked, but what it finds is kept dismissed' })
+        : plainChip('On', { tone: 'good', iconName: 'check-circle' })),
+      h('td', { 'data-label': 'Severity' }, t.severity ? chip('severity', t.severity) : h('span', { class: 'muted' }, "Its checks' own")),
+      h('td', { 'data-label': 'Open' }, `${fmt(t.open)} of ${fmt(t.total)}`),
+      h('td', { 'data-label': '' }, admin
+        ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `ftype-${t.type}`, onclick: guarded(() => findingTypeForm(t)) }, icon('edit'), 'Change')
+        : null))))))
+    : emptyState('No findings yet', 'A type is listed once AgentGov raises a finding of it, or once it is set up here.');
+  return h('div', { class: 'page', 'data-title': 'Finding types' },
+    pageHead({
+      title: 'Findings',
+      sub: "Each type of finding AgentGov's checks raise. Turn off the types your organisation doesn't act on: they are still checked, but what they find is kept dismissed and reaches no one. Or say how severe a type is here.",
+      actions: [
+        admin ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'add-finding-type', onclick: guarded(() => findingTypeForm(null)) }, icon('plus'), 'Set up a type') : null,
+        refreshButton(),
+      ],
+    }),
+    findingTabs('types'),
+    off.length ? callout('neutral', 'info', h('span', {}, h('strong', {}, `${plural(off.length, 'type')} off: `),
+      off.length === 1
+        ? 'what it finds is kept dismissed. Turned on again, what its checks find again comes back the next time they run.'
+        : 'what they find is kept dismissed. Turned on again, what their checks find again comes back the next time they run.')) : null,
+    card({ title: 'Types of findings', flush: Boolean(types.length), body }));
+}
+
+async function findingTypeForm(t) {
+  const saved = await ask({
+    title: t ? `Finding type ${t.type}` : 'Set up a type of finding',
+    text: t ? 'Changes are recorded in the evidence ledger.' : 'Set up a type before its checks raise anything, such as agent.no_owner (docs/issues.md lists them). Changes are recorded in the evidence ledger.',
+    iconName: 'edit', confirm: 'Save',
+    fields: [
+      t ? null : { id: 'type', label: 'Type', required: true, mono: true, placeholder: 'agent.no_owner' },
+      {
+        id: 'mode', label: 'Raised', type: 'select', value: t?.mode || 'on',
+        options: [
+          { value: 'on', label: 'On: raised and sent to the people responsible' },
+          { value: 'off', label: 'Off: checked, but what it finds is kept dismissed' },
+        ],
+        hint: 'Turned off, its open findings are dismissed.',
+      },
+      {
+        id: 'severity', label: 'Severity', type: 'select', value: t?.severity || '',
+        options: [{ value: '', label: "Its checks' own" }, ...SEVERITY_ORDER.map((k) => ({ value: k, label: statusMeta('severity', k)[2] }))],
+        hint: 'For what it finds from now on, and what it found that is still open.',
+      },
+    ].filter(Boolean),
+    submit: (v) => api(`v1/finding-types/${encodeURIComponent(t ? t.type : v.type)}`, {
+      method: 'PUT', body: { mode: v.mode, severity: v.severity || null },
+    }),
+  });
+  if (!saved) return;
+  toast(`${saved.type}: ${saved.mode === 'off' ? 'off' : 'on'}, ${saved.severity ? `severity ${saved.severity}` : "its checks' severity"}.`);
   await refresh();
 }
 

@@ -39,7 +39,12 @@ region, a Salesforce org, a Databricks workspace's agents on Model Serving). Age
 part it read in full stay in the registry, marked as gone, so their history is kept: delete
 them when you no longer need the record. A part that can't be read (its region refuses, say) is
 named on the Platforms page; its agents are left as the last sync saw them, and their findings
-stay open, marked unverified, until it can be read again.
+stay open, marked unverified with why, until it can be read again. So does a part with more
+than 50 pages of results, a cap that keeps one sync from running for hours: what is past the
+cap isn't read, so AgentGov can't tell which of its agents are gone.
+
+What a platform's first sync finds reaches the people responsible in AgentGov, without an
+email or a chat message ([issues](issues.md#fewer-messages)).
 
 AgentGov never copies secrets: of an agent's environment variables, it keeps only their
 names. Its instructions (a system prompt) go through the same [instruction

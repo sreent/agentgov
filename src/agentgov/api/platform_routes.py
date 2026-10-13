@@ -110,7 +110,7 @@ def import_copilot_studio(
 ) -> dict[str, int]:
     """Import Copilot Studio agents from a Power Platform inventory export (JSON)."""
     rt = request.app.state.rt
-    with rt.db.session() as s:
+    with rt.db.session() as s, platforms.first_sync(s, "copilot-studio"):
         counts = platforms.import_copilot_studio(s, payload, actor=principal.actor)
         platforms.refresh_risk(s, rt.settings)
         return counts
@@ -129,7 +129,7 @@ def sync_copilot_studio(request: Request, principal: Principal = Depends(admin))
                 s, "copilot-studio", ok=False, counts={}, message=str(exc), actor=principal.actor
             )
         raise HTTPException(502, str(exc)) from exc
-    with rt.db.session() as s:
+    with rt.db.session() as s, platforms.first_sync(s, "copilot-studio"):
         counts = platforms.import_copilot_studio(s, rows, actor=principal.actor)
         platforms.refresh_risk(s, rt.settings)
         return counts

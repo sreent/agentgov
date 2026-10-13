@@ -386,7 +386,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Access packages](docs/access-packages.md): tools, models and agents an agent holds for a
   while once approved, with reminders, renewals and reviews
 * [Issues](docs/issues.md): findings sent to each agent's owner, sponsors and team, by email
-  and in their chats, until someone takes them on
+  and in their chats, until someone takes them on; which kinds of findings are raised, how
+  severe each is, and which reach inboxes
 * [Management rules](docs/management-rules.md): what to do about agents that meet some
   conditions for long enough, such as blocking agents nobody uses, after telling their people
 * [Evidence](docs/evidence.md): checkpoints time-stamped by an authority and published in a

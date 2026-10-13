@@ -179,6 +179,9 @@ never in a values file you share.
 |---|---|---|
 | `AGENTGOV_ISSUE_ESCALATION_HOURS` | `critical:4,high:24,medium:72,low:168,info:168` | Hours an issue waits at each step of its chain (owner, sponsors, team) for someone to acknowledge it, before it goes to the next, by severity. |
 | `AGENTGOV_ISSUES_INTERVAL_SECONDS` | `60` | Seconds between rounds of routing issues, escalating them and sending what is due. |
+| `AGENTGOV_ISSUES_NOTIFY_SEVERITY` | `info` | Issues below this severity reach people in AgentGov only, without an email or a chat message. info: every issue is sent. |
+| `AGENTGOV_ISSUES_QUIET_FIRST_SYNC` | `true` | What a platform's first sync finds reaches people in AgentGov only, without an email or a chat message: what was there before AgentGov looked doesn't flood inboxes. Found again after it is resolved, it is sent as any other. |
+| `AGENTGOV_THREAT_FINDING_DAYS` | `30` | Days a threat finding stays open without happening again before it is resolved (it opens again if it happens again). 0 keeps threats open until someone closes them. |
 | `AGENTGOV_SMTP_URL` | — | The mail server for issues' emails: smtp://host:587 (STARTTLS) or smtps://host:465 (TLS). Without it, issues reach people in AgentGov and in their teams' chats only. |
 | `AGENTGOV_SMTP_FROM` | — | The sender of issues' emails, such as agentgov@example.com. |
 | `AGENTGOV_SMTP_USERNAME`<br>`AGENTGOV_SMTP_PASSWORD` (secret) | —<br>— | The mail server's user and password, if it needs them. |

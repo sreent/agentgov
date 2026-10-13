@@ -38,6 +38,14 @@ from agentgov.platforms.base import Found, Inventory, PlatformError, Risk
 API_VERSION = "v1"
 ARM_VERSION = "2025-06-01"
 MAX_PAGES = 50
+
+
+def _capped(what: str) -> str:
+    """Why a list read only up to MAX_PAGES pages fails: the part it is in wasn't read in
+    full, so its agents are left as the last full read saw them (agentgov.platforms.base)."""
+    return f"more than {MAX_PAGES} pages of {what}: the rest weren't read"
+
+
 RETRIES = (0.5, 1.0, 2.0)
 SECRET_NAME = re.compile(r"(secret|passw(or)?d|token|api[_-]?key|private[_-]?key|credential)", re.I)
 # A value that refers to a secret rather than holding one (a Key Vault reference), or that the
@@ -246,6 +254,8 @@ class FoundryConnector:
             yield from (v for v in page.get("value") or [] if isinstance(v, dict))
             # The next link is opaque and carries the API version itself.
             next_url, params = page.get("nextLink"), None
+        if next_url:
+            raise PlatformError(_capped(url))
 
     # -- projects and agents --------------------------------------------------------
 
@@ -295,6 +305,8 @@ class FoundryConnector:
                         found[str(connection["id"])] = connection
             url = page.get("nextLink")
             params = None if url and "api-version=" in url else {"api-version": API_VERSION}
+        if url:
+            raise PlatformError(_capped(f"{endpoint}/connections"))
         return found
 
     def _project(self, endpoint: str, part: str, inventory: Inventory) -> list[Found]:
@@ -348,6 +360,7 @@ class FoundryConnector:
                 if notes:
                     # Its findings stay as they were rather than close unchecked.
                     item.complete = False
+                    item.missing += notes
                     item.details["facts"] += [
                         {"label": "Not read in full", "value": note, "tone": "warning"}
                         for note in notes
@@ -356,6 +369,8 @@ class FoundryConnector:
             after = page.get("last_id")
             if not agents or not after or page.get("has_more") is False:
                 break
+        else:
+            raise PlatformError(_capped(f"{endpoint}/agents"))
         return found
 
 

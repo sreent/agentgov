@@ -151,15 +151,84 @@ them. A password is never sent to a server that doesn't offer TLS. In the Helm c
 them in `controlPlane.env`, with the password from a secret
 ([configuration](configuration.md#issues)).
 
+### Fewer messages
+
+Not every issue needs to reach an inbox:
+
+* **A severity floor.** `AGENTGOV_ISSUES_NOTIFY_SEVERITY` (`info`: every issue is sent)
+  sends emails and chat messages for issues of that severity and above only. Those below
+  still go to their people, one step at a time, and are listed for them in AgentGov; their
+  `finding.assigned` and `finding.escalated` entries say why nothing was sent (`quiet`).
+* **A quiet first sync.** When AgentGov first reads a platform (AWS, Copilot Studio,
+  Microsoft 365, ...), what it finds about the platform's agents was there before anyone
+  looked: their risky settings, and AgentGov's own findings about them, such as unmanaged
+  or high risk. With `AGENTGOV_ISSUES_QUIET_FIRST_SYNC` (true by default), those go to their
+  people in AgentGov without an email or a chat message, so that connecting a platform
+  doesn't flood inboxes; the finding's `details.baseline` says so. What later syncs find is
+  sent as usual, and so is a baseline finding that comes back after it was resolved.
+* **Types turned off** reach no one at all ([below](#kinds-of-findings)).
+
+## Kinds of findings
+
+Every check raises findings of its own types, such as `agent.no_owner`,
+`platform.no_guardrail` or `agent.ungranted_tool_use`, at the severity it judges. An
+organisation that doesn't act on some of them, or judges them otherwise, says so per type:
+
+* **Off.** The check still runs, but what it finds is kept dismissed: in nobody's list and
+  no one's inbox. Its open findings are dismissed when it is turned off (each a
+  `finding.dismissed` entry, by the administrator, "its type is off"). Turned on again, what
+  its checks find again comes back, the next time they run; a finding someone dismissed by
+  hand stays dismissed.
+* **A severity of its own.** For what the type finds from then on, and what it found that is
+  still open; `default` (null) goes back to its checks' own.
+
+```console
+$ agentgov findings type platform.shared_with_everyone --severity low
+finding-type/platform.shared_with_everyone: on, severity low
+$ agentgov findings type agent.no_sponsor --off
+$ agentgov findings types
+TYPE                           MODE  SEVERITY       OPEN  TOTAL
+agent.no_owner                 on    (its checks')  3     5
+agent.no_sponsor               off   (its checks')  0     0
+platform.shared_with_everyone  on    low            12    12
+```
+
+In the UI, **Findings > Types** lists every type AgentGov has raised, with how many are
+open, and an administrator changes one there, or sets up a type before anything of it is
+raised. The API is `GET /v1/finding-types` and `PUT /v1/finding-types/{type}` with
+`{"mode": "off"}` or `{"severity": "low"}`, and manifests have a `FindingType` kind:
+
+```yaml
+apiVersion: agentgov/v1alpha1
+kind: FindingType
+metadata: {name: platform.shared_with_everyone}
+spec: {severity: low}
+```
+
+Each change is a `finding_type.changed` entry in the ledger, a warning when it turns a type
+off or lowers its severity.
+
 ## Checks that couldn't run
 
 Some findings come from another system's data: the Copilot Studio inventory, Microsoft
-Entra's agent identities, Defender's alerts. When the sync that reads it fails, AgentGov can't
-tell whether its open findings still hold. They stay open, marked **unverified**, so that the
-people they reached know they might not; the next sync that succeeds verifies them again.
+Entra's agent identities, Defender's alerts, the other platforms AgentGov reads. When the
+sync that reads it fails, or reads some of it only (a region it may not read, an agent whose
+resource policy it can't see, more pages than it reads), AgentGov can't tell whether the
+open findings it would have checked still hold. They stay open, marked **unverified**, with
+why: "the last AWS sync couldn't read 111122223333/us-west-2: AccessDeniedException ...".
+The people they reached know they might not hold; the next sync that reads them verifies
+them again.
 
-A finding from Microsoft Entra closes only after two syncs in a row find its cause gone, so
-one odd page of results from Microsoft Graph doesn't close it and open it again.
+A finding from another platform closes only after two syncs in a row find its cause gone, so
+one odd page of results doesn't close it and open it again.
+
+## Threats that don't happen again
+
+A threat is an event: an agent used a tool it isn't granted, or called another agent around
+the gateway. One that hasn't happened again for `AGENTGOV_THREAT_FINDING_DAYS` (30) is
+resolved, with a `finding.resolved` entry that says so; if it happens again, it opens again
+and starts its chain over. `0` keeps threats open until someone closes them. Posture
+findings aren't affected: they close when their check finds their cause gone.
 
 ## In the ledger
 
@@ -170,6 +239,9 @@ one odd page of results from Microsoft Graph doesn't close it and open it again.
 | `finding.acknowledged` | Someone took it on |
 | `finding.accepted` (warning) | Its risk was accepted, with the date and the reason |
 | `finding.reopened` | Raised again, reopened by hand, or its accepted risk ran out |
+| `finding.resolved` | Its cause is gone, or, a threat, it hasn't happened for a while |
+| `finding.dismissed` | Dismissed by hand, or because its type was turned off |
+| `finding_type.changed` | A type was turned off or on, or given a severity |
 | `finding.notified` | A message went, to whom and how |
 | `finding.notification_failed` (warning) | A message was given up on after retrying |
 | `team.created`, `team.updated`, `team.deleted` | A team changed |

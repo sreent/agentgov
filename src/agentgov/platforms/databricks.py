@@ -185,6 +185,8 @@ class DatabricksConnector:
             token = page.get("next_page_token")
             if not token:
                 return
+        # The part this list is in wasn't read in full: its agents stay as last read.
+        raise PlatformError(f"more than {MAX_PAGES} pages of {path}: the rest weren't read")
 
     def _acl(self, url: str, path: str) -> list[dict[str, Any]] | None:
         """An object's permissions, or None when AgentGov may not read them."""

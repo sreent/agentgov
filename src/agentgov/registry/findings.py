@@ -7,6 +7,7 @@ date. Raised again after being resolved or accepted, a finding starts its chain 
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -21,6 +22,18 @@ POSTURE = "posture"
 THREAT = "threat"
 SYSTEM = "system:agentgov"
 STATUSES = ("open", "resolved", "dismissed", "accepted")
+# In an unverified finding's details: why its check couldn't run.
+UNVERIFIED = "unverified"
+# In a finding's details: found by a platform's first sync, there before AgentGov looked
+# (agentgov.registry.platforms.first_sync; agentgov.registry.issues sends it to no inbox).
+BASELINE = "baseline"
+
+
+def checked(finding: Finding) -> None:
+    """Its check ran: it holds, or it is gone, as far as anyone can tell."""
+    finding.verified = True
+    if UNVERIFIED in (finding.details or {}):
+        finding.details = {k: v for k, v in finding.details.items() if k != UNVERIFIED}
 
 
 def restart_chain(finding: Finding) -> None:
@@ -91,10 +104,15 @@ def raise_finding(
 
     Returns ``(finding, is_new)``. Dismissed findings stay dismissed, and accepted ones
     accepted until their date; resolved ones are reopened because the condition has come
-    back.
+    back. Its type's settings apply (agentgov.registry.finding_types): its severity, and,
+    while the type is off, it is kept dismissed instead; found again once its type is on,
+    it is reopened.
     """
+    from agentgov.registry import finding_types
+
     if severity not in SEVERITIES:
         raise ValidationError(f"unknown severity {severity!r}")
+    severity, off = finding_types.effective(session, type, severity)
     key = f"{type}:{subject}"
     finding = session.scalar(select(Finding).where(Finding.key == key))
     now = ids.utcnow()
@@ -114,6 +132,11 @@ def raise_finding(
             first_seen=now,
             last_seen=now,
         )
+        if off:
+            finding_types.suppress(finding, now)
+            session.add(finding)
+            session.flush()
+            return finding, False
         session.add(finding)
         session.flush()
         _record(session, finding, "raised", SYSTEM)
@@ -121,7 +144,7 @@ def raise_finding(
     finding.last_seen = now
     # The check ran and found it: it holds, as far as anyone can tell.
     finding.clean_checks = 0
-    finding.verified = True
+    checked(finding)
     finding.severity = severity
     finding.title = title
     finding.description = description or finding.description
@@ -130,11 +153,25 @@ def raise_finding(
         finding.details = {**(finding.details or {}), **details}
     if category == THREAT:
         finding.occurrences += 1
-    reopened = finding.status == "resolved"
+    if off and finding.status in ("open", "resolved"):
+        # Found again, but its type is off.
+        if finding.status == "open":
+            _record(session, finding, "dismissed", finding_types.ACTOR, reason="its type is off")
+        finding_types.suppress(finding, now)
+    suppressed = finding.status == "dismissed" and finding_types.SUPPRESSED in (
+        finding.details or {}
+    )
+    reopened = finding.status == "resolved" or (suppressed and not off)
     if reopened:
         finding.status = "open"
         finding.resolved_at = None
         finding.resolved_by = None
+        # Back after it was gone: news, whatever it was before.
+        finding.details = {
+            k: v
+            for k, v in (finding.details or {}).items()
+            if k not in (finding_types.SUPPRESSED, BASELINE)
+        }
         restart_chain(finding)
         _record(session, finding, "reopened", SYSTEM)
     return finding, reopened
@@ -163,7 +200,7 @@ def resolve_absent(
     for finding in open_findings:
         if finding.key in present_keys:
             continue
-        finding.verified = True
+        checked(finding)
         finding.clean_checks = (finding.clean_checks or 0) + 1
         if finding.clean_checks >= clean:
             finding.status = "resolved"
@@ -175,6 +212,29 @@ def resolve_absent(
     return count
 
 
+def close_stale_threats(session: Session, days: int, now: datetime | None = None) -> int:
+    """Resolve the threats that haven't happened again for ``days`` days (0: none are): they
+    were events, and one that happens again opens again."""
+    if days <= 0:
+        return 0
+    now = now or ids.utcnow()
+    count = 0
+    for finding in session.scalars(
+        select(Finding).where(
+            Finding.status == "open",
+            Finding.category == THREAT,
+            Finding.last_seen < now - timedelta(days=days),
+        )
+    ):
+        finding.status = "resolved"
+        finding.resolved_at = now
+        finding.resolved_by = SYSTEM
+        finding.escalate_at = None
+        record(session, finding, "resolved", SYSTEM, why=f"it hasn't happened for {days} days")
+        count += 1
+    return count
+
+
 def mark_unverified(
     session: Session,
     *,
@@ -182,18 +242,27 @@ def mark_unverified(
     verified: bool = False,
     subjects: set[str] | None = None,
     present_keys: set[str] | None = None,
+    reason: str = "",
 ) -> int:
     """The check behind these findings couldn't run (a sync failed): their open findings
-    may or may not still hold, so they stay open, marked unverified, until it runs again
-    (``verified=True``, when it does). ``subjects`` as for :func:`resolve_absent`; findings
-    in ``present_keys`` were found again by a check that ran in part, so they still hold."""
+    may or may not still hold, so they stay open, marked unverified with ``reason``, until
+    it runs again (``verified=True``, when it does). ``subjects`` as for
+    :func:`resolve_absent`; findings in ``present_keys`` were found again by a check that
+    ran in part, so they still hold."""
     count = 0
     for finding in session.scalars(_open(types, subjects)):
         if present_keys and finding.key in present_keys:
             continue
-        if finding.verified != verified:
-            finding.verified = verified
+        if verified:
+            if finding.verified is False:
+                count += 1
+            checked(finding)
+            continue
+        if finding.verified is not False:
             count += 1
+        finding.verified = False
+        if reason and (finding.details or {}).get(UNVERIFIED) != reason:
+            finding.details = {**(finding.details or {}), UNVERIFIED: reason[:500]}
     return count
 
 
@@ -260,4 +329,6 @@ def to_dict(f: Finding) -> dict[str, Any]:
         "accepted_until": ids.isoformat(f.accepted_until),
         "accepted_reason": f.accepted_reason,
         "verified": bool(f.verified) if f.verified is not None else True,
+        # Why its check couldn't run, while it is unverified.
+        "unverified_reason": (f.details or {}).get(UNVERIFIED) if f.verified is False else None,
     }

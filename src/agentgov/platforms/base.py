@@ -63,6 +63,8 @@ class Found:
     instructions: str | None = None
     # False when some of it couldn't be read: its findings are then left as they were.
     complete: bool = True
+    # What of it couldn't be read, and why: its findings say so while they wait.
+    missing: list[str] = field(default_factory=list)
 
 
 @dataclass

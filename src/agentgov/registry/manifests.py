@@ -2,8 +2,8 @@
 
 ```yaml
 apiVersion: agentgov/v1alpha1
-kind: Agent            # Feature | Destination | Team | IdentityIssuer | Blueprint |
-                       # ToolServer | ModelProvider | AccessPackage | Policy |
+kind: Agent            # Feature | FindingType | Destination | Team | IdentityIssuer |
+                       # Blueprint | ToolServer | ModelProvider | AccessPackage | Policy |
                        # ManagementRule | Agent
 metadata:
   name: support-bot
@@ -21,6 +21,10 @@ A ``Feature`` sets how strictly one of AgentGov's features applies
 control ``spec.scopes`` its exceptions, its mode for the agents in a scope
 (docs/features.md#exceptions).
 
+A ``FindingType`` says how one type of finding is handled (docs/issues.md#kinds-of-findings):
+``metadata.name`` is the type, such as ``agent.no_owner``; ``spec.mode`` on or off, and
+``spec.severity`` its severity here.
+
 Applying is idempotent: unchanged resources are reported as ``unchanged``.
 Resources are applied in dependency order (features first, then destinations, the teams
 that post to them, identity issuers, blueprints, tool servers, model providers and the access
@@ -36,13 +40,14 @@ import yaml
 from sqlalchemy.orm import Session
 
 from agentgov.config import Settings
-from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
+from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions, FindingType
 from agentgov.registry import (
     access_packages,
     agents,
     blueprints,
     destinations,
     features,
+    finding_types,
     identity_issuers,
     instructions,
     model_providers,
@@ -56,6 +61,7 @@ from agentgov.registry.errors import NotFound, ValidationError
 API_VERSION = "agentgov/v1alpha1"
 ORDER = [
     "Feature",
+    "FindingType",
     "Destination",
     "Team",
     "IdentityIssuer",
@@ -110,6 +116,7 @@ def apply(
         name = spec["name"]
         action = {
             "Feature": _feature,
+            "FindingType": _finding_type,
             "Destination": _destination,
             "Team": _team,
             "IdentityIssuer": _identity_issuer,
@@ -142,6 +149,19 @@ def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: 
     except NotFound as exc:
         raise ValidationError(str(exc)) from None
     return "configured" if changed else "unchanged"
+
+
+def _finding_type(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    if set(spec) - {"name", "mode", "severity", "labels"}:
+        raise ValidationError(f"finding type {spec['name']}: spec takes only mode and severity")
+    if "mode" not in spec and "severity" not in spec:
+        raise ValidationError(f"finding type {spec['name']}: spec needs mode, severity or both")
+    row = session.get(FindingType, spec["name"])
+    before = (row.mode, row.severity) if row is not None else None
+    after = finding_types.configure(
+        session, spec["name"], {k: spec[k] for k in ("mode", "severity") if k in spec}, actor=actor
+    )
+    return "unchanged" if before == (after["mode"], after["severity"]) else "configured"
 
 
 def _destination(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
@@ -313,6 +333,15 @@ def export(session: Session) -> list[dict[str, Any]]:
     # Features administrators chose; the deployment's pins belong to the deployment.
     docs: list[dict[str, Any]] = [
         _doc("Feature", key, spec) for key, spec in features.chosen(session).items()
+    ]
+    # How types of findings are handled here.
+    docs += [
+        _doc(
+            "FindingType",
+            row.type,
+            {"mode": row.mode, **({"severity": row.severity} if row.severity else {})},
+        )
+        for row in finding_types.chosen(session)
     ]
     # Where events and alerts go; their credentials are files, never exported.
     for destination in destinations.list_all(session):

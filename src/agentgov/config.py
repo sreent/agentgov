@@ -142,6 +142,16 @@ class Settings:
     issue_escalation_hours: str = "critical:4,high:24,medium:72,low:168,info:168"
     # Seconds between rounds of routing issues, escalating them and sending what is due.
     issues_interval_seconds: int = 60
+    # Issues below this severity reach people in AgentGov only, without an email or a chat
+    # message. info: every issue is sent.
+    issues_notify_severity: str = "info"
+    # What a platform's first sync finds reaches people in AgentGov only, without an email
+    # or a chat message: what was there before AgentGov looked doesn't flood inboxes. Found
+    # again after it is resolved, it is sent as any other.
+    issues_quiet_first_sync: bool = True
+    # Days a threat finding stays open without happening again before it is resolved (it
+    # opens again if it happens again). 0 keeps threats open until someone closes them.
+    threat_finding_days: int = 30
     # The mail server for issues' emails: smtp://host:587 (STARTTLS) or smtps://host:465
     # (TLS). Without it, issues reach people in AgentGov and in their teams' chats only.
     smtp_url: str | None = None
@@ -550,6 +560,12 @@ class Settings:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
         if self.issues_interval_seconds < 0:
             raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
+        if self.issues_notify_severity not in ("info", "low", "medium", "high", "critical"):
+            raise ValueError(
+                "AGENTGOV_ISSUES_NOTIFY_SEVERITY is one of info, low, medium, high, critical"
+            )
+        if self.threat_finding_days < 0:
+            raise ValueError("AGENTGOV_THREAT_FINDING_DAYS must be 0 (never) or more")
         if self.component_report_seconds < 0:
             raise ValueError("AGENTGOV_COMPONENT_REPORT_SECONDS must be 0 (none) or more")
         if self.platform_sync_interval_seconds < 0:

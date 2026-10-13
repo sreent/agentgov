@@ -386,6 +386,20 @@ class Policy(Base):
     updated_at: Mapped[datetime] = _updated()
 
 
+class FindingType(Base):
+    """How findings of one type are handled here (``agentgov.registry.finding_types``):
+    raised or not, and how severe. Types nobody configured have no row."""
+
+    __tablename__ = "finding_types"
+
+    type: Mapped[str] = mapped_column(String(128), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(8), default="on")
+    # Instead of the severity its check gives it; None keeps that one.
+    severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    changed_by: Mapped[str] = mapped_column(String(200))
+    changed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
 class FeatureSetting(Base):
     """The mode chosen for one of AgentGov's features (``agentgov.registry.features``).
 
