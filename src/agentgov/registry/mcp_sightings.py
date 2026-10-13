@@ -92,8 +92,12 @@ def _strings(value: Any, field: str) -> list[str]:
 
 def _sanitised(url: str | None, command: list[str], identity: str) -> tuple[Any, ...]:
     """A server's address, command line and identity, as the scanner reports them now
-    (agentgov.mcp_scan): what an older scanner, or anything else, sent holds no more."""
+    (agentgov.mcp_scan): what an older scanner, or anything else, sent holds no more.
+    Sanitising them again changes nothing."""
     url = mcp_scan.address(url) if url else None
+    if not url and not command and identity.startswith("command:"):
+        # Only the identity names the command line: cleaned as one, once.
+        command = mcp_scan.command_line(identity.removeprefix("command:"))
     command = mcp_scan.clean_args(command)
     return url, command, mcp_scan.identity_of(url, command) or mcp_scan.clean_identity(identity)
 

@@ -264,7 +264,8 @@ def clean_args(args: list[Any]) -> list[str]:
             continue
         if expect == "header":
             out.append(_header(arg))
-            expect = None
+            # "Name:" alone: its value is the next argument (a command line split at spaces).
+            expect = "secret" if arg.rstrip().endswith(":") else None
             continue
         if expect == "env":
             out.append(_env(arg))
@@ -357,14 +358,17 @@ def identity_of(url: str | None, command: list[str]) -> str:
     return "command:" + " ".join([program, *args])[:300]
 
 
+def command_line(line: str) -> list[str]:
+    """A command line written as one string (as an identity names it), as its arguments:
+    what spans arguments there (Bearer <token>) is redacted first."""
+    return _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}", line).split(" ")
+
+
 def clean_identity(identity: str) -> str:
-    """An identity as reported, sanitised as :func:`identity_of` makes one."""
+    """An identity as reported, with its address as :func:`address` gives it. Cleaning it
+    again changes nothing."""
     kind, _, value = identity.partition(":")
-    if kind == "url":
-        return f"url:{address(value)}"
-    if kind == "command":
-        return "command:" + " ".join(clean_args(value.split(" ")))[:300]
-    return identity
+    return f"url:{address(value)}" if kind == "url" else identity
 
 
 def sighting(source: Source, name: str, spec: dict[str, Any]) -> Sighting:

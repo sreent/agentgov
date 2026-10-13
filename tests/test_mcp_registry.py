@@ -343,6 +343,21 @@ class TestSightings:
         [seen] = client.get("/v1/mcp/sightings", headers=ADMIN).json()
         assert (seen["status"], seen["server"]) == ("approved", "github")
 
+    def test_an_identity_alone_is_sanitised_once(self, client, settings) -> None:
+        """A report that names a command line by its identity only: cleaned as one, and
+        the same at every refresh after."""
+        alone = {"name": "x", "client": "cursor", "transport": "stdio",
+                 "identity": "command:mcp-remote -H Authorization: Bearer abc123"}  # fmt: skip
+        client.post("/v1/mcp/sightings", json=scanned(alone), headers=ADMIN).raise_for_status()
+        [seen] = client.get("/v1/mcp/sightings", headers=ADMIN).json()
+        assert "abc123" not in json.dumps(seen)
+        assert seen["command"][:3] == ["mcp-remote", "-H", "Authorization: <redacted>"]
+        rt = client.app.state.rt
+        for _ in range(2):
+            with rt.db.session() as s:
+                mcp_sightings.refresh(s, settings)
+            assert client.get("/v1/mcp/sightings", headers=ADMIN).json() == [seen]
+
     def test_what_was_kept_before_is_sanitised(self, client, settings) -> None:
         rt = client.app.state.rt
         secret = "https://actions.zapier.com/mcp/sk-ak-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c/sse"

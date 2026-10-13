@@ -209,3 +209,6 @@ def test_sanitising_again_changes_nothing(url: str) -> None:
     assert mcp_scan.address(mcp_scan.address(url)) == mcp_scan.address(url)
     args = ["npx", "mcp-remote", url, "-e", "A=b", "--token", "t", "--header", "X: y"]
     assert mcp_scan.clean_args(mcp_scan.clean_args(args)) == mcp_scan.clean_args(args)
+    for identity in (f"url:{url}", "command:mcp-remote -H X-Api-Key: <redacted>"):
+        once = mcp_scan.clean_identity(identity)
+        assert mcp_scan.clean_identity(once) == once
