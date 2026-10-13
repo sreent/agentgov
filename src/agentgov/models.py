@@ -513,6 +513,24 @@ class PlatformSync(Base):
     counts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class ComponentReport(Base):
+    """What one instance of a component (a governance processor) last said it can reach:
+    OPA, Presidio, Granite Guardian, a decision point of your own (agentgov.health)."""
+
+    __tablename__ = "component_reports"
+
+    component: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instance: Mapped[str] = mapped_column(String(200), primary_key=True)
+    reported_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    version: Mapped[str] = mapped_column(String(32), default="")
+    # Seconds between its reports: it is out of touch after a few missed ones.
+    interval: Mapped[int] = mapped_column(Integer, default=60)
+    # {"opa": {"configured": bool, "ok": bool, "detail": str}, ...}
+    checks: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # The settings that decide what a failed check does (Presidio's failure mode).
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class IntegrationState(Base):
     """Where an integration with another service got to, between runs (a cursor, a
     pending query, the permissions an app was granted)."""

@@ -451,6 +451,10 @@ class Settings:
     processor_webhook_listen: str = "0.0.0.0:8091"
     # Control plane URL as seen from the processor.
     control_plane_url: str = "http://localhost:8000"
+    # Seconds between the processor's reports to the control plane of what it can reach
+    # (OPA, Presidio, Granite Guardian, your decision point), which say on the Features page
+    # whether each control can do what its mode says; 0 sends none.
+    component_report_seconds: int = 60
     # Presidio's analyzer, such as http://presidio-analyzer:3000. Without it, personal
     # data isn't looked for.
     presidio_url: str | None = None
@@ -508,6 +512,8 @@ class Settings:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
         if self.issues_interval_seconds < 0:
             raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
+        if self.component_report_seconds < 0:
+            raise ValueError("AGENTGOV_COMPONENT_REPORT_SECONDS must be 0 (none) or more")
         if self.platform_sync_interval_seconds < 0:
             raise ValueError(
                 "AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS must be 0 (on demand only) or more"

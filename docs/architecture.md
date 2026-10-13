@@ -105,6 +105,9 @@ sequenceDiagram
   call through and its decision says what it would have done, which the ledger records
   as a warning. The bundle carries the modes (`data.registry.features`), and the
   processor reads them from OPA, so a change reaches every gateway within seconds.
+* Each processor tells the control plane every minute what it can reach (OPA, Presidio,
+  Granite Guardian, a decision point of yours), so the Features page says which controls
+  can do what their modes say ([is it working?](features.md#is-it-working)).
 * A developer's MCP client takes the same path with the developer's own token, once they
   have signed in to an agent registered as a public client: with the `developer-sign-in`
   feature, the route checks tokens with agentgateway's MCP authentication, which also

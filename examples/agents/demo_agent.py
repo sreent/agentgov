@@ -1592,6 +1592,36 @@ def identity_assertions() -> None:
         admin("PUT", "/v1/features/identity-assertions", json={"mode": "off"})
 
 
+def component_health() -> None:
+    step("26. Is it working? What the governance processor reaches, and so what the controls do")
+
+    def fresh() -> list[dict[str, Any]]:
+        return [p for p in admin("GET", "/v1/components")["processors"] if p["fresh"]]
+
+    until(lambda: bool(fresh()))
+    processors = fresh()
+    reached = [
+        f"{p['instance']}: "
+        + ", ".join(
+            f"{name} {'reachable' if c['ok'] else 'unreachable'}"
+            for name, c in p["checks"].items()
+            if c["configured"]
+        )
+        for p in processors
+    ]
+    ok = bool(processors) and all(
+        p["checks"]["opa"]["ok"] and p["checks"]["presidio"]["ok"] for p in processors
+    )
+    show("processor:", ok, "; ".join(reached) or "none has reported")
+    for key in ("least-privilege", "data-protection"):
+        f = admin("GET", f"/v1/features/{key}")
+        show(
+            f"{key}:",
+            f["status"] == "active",
+            f"{f['mode']}, {f['status']}" + (f": {f['problems'][0]}" if f["problems"] else ""),
+        )
+
+
 def back_channel_logout() -> None:
     step("25. Signing out everywhere: alice signs out at Keycloak, and AgentGov signs her out")
     alice = agentgov_session("alice")
@@ -1644,6 +1674,7 @@ def main() -> None:
         asyncio.run(developer_sign_in())
         identity_assertions()
         back_channel_logout()
+        component_health()
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")
         print(f"{DIM}Open {CONTROL_PLANE}/ui for the admin view.{RESET}")

@@ -1071,10 +1071,14 @@ function enterApp() {
   if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', isPerson() ? personHome() : '#/overview');
   route();
   refreshBadges();
-  getInfo().then((info) => {
+  getInfo().then(async (info) => {
     if (!info) return;
     const who = me ? ` · signed in as ${me.actor}${me.via === 'session' ? ' (single sign-on)' : ''}` : '';
-    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'Keycloak identities' : 'no identity provider'} · OPA ${info.opa ? 'connected' : 'not configured'}${who}`;
+    // Whether the control plane reaches OPA now, not only whether it is set up.
+    const components = await api('v1/components').catch(() => null);
+    const opa = components?.control_plane?.opa;
+    const opaWords = !info.opa ? 'not configured' : opa ? (opa.ok ? 'reachable' : 'unreachable') : 'set up';
+    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'Keycloak identities' : 'no identity provider'} · OPA ${opaWords}${who}`;
   });
 }
 
@@ -6213,23 +6217,76 @@ function featureSummary(list) {
   return parts.length ? `Features: ${parts.join(', ')}` : 'Features: the defaults';
 }
 
+// Whether a feature can do what its mode says (agentgov.health): words and tone.
+const FEATURE_STATUS = {
+  failing: ['Stopping more than it should', 'critical', 'alert-circle'],
+  inactive: ['Doing nothing', 'warning', 'triangle'],
+  limited: ['Doing part of it', 'warning', 'triangle'],
+};
+
 async function renderFeatures() {
-  const view = await api('v1/features');
+  const [view, components] = await Promise.all([api('v1/features'), api('v1/components')]);
   const monitored = view.features.filter((f) => f.mode === 'monitor' && f.group === 'controls');
+  const failing = view.features.filter((f) => f.status === 'failing');
+  const short = view.features.filter((f) => f.status === 'inactive' || f.status === 'limited');
   return h('div', { class: 'page' },
     pageHead({
       title: 'Features',
       sub: 'Choose which parts of AgentGov you use, and how strictly. In monitor mode a control decides and records what it would have done, but lets the call through: try it on real traffic before you enforce it.',
       actions: [refreshButton()],
     }),
+    failing.length ? callout('critical', 'alert-circle', h('span', {},
+      h('strong', {}, `${plural(failing.length, 'feature')} stopping more than ${failing.length === 1 ? 'it' : 'they'} should: `),
+      failing.map((f) => f.title).join(', '), '. See why below.')) : null,
+    short.length ? callout('warning', 'triangle', h('span', {},
+      h('strong', {}, `${plural(short.length, 'feature')} not doing all ${short.length === 1 ? 'its mode says' : 'their modes say'}: `),
+      short.map((f) => f.title).join(', '), '. Turn off the ones you don\'t use; for the others, see below what each needs.')) : null,
     monitored.length ? callout('warning', 'eye', h('span', {},
       h('strong', {}, `${plural(monitored.length, 'control')} in monitor mode. `),
       'Calls they would have stopped go through, and the ledger records them as warnings. ',
       h('a', { href: '#/ledger?decision=monitored' }, 'See what they would have stopped'), '.')) : null,
+    componentsCard(components),
     Object.entries(view.groups).map(([group, title]) => {
       const list = view.features.filter((f) => f.group === group);
       return list.length ? featuresCard(title, list) : null;
     }));
+}
+
+// What the control plane reaches itself, and what each governance processor says it reaches.
+const CHECK_NAMES = { opa: 'OPA', keycloak: "Keycloak's keys", presidio: 'Presidio', guardian: 'Granite Guardian', authzen: 'Your decision point' };
+
+function checkChip(name, c) {
+  const label = CHECK_NAMES[name] || name;
+  if (!c || !c.configured) {
+    // A processor with no AGENTGOV_OPA_URL still asks one, at its default address.
+    if (c && c.detail) return plainChip(`${label}: ${c.ok ? 'reachable' : 'unreachable'}`, { tone: c.ok ? 'good' : 'critical', iconName: c.ok ? 'check' : 'alert-circle', title: c.detail });
+    return plainChip(`${label}: not set up`, { title: `Not set up where it runs` });
+  }
+  return c.ok
+    ? plainChip(`${label}: reachable`, { tone: 'good', iconName: 'check' })
+    : plainChip(`${label}: unreachable`, { tone: 'critical', iconName: 'alert-circle', title: c.detail || null });
+}
+
+function componentsCard(view) {
+  const cp = view.control_plane || {};
+  const processors = view.processors || [];
+  const rows = [
+    ['Control plane', h('div', { class: 'chip-row' }, ['opa', 'keycloak'].map((n) => checkChip(n, cp[n])))],
+    ...processors.map((p) => [
+      h('span', {}, 'Governance processor ', h('code', {}, p.instance)),
+      h('div', {},
+        h('div', { class: 'chip-row' }, ['opa', 'presidio', 'guardian', 'authzen'].map((n) => checkChip(n, p.checks[n]))),
+        h('div', { class: 'cell-sub' }, p.fresh ? 'Reported ' : 'Out of touch: last reported ', timeEl(p.reported_at)),
+        ...Object.entries(p.checks).filter(([, c]) => c.configured && !c.ok && c.detail).map(([n, c]) => h('div', { class: 'cell-sub' }, `${CHECK_NAMES[n] || n}: ${c.detail}`))),
+    ]),
+  ];
+  return card({
+    title: 'What AgentGov can reach',
+    sub: 'Checked now by the control plane, and reported every minute by each governance processor where it runs. A feature that needs what isn\'t reachable says so below.',
+    body: h('div', {},
+      processors.length ? null : callout('warning', 'triangle', 'No governance processor has reported. The controls at the gateway check only calls through AgentGov\'s gateway, and nothing is known to check them.'),
+      facts(rows)),
+  });
 }
 
 function featuresCard(title, list) {
@@ -6244,8 +6301,19 @@ function featuresCard(title, list) {
           h('span', { class: 'cell-title' }, f.title), h('div', { class: 'cell-sub' }, f.description),
           f.needs ? h('div', { class: 'cell-sub' }, `Needs ${f.needs}.`) : null),
         h('td', { 'data-label': 'Mode' }, modeControl(f)),
-        h('td', { 'data-label': 'Now' }, h('div', {}, f.effect), featureProvenance(f))))))),
+        h('td', { 'data-label': 'Now' }, featureNow(f), featureProvenance(f))))))),
   });
+}
+
+// What the mode does, or, when it can't do all of it, what stops it.
+function featureNow(f) {
+  const status = FEATURE_STATUS[f.status];
+  if (!status || !(f.problems || []).length) return h('div', {}, f.effect);
+  const [words, tone, iconName] = status;
+  return h('div', { class: 'stack-tight' },
+    plainChip(words, { tone, iconName }),
+    (f.problems || []).map((p) => h('div', { class: 'break' }, p)),
+    h('div', { class: 'cell-sub' }, `Its mode: ${f.effect}`));
 }
 
 function featureProvenance(f) {

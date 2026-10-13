@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from agentgov import ids, ledger, migrations, retention, timestamping, transparency
+from agentgov import health, ids, ledger, migrations, retention, timestamping, transparency
 from agentgov.config import Settings
 from agentgov.coordination import Coordinator
 from agentgov.db import Database
@@ -125,6 +125,10 @@ class Runtime:
         self.settings = settings
         # This component's certificate, for mutual TLS with the others (agentgov.tls).
         self.tls = settings.tls()
+        # What the control plane reaches itself, for whether features can do their work.
+        self.health = health.Cached(
+            settings, verify=lambda: self.tls.client_context() if self.tls else True
+        )
         self.db = Database(settings.database_url, on_commit=self._on_commit)
         # OPA's bundles, signed when a key is set (agentgov.opa.signing).
         signer = (

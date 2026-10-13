@@ -329,6 +329,7 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Micro
 | `AGENTGOV_PROCESSOR_LISTEN` | `0.0.0.0:50051` | Where it answers agentgateway about tool calls (gRPC). |
 | `AGENTGOV_PROCESSOR_WEBHOOK_LISTEN` | `0.0.0.0:8091` | Where it answers agentgateway's guardrail webhook for model calls, and its external authorization of calls between agents. |
 | `AGENTGOV_CONTROL_PLANE_URL` | `http://localhost:8000` | Control plane URL as seen from the processor. |
+| `AGENTGOV_COMPONENT_REPORT_SECONDS` | `60` | Seconds between the processor's reports to the control plane of what it can reach (OPA, Presidio, Granite Guardian, your decision point), which say on the Features page whether each control can do what its mode says; 0 sends none. |
 | `AGENTGOV_PRESIDIO_URL` | — | Presidio's analyzer, such as `http://presidio-analyzer:3000`. Without it, personal data isn't looked for. |
 | `AGENTGOV_PII_ENTITIES` | `EMAIL_ADDRESS:0.5,PHONE_NUMBER:0.4,US_SSN:0.5,CREDIT_CARD:0.5,IBAN_CODE:0.5,CRYPTO:0.5` | Presidio entities treated as personal data, with per-entity minimum scores. Noisy recognisers (DATE_TIME, URL, LOCATION, ...) are deliberately absent; add PERSON:0.85 to also mask names (it has false positives). |
 | `AGENTGOV_PRESIDIO_MAX_CHARS` | `16000` | Presidio costs ~40 ms per KB; text beyond this budget is not sent to it. |

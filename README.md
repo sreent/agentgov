@@ -218,6 +218,9 @@ the gateway. It shows each control in turn:
 25. **Signing out everywhere**: alice signs in to AgentGov, then signs out at Keycloak
     itself; Keycloak tells AgentGov, and her AgentGov session ends at once
     ([administration](docs/administration.md#signing-out-everywhere)).
+26. **Is it working?**: the governance processor has told the control plane what it can
+    reach, OPA and Presidio, so least privilege and data protection can do what their
+    modes say ([features](docs/features.md#is-it-working)).
 
 Then look around:
 

@@ -139,6 +139,49 @@ Some things are never switched off: an agent or tool server that is blocked stay
 blocked, callers must be registered agents unless `unknown-callers` is monitored, and
 organisation policies' denials always apply.
 
+## Is it working?
+
+A mode says what should happen. Each feature also says whether it can do that now, and
+what stops it when it can't:
+
+| Status | Meaning |
+|---|---|
+| active | nothing AgentGov knows of stops it |
+| limited | it does part of what its mode says |
+| inactive | it is on, but does nothing |
+| failing | it stops more than it should: calls are refused because something it needs is down |
+
+AgentGov learns this from what it can check, not from settings alone. The control plane
+checks OPA (with its policies loaded) and Keycloak's keys, at most every 30 seconds, where
+it is set up to use them. Each governance processor reports what it reaches where it runs,
+with its own settings: OPA, Presidio, Granite Guardian and your decision point
+([AuthZEN](policies.md#authzen)). It reports when it starts and every
+`AGENTGOV_COMPONENT_REPORT_SECONDS` (60) after that. A processor that misses three reports
+in a row, or three minutes, whichever is longer, is out of touch and doesn't count.
+
+| Feature | What stops it |
+|---|---|
+| The gateway and every control at it | no governance processor in touch: inactive, since nothing is known to check calls; a processor that can't reach OPA, or whose OPA has no policies loaded: failing, since every call through the gateway is refused, in every mode |
+| `data-protection` | no Presidio where the processor runs: limited, since credentials are still found; Presidio unreachable: failing while enforced with `AGENTGOV_PRESIDIO_FAILURE_MODE=closed`, limited otherwise |
+| `a2a-masking` | `data-protection` off, or Presidio missing or unreachable: inactive, since nothing finds the personal data to mask |
+| `traffic-classifier` | no Granite Guardian where the processor runs: inactive; unreachable: limited, since the rules decide alone |
+| `external-decision-point` | no `AGENTGOV_AUTHZEN_URL` where the processor runs: inactive; unreachable: failing while enforced, limited while monitored |
+| `token-budgets` | no `AGENTGOV_GATEWAY_OTLP_ENDPOINT`: inactive, since usage isn't metered |
+| `authzen-decision-point`, `copilot-studio-threat-detection` | OPA unreachable from the control plane: failing |
+| `developer-sign-in`, `identity-assertions`, `approvals-by-person` | Keycloak's keys unreachable from the control plane: limited |
+| The Microsoft connections | not set up, or the app lacks the permission: inactive; the last sync failed: limited |
+| The other platforms | not configured: inactive; the last sync didn't read everything: limited |
+| `security-operations` | no destinations: inactive |
+
+A mode a feature can't use yet, for want of a setting, makes it inactive too, and says
+which setting.
+
+| | Where |
+|---|---|
+| Admin UI | **Features**: a status on each feature that isn't fully working, with why, and **What AgentGov can reach** |
+| CLI | `agentgov features list` (its `status` column), `agentgov components` |
+| API | `status` and `problems` in `GET /v1/features`; `GET /v1/components` |
+
 ## Rolling out a control
 
 1. Set the control to monitor: `agentgov features set least-privilege monitor`.

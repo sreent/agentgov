@@ -811,9 +811,14 @@ async def serve(settings: Settings) -> None:
     webhook = model_guard.server(
         model_guard.ModelGuard(processor), settings.processor_webhook_listen, tls=identity
     )
+    # What it can reach, for the Features page (agentgov.health).
+    from agentgov.processor.health import ComponentReporter
+
+    reporter = ComponentReporter(settings, control_plane, components=http)
     recorder.start()
     await server.start()
     webhook_task = asyncio.create_task(webhook.serve())
+    reporter.start()
     log.info(
         "governance processor listening on %s (tool calls, agents' answers) and %s (model calls)%s",
         settings.processor_listen,
@@ -823,6 +828,7 @@ async def serve(settings: Settings) -> None:
     try:
         await server.wait_for_termination()
     finally:
+        await reporter.stop()
         webhook.should_exit = True
         await webhook_task
         await server.stop(grace=5)

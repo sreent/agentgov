@@ -2747,18 +2747,57 @@ def instructions_check(
 
 @features_app.command("list")
 def features_list() -> None:
-    """Every feature, its mode and what that mode does."""
+    """Every feature, its mode, whether it can do what its mode says, and what it does or
+    what stops it."""
     view = _call("GET", "/v1/features")
     rows = [
         {
             "feature": f["key"],
             "mode": f["mode"],
+            "status": f.get("status"),
             "set_by": f["set_by"],
-            "does": f["effect"],
+            "does": (f.get("problems") or [f["effect"]])[0],
         }
         for f in view["features"]
     ]
-    _table(rows, ["feature", "mode", "set_by", "does"])
+    _table(rows, ["feature", "mode", "status", "set_by", "does"])
+
+
+@app.command()
+def components() -> None:
+    """What the control plane reaches itself, and what each governance processor says it
+    reaches: whether features can do what their modes say comes from these."""
+    view = _call("GET", "/v1/components")
+    rows = []
+
+    def add(where: str, reported: str | None, checks: dict[str, Any]) -> None:
+        for name, c in checks.items():
+            state = ("reachable" if c["ok"] else "unreachable") if c["configured"] else "not set up"
+            rows.append(
+                {
+                    "component": where,
+                    "check": name,
+                    "state": state,
+                    "reported": reported,
+                    "detail": c.get("detail") or "",
+                }
+            )
+
+    add("control plane", "now", view["control_plane"])
+    for p in view["processors"]:
+        where = f"processor {p['instance']}" + ("" if p["fresh"] else " (out of touch)")
+        add(where, p["reported_at"], p["checks"])
+    if not view["processors"]:
+        rows.append(
+            {
+                "component": "processor",
+                "check": "",
+                "state": "none has reported",
+                "reported": "",
+                "detail": "nothing is known to check calls through the gateway",
+            }
+        )
+    _table(rows, ["component", "check", "state", "reported", "detail"])
 
 
 @features_app.command("get")

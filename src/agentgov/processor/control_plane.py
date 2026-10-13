@@ -52,6 +52,9 @@ class ControlPlaneClient:
     async def record_decisions(self, records: list[dict[str, Any]]) -> dict[str, Any]:
         return await self._post("/v1/internal/decisions", {"records": records})
 
+    async def report_component(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._post("/v1/internal/components", payload)
+
 
 class DecisionRecorder:
     """Ships decision records to the ledger in batches, off the request path.
