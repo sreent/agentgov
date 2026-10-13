@@ -643,6 +643,13 @@ def evaluate(session: Session) -> int:
         actor=SYSTEM_ACTOR,
         subjects=subjects(session, "copilot-studio"),
     )
+    sync = session.get(PlatformSync, "copilot-studio")
+    if sync is not None and not sync.ok:
+        # Raised again from what an earlier sync stored, which may no longer hold: they stay
+        # unverified until a sync succeeds.
+        findings.mark_unverified(
+            session, types=FINDING_TYPES, subjects=subjects(session, "copilot-studio")
+        )
     return len(present)
 
 
