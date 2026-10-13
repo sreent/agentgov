@@ -2362,6 +2362,60 @@ def approvals_deny(approval_id: str, note: str | None = None) -> None:
     typer.echo(f"{r['id']}: {r['status']}")
 
 
+# What to run to decide each kind of the inbox.
+INBOX_HOW = {
+    "calls": "agentgov approvals approve|deny ID",
+    "access": "agentgov access-packages approve|deny ID",
+    "risks": "agentgov findings accept|decline-exception ID",
+    "agents": "agentgov agents lifecycle NAME approve|block",
+    "toolservers": "agentgov toolservers approve|block NAME",
+    "definitions": "agentgov toolservers approve-tool SERVER TOOL",
+    "platform_agents": "agentgov agents list --status discovered, then adopt or block them",
+}
+
+
+def _inbox_line(kind: str, item: dict[str, Any]) -> str:
+    if kind == "calls":
+        return f"{item['id']}  {item['agent_name']}: {item['action']} {item['resource']}"
+    if kind == "access":
+        return (
+            f"{item['id']}  {item['package']} for {item['agent_name']}, asked by "
+            f"{item['requested_by']}: {item['reason']}"
+        )
+    if kind == "risks":
+        asked = item.get("asked") or {}
+        return (
+            f"{item['id']}  {item['title']} ({asked.get('by')}, until "
+            f"{str(asked.get('until'))[:10]}: {asked.get('reason')})"
+        )
+    if kind == "agents":
+        sponsors = ", ".join(item.get("sponsors") or []) or "none"
+        return f"{item['name']}  owner {item.get('owner') or 'none'}, sponsors {sponsors}"
+    if kind == "toolservers":
+        return f"{item['name']}  {item['url']}"
+    if kind == "definitions":
+        return f"{item['server']}/{item['tool']}"
+    return f"{item['platform']}: {item['count']}"
+
+
+@app.command("inbox")
+def inbox() -> None:
+    """Everything waiting for a decision you can make: calls held for a person, access
+    asked for agents, risks asked to be accepted, and, for administrators, agents and tool
+    servers to approve, changed tool definitions and platform agents nobody reviewed."""
+    view = _call("GET", "/v1/inbox")
+    if not view["total"]:
+        typer.echo("Nothing waits for a decision of yours.")
+        return
+    typer.echo(f"{view['total']} waiting for a decision of yours")
+    for kind in view["kinds"]:
+        if not kind["count"]:
+            continue
+        typer.echo(f"\n{kind['title']} ({kind['count']}): {INBOX_HOW[kind['kind']]}")
+        for item in kind["items"]:
+            typer.echo(f"  {_inbox_line(kind['kind'], item)}")
+
+
 # ------------------------------------------------------------------ findings
 
 FINDING_STATUS = typer.Option("open", help="open, resolved, dismissed, accepted or all.")

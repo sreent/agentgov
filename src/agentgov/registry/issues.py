@@ -288,10 +288,10 @@ def reopen_accepted(session: Session, now: datetime | None = None) -> int:
     now = now or ids.utcnow()
     count = 0
     off = finding_types.off_types(session)
+    # The key as text: SQLite's JSON values come quoted (a missing key reads as "null").
+    dismissed_until = Finding.details[findings.DISMISSAL].as_string().is_not(None)
     for finding in session.scalars(
-        select(Finding).where(
-            Finding.status == "dismissed", Finding.details[findings.DISMISSAL].is_not(None)
-        )
+        select(Finding).where(Finding.status == "dismissed", dismissed_until)
     ):
         until = ((finding.details or {}).get(findings.DISMISSAL) or {}).get("until")
         if not until or datetime.fromisoformat(until) > now or finding.type in off:

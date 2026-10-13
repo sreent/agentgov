@@ -38,6 +38,7 @@ from agentgov.registry import (
     discovery,
     finding_types,
     findings,
+    inbox,
     issues,
     manifests,
     start,
@@ -65,6 +66,16 @@ def list_approvals(
 ) -> list[dict[str, Any]]:
     with _rt(request).db.session() as s:
         return [approvals.to_dict(r) for r in approvals.list_requests(s, status=status)]
+
+
+@router.get("/inbox", tags=["approvals"])
+def get_inbox(request: Request, principal: Principal = Depends(signed_in)) -> dict[str, Any]:
+    """What waits for a decision from whoever asks, by kind (``kinds``), and how many in all
+    (``total``): calls held for a person, access packages asked for, risks asked to be
+    accepted, and, for administrators, agents and tool servers waiting for approval,
+    changed tool definitions, and agents found on platforms that nobody has reviewed."""
+    with _rt(request).db.session() as s:
+        return inbox.gather(s, principal)
 
 
 @router.get("/me/approvals", tags=["approvals"])
@@ -176,7 +187,7 @@ def list_findings(
         if agent:
             conditions.append(Finding.agent_id == agents.get(s, agent).id)
         if asked:
-            conditions.append(Finding.details[issues.ASKED].is_not(None))
+            conditions.append(Finding.details[issues.ASKED].as_string().is_not(None))
         total = s.scalar(select(func.count()).select_from(Finding).where(*conditions))
         response.headers["X-Total-Count"] = str(total or 0)
         stmt = (

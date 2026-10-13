@@ -108,13 +108,30 @@ The admin center's menu has the overview first, then five groups:
 
 | Group | Pages | For |
 |---|---|---|
-| *Work* | **Approvals**, **Findings** | What waits for someone: calls and requests to decide, and issues to take on |
+| *Work* | **Approvals**, **Findings** | What waits for someone: decisions ([below](#approvals)), and issues to take on |
 | *Agents* | **Agents**, **Agent map**, **Platforms** | What there is: the registry, which agents call which, and the platforms agents come from |
 | *Gateway* | **Tool servers**, **Models**, **Policies**, **Developer tools** | What agents' calls through the gateway may reach, and the rules for them: unused [without the gateway](deploy/local.md#just-the-inventory) |
 | *Evidence* | **Ledger**, **Compliance**, **Register** | What happened, the reports for a framework, and how each agent is classified |
 | *Settings* | **Teams**, **Security operations**, **Access**, **Features** | Who takes the issues, the security team's tools, who signs in, and which features are on |
 
 People without an AgentGov role see only their issues and the approvals waiting for them.
+
+## Approvals
+
+**Approvals** gathers everything waiting for a decision, each kind for those who may make
+it, and its badge counts them:
+
+| Kind | Who decides | Where |
+|---|---|---|
+| Calls policy held for a person, such as a tool its server marks destructive | Approvers and administrators, the security team from the hand-off's *decide* level, or the person they were sent to ([acting for people](acting-for-people.md#approvals-sent-to-the-person)) | On the page: **Approve**, **Deny** |
+| Access packages asked for agents | Approvers and administrators, but not whoever asked ([access packages](access-packages.md)) | On the page |
+| Risks the people an issue reached ask to be accepted | Approvers and administrators, and the security team from *triage* on; nobody accountable for the agent | On the issue: **Accept the risk**, **Decline** ([issues](issues.md)) |
+| Agents and tool servers registered for review | Administrators | On the page: **Approve**, **Block** |
+| Tool definitions that changed since they were approved | Administrators | In the tool server's catalog: **Approve new definition** |
+| Agents found on platforms that nobody has reviewed | Administrators | **Agents**, not reviewed yet: **Adopt** |
+
+The same list is `agentgov inbox`, with the command that decides each kind, and
+`GET /v1/inbox`.
 
 ## Tasks
 

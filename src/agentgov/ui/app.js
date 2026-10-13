@@ -924,10 +924,10 @@ async function refreshBadges() {
       const res = await api(`v1/findings?status=open&limit=1${query}`, { raw: true });
       return Number(res.headers.get('X-Total-Count') || 0);
     };
-    const [pending, open, critical, high] = await Promise.all([
-      api('v1/approvals?status=pending'), count(''), count('&severity=critical'), count('&severity=high'),
+    const [waiting, open, critical, high] = await Promise.all([
+      api('v1/inbox'), count(''), count('&severity=critical'), count('&severity=high'),
     ]);
-    updateBadges({ pendingApprovals: pending.length, findings: { open, by_severity: { critical, high } } });
+    updateBadges({ pendingApprovals: waiting.total, findings: { open, by_severity: { critical, high } } });
   } catch { /* badges are a convenience; the pages show the real state */ }
 }
 
@@ -1274,7 +1274,7 @@ async function renderOverview() {
     api('v1/overview'), getInfo(), api('v1/features').then((v) => v.features).catch(() => null),
     api('v1/start').catch(() => null),
   ]);
-  updateBadges({ pendingApprovals: ov.approvals?.pending ?? 0, findings: ov.findings });
+  updateBadges({ findings: ov.findings });
   // The gateway's panels once agents may call through it, or have: until then they would
   // show nothing but zeros.
   const gateway = (features || []).some((f) => f.key === 'mcp-gateway' && f.mode !== 'off')
@@ -3656,23 +3656,27 @@ async function renderApprovals({ match }) {
   const tab = match[1] === 'history' ? 'history' : 'pending';
   const person = isPerson();
   // Requests sent to the person signed in: agents acted for them.
-  const [all, agents, mine, asked, packages] = await Promise.all([
+  const [all, agents, mine, asked, packages, inbox] = await Promise.all([
     person ? api('v1/me/approvals') : api('v1/approvals'),
     person ? [] : api('v1/agents?include_deleted=true').catch(() => []),
     api('v1/me/approvals?status=pending').catch(() => []),
     person ? [] : api('v1/access-assignments?status=requested').catch(() => []),
     person ? [] : api('v1/access-packages').catch(() => []),
+    // Everything else waiting for a decision this role can make.
+    person ? null : api('v1/inbox').catch(() => null),
   ]);
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const mineIds = new Set(mine.map((r) => r.id));
   const pending = all.filter((r) => r.status === 'pending');
   const history = all.filter((r) => r.status !== 'pending');
-  updateBadges({ pendingApprovals: pending.length });
+  const more = (inbox?.kinds || []).filter((k) => k.count && !['calls', 'access'].includes(k.kind));
+  const waiting = pending.length + asked.length + more.reduce((n, k) => n + k.count, 0);
+  updateBadges({ pendingApprovals: inbox ? inbox.total : pending.length });
   const approvalsMode = person ? 'enforce' : (await featureModes().catch(() => ({}))).approvals;
   const approval = (r) => approvalCard(r, agentsById.get(r.agent_id), mineIds.has(r.id));
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'Approval views' },
     h('a', { class: 'tab', href: '#/approvals', 'aria-current': tab === 'pending' ? 'page' : null },
-      'Pending', h('span', { class: 'nav-badge', 'data-tone': pending.length ? 'warning' : '' }, fmt(pending.length))),
+      'Pending', h('span', { class: 'nav-badge', 'data-tone': waiting ? 'warning' : '' }, fmt(waiting))),
     h('a', { class: 'tab', href: '#/approvals/history', 'aria-current': tab === 'history' ? 'page' : null },
       'History', h('span', { class: 'nav-badge' }, fmt(history.length))));
   let content;
@@ -3680,18 +3684,18 @@ async function renderApprovals({ match }) {
     // Yours first: requests agents made while acting for you wait for your decision.
     const yours = pending.filter((r) => mineIds.has(r.id));
     const others = pending.filter((r) => !mineIds.has(r.id));
-    content = pending.length
-      ? h('div', { class: 'stack' },
-        yours.length && !person ? h('div', { class: 'section-title' }, h('h2', {}, 'Waiting for you')) : null,
+    const sections = [];
+    if (pending.length) {
+      // Headed as one kind among others when there are others.
+      if (asked.length || more.length) sections.push(h('div', { class: 'section-title' }, h('h2', {}, 'Calls held for a decision')));
+      sections.push(
+        yours.length && !person ? h('div', { class: 'section-title' }, h('h3', {}, 'Waiting for you')) : null,
         yours.length ? h('div', { class: 'approval-list' }, yours.map(approval)) : null,
-        yours.length && others.length ? h('div', { class: 'section-title' }, h('h2', {}, "Everyone else's")) : null,
-        others.length ? h('div', { class: 'approval-list' }, others.map(approval)) : null)
-      : h('section', { class: 'card' }, person
-        ? emptyState('Nothing is waiting for you', 'When an agent acting for you needs your approval to do something, it appears here.')
-        : emptyState('Nothing is waiting for approval',
-          'When policy holds a tool call for a human (for example a tool its server marks destructive), it appears here.'));
+        yours.length && others.length ? h('div', { class: 'section-title' }, h('h3', {}, "Everyone else's")) : null,
+        others.length ? h('div', { class: 'approval-list' }, others.map(approval)) : null);
+    }
     if (asked.length) {
-      content = h('div', { class: 'stack' }, content, card({
+      sections.push(card({
         title: 'Access requests',
         sub: 'Access packages asked for agents. Someone other than who asked decides.',
         body: h('ul', { class: 'access-list', role: 'list' }, asked.map((r) => h('li', { class: 'access-row' },
@@ -3701,6 +3705,13 @@ async function renderApprovals({ match }) {
           h('div', { class: 'btn-row' }, assignmentButtons(r, packages, { id: r.agent_id, name: r.agent_name }))))),
       }));
     }
+    sections.push(...more.map(inboxCard));
+    content = sections.length
+      ? h('div', { class: 'stack' }, ...sections)
+      : h('section', { class: 'card' }, person
+        ? emptyState('Nothing is waiting for you', 'When an agent acting for you needs your approval to do something, it appears here.')
+        : emptyState('Nothing is waiting for a decision',
+          'Calls policy holds for a person, access asked for agents, risks people ask to accept, and agents and tool servers registered for review appear here.'));
   } else {
     content = h('section', { class: 'card', 'aria-label': 'Approval history' },
       history.length ? approvalHistoryTable(history) : emptyState('No decided approvals yet'));
@@ -3710,7 +3721,7 @@ async function renderApprovals({ match }) {
       title: 'Approvals',
       sub: person
         ? 'What agents acting for you want to do, and need you to approve first. Approve a call and the agent can make it once.'
-        : 'Tool calls that policy held for a human decision. An approval is single-use: the agent retries the identical call and it goes through once.',
+        : 'Everything waiting for a decision you can make: calls policy held, access asked for agents, risks people ask to accept, and agents and tool servers to approve. An approved call is single-use: the agent retries the identical call and it goes through once.',
       actions: [refreshButton()],
     }),
     approvalsMode && approvalsMode !== 'enforce' ? callout('warning', 'eye', h('span', {},
@@ -3718,6 +3729,70 @@ async function renderApprovals({ match }) {
       approvalsMode === 'off' ? 'no call waits for approval. ' : 'calls that need approval go through, and the ledger records them. ',
       h('a', { href: '#/features' }, 'Features'), '.')) : null,
     tabs, content);
+}
+
+// One kind of decision from the inbox (GET /v1/inbox), beyond calls and access requests.
+function inboxCard(k) {
+  // Its count is of agents, its rows of platforms.
+  const listed = k.kind === 'platform_agents' ? k.count : k.items.length;
+  const more = k.count > listed ? h('p', { class: 'hint' }, `And ${fmt(k.count - listed)} more.`) : null;
+  const row = (main, sub, buttons) => h('li', { class: 'access-row' },
+    h('div', { class: 'access-main' }, h('div', { class: 'cell-title' }, main), sub ? h('div', { class: 'cell-sub break' }, sub) : null),
+    buttons ? h('div', { class: 'btn-row' }, buttons) : null);
+  const list = (rows) => h('div', {}, h('ul', { class: 'access-list', role: 'list' }, rows), more);
+  if (k.kind === 'risks') {
+    return card({
+      title: k.title,
+      sub: 'The people an issue reached ask for its risk to be accepted until a date, and say why. Accept or decline it on the issue; nobody accountable for the agent accepts its risk.',
+      body: list(k.items.map((f) => row(
+        h('a', { href: `#/findings/${encodeURIComponent(f.id)}` }, f.title),
+        [f.agent_id ? [agentLink(f.agent_id, f.agent_name || f.subject), ' · '] : null,
+          `${f.asked.by}, until ${String(f.asked.until).slice(0, 10)}: ${f.asked.reason}`],
+        [h('a', { class: 'btn btn--sm', href: `#/findings/${encodeURIComponent(f.id)}` }, 'Decide')]))),
+    });
+  }
+  if (k.kind === 'agents') {
+    return card({
+      title: k.title,
+      sub: 'Registered for review. Approved, an agent becomes active and can authenticate; blocked, it can do nothing.',
+      body: list(k.items.map((a) => row(
+        agentLink(a.id, a.name),
+        [`Owner ${a.owner || 'none'} · sponsors ${(a.sponsors || []).join(', ') || 'none'}`, a.blueprint ? ` · blueprint ${a.blueprint}` : null,
+          ` · registered by ${a.created_by || 'someone'} `, timeEl(a.created_at)],
+        [h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => runLifecycle(a, 'approve') }, icon('check'), 'Approve'),
+          h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: () => runLifecycle(a, 'block') }, icon('ban'), 'Block')]))),
+    });
+  }
+  if (k.kind === 'toolservers') {
+    return card({
+      title: k.title,
+      sub: 'Registered for review. Approved, agents whose grants cover it can call its tools through the gateway.',
+      body: list(k.items.map((ts) => row(
+        ts.name,
+        [h('code', {}, ts.url), ts.owner ? ` · owner ${ts.owner}` : null, ` · registered by ${ts.created_by || 'someone'} `, timeEl(ts.created_at)],
+        [h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => serverAction(ts, 'approve') }, icon('check'), 'Approve'),
+          h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: () => serverAction(ts, 'block') }, icon('ban'), 'Block')]))),
+    });
+  }
+  if (k.kind === 'definitions') {
+    return card({
+      title: k.title,
+      sub: 'Calls to these tools are refused until an administrator reads the new definition and approves it, in the tool server\'s catalog.',
+      body: list(k.items.map((d) => row(
+        h('code', {}, `${d.server}/${d.tool}`), ['Changed ', timeEl(d.since)],
+        [h('a', { class: 'btn btn--sm', href: '#/toolservers' }, 'Review')]))),
+    });
+  }
+  if (k.kind === 'platform_agents') {
+    return card({
+      title: k.title,
+      sub: 'Found on the platforms AgentGov reads, with no owner, sponsors or review yet. Adopt the ones you keep; block or delete the others where they run.',
+      body: list(k.items.map((p) => row(
+        `${plural(p.count, 'agent')} in ${p.platform}`, null,
+        [h('a', { class: 'btn btn--sm', href: '#/agents?status=discovered' }, 'Review them')]))),
+    });
+  }
+  return null;
 }
 
 function approvalCard(r, agent, mine = false) {
