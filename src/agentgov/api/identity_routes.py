@@ -10,17 +10,40 @@ from sqlalchemy import func, select
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.api.versions import if_match
 from agentgov.models import Agent
-from agentgov.registry import identity_issuers
-from agentgov.registry.errors import NotFound
+from agentgov.registry import features, identity_issuers
+from agentgov.registry.errors import Conflict, NotFound
 from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1/identity-issuers", tags=["identity"])
 read = require(*READ_ROLES)
 admin = require("admin")
+# Agents' own identities: off, no issuer is trusted, in Keycloak or at the gateway.
+OWN_IDENTITIES = "workload-identity"
 
 
 def _with_count(s: Any, issuer: Any) -> dict[str, Any]:
-    return identity_issuers.to_dict(issuer, identity_issuers.agent_count(s, issuer))
+    return identity_issuers.to_dict(
+        issuer, identity_issuers.agent_count(s, issuer), on=features.is_on(s, OWN_IDENTITIES)
+    )
+
+
+def _not_keycloak(request: Request, issuer: Any) -> None:
+    """The gateway takes Keycloak's tokens as AgentGov's own: not as another issuer's too."""
+    own = request.app.state.rt.settings.keycloak_issuer
+    if issuer.gateway and own and issuer.issuer.rstrip("/") == own.rstrip("/"):
+        raise Conflict(
+            f"{issuer.issuer} is AgentGov's own Keycloak, whose tokens the gateway takes already"
+        )
+
+
+def _keys_now(request: Request, name: str, trusted: bool) -> dict[str, Any]:
+    """The issuer, its keys fetched first when the gateway is to take its tokens: whether
+    it can is known at once (docs/agent-identity.md#straight-to-the-gateway)."""
+    rt = request.app.state.rt
+    if trusted:
+        rt.refresh_issuer_keys([name])
+    with rt.db.session() as s:
+        return _with_count(s, identity_issuers.get(s, name))
 
 
 @router.get("")
@@ -33,8 +56,10 @@ def list_issuers(request: Request, _: Principal = Depends(read)) -> list[dict[st
                 .group_by(Agent.workload_issuer)
             ).all()
         )
+        on = features.is_on(s, OWN_IDENTITIES)
         return [
-            identity_issuers.to_dict(i, counts.get(i.name, 0)) for i in identity_issuers.list_all(s)
+            identity_issuers.to_dict(i, counts.get(i.name, 0), on=on)
+            for i in identity_issuers.list_all(s)
         ]
 
 
@@ -42,9 +67,13 @@ def list_issuers(request: Request, _: Principal = Depends(read)) -> list[dict[st
 def create_issuer(
     request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
 ) -> dict[str, Any]:
-    """Trust an identity issuer: agents can then authenticate with its tokens."""
+    """Trust an identity issuer: agents can then authenticate with its tokens (with
+    ``gateway``, at the gateway too)."""
     with request.app.state.rt.db.session() as s:
-        return _with_count(s, identity_issuers.create(s, body, actor=principal.actor))
+        issuer = identity_issuers.create(s, body, actor=principal.actor)
+        _not_keycloak(request, issuer)
+        name, trusted = issuer.name, issuer.gateway
+    return _keys_now(request, name, trusted)
 
 
 @router.get("/{ref}")
@@ -62,8 +91,26 @@ def update_issuer(
 ) -> dict[str, Any]:
     with request.app.state.rt.db.session() as s:
         issuer = identity_issuers.get(s, ref)
-        identity_issuers.update(s, issuer, body, actor=principal.actor, version=if_match(request))
-        return _with_count(s, issuer)
+        changed = identity_issuers.update(
+            s, issuer, body, actor=principal.actor, version=if_match(request)
+        )
+        _not_keycloak(request, issuer)
+        name = issuer.name
+        # Where its keys are may have changed, or the gateway is to take its tokens now.
+        fetch = issuer.gateway and bool({"gateway", "issuer", "keys_url"} & set(changed))
+    return _keys_now(request, name, fetch)
+
+
+@router.post("/{ref}/keys")
+def fetch_issuer_keys(request: Request, ref: str, _: Principal = Depends(admin)) -> dict[str, Any]:
+    """Fetch the signing keys of an issuer the gateway trusts now, as when it rotated them
+    sooner than AgentGov fetches them again (AGENTGOV_ISSUER_KEYS_INTERVAL_SECONDS)."""
+    with request.app.state.rt.db.session() as s:
+        issuer = identity_issuers.get(s, ref)
+        if not issuer.gateway:
+            raise Conflict(f"the gateway doesn't take {issuer.name}'s tokens: it has no keys there")
+        name = issuer.name
+    return _keys_now(request, name, True)
 
 
 @router.post("/{ref}/{action}")

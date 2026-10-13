@@ -199,6 +199,88 @@ Most of these tokens carry a `jti`, and agents can fetch a fresh one for each si
 `allow_reuse` can stay off; turn it on when an agent presents the same token more than
 once, or its tokens lack a `jti`.
 
+## Straight to the gateway
+
+An OpenID Connect or Kubernetes issuer can also be **trusted at the gateway**: its agents
+then call the gateway with their issuer's token itself, as they would with an AgentGov
+token, without trading it at Keycloak first. There's no extra hop in the agent's code, and
+an install without Keycloak (the [inventory](features.md#starting-points) starting point,
+or your own identity provider) can tell agents apart at the gateway too.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Ad as Administrator
+    participant CP as AgentGov
+    participant P as Platform (Kubernetes, Entra ID, Okta)
+    participant Ag as Agent
+    participant G as agentgateway
+    Ad->>CP: trust an issuer at the gateway; give an agent its subject there
+    CP->>P: fetch the issuer's signing keys
+    CP->>G: the keys, written into the gateway's configuration
+    P-->>Ag: a short-lived token for the workload (the gateway's audience)
+    Ag->>G: tool, model and agent calls, with that token
+    G->>G: signature, issuer, audience, expiry; the agent its issuer and subject name
+```
+
+| | How |
+|---|---|
+| Admin UI | **Access** → *Agent identity issuers*: *The gateway takes its tokens itself* on the issuer's form; the card says whether it does, with how many keys, and **Fetch keys** fetches them now |
+| CLI | `agentgov issuers create prod-cluster --kind kubernetes --issuer <URL> --gateway`; `update --gateway` or `--no-gateway`; `fetch-keys` |
+| API | `gateway: true` in `POST /v1/identity-issuers` and `PATCH /v1/identity-issuers/{name}`; `POST /v1/identity-issuers/{name}/keys` fetches its keys now; each issuer's `gateway` says whether the gateway takes its tokens, with how many keys, fetched when, and why not |
+| Manifests | `gateway: true` in an `IdentityIssuer`'s spec |
+
+**The token** carries the issuer's `audience` (`oidc`), else the gateway's
+(`AGENTGOV_GATEWAY_AUDIENCE`, `agentgov-gateway` by default), and goes in the
+`Authorization: Bearer` header of each call. Give each AgentGov install an audience of its
+own, such as its gateway's URL: with a shared one, a token that one install's gateway
+receives, from an issuer both trust, is good at the other's too. A pod gets one for the
+gateway alongside, or instead of, the one for Keycloak:
+
+```yaml
+          - serviceAccountToken:
+              path: agentgov-gateway
+              audience: agentgov-gateway  # AGENTGOV_GATEWAY_AUDIENCE
+              expirationSeconds: 3600
+```
+
+`agentgov agents credentials support-bot` (the agent's *How it authenticates*) says so
+under `gateway`, and works without Keycloak then:
+
+```json
+"gateway": {
+  "url": "https://gateway.example.com",
+  "issuer": "https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE",
+  "audience": "agentgov-gateway"
+}
+```
+
+**Its keys.** AgentGov fetches the issuer's signing keys (from its `keys_url`, else from its
+discovery document's `jwks_uri`) and writes the public ones that name a key ID into the
+gateway's configuration: the gateway never reaches the issuer. It fetches them again every
+five minutes (`AGENTGOV_ISSUER_KEYS_INTERVAL_SECONDS`), when the issuer changes, and on
+demand (**Fetch keys**, `agentgov issuers fetch-keys`), as issuers rotate their keys. When
+they can't be fetched, the last ones stay: the issuer says why, and so does the
+*Agents' own identities* feature's status; tokens signed with a key AgentGov hasn't fetched
+yet are refused. A cluster that keeps the default issuer
+(`https://kubernetes.default.svc.cluster.local`) shows its keys only to callers with a
+token: put them where AgentGov can read them, and name that `keys_url`.
+
+**Which agent.** A token's issuer and its `sub` name the agent with that workload
+identity, and every control applies as with AgentGov's own tokens: grants, approvals,
+budgets, the kill switch, the ledger (whose entries record the token's issuer and subject)
+and model usage. A subject no agent has is an unknown caller: refused while
+[`unknown-callers`](features.md) is enforced; let through and recorded while it is
+monitored, and found as a discovered agent with that workload identity, so adopting it is
+all it needs. Only AgentGov's own tokens are believed for which agent or client they name
+and for the person an agent acts for: claims such as `agent_id`, `azp` or `email` in
+another issuer's token are ignored.
+
+**Blocking** the issuer, or turning agents' own identities off, takes its tokens off the
+gateway within seconds: at once they name no agent, and the gateway's next configuration
+doesn't take them. Without Keycloak, the gateway takes only the tokens of the issuers it
+trusts, and the model providers' keys are spent for their agents alone.
+
 ## In policy
 
 The agents in OPA's data say how each authenticates:
@@ -258,3 +340,19 @@ a tool, and blocks and unblocks the issuer.
 * SPIFFE support in Keycloak is a preview.
 * AgentGov checks the subject's form for SPIFFE IDs only; for other issuers, check it
   against a real token.
+* At the gateway ([above](#straight-to-the-gateway)):
+  * OpenID Connect and Kubernetes issuers only. A SPIFFE trust domain's agents get
+    AgentGov tokens through Keycloak; or register SPIRE's OIDC Discovery Provider as an
+    `oidc` issuer, with SPIRE's `jwt_issuer` set to it, since the gateway refuses tokens
+    without an `iss`.
+  * While developers sign in at the gateway (`developer-sign-in`,
+    [developer tools](developer-tools.md#signing-in-at-the-gateway)), tool servers there
+    take only Keycloak's tokens, since agentgateway's MCP authentication names one
+    issuer: agents of a trusted issuer get AgentGov tokens from Keycloak for tool servers,
+    as above, and call models and other agents with their own. The *Agents' own
+    identities* feature's status says so.
+  * The gateway checks a token's signature, issuer, audience and expiry; it doesn't take
+    each token once, as Keycloak can. Keep the tokens short-lived.
+  * A token another issuer gives an agent for a person names the person in `sub`, not a
+    workload: for acting on people's behalf, agents use AgentGov's tokens
+    ([acting for people](acting-for-people.md)).

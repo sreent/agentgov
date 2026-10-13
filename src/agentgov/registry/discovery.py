@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.db import mark_changed
-from agentgov.models import DISCOVERED, Agent, AgentActivity
+from agentgov.models import DISCOVERED, Agent, AgentActivity, IdentityIssuer
 from agentgov.registry import findings, risk
 
 
@@ -35,6 +35,19 @@ def unique_name(session: Session, base: str) -> str:
         n += 1
         name = f"{base}-{n}"
     return name
+
+
+def _workload(session: Session, issuer: str | None, subject: str | None) -> tuple[str, str] | None:
+    """The workload identity (issuer name, subject) a token of an issuer the gateway trusts
+    names, or None."""
+    if not issuer or not subject:
+        return None
+    found = session.scalar(
+        select(IdentityIssuer).where(
+            IdentityIssuer.issuer == issuer, IdentityIssuer.gateway.is_(True)
+        )
+    )
+    return (found.name, str(subject)[:512]) if found is not None else None
 
 
 def find(
@@ -71,10 +84,24 @@ def observe(
     details: dict[str, Any] | None = None,
     seen_at: datetime | None = None,
     discover: bool = True,
+    issuer: str | None = None,
+    subject: str | None = None,
 ) -> Agent | None:
     """Match an observation to an agent, registering a discovered one if needed (and
-    ``discover``: the discovery feature is on)."""
-    agent = find(session, agent_id=agent_id, client_id=client_id, name=name)
+    ``discover``: the discovery feature is on). ``issuer`` and ``subject``: a token of an
+    identity issuer the gateway trusts, which names the agent by its workload identity; a
+    discovered agent takes it on, so that adopting it is all it needs
+    (docs/agent-identity.md#straight-to-the-gateway)."""
+    workload = _workload(session, issuer, subject)
+    agent = None
+    if workload is not None:
+        agent = session.scalar(
+            select(Agent).where(
+                Agent.workload_issuer == workload[0], Agent.workload_subject == workload[1]
+            )
+        )
+    if agent is None and workload is None:
+        agent = find(session, agent_id=agent_id, client_id=client_id, name=name)
     if agent is None:
         label = name or client_id or agent_id
         if not label or not discover:
@@ -95,6 +122,8 @@ def observe(
                 for k, v in {"agent_id": agent_id, "client_id": client_id, "name": name}.items()
                 if v
             },
+            workload_issuer=workload[0] if workload else None,
+            workload_subject=workload[1] if workload else None,
             created_by=f"system:{source}",
         )
         session.add(agent)

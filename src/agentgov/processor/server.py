@@ -365,7 +365,26 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
 
     @staticmethod
     def _identity(meta: dict[str, Any]) -> dict[str, Any]:
-        return {k: meta[k] for k in ("client_id", "agent_id", "subject") if meta.get(k)}
+        return {k: meta[k] for k in ("client_id", "agent_id", "subject", "issuer") if meta.get(k)}
+
+    async def caller(self, identity: dict[str, Any]) -> dict[str, Any]:
+        """``identity``, with the agent's ID where its token came from an identity issuer the
+        gateway trusts: such a token names the agent by its workload identity, its issuer
+        and subject, which OPA's data maps to the agent
+        (docs/agent-identity.md#straight-to-the-gateway). AgentGov's own tokens name the
+        agent or its client themselves (the gateway passes those on from them alone)."""
+        if identity.get("agent_id") or identity.get("client_id"):
+            return identity
+        if not (identity.get("issuer") and identity.get("subject")):
+            return identity
+        try:
+            found, _ = await self.opa.evaluate(
+                "agentgov/context/workload_agent", {"agent": identity}
+            )
+        except OpaError as exc:
+            log.warning("could not look up the agent of a workload identity: %s", exc)
+            return identity
+        return {**identity, "agent_id": found} if isinstance(found, str) and found else identity
 
     def _caller(self, message: Any) -> dict[str, Any]:
         """Who sent a message the processor failed on, if that much can be read."""
@@ -406,6 +425,9 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
                     "client_id": identity.get("client_id"),
                     "agent_id": identity.get("agent_id"),
                     "name": identity.get("client_id") or identity.get("subject"),
+                    # A token of an issuer the gateway trusts: whose workload identity it is.
+                    "issuer": identity.get("issuer"),
+                    "subject": identity.get("subject") if identity.get("issuer") else None,
                     "details": {"server": server, "method": method},
                 }
             )
@@ -447,7 +469,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         if method in PLUMBING or method.startswith("notifications/"):
             return _pass_request()
         target, payload = _target(method, params if isinstance(params, dict) else {})
-        identity = self._identity(meta)
+        identity = await self.caller(self._identity(meta))
         person = people.person_of(meta)
         # Work another agent handed down: the chain, and the person at its head.
         chain, unusable = self.delegation(_header(request.headers, chains.HEADER), identity, person)
@@ -655,7 +677,7 @@ class GovernanceProcessor(pb_grpc.ExtMcpServicer):
         meta = _struct(request.metadata_context)
         server = (list(request.service_names) or [meta.get("server")])[0] or "unknown"
         result = json.loads(request.mcp_response) if request.mcp_response else {}
-        identity = self._identity(meta)
+        identity = await self.caller(self._identity(meta))
         person = people.person_of(meta)
         if method == "tools/list":
             return await self._filter_tools(server, identity, person, result)

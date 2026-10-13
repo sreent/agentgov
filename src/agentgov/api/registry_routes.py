@@ -248,6 +248,20 @@ def attest_agent(
         return agents.to_dict(agent)
 
 
+def _straight_to_the_gateway(s: Any, agent: Any, settings: Any) -> dict[str, str] | None:
+    """How an agent calls the gateway with its own token, where the gateway takes its
+    identity issuer's (docs/agent-identity.md#straight-to-the-gateway): the token its issuer
+    gives it, for this audience, as the bearer token. None where it doesn't."""
+    for issuer in identity_issuers.at_the_gateway(s) if agent.workload_issuer else ():
+        if issuer.name == agent.workload_issuer:
+            return {
+                "url": settings.gateway_public_url,
+                "issuer": issuer.issuer,
+                "audience": issuer.audience or settings.gateway_audience,
+            }
+    return None
+
+
 @router.post("/agents/{ref}/credentials", tags=["agents"])
 def agent_credentials(
     request: Request,
@@ -256,11 +270,10 @@ def agent_credentials(
     principal: Principal = Depends(reach.require("admin")),
 ) -> dict[str, Any]:
     """Return the agent's OAuth client credentials (``rotate: true`` issues a new secret);
-    for an agent with a workload identity, what token authenticates it instead; and for a
-    public client, where people sign in to it."""
+    for an agent with a workload identity, what token authenticates it instead (and how it
+    calls the gateway with that token itself, where the gateway takes its issuer's); and for
+    a public client, where people sign in to it."""
     rt = _rt(request)
-    if rt.identity is None:
-        raise HTTPException(409, "identity provider integration is not configured")
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, "admin", ref=ref)
@@ -272,6 +285,17 @@ def agent_credentials(
             )
         if agents.identity_method(agent) == "sign-in" and body.get("rotate"):
             raise Conflict("a public client has no secret to rotate: people sign in to it")
+        direct = _straight_to_the_gateway(s, agent, rt.settings)
+        if rt.identity is None:
+            if direct is None:
+                raise HTTPException(409, "identity provider integration is not configured")
+            # No Keycloak: its issuer's token goes to the gateway as it is.
+            return {
+                "method": "workload-identity",
+                "issuer": agent.workload_issuer,
+                "subject": agent.workload_subject or "",
+                "gateway": direct,
+            }
         try:
             creds = rt.identity.credentials(agent, rotate=bool(body.get("rotate")))
         except KeycloakError as exc:
@@ -294,6 +318,8 @@ def agent_credentials(
             issuer = identity_issuers.get(s, creds["issuer"])
             creds["assertion_type"] = identity_issuers.assertion_type(issuer)
             creds["assertion_audience"] = issuer.audience or rt.settings.keycloak_issuer
+            if direct is not None:
+                creds["gateway"] = direct
             return creds
         ledger.append(
             s,

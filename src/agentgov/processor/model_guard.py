@@ -57,6 +57,8 @@ PROVIDER = "x-agentgov-provider"
 MODEL = "x-agentgov-model"
 # The person the agent acts for: the token's claims (agentgov.gateway.PERSON_HEADERS).
 SUBJECT = "x-agentgov-subject"
+# The token's issuer, while the gateway takes others' than AgentGov's own.
+ISSUER = "x-agentgov-issuer"
 USERNAME = "x-agentgov-username"
 EMAIL = "x-agentgov-email"
 GROUPS = "x-agentgov-groups"
@@ -175,11 +177,13 @@ class ModelGuard:
 
     @staticmethod
     def _identity(headers: Any) -> dict[str, Any]:
-        return {
-            key: headers.get(header)
-            for key, header in (("agent_id", AGENT_ID), ("client_id", CLIENT_ID))
-            if headers.get(header)
-        }
+        named = (("agent_id", AGENT_ID), ("client_id", CLIENT_ID), ("issuer", ISSUER))
+        found = {key: headers.get(header) for key, header in named if headers.get(header)}
+        # Another issuer's token names the agent by its subject there
+        # (GovernanceProcessor.caller).
+        if found.get("issuer") and headers.get(SUBJECT):
+            found["subject"] = people.header_text(headers.get(SUBJECT))
+        return found
 
     @staticmethod
     def _person(headers: Any) -> dict[str, Any] | None:
@@ -196,7 +200,12 @@ class ModelGuard:
         )
 
     def _recorder(
-        self, phase: str, headers: Any, inspection: Inspection, monitored: list[str]
+        self,
+        phase: str,
+        headers: Any,
+        inspection: Inspection,
+        monitored: list[str],
+        identity: dict[str, Any] | None = None,
     ) -> Callable[..., None]:
         """Records the decision on one prompt or answer, when called with its outcome.
 
@@ -204,7 +213,7 @@ class ModelGuard:
         answer names the provider; its trace ID links it to the prompt's decision."""
         started = time.perf_counter()
         provider, model = headers.get(PROVIDER) or "unknown", headers.get(MODEL) or ""
-        identity = self._identity(headers)
+        identity = identity if identity is not None else self._identity(headers)
         person = self._person(headers)
         chain, _ = self.p.delegation(headers.get(chains.HEADER), identity, person)
         if chain is not None and person is None:
@@ -250,7 +259,7 @@ class ModelGuard:
             m for m in (payload.get("body") or {}).get("messages") or [] if isinstance(m, dict)
         ]
         provider, model = headers.get(PROVIDER) or "unknown", headers.get(MODEL) or ""
-        identity = self._identity(headers)
+        identity = await self.p.caller(self._identity(headers))
         modes = await self.p.features.for_caller(identity)
         inspection = await self.p._inspect(
             messages, protect=modes["data-protection"] != "off", check_injection=False
@@ -273,7 +282,7 @@ class ModelGuard:
         # from a person, and the tool results that came in since the model last answered.
         deferred = await self._second_opinions(messages, modes, inspection)
         monitored: list[str] = []
-        finish = self._recorder("request", headers, inspection, monitored)
+        finish = self._recorder("request", headers, inspection, monitored, identity)
 
         person = self._person(headers)
         chain, unusable = self.p.delegation(headers.get(chains.HEADER), identity, person)
@@ -383,7 +392,8 @@ class ModelGuard:
 
     # ------------------------------------------------------------------ answers
     async def check_answer(self, payload: dict[str, Any], headers: Any) -> dict[str, Any]:
-        modes = await self.p.features.for_caller(self._identity(headers))
+        identity = await self.p.caller(self._identity(headers))
+        modes = await self.p.features.for_caller(identity)
         if modes["data-protection"] == "off":
             return PASS  # the only control that looks at answers
         choices = [
@@ -395,11 +405,11 @@ class ModelGuard:
             return PASS  # nothing to decide; the prompt's decision is in the ledger
         inspection = Inspection(scan, self.p.settings.prompt_injection_threshold)
         monitored: list[str] = []
-        finish = self._recorder("response", headers, inspection, monitored)
+        finish = self._recorder("response", headers, inspection, monitored, identity)
         opa_input = {
             "kind": "model",
             "phase": "response",
-            "agent": self._identity(headers),
+            "agent": identity,
             "provider": headers.get(PROVIDER) or "unknown",
             "model": headers.get(MODEL) or "",
             "detections": inspection.summary,

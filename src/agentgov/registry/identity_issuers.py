@@ -9,6 +9,10 @@ provider in Keycloak, and the agent's client one that authenticates with that is
 token for that subject instead of a secret (Keycloak's federated client
 authentication). The agent still gets an AgentGov token for the gateway, so every
 control applies as before.
+
+Trusted at the gateway (``gateway``), an issuer's tokens are taken there directly too, as
+Keycloak's are: the agent calls with its own token, and is the agent whose workload
+identity it names (docs/agent-identity.md#straight-to-the-gateway).
 """
 
 from __future__ import annotations
@@ -23,13 +27,22 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.db import lock, mark_changed
 from agentgov.models import BLOCKED, ISSUER_KINDS, Agent, IdentityIssuer
-from agentgov.registry import validation
+from agentgov.registry import features, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
 
 APPROVED = "approved"
 KUBERNETES, SPIFFE, OIDC = ISSUER_KINDS
-FIELDS = ("kind", "description", "issuer", "keys_url", "audience", "allow_reuse", "labels")
+FIELDS = (
+    "kind",
+    "description",
+    "issuer",
+    "keys_url",
+    "audience",
+    "allow_reuse",
+    "gateway",
+    "labels",
+)
 # Keycloak's identity provider aliases for AgentGov's issuers.
 ALIAS_PREFIX = "agentgov-"
 _TRUST_DOMAIN = re.compile(r"^spiffe://[a-z0-9.\-_]+$")
@@ -86,6 +99,9 @@ def _apply(issuer: IdentityIssuer, data: dict[str, Any]) -> list[str]:
             value = str(value) if value else None
         elif key == "allow_reuse":
             value = bool(value)
+        elif key == "gateway":
+            if not isinstance(value, bool):
+                raise ValidationError("gateway is true (the gateway takes its tokens) or false")
         elif key == "labels":
             value = validation.labels(value)
         elif key == "description":
@@ -110,6 +126,15 @@ def _check(issuer: IdentityIssuer) -> None:
         _url(issuer.issuer, "issuer")
     if issuer.kind != OIDC and (issuer.audience or issuer.allow_reuse):
         raise ValidationError("audience and allow_reuse are for OpenID Connect issuers only")
+    if issuer.gateway and issuer.kind == SPIFFE:
+        raise ValidationError(
+            "the gateway can't take a SPIFFE trust domain's JWT-SVIDs itself: its agents get "
+            "AgentGov tokens through Keycloak, or register SPIRE's OIDC Discovery Provider as "
+            "an OpenID Connect issuer"
+        )
+    if not issuer.gateway:
+        # No longer trusted there: fetched again, should it be again.
+        issuer.gateway_keys = issuer.keys_at = issuer.keys_error = None
 
 
 def _unique(session: Session, issuer: IdentityIssuer) -> None:
@@ -256,7 +281,39 @@ def workload_identity(session: Session, agent: Agent, value: Any) -> tuple[str, 
     return issuer.name, subject
 
 
-def to_dict(issuer: IdentityIssuer, agents: int | None = None) -> dict[str, Any]:
+def _taking(issuer: IdentityIssuer) -> bool:
+    return bool(issuer.gateway and issuer.gateway_keys and issuer.status == APPROVED)
+
+
+def at_the_gateway(session: Session) -> list[IdentityIssuer]:
+    """The identity issuers whose tokens the gateway takes
+    (docs/agent-identity.md#straight-to-the-gateway): trusted there and approved, with the
+    keys AgentGov fetched from them; none while agents' own identities are off, as in
+    Keycloak."""
+    if not features.is_on(session, "workload-identity"):
+        return []
+    stmt = select(IdentityIssuer).where(IdentityIssuer.gateway.is_(True))
+    return [i for i in session.scalars(stmt.order_by(IdentityIssuer.name)) if _taking(i)]
+
+
+def gateway_state(issuer: IdentityIssuer, *, on: bool = True) -> dict[str, Any]:
+    """Whether the gateway takes ``issuer``'s tokens: set to (``trusted``), and doing so now
+    (``taking``: approved, with keys, while agents' own identities are ``on``), with how
+    many keys, fetched when, and why the last fetch failed."""
+    return {
+        "trusted": bool(issuer.gateway),
+        "taking": on and _taking(issuer),
+        "keys": len(issuer.gateway_keys or []) if issuer.gateway else 0,
+        "keys_at": ids.isoformat(issuer.keys_at),
+        "error": issuer.keys_error if issuer.gateway else None,
+    }
+
+
+def to_dict(
+    issuer: IdentityIssuer, agents: int | None = None, *, on: bool = True
+) -> dict[str, Any]:
+    """``issuer``, with how many ``agents`` have a workload identity there; ``on``: whether
+    agents' own identities are (the workload-identity feature)."""
     return {
         "id": issuer.id,
         "name": issuer.name,
@@ -267,6 +324,8 @@ def to_dict(issuer: IdentityIssuer, agents: int | None = None) -> dict[str, Any]
         "keys_url": issuer.keys_url,
         "audience": issuer.audience,
         "allow_reuse": issuer.allow_reuse,
+        # Whether the gateway takes its tokens itself, and with the keys AgentGov fetched.
+        "gateway": gateway_state(issuer, on=on),
         "status": issuer.status,
         "labels": issuer.labels or {},
         "keycloak_alias": alias(issuer.name),

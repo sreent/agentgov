@@ -16,6 +16,9 @@ spec:
   issuer: http://workload-issuer:9200
   description: Stand-in Kubernetes cluster (demo server in examples/identity/workload-issuer).
   status: approved
+  # The gateway takes its tokens itself too, without Keycloak, for the gateway's audience
+  # (docs/agent-identity.md#straight-to-the-gateway):
+  # gateway: true
 # Other kinds:
 #
 #   kind: spiffe                     # SPIRE and other SPIFFE implementations' JWT-SVIDs
@@ -26,3 +29,4 @@ spec:
 #   issuer: https://login.microsoftonline.com/<tenant ID>/v2.0
 #   audience: <client ID>            # the API registration's: what Entra ID's v2 tokens carry
 #   allow_reuse: true                # Entra ID's tokens have no jti to take each once
+#   gateway: true                    # agents call the gateway with these tokens too

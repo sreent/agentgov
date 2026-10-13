@@ -43,7 +43,8 @@
 * [Acting for people](acting-for-people.md): agents that act for a person, whom each may
   act for, and approvals sent to the person
 * [Agents' own identities](agent-identity.md): Kubernetes service accounts, SPIFFE IDs and
-  Microsoft Entra Agent ID instead of client secrets
+  Microsoft Entra Agent ID instead of client secrets, through Keycloak or straight at the
+  gateway
 * [Agent to agent](agent-to-agent.md): calls between agents over A2A, their answers, and
   the chain of delegation
 * [Agent instructions](instructions.md): checking agents' system prompts for harmful or

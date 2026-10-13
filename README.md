@@ -232,7 +232,9 @@ enforcement points, and the processor can ask a decision point of yours beside t
   `Authorization: Bearer <token>`. Any MCP client works.
 * **No client secret**: an agent that already has an identity, a Kubernetes service
   account, a SPIFFE ID, a Microsoft Entra Agent ID or another OpenID Connect issuer's
-  token, sends that token instead of a secret ([agents' own identities](docs/agent-identity.md)).
+  token, sends that token instead of a secret ([agents' own identities](docs/agent-identity.md)),
+  or calls the gateway with it straight away, where the gateway trusts its issuer
+  ([straight to the gateway](docs/agent-identity.md#straight-to-the-gateway)).
 * **Models**: point any OpenAI client at `http://<gateway>/llm/<provider>/v1`, with the
   same token as its API key. The gateway adds the provider's key
   ([model calls](docs/models.md)).
@@ -302,7 +304,7 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
   identity assertions for MCP servers outside the gateway
 * [Agents' own identities](docs/agent-identity.md): agents that authenticate with a
   Kubernetes service account, a SPIFFE ID or a Microsoft Entra Agent ID instead of a
-  client secret
+  client secret, through Keycloak or straight at the gateway
 * [Agent to agent](docs/agent-to-agent.md): calls between agents over A2A through the
   gateway, who may call whom, the chain of delegation in policy and the ledger, and calls
   that go around the gateway

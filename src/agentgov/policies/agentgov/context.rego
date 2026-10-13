@@ -21,12 +21,15 @@ enforced(key) if mode(key) == "enforce"
 monitored(key) if mode(key) == "monitor"
 
 # The calling agent, resolved from claims the gateway has already validated
-# (the agent_id claim first, then the OAuth client id).
+# (the agent_id claim first, then the OAuth client id, both of AgentGov's own tokens;
+# else the workload identity a token of an identity issuer the gateway trusts names).
 agent_id := id if {
 	id := input.agent.agent_id
 	registry.agents[id]
 } else := id if {
 	id := registry.clients[input.agent.client_id]
+} else := id if {
+	id := workload_agent
 } else := id if {
 	# Copilot Studio's tool calls: the control plane has already matched the agent.
 	input.platform == "copilot-studio"
@@ -35,6 +38,11 @@ agent_id := id if {
 }
 
 agent := registry.agents[agent_id]
+
+# The agent whose workload identity a token names: its issuer, as tokens name it, and its
+# subject there, for an issuer the gateway takes tokens from
+# (docs/agent-identity.md#straight-to-the-gateway). The governance processor asks too.
+workload_agent := registry.workloads[input.agent.issuer][input.agent.subject]
 
 # Every feature's mode for the calling agent (the governance processor asks:
 # agentgov.processor.modes).

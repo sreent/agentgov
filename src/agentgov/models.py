@@ -307,7 +307,8 @@ class IdentityIssuer(Base):
 
     AgentGov makes it an identity provider in Keycloak, and the client of each agent bound
     to it one that authenticates with that issuer's token for the agent's subject
-    (Keycloak's federated client authentication).
+    (Keycloak's federated client authentication). Trusted at the gateway, its tokens are
+    taken there too, without Keycloak (docs/agent-identity.md#straight-to-the-gateway).
     """
 
     __tablename__ = "identity_issuers"
@@ -325,6 +326,12 @@ class IdentityIssuer(Base):
     audience: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # OpenID Connect: a token may authenticate more than once.
     allow_reuse: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # The gateway takes its tokens itself, with the signing keys AgentGov last fetched from
+    # it (only those with a key ID), when it did, and why it couldn't since.
+    gateway: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    gateway_keys: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    keys_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    keys_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="approved")
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

@@ -70,6 +70,13 @@ with the gateway, it can write the file itself instead (``GatewayConfigWriter``)
 agentgateway refuses a whole configuration that names a key file it can't read,
 so whoever writes the file checks the key files first: a provider whose key is
 missing answers 503 until it is there (``with_available_keys``).
+
+Tokens: Keycloak's, AgentGov's own, and those of the identity issuers the gateway trusts
+(docs/agent-identity.md#straight-to-the-gateway), each a ``jwtAuth`` provider, with the
+keys AgentGov fetched from them written in. The claims only AgentGov's tokens are believed
+for (which agent and client, and the person an agent acts for) are passed on from those
+alone; the issuer and subject of every token are, which name an agent with a workload
+identity.
 """
 
 from __future__ import annotations
@@ -94,8 +101,8 @@ from sqlalchemy import select
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.identity import chains
-from agentgov.models import PENDING, Agent, ModelProvider, ToolServer
-from agentgov.registry import features, model_providers
+from agentgov.models import PENDING, Agent, IdentityIssuer, ModelProvider, ToolServer
+from agentgov.registry import features, identity_issuers, model_providers
 from agentgov.registry.agents import a2a_published
 
 log = logging.getLogger(__name__)
@@ -153,6 +160,68 @@ PERSON_HEADERS = {
 }
 
 
+# What only AgentGov's own tokens (Keycloak's) are believed for: which agent and client, and
+# the person an agent acts for (IDENTITY_METADATA's keys, PERSON_HEADERS' and the like).
+OWN_CLAIMS = frozenset(
+    {"client_id", "agent_id", "username", "email", "groups", "roles", "act", "sign_in"}
+)
+OWN_HEADERS = frozenset(
+    {
+        "x-agentgov-agent-id",
+        "x-agentgov-client-id",
+        "x-agentgov-username",
+        "x-agentgov-email",
+        "x-agentgov-groups",
+        "x-agentgov-roles",
+        "x-agentgov-act",
+        "x-agentgov-sign-in",
+    }
+)
+
+
+def _own(expression: str, settings: Settings, issuers: Any, *, empty: str = "null") -> str | None:
+    """``expression``, a claim only AgentGov's own tokens are believed for: as it is while
+    the gateway takes no one else's; else only for Keycloak's tokens (``empty`` for the
+    others), or nothing at all without Keycloak."""
+    if not issuers:
+        return expression
+    if not settings.keycloak_issuer:
+        return None
+    issued = f"has(jwt.iss) && jwt.iss == {json.dumps(settings.keycloak_issuer)}"
+    return f"{issued} ? {expression} : {empty}"
+
+
+def _believed(
+    values: dict[str, str], own: frozenset[str], settings: Settings, issuers: Any
+) -> dict[str, str]:
+    """``values`` (CEL by name), those named in ``own`` only from AgentGov's own tokens."""
+    out: dict[str, str] = {}
+    for name, expression in values.items():
+        value = _own(expression, settings, issuers) if name in own else expression
+        if value is not None:
+            out[name] = value
+    return out
+
+
+def identity_metadata(settings: Settings, issuers: Any = ()) -> dict[str, str]:
+    """IDENTITY_METADATA, with the issuer of the token too while the gateway trusts other
+    issuers than Keycloak."""
+    out = _believed(IDENTITY_METADATA, OWN_CLAIMS, settings, issuers)
+    if issuers:
+        out["issuer"] = "jwt.iss"
+    return out
+
+
+def identity_headers(settings: Settings, issuers: Any = ()) -> dict[str, str]:
+    """The agent, its client and the person it acts for, as headers (model calls, and calls
+    to other agents), with the token's issuer while the gateway trusts other issuers."""
+    values = {"x-agentgov-agent-id": "jwt.agent_id", "x-agentgov-client-id": "jwt.azp"}
+    out = _believed({**values, **PERSON_HEADERS}, OWN_HEADERS, settings, issuers)
+    if issuers:
+        out["x-agentgov-issuer"] = "jwt.iss"
+    return out
+
+
 def processor_tls(settings: Settings, address: str, *, grpc: bool = False) -> dict[str, Any]:
     """agentgateway's TLS to the processor (with AGENTGOV_TLS_DIR): it checks the
     processor's certificate against AgentGov's authority, and shows its own."""
@@ -186,7 +255,9 @@ def _failure_mode(settings: Settings, modes: dict[str, str]) -> str:
     return "failOpen" if _fails_open(settings, modes) else "failClosed"
 
 
-def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
+def route_for(
+    ts: ToolServer, settings: Settings, modes: dict[str, str], issuers: Any = ()
+) -> dict[str, Any]:
     policies: dict[str, Any] = {
         "cors": {
             "allowOrigins": ["*"],
@@ -200,7 +271,10 @@ def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict
                     "host": settings.processor_address,
                     "failureMode": _failure_mode(settings, modes),
                     "methods": dict(GUARDED_METHODS),
-                    "metadata": {**IDENTITY_METADATA, "server": f'"{ts.name}"'},
+                    "metadata": {
+                        **identity_metadata(settings, issuers),
+                        "server": f'"{ts.name}"',
+                    },
                     "requestHeaders": {"disallowed": ["authorization", "cookie"]},
                     **_to_processor(settings, settings.processor_address, grpc=True),
                 }
@@ -208,15 +282,17 @@ def route_for(ts: ToolServer, settings: Settings, modes: dict[str, str]) -> dict
         },
     }
     matches = [{"path": {"exact": f"/mcp/{ts.name}"}}]
-    auth = _jwt_auth(settings, modes)
-    if auth and modes["developer-sign-in"] == features.ON:
+    keycloak = _jwt_auth(settings, modes)
+    auth = _jwt_auth(settings, modes, issuers=issuers)
+    if keycloak and modes["developer-sign-in"] == features.ON:
         # The same check, and where to sign in for MCP clients that have no token: the
         # metadata, at the route's well-known path (served only where the route matches
-        # it), names Keycloak; its resource is the server's address on the gateway.
+        # it), names Keycloak; its resource is the server's address on the gateway. It
+        # names one issuer: Keycloak's tokens alone are taken here then.
         metadata: dict[str, Any] = {"bearerMethodsSupported": ["header"]}
         if settings.gateway_public_url:
             metadata["resource"] = f"{settings.gateway_public_url.rstrip('/')}/mcp/{ts.name}"
-        policies["mcpAuthentication"] = {**auth, "resourceMetadata": metadata}
+        policies["mcpAuthentication"] = {**keycloak, "resourceMetadata": metadata}
         policies["cors"]["exposeHeaders"].append("WWW-Authenticate")
         matches.append({"path": {"exact": f"{RESOURCE_METADATA}/mcp/{ts.name}"}})
     elif auth:
@@ -239,24 +315,47 @@ AI_PROVIDERS = {
 CHAT_PATH = "/v1/chat/completions"
 
 
+def _providers(settings: Settings, issuers: Any) -> list[dict[str, Any]]:
+    """Whose tokens the gateway takes: Keycloak's, then those of each identity issuer it
+    trusts, for the audience the issuer's tokens carry, with its keys written in (the
+    gateway never fetches them, and agentgateway won't load keys it can't use)."""
+    providers = []
+    if settings.keycloak_issuer and settings.keycloak_jwks_url:
+        providers.append(
+            {
+                "issuer": settings.keycloak_issuer,
+                "audiences": [settings.gateway_audience],
+                "jwks": {"url": settings.keycloak_jwks_url},
+            }
+        )
+    for issuer in issuers:
+        providers.append(
+            {
+                "issuer": issuer.issuer,
+                "audiences": [issuer.audience or settings.gateway_audience],
+                "jwks": json.dumps({"keys": issuer.gateway_keys}, sort_keys=True),
+            }
+        )
+    return providers
+
+
 def _jwt_auth(
-    settings: Settings, modes: dict[str, str], *, strict: bool = False
+    settings: Settings, modes: dict[str, str], *, strict: bool = False, issuers: Any = ()
 ) -> dict[str, Any] | None:
-    if not (settings.keycloak_issuer and settings.keycloak_jwks_url):
+    providers = _providers(settings, issuers)
+    if not providers:
         return None
     optional = modes["unknown-callers"] == features.MONITOR and not strict
-    return {
-        # "optional" lets unauthenticated callers reach the processor, which lets
-        # them through and records them while unknown callers are monitored.
-        "mode": "optional" if optional else "strict",
-        "issuer": settings.keycloak_issuer,
-        "audiences": [settings.gateway_audience],
-        "jwks": {"url": settings.keycloak_jwks_url},
-    }
+    # "optional" lets unauthenticated callers reach the processor, which lets them through
+    # and records them while unknown callers are monitored.
+    mode = "optional" if optional else "strict"
+    if not issuers:
+        return {"mode": mode, **providers[0]}  # Keycloak's alone
+    return {"mode": mode, "providers": providers}
 
 
 def model_route_for(
-    provider: ModelProvider, settings: Settings, modes: dict[str, str]
+    provider: ModelProvider, settings: Settings, modes: dict[str, str], issuers: Any = ()
 ) -> dict[str, Any]:
     name = provider.name
     backend: dict[str, Any] = {"name": name, "provider": {AI_PROVIDERS[provider.kind]: {}}}
@@ -271,11 +370,9 @@ def model_route_for(
         if url.scheme == "https":
             policies["backendTLS"] = {}
     guard_headers = {
-        "x-agentgov-agent-id": "jwt.agent_id",
-        "x-agentgov-client-id": "jwt.azp",
+        **identity_headers(settings, issuers),
         "x-agentgov-provider": f'"{name}"',
         "x-agentgov-model": "llmRequest.model",
-        **PERSON_HEADERS,
         # The delegation the agent carries, when another agent handed it the work.
         chains.HEADER: f'request.headers["{chains.HEADER}"]',
     }
@@ -319,11 +416,12 @@ def model_route_for(
     # The gateway spends the provider's key on the caller's behalf: only for callers whose
     # token it has checked, whatever the mode of unknown callers, and not at all when it
     # can't check tokens.
-    auth = _jwt_auth(settings, modes, strict=True)
+    auth = _jwt_auth(settings, modes, strict=True, issuers=issuers)
     if not auth:
         message = (
             f"The gateway uses {name}'s key only for agents whose tokens it can check: "
-            "set AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL"
+            "set AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL, or trust an "
+            "identity issuer at the gateway"
         )
         return {
             "name": f"llm-{name}",
@@ -357,7 +455,9 @@ A2A_MAX_BODY = 256 * 1024
 # than not found.
 
 
-def _answer_checks(agent: Agent, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
+def _answer_checks(
+    agent: Agent, settings: Settings, modes: dict[str, str], issuers: Any = ()
+) -> dict[str, Any]:
     """agentgateway's external processing of the agent's answers, by the processor
     (agentgov.processor.a2a_answers): each answer as it streams, with whom it answers in
     metadata; and while a2a-masking is enforced, each message sent to it, to mask it.
@@ -370,6 +470,29 @@ def _answer_checks(agent: Agent, settings: Settings, modes: dict[str, str]) -> d
         value = f"toJson(jwt.{path})" if as_json else f"jwt.{path}"
         return f'{present} ? {value} : ""'
 
+    claims = {
+        "agent_id": claim("agent_id"),
+        "client_id": claim("azp"),
+        "subject": claim("sub"),
+        "username": claim("preferred_username"),
+        "email": claim("email"),
+        "groups": claim("groups", as_json=True),
+        "roles": claim("realm_access.roles", as_json=True),
+        "act": claim("act", as_json=True),
+        "sign_in": claim("agentgov_sign_in", as_json=True),
+    }
+    believed = {
+        name: value
+        for name, expression in claims.items()
+        if (
+            value := _own(f"({expression})", settings, issuers, empty='""')
+            if name in OWN_CLAIMS
+            else expression
+        )
+        is not None
+    }
+    if issuers:
+        believed["issuer"] = claim("iss")
     return {
         "host": settings.processor_address,
         "failureMode": _failure_mode(settings, modes),
@@ -377,15 +500,7 @@ def _answer_checks(agent: Agent, settings: Settings, modes: dict[str, str]) -> d
             "agentgov": {
                 "agent": json.dumps(agent.name),
                 "path": "request.path",
-                "agent_id": claim("agent_id"),
-                "client_id": claim("azp"),
-                "subject": claim("sub"),
-                "username": claim("preferred_username"),
-                "email": claim("email"),
-                "groups": claim("groups", as_json=True),
-                "roles": claim("realm_access.roles", as_json=True),
-                "act": claim("act", as_json=True),
-                "sign_in": claim("agentgov_sign_in", as_json=True),
+                **believed,
                 "traceparent": (
                     '"traceparent" in request.headers ? request.headers["traceparent"] : ""'
                 ),
@@ -408,15 +523,15 @@ def _answer_checks(agent: Agent, settings: Settings, modes: dict[str, str]) -> d
     }
 
 
-def a2a_route_for(agent: Agent, settings: Settings, modes: dict[str, str]) -> dict[str, Any]:
+def a2a_route_for(
+    agent: Agent, settings: Settings, modes: dict[str, str], issuers: Any = ()
+) -> dict[str, Any]:
     url = urlsplit(agent.a2a_url or "")
     port = url.port or (443 if url.scheme == "https" else 80)
     host = f"[{url.hostname}]" if ":" in (url.hostname or "") else url.hostname
     route = f"/a2a/{agent.name}"
     check_headers = {
-        "x-agentgov-agent-id": "jwt.agent_id",
-        "x-agentgov-client-id": "jwt.azp",
-        **PERSON_HEADERS,
+        **identity_headers(settings, issuers),
         chains.HEADER: f'request.headers["{chains.HEADER}"]',
         "traceparent": 'request.headers["traceparent"]',
         "x-agentgov-path": "request.path",
@@ -443,12 +558,12 @@ def a2a_route_for(agent: Agent, settings: Settings, modes: dict[str, str]) -> di
         },
     }
     if modes["data-protection"] != features.OFF or modes["prompt-injection"] != features.OFF:
-        policies["extProc"] = _answer_checks(agent, settings, modes)
+        policies["extProc"] = _answer_checks(agent, settings, modes, issuers)
         # Answers the processor can read: not compressed, whatever the caller accepts.
         policies["requestHeaderModifier"] = {"set": {"accept-encoding": "identity"}}
     if url.scheme == "https":
         policies["backendTLS"] = {}
-    auth = _jwt_auth(settings, modes)
+    auth = _jwt_auth(settings, modes, issuers=issuers)
     if auth:
         policies["jwtAuth"] = auth
     return {
@@ -465,20 +580,26 @@ def render(
     modes: dict[str, str] | None = None,
     providers: list[ModelProvider] | None = None,
     agents: list[Agent] | None = None,
+    issuers: list[IdentityIssuer] | None = None,
 ) -> dict[str, Any]:
+    """The gateway's configuration. ``issuers``: the identity issuers whose tokens it takes
+    besides Keycloak's (identity_issuers.at_the_gateway)."""
     modes = {**{f.key: f.default for f in features.CATALOG}, **(modes or {})}
+    trusted = list(issuers or [])
     routes = []
     if modes["mcp-gateway"] != features.OFF:
         # Servers only for developers aren't published: they run elsewhere.
         routes = [
-            route_for(ts, settings, modes)
+            route_for(ts, settings, modes, trusted)
             for ts in servers
             if ts.status != PENDING and ts.gateway is not False
         ]
     if modes["model-gateway"] != features.OFF:
-        routes += [model_route_for(p, settings, modes) for p in providers or []]
+        routes += [model_route_for(p, settings, modes, trusted) for p in providers or []]
     if modes["a2a-gateway"] != features.OFF:
-        routes += [a2a_route_for(a, settings, modes) for a in agents or [] if a2a_published(a)]
+        routes += [
+            a2a_route_for(a, settings, modes, trusted) for a in agents or [] if a2a_published(a)
+        ]
     # A static health route keeps the listener valid when no servers exist yet.
     routes.append(
         {
@@ -495,12 +616,26 @@ def render(
             "tracing": {"host": host, "protocol": "grpc", "randomSampling": "true"},
             # Access logs carry each model call's tokens; the agent comes from its token.
             "accessLog": {
-                "add": {"agentgov.agent_id": "jwt.agent_id", "agentgov.client_id": "jwt.azp"},
+                "add": _access_log_fields(settings, trusted),
                 "otlp": {"host": host, "protocol": "grpc"},
             },
         }
     config["binds"] = [{"port": settings.gateway_port, "listeners": [{"routes": routes}]}]
     return config
+
+
+def _access_log_fields(settings: Settings, issuers: Any) -> dict[str, str]:
+    """Whom each access log entry is about: the agent or client AgentGov's tokens name, and
+    the issuer and subject of others' (agentgov.registry.model_usage)."""
+    fields = _believed(
+        {"agentgov.agent_id": "jwt.agent_id", "agentgov.client_id": "jwt.azp"},
+        frozenset({"agentgov.agent_id", "agentgov.client_id"}),
+        settings,
+        issuers,
+    )
+    if issuers:
+        fields.update({"agentgov.issuer": "jwt.iss", "agentgov.subject": "jwt.sub"})
+    return fields
 
 
 def with_available_keys(
@@ -580,6 +715,7 @@ class GatewayConfigWriter:
                 features.strictest_modes(session),
                 model_providers.list_all(session),
                 agents,
+                identity_issuers.at_the_gateway(session),
             )
 
     def render_current(self) -> str:

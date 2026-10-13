@@ -408,7 +408,8 @@ def export(session: Session) -> list[dict[str, Any]]:
         spec = {k: d[k] for k in teams.FIELDS if d[k] not in ("", [], False)}
         docs.append(_doc("Team", team.name, spec))
     for issuer in identity_issuers.list_all(session):
-        d = identity_issuers.to_dict(issuer)
+        # Whether the gateway takes its tokens, as set (its dict says how that goes too).
+        d = {**identity_issuers.to_dict(issuer), "gateway": bool(issuer.gateway)}
         spec = {k: d[k] for k in identity_issuers.FIELDS if d[k] not in (None, "", {}, False)}
         spec["status"] = issuer.status
         docs.append(_doc("IdentityIssuer", issuer.name, spec))

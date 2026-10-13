@@ -4094,6 +4094,12 @@ ALLOW_REUSE = typer.Option(
     help="oidc: whether a token may authenticate more than once (needed for tokens without a "
     "jti claim, such as Microsoft Entra ID's).",
 )
+GATEWAY = typer.Option(
+    None,
+    "--gateway/--no-gateway",
+    help="oidc and kubernetes: the gateway takes its tokens itself, without Keycloak, for the "
+    "audience it names (or AGENTGOV_GATEWAY_AUDIENCE).",
+)
 
 
 def _issuer_fields(**fields: Any) -> dict[str, Any]:
@@ -4110,9 +4116,12 @@ def _issuer_fields(**fields: Any) -> dict[str, Any]:
 def issuers_list() -> None:
     """List identity issuers, with the agents that authenticate with each."""
     rows = _call("GET", "/v1/identity-issuers")
+    keycloak = bool(_call("GET", "/v1/info").get("identity_provider"))
     for r in rows:
-        r["sync"] = r["sync"]["error"] or ("synced" if r["sync"]["synced_at"] else "waiting")
-    _table(rows, ["name", "kind", "status", "agents", "issuer", "sync"])
+        synced = r["sync"]["error"] or ("synced" if r["sync"]["synced_at"] else "waiting")
+        r["sync"] = synced if keycloak else "-"  # no Keycloak: the gateway alone takes tokens
+        r["gateway"] = _at_the_gateway(r) or "-"
+    _table(rows, ["name", "kind", "status", "agents", "issuer", "sync", "gateway"])
 
 
 @issuers_app.command("get")
@@ -4131,21 +4140,25 @@ def issuers_create(
     keys_url: str | None = KEYS_URL,
     audience: str | None = AUDIENCE,
     allow_reuse: bool | None = ALLOW_REUSE,
+    gateway: bool | None = GATEWAY,
     description: str | None = DESCRIPTION,
     label: list[str] | None = LABEL,
 ) -> None:
-    """Trust an identity issuer: agents then authenticate with its tokens."""
+    """Trust an identity issuer: agents then authenticate with its tokens (with --gateway,
+    straight at the gateway too)."""
     body = _issuer_fields(
         kind=kind,
         issuer=issuer,
         keys_url=keys_url,
         audience=audience,
         allow_reuse=allow_reuse,
+        gateway=gateway,
         description=description,
         label=label,
     )
     out = _call("POST", "/v1/identity-issuers", json={"name": name, **body})
     _done("identity-issuer", out["name"], out["status"])
+    _gateway_note(out)
 
 
 @issuers_app.command("update")
@@ -4155,6 +4168,7 @@ def issuers_update(
     keys_url: str | None = KEYS_URL,
     audience: str | None = AUDIENCE,
     allow_reuse: bool | None = ALLOW_REUSE,
+    gateway: bool | None = GATEWAY,
     description: str | None = DESCRIPTION,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
     if_version: int | None = IF_VERSION,
@@ -4165,6 +4179,7 @@ def issuers_update(
         keys_url=keys_url,
         audience=audience,
         allow_reuse=allow_reuse,
+        gateway=gateway,
         description=description,
         label=label,
     )
@@ -4174,6 +4189,40 @@ def issuers_update(
         "PATCH", f"/v1/identity-issuers/{quote(name)}", json=body, **_if_version(if_version)
     )
     _done("identity-issuer", out["name"], "updated")
+    _gateway_note(out)
+
+
+def _at_the_gateway(issuer: dict[str, Any]) -> str | None:
+    """Whether the gateway takes the issuer's tokens now, or why not (None: it isn't to)."""
+    state = issuer.get("gateway") or {}
+    if not state.get("trusted"):
+        return None
+    keys = state.get("keys") or 0
+    if not keys:
+        return f"can't take its tokens: {state['error']}" if state.get("error") else "no keys yet"
+    if state.get("taking"):
+        took = f"takes its tokens ({keys} key{'' if keys == 1 else 's'})"
+    elif issuer.get("status") == "blocked":
+        took = "not while the issuer is blocked"
+    else:
+        took = "not while agents' own identities are off"
+    return f"{took}; the last fetch failed: {state['error']}" if state.get("error") else took
+
+
+def _gateway_note(issuer: dict[str, Any]) -> None:
+    """Whether the gateway takes the issuer's tokens now, or why not."""
+    said = _at_the_gateway(issuer)
+    if said:
+        typer.echo(f"the gateway: {said}", err=True)
+
+
+@issuers_app.command("fetch-keys")
+def issuers_fetch_keys(name: str) -> None:
+    """Fetch the signing keys of an issuer the gateway trusts now, as when it rotated them
+    sooner than AgentGov fetches them again."""
+    out = _call("POST", f"/v1/identity-issuers/{quote(name)}/keys")
+    _done("identity-issuer", out["name"], "keys fetched")
+    _gateway_note(out)
 
 
 @issuers_app.command("block")
