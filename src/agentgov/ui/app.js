@@ -5750,7 +5750,9 @@ function syncCounts(c) {
 }
 
 async function renderPlatforms() {
-  const [view, usage] = await Promise.all([api('v1/platforms'), api('v1/platforms/connectors')]);
+  const [view, usage, modes] = await Promise.all([
+    api('v1/platforms'), api('v1/platforms/connectors'), featureModes().catch(() => ({})),
+  ]);
   const sources = Object.fromEntries(view.sources.map((src) => [src.source, src]));
   return h('div', { class: 'page' },
     pageHead({
@@ -5761,7 +5763,7 @@ async function renderPlatforms() {
     platformsCallout(view),
     connectionsCard(view),
     h('div', { class: 'grid-halves' }, m365Card(sources['microsoft-365']), copilotStudioCard(sources['copilot-studio'], view.admin_actions)),
-    connectorsCard(usage, view),
+    connectorsCard(usage, view, modes),
     otherPlatformsCard(view));
 }
 
@@ -6016,7 +6018,22 @@ async function importCopilotStudio() {
   await refresh();
 }
 
-function connectorsCard(usage, view) {
+// What happens to an agent that uses a connector the allowlist doesn't name
+// (docs/platforms.md#when-an-agent-uses-a-connector-that-isnt-approved).
+function connectorResponse(modes) {
+  const detection = modes['copilot-studio-threat-detection'];
+  const control = modes['connector-allowlist'];
+  let runtime;
+  if (!detection || detection === 'off') runtime = 'not checked as they run, because Copilot Studio threat detection is off';
+  else if (control === 'off') runtime = 'not checked as they run, because the connector allowlist control is off';
+  else if (detection === 'monitor' || control === 'monitor') runtime = 'let through, and recorded as what AgentGov would refuse';
+  else runtime = 'refused by Copilot Studio threat detection';
+  return h('p', { class: 'hint' }, 'An agent that uses a connector that is not approved is flagged, and its people are told. Its calls through that connector are ',
+    runtime, '. ', h('a', { href: '#/features' }, 'Features'), ' sets this, and a ', h('a', { href: '#/policies' }, 'management rule'),
+    ' can block such agents too.');
+}
+
+function connectorsCard(usage, view, modes = {}) {
   const rows = usage.connectors || [];
   const active = usage.allowlist_active;
   const pushable = can('admin') && view?.admin_actions && me?.microsoft;
@@ -6039,6 +6056,7 @@ function connectorsCard(usage, view) {
       h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'approve-connector', onclick: guarded(() => approveConnector(null, active)) }, icon('plus'), 'Approve a connector'),
     ].filter(Boolean) : null,
     flush: rows.length > 0,
+    foot: active ? connectorResponse(modes) : null,
     body: rows.length
       ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
         h('caption', { class: 'sr-only' }, 'Connectors'),

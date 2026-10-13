@@ -38,20 +38,21 @@ deny contains msg if {
 	msg := sprintf("Agent %s is blocked in AgentGov", [agent.name])
 }
 
-# The connector allowlist, enforced at run time once it lists a connector.
-deny contains msg if {
-	allowlist.active == true
-	connector := input.tool.connector
-	not allowlist.approved[connector]
-	msg := sprintf("Connector %s is not on AgentGov's connector allowlist", [connector])
-}
-
 deny contains msg if {
 	some name
 	some msg in data.agentgov.custom[name].deny
 }
 
 # The controls an organisation can switch apply as their modes say (see agentgov.mcp).
+
+# The connector allowlist, once it lists a connector: refused, or recorded, as its mode
+# says (for this agent, if an exception or its label sets it).
+violation contains {"control": "connector-allowlist", "message": msg} if {
+	allowlist.active == true
+	connector := input.tool.connector
+	not allowlist.approved[connector]
+	msg := sprintf("Connector %s is not on AgentGov's connector allowlist", [connector])
+}
 
 # Risk-based access, as for agents behind the gateway.
 violation contains {"control": "risk-based-access", "message": msg} if {

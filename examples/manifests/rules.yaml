@@ -31,6 +31,20 @@ spec:
 apiVersion: agentgov/v1alpha1
 kind: ManagementRule
 metadata:
+  name: unapproved-connectors
+spec:
+  description: Block agents that still use a connector that isn't approved, a week after telling their people
+  # Copilot Studio agents are blocked while Copilot Studio threat detection is enforced:
+  # Copilot Studio then asks AgentGov before each tool call, and a blocked agent makes none.
+  # Otherwise the rule's issue says to quarantine the agent (docs/platforms.md).
+  conditions:
+    findings: [platform.unapproved_connector]
+  action: block
+  after_days: 7
+---
+apiVersion: agentgov/v1alpha1
+kind: ManagementRule
+metadata:
   name: stale-registrations
 spec:
   description: Delete registrations nobody approved within 30 days

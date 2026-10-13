@@ -108,9 +108,12 @@ access packages; and one that gives an owner, at agents without one.
 | `delete` | Deletes the agent, which can be restored until it is purged (`AGENTGOV_SOFT_DELETE_RETENTION_DAYS`, 30) | Restore it before then |
 | `revoke_access` | Revokes the [access packages](access-packages.md) the agent holds | Ask for them again |
 
-AgentGov can't block or delete agents that run on Microsoft 365 or Copilot Studio: the
-gateway never sees their calls. For them, a rule's issue says so, and says to do it in that
-platform's admin center.
+AgentGov can't block or delete agents that run on other platforms: the gateway never sees
+their calls. For them, a rule's issue says so, and says to do it in that platform's admin
+center. The exception is blocking a Copilot Studio agent while [Copilot Studio threat
+detection](microsoft-connections.md#copilot-studio-threat-detection) is enforced: Copilot
+Studio then asks AgentGov before each tool call, so a rule blocks the agent and its tool
+calls stop. Otherwise its issue says to quarantine the agent.
 
 ## Telling first, and what stops a rule
 
@@ -172,7 +175,7 @@ them; an agent's owner and sponsors see the rules that match their agent.
 
 ## Examples
 
-[examples/manifests/rules.yaml](../examples/manifests/rules.yaml) has four rules, all
+[examples/manifests/rules.yaml](../examples/manifests/rules.yaml) has five rules, all
 monitored:
 
 * `inactive-agents` blocks agents nobody has used for 90 days, two weeks after telling
@@ -181,6 +184,10 @@ monitored:
   their sponsors and team (Agent 365's example rule blocks ownerless agents too). To give
   them to a team instead, change its action to `assign_owner` with `params: {owner: TEAM}`.
 * `stale-registrations` deletes registrations nobody approved within 30 days.
+* `unapproved-connectors` blocks agents that still use a connector that isn't on the
+  [connector allowlist](platforms.md#when-an-agent-uses-a-connector-that-isnt-approved) a
+  week after their people were told: for Copilot Studio agents, while threat detection is
+  enforced.
 * `expired-access` revokes access packages a week after they expired, unless renewed.
 
 In step 19 of the demo, `python examples/agents/demo_agent.py`, an administrator previews

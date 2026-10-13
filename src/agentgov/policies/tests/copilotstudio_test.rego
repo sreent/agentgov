@@ -46,6 +46,30 @@ test_unapproved_connectors_are_refused if {
 	d.reasons == ["Connector shared_sql is not on AgentGov's connector allowlist"]
 }
 
+test_a_monitored_allowlist_lets_unapproved_connectors_through_and_records_them if {
+	reg := object.union(registry, {"features": {"connector-allowlist": "monitor"}})
+	d := copilotstudio.decision with input as call("agt_sales", sql) with data.registry as reg
+	d.effect == "allow"
+	d.monitored == ["connector-allowlist: Connector shared_sql is not on AgentGov's connector allowlist"]
+}
+
+test_an_allowlist_that_is_off_checks_nothing if {
+	reg := object.union(registry, {"features": {"connector-allowlist": "off"}})
+	d := copilotstudio.decision with input as call("agt_sales", sql) with data.registry as reg
+	d.effect == "allow"
+	d.monitored == []
+}
+
+# An exception, or the agent's agentgov/exempt-controls label, sets its own mode.
+test_an_agents_own_mode_for_the_allowlist_applies if {
+	reg := object.union(registry, {"agents": {"agt_sales": {"modes": {"connector-allowlist": "monitor"}}}})
+	mine := copilotstudio.decision with input as call("agt_sales", sql) with data.registry as reg
+	mine.effect == "allow"
+	count(mine.monitored) == 1
+	others := copilotstudio.decision with input as call("agt_it", sql) with data.registry as reg
+	"Connector shared_sql is not on AgentGov's connector allowlist" in others.reasons
+}
+
 test_tools_that_are_not_connectors_pass_the_allowlist if {
 	d := copilotstudio.decision with input as call("agt_sales", topic) with data.registry as registry
 	d.effect == "allow"

@@ -225,7 +225,9 @@ with its policies and the registry, using the same OPA that decides for the gate
   agent's tool calls;
 * the agent's risk is critical (the `risk-based-access` control);
 * the tool uses a connector that isn't on the allowlist (once the allowlist lists one,
-  and when Copilot Studio names the connector in the tool's definition);
+  and when Copilot Studio names the connector in the tool's definition), while the
+  `connector-allowlist` control is enforced; monitored, the call goes through and is
+  recorded ([what happens](platforms.md#when-an-agent-uses-a-connector-that-isnt-approved));
 * the inputs contain credentials (the `data-protection` control);
 * an earlier tool result in the plan tried to give the agent instructions (indirect
   prompt injection, the `prompt-injection` control);

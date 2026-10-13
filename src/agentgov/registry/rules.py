@@ -58,6 +58,10 @@ from agentgov.registry.versions import edited, start_edit
 
 FEATURE = "management-rules"
 POSTURE = "posture-checks"
+# Copilot Studio asks AgentGov before each tool call while this is enforced
+# (agentgov.platforms.threat_detection), so an agent blocked here makes none.
+THREAT_DETECTION = "copilot-studio-threat-detection"
+COPILOT_STUDIO_ID = "copilot_studio_agent_id"
 ISSUE, ASSIGN_OWNER, BLOCK, DELETE, REVOKE = (
     "issue",
     "assign_owner",
@@ -430,6 +434,8 @@ class _Context:
     holding: set[str]
     # Since when, and until when, AgentGov has read other platforms' usage of agents.
     usage: tuple[datetime, datetime] | None
+    # The features' modes: whether blocking a Copilot Studio agent here stops it.
+    modes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -485,7 +491,15 @@ def _context(session: Session, now: datetime, feature: str) -> _Context:
             )
         )
     )
-    return _Context(now, feature, agents, dict(open_findings), holding, _usage(session, now))
+    return _Context(
+        now,
+        feature,
+        agents,
+        dict(open_findings),
+        holding,
+        _usage(session, now),
+        features.modes(session),
+    )
 
 
 platform = scopes.platform
@@ -615,14 +629,27 @@ def assess(rule: ManagementRule, agent: Agent, ctx: _Context) -> Assessment:
     return Assessment(True, reasons, hints)
 
 
-def _cannot(rule: ManagementRule, agent: Agent) -> str | None:
+def _copilot_studio(agent: Agent) -> bool:
+    return COPILOT_STUDIO_ID in (agent.external_ids or {})
+
+
+def _cannot(rule: ManagementRule, agent: Agent, modes: dict[str, str]) -> str | None:
     """Why the rule can't do its action to the agent, if it can't."""
-    if rule.action in (BLOCK, DELETE) and agent.on_platform:
+    if rule.action not in (BLOCK, DELETE) or not agent.on_platform:
+        return None
+    if rule.action == BLOCK and _copilot_studio(agent):
+        if modes.get(THREAT_DETECTION) == features.ENFORCE:
+            # Copilot Studio asks AgentGov before each tool call: blocked here, it makes none.
+            return None
         return (
-            f"it runs on {_platform_name(agent)}: {VERBS[rule.action][0]} it in "
-            f"{_platform_name(agent)}'s admin center"
+            "it runs on Copilot Studio: quarantine it there (from its page in AgentGov, signed "
+            "in through Microsoft Entra ID, or in the Power Platform admin center), or enforce "
+            "Copilot Studio threat detection, so that blocking it in AgentGov stops its tool calls"
         )
-    return None
+    return (
+        f"it runs on {_platform_name(agent)}: {VERBS[rule.action][0]} it in "
+        f"{_platform_name(agent)}'s admin center"
+    )
 
 
 def _due_at(rule: ManagementRule, row: RuleMatch, mode: str, now: datetime) -> datetime:
@@ -951,7 +978,7 @@ def _round(
             if mode == features.ENFORCE:
                 present.add(key)
             continue
-        cannot = _cannot(rule, agent)
+        cannot = _cannot(rule, agent, ctx.modes)
         if rule.action != ISSUE and mode == features.ENFORCE:
             row.warned_at = row.warned_at or ctx.now
             due_at = _due_at(rule, row, mode, ctx.now)
@@ -1037,11 +1064,12 @@ def _state(
     mode: str,
     finding: Finding | None,
     now: datetime,
+    modes: dict[str, str],
 ) -> tuple[str, str, datetime | None]:
     """Where the agent is with the rule: its state, what that means, and when it acts."""
     if row is not None and row.acted_at is not None:
         return "acted", f"{row.outcome or _verb(rule, past=True)} on {row.acted_at:%Y-%m-%d}", None
-    cannot = _cannot(rule, agent)
+    cannot = _cannot(rule, agent, modes)
     if cannot:
         return "cannot", cannot, None
     if mode == features.ENFORCE and rule.action != ISSUE:
@@ -1103,7 +1131,7 @@ def preview(session: Session, rule: ManagementRule, now: datetime | None = None)
         else:
             reasons = [row.outcome or ""]
         finding = _finding(session, _key(rule, agent.id)) if saved else None
-        state, detail, due = _state(rule, agent, row, mode, finding, now)
+        state, detail, due = _state(rule, agent, row, mode, finding, now, ctx.modes)
         entries.append(
             {
                 "agent_id": agent.id,
@@ -1148,6 +1176,7 @@ def preview(session: Session, rule: ManagementRule, now: datetime | None = None)
 def for_agent(session: Session, agent: Agent) -> list[dict[str, Any]]:
     """The rules that match the agent, and what each will do or did."""
     feature = features.mode(session, FEATURE)
+    modes = features.modes(session)
     out = []
     now = ids.utcnow()
     for row, rule in session.execute(
@@ -1158,7 +1187,7 @@ def for_agent(session: Session, agent: Agent) -> list[dict[str, Any]]:
     ):
         mode = effective(rule.mode, feature)
         state, detail, due = _state(
-            rule, agent, row, mode, _finding(session, _key(rule, agent.id)), now
+            rule, agent, row, mode, _finding(session, _key(rule, agent.id)), now, modes
         )
         out.append(
             {
