@@ -47,10 +47,15 @@ def get_feature(request: Request, key: str, _: Principal = Depends(read)) -> dic
 @router.get("/components")
 def list_components(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
     """What the control plane reaches itself, and what each governance processor said it
-    reaches, with whether it is in touch."""
+    reaches, with whether it is in touch; and the hosts credentials may go to
+    (AGENTGOV_CREDENTIAL_HOSTS; none listed, any host)."""
     rt = request.app.state.rt
     with rt.db.session() as s:
-        return {"control_plane": rt.health.get(), "processors": health.reports(s)}
+        return {
+            "control_plane": rt.health.get(),
+            "processors": health.reports(s),
+            "credential_hosts": rt.settings.credential_host_list(),
+        }
 
 
 @router.get("/feature-presets")

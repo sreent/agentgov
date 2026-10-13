@@ -85,6 +85,24 @@ def routes(config: dict) -> dict[str, dict]:
     return {r["name"]: r for r in config["binds"][0]["listeners"][0]["routes"]}
 
 
+def test_a_key_goes_only_where_it_may() -> None:
+    """Set before the rules were, or before the deployment listed the hosts: the gateway
+    doesn't send the key, and says why."""
+    odd = ModelProvider(name="odd", kind="openai", status="approved", key_file="/tls/tls.key")
+    listed = SETTINGS.with_overrides(credential_hosts="api.groq.com")
+    got = routes(render([], listed, providers=[*providers(), odd]))
+    assert got["llm-groq"]["policies"]["backendAuth"] == {"key": {"file": "/model-keys/groq"}}
+    for name, why in (("vllm", "doesn't list its base_url's host, vllm"), ("odd", "/tls/tls.key")):
+        policies = got[f"llm-{name}"]["policies"]
+        assert "backendAuth" not in policies
+        assert policies["directResponse"]["status"] == 503
+        assert why in policies["directResponse"]["body"]
+    # No list: any host, as before.
+    assert (
+        "backendAuth" in routes(render([], SETTINGS, providers=providers()))["llm-vllm"]["policies"]
+    )
+
+
 def test_one_route_per_reviewed_server() -> None:
     config = render(servers(), SETTINGS)
     assert set(routes(config)) == {"mcp-crm", "mcp-hr", "agentgov-health"}  # pending excluded
@@ -294,7 +312,7 @@ def test_agentgateway_accepts_generated_config(tmp_path: Path) -> None:
         servers(),
         SETTINGS,
         {"a2a-masking": "enforce", "developer-sign-in": "on"},
-        providers=providers("/cfg/keys"),
+        providers=providers(),
         agents=a2a_agents(),
     )
     routes = {r["name"]: r for r in config["binds"][0]["listeners"][0]["routes"]}
@@ -321,6 +339,8 @@ def test_agentgateway_accepts_generated_config(tmp_path: Path) -> None:
             "--rm",
             "-v",
             f"{tmp_path}:/cfg:ro",
+            "-v",
+            f"{tmp_path / 'keys'}:/model-keys:ro",
             IMAGE,
             "-f",
             "/cfg/config.yaml",
@@ -377,9 +397,13 @@ class TestServedConfig:
         assert "mcp-crm" in Path(path).read_text()
 
     def test_the_sidecar_publishes_a_provider_once_its_key_is_there(
-        self, settings, tmp_path: Path
+        self, settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from agentgov.api.app import create_app
+        from agentgov.registry import model_providers
+
+        # The model keys directory, here.
+        monkeypatch.setattr(model_providers, "KEY_DIR", str(tmp_path / "keys"))
 
         # Agents' tokens can be checked: the gateway spends a provider's key on no others.
         checked = settings.with_overrides(

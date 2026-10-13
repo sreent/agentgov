@@ -133,10 +133,18 @@ AgentGov's examples. On one server, `docker-compose.server.yml` does most of wha
   the `registrar` role. Give device management its own key, and revoke it if the
   machines it runs on are lost.
 * Model providers' API keys are files that the gateway and its config sidecar read
-  (`deploy/compose/model-keys`, or the Helm chart's `modelKeys` Secret). Keep them out of
-  version control (the Compose directory ignores everything but the demo's key). To
-  rotate one, replace the file (or the Secret) and restart the gateway. Mark a provider
-  `verified` only if personal data may go to it unmasked.
+  (`deploy/compose/model-keys`, or the Helm chart's `modelKeys` Secret), in `/model-keys`:
+  a provider's `key_file` can name no other file. Keep them out of version control (the
+  Compose directory ignores everything but the demo's key). To rotate one, replace the file
+  (or the Secret) and restart the gateway. Mark a provider `verified` only if personal data
+  may go to it unmasked.
+* List the hosts credentials may go to in `AGENTGOV_CREDENTIAL_HOSTS`: your SIEMs', chats'
+  and service desks', and your `openai-compatible` model providers'. Administrators can't
+  read destinations' credentials or providers' keys, but without the list they can send
+  them to any host, by changing a destination's `url` or a provider's `base_url`; with it,
+  AgentGov refuses other hosts, when they are set and again when it sends. The
+  **Features** page says when the list is empty
+  ([security operations](docs/secops.md#credentials), [model calls](docs/models.md)).
 
 ## Known limitations
 

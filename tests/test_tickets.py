@@ -21,7 +21,7 @@ from agentgov import ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.models import Destination, Finding, Ticket
-from agentgov.registry import desks, findings, issues, teams
+from agentgov.registry import desks, destinations, findings, issues, teams
 from agentgov.registry.errors import ValidationError
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN, seed
@@ -690,6 +690,39 @@ class TestFailures:
         fake.next.append(("GET", "/api/now", httpx.Response(401)))
         out = desks_client.post("/v1/destinations/itsm/test", headers=ADMIN).json()
         assert not out["ok"] and "refused AgentGov's credential" in out["error"]
+
+
+def test_a_desk_on_a_host_not_listed_gets_nothing(
+    settings: Settings, fake: FakeDesks, secrets: Path
+) -> None:
+    """With AGENTGOV_CREDENTIAL_HOSTS, a desk must be on a host it lists: when it is set up,
+    and again when AgentGov signs in to it."""
+    settings = settings.with_overrides(
+        destination_secrets_dir=str(secrets),
+        public_url="https://agentgov.example.com",
+        credential_hosts="*.service-now.com",
+    )
+    rt = Runtime(settings, destinations_http=httpx.Client(transport=httpx.MockTransport(fake)))
+    with TestClient(create_app(settings, runtime=rt, background=False)) as client:
+        (secrets / "jsm").write_text("bot@example.com:tok")
+        body = {"name": "jsm", "kind": "jira", "url": JIRA, "tickets": {"group": "OPS"}}
+        refused = client.post("/v1/destinations", json=body, headers=ADMIN)
+        assert refused.status_code == 422
+        assert "AGENTGOV_CREDENTIAL_HOSTS doesn't list acme.atlassian.net" in refused.text
+        with rt.db.session() as s:
+            # Set up before the deployment listed the hosts.
+            destinations.create(s, body, actor="admin:test")
+        created = seed(client, sponsors=["alice@example.com"])
+        with rt.db.session() as s:
+            teams.create(s, {"name": "ai-governance", "default": True}, actor="admin:test")
+        issue(client, created["id"])
+        run(client)
+        state = client.get("/v1/destinations/jsm", headers=ADMIN).json()["delivery"]
+        assert "doesn't list acme.atlassian.net" in state["last_error"]
+        assert fake.requests == []
+        tested = client.post("/v1/destinations/jsm/test", headers=ADMIN).json()
+        assert not tested["ok"] and "acme.atlassian.net" in tested["error"]
+        assert fake.requests == []
 
 
 class TestJira:

@@ -7946,11 +7946,19 @@ function failureLine(settings) {
   return parts.length ? h('div', { class: 'cell-sub' }, `${parts.join('. ')}.`) : null;
 }
 
+// Where destinations' credentials and model providers' keys may go (AGENTGOV_CREDENTIAL_HOSTS).
+function credentialHosts(hosts) {
+  if (hosts?.length) return h('div', {}, plainChip('Listed hosts only', { tone: 'good', iconName: 'lock' }), h('div', { class: 'cell-sub break' }, hosts.join(', ')));
+  return h('div', {}, plainChip('Any host', { tone: 'warning', iconName: 'triangle' }),
+    h('div', { class: 'cell-sub' }, "An administrator can send destinations' credentials and model providers' keys to any host, by changing a URL. List the hosts they may go to in AGENTGOV_CREDENTIAL_HOSTS."));
+}
+
 function componentsCard(view) {
   const cp = view.control_plane || {};
   const processors = view.processors || [];
   const rows = [
     ['Control plane', h('div', { class: 'chip-row' }, ['opa', 'keycloak'].map((n) => checkChip(n, cp[n])))],
+    'credential_hosts' in view ? ['Credentials go to', credentialHosts(view.credential_hosts)] : null,
     ...processors.map((p) => [
       h('span', {}, 'Governance processor ', h('code', {}, p.instance)),
       h('div', {},

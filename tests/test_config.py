@@ -80,3 +80,33 @@ def test_one_certificate_watcher_per_directory(tmp_path) -> None:
     settings = Settings.from_env(env)
     assert settings.tls() is settings.tls() is Settings.from_env(dict(env)).tls()
     assert Settings.from_env({}).tls() is None
+
+
+def test_the_hosts_credentials_may_go_to() -> None:
+    listed = Settings(
+        credential_hosts=" Splunk.Example.com., *.service-now.com, 10.0.0.5, ::1, vllm"
+    )
+    assert listed.credential_host_list() == [
+        "splunk.example.com", "*.service-now.com", "10.0.0.5", "::1", "vllm",
+    ]  # fmt: skip
+    for url in (
+        "https://SPLUNK.example.com:8088/services/collector",
+        "https://acme.service-now.com/api",
+        "http://10.0.0.5:4318",
+        "http://[::1]:8080/x",
+        "http://vllm:8000/v1",
+    ):
+        assert listed.credentials_may_go_to(url), url
+    for url in (
+        "https://service-now.com/",  # *. is the hosts under it, not the domain itself
+        "https://acme.service-now.com.evil.example/",
+        "https://evil-service-now.com/",
+        "https://splunk.example.com@evil.example/",
+        "not a url",
+        None,
+    ):
+        assert not listed.credentials_may_go_to(url), url
+    assert Settings().credentials_may_go_to("https://anything.example")
+    for bad in ("https://splunk.example.com", "*", "*.", "a b"):
+        with pytest.raises(ValueError, match="AGENTGOV_CREDENTIAL_HOSTS"):
+            Settings(credential_hosts=bad).credential_host_list()

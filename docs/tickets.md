@@ -70,6 +70,9 @@ than all at once.
 The secret file holds HTTP headers, one per line (`Authorization: Basic …`, or ServiceNow's
 `x-sn-apikey: …`), or one line that AgentGov turns into the header: a user name and
 password (ServiceNow), an email address and API token (Jira), or an API key (Freshservice).
+Where the deployment lists the hosts credentials may go to (`AGENTGOV_CREDENTIAL_HOSTS`,
+[security operations](secops.md#credentials)), a desk's `url` must be on one of them, and
+AgentGov signs in to no other.
 
 ### ServiceNow
 

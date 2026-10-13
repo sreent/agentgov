@@ -120,6 +120,15 @@ The page and `agentgov destinations list` say when a destination's file is missi
 workflow in the channel from the template *Send webhook alerts to a channel* (Office 365
 connectors are retired), and take the URL it gives.
 
+An administrator can't read a credential, but could send one elsewhere, by changing a
+destination's `url` to a host of their own. To keep credentials with the services they are
+for, list the hosts destinations may reach in `AGENTGOV_CREDENTIAL_HOSTS`
+(`splunk.example.com,*.service-now.com,hooks.slack.com`, say; `*.example.com` is any host
+under example.com). AgentGov then refuses a `url` on another host, and checks again each
+time it sends, the URL in a secret file too: a destination set up before the list, or whose
+host it no longer lists, gets nothing, and its error says why. While the list is empty, the
+**Features** page says that credentials can go to any host.
+
 ### Delivery
 
 Each destination has a cursor: the last ledger entry it got. The control plane sends it

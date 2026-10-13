@@ -3971,7 +3971,7 @@ BASE_URL = typer.Option(
     None, help="An openai-compatible server's OpenAI API base, e.g. http://vllm:8000/v1."
 )
 KEY_FILE = typer.Option(
-    None, help="Where the gateway reads its API key (default /model-keys/<name>)."
+    None, help="Where the gateway reads its API key: a file in /model-keys (default its name)."
 )
 TRUST = typer.Option(None, "--trust", help="verified: personal data may be sent to it.")
 PRICE = typer.Option(
