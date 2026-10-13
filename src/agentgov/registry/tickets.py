@@ -14,7 +14,7 @@ The desks' APIs are agentgov.servicedesks; agentgov.ticketing runs the rounds.
 * What happens in the desk comes back: a ticket assigned or worked on means someone took
   the issue on, so it goes no further up its chain. A ticket resolved there resolves a
   threat (an event someone dealt with; it opens again if it happens again). A posture
-  finding is for AgentGov's own check to resolve: if it finds the problem again after the
+  issue is for AgentGov's own check to resolve: if it finds the problem again after the
   ticket was resolved, it opens another ticket that says so.
 """
 
@@ -234,7 +234,7 @@ def new_ticket(
         "AgentGov keeps this ticket in step with the issue: it adds a note when the issue "
         "changes, and resolves the ticket once the problem is gone. Assigning the ticket, or "
         "starting work on it, tells AgentGov that someone has taken the issue on. To accept "
-        "the risk instead of fixing it, ask for an exception in AgentGov.",
+        "the risk instead of fixing it, ask for that in AgentGov: an approver decides.",
     ]
     cfg = desk.tickets or {}
     return NewTicket(
@@ -289,7 +289,7 @@ def _ended(finding: Finding) -> str:
         )
     if finding.status == "dismissed":
         if finding_types.SUPPRESSED in details:
-            return "AgentGov no longer raises this kind of finding: an administrator turned it off."
+            return "AgentGov no longer raises this kind of issue: an administrator turned it off."
         dismissal = details.get(findings.DISMISSAL) or {}
         until = f" (until {_date(dismissal['until'])})" if dismissal.get("until") else ""
         return (

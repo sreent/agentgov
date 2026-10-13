@@ -148,7 +148,7 @@ class Settings:
     # How long risk signals (denied calls, credentials, prompt injections) count towards
     # an agent's risk score.
     risk_window_hours: int = 24
-    # Agents not seen for this many days raise a stale-agent finding.
+    # Agents not seen for this many days raise a stale-agent issue.
     stale_agent_days: int = 30
     # Seconds between posture scans (owners, sponsors, attestations, stale agents); 0
     # turns the scheduled scan off.
@@ -176,7 +176,7 @@ class Settings:
     # or a chat message: what was there before AgentGov looked doesn't flood inboxes. Found
     # again after it is resolved, it is sent as any other.
     issues_quiet_first_sync: bool = True
-    # Days a threat finding stays open without happening again before it is resolved (it
+    # Days a threat issue stays open without happening again before it is resolved (it
     # opens again if it happens again). 0 keeps threats open until someone closes them.
     threat_finding_days: int = 30
     # The time of day, HH:MM, a digest of their open issues goes to each address and team
@@ -232,7 +232,7 @@ class Settings:
     ledger_rekor_origin: str | None = None
     # Days AgentGov keeps the operational records whose history the ledger has: daily
     # activity and model usage, risk signals, notifications sent, decided approvals,
-    # resolved findings, ended access assignments, and developers' MCP servers not
+    # resolved issues, ended access assignments, and developers' MCP servers not
     # reported since. 0 keeps them; otherwise at least 30.
     data_retention_days: int = 0
 

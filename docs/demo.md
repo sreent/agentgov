@@ -63,16 +63,16 @@ the gateway. It shows each control in turn:
 14. **Own identities**: an agent with no client secret at all authenticates with its
     service account token from a stand-in Kubernetes cluster, and calls a tool; blocking
     the cluster's issuer stops Keycloak taking its tokens.
-15. **Shadow AI**: telemetry from an unregistered agent is discovered.
+15. **Shadow AI**: telemetry from an unregistered agent adds it as unmanaged.
 16. **Developer tools**: the MCP servers approved for developers are served as an MCP
     registry for GitHub Copilot, and a developer's laptop
     ([examples/developer-machine](../examples/developer-machine)) reports its MCP servers:
-    those that aren't approved, or skip the gateway, raise findings.
+    those that aren't approved, or skip the gateway, raise issues.
 17. **Security operations**: the SOC's stand-in SIEM has the ledger as OCSF events, its
-    Splunk the decisions and findings that matter, and its Slack and Teams the alerts;
+    Splunk the decisions and issues that matter, and its Slack and Teams the alerts;
     its SOAR's `secops` key is refused a block at the `inform` level, and blocks the
     shadow agent once the level is `contain`.
-18. **Issues**: the agent's findings went to its owner, the cx-platform team, in its own
+18. **Issues**: the agent's issues went to its owner, the cx-platform team, in its own
     Slack channel, and the issues no team owns to the AI governance team's Teams channel;
     alice, in cx-platform, sees them in AgentGov and acknowledges one.
 19. **Management rules**: a rule that deletes agents blocked for 30 days matches the demo
@@ -118,7 +118,7 @@ Then look around:
   paste the API token `dev-admin-token`
 * What the security team's tools got: <http://localhost:9300/received> (the demo sink)
 * API reference: <http://localhost:8000/docs>
-* CLI: `agentgov agents list`, `agentgov findings`, `agentgov approvals list`,
+* CLI: `agentgov agents list`, `agentgov issues`, `agentgov approvals list`,
   `agentgov ledger verify`. The CLI can do everything the UI can
   ([Administration](administration.md) maps one to the other)
 * Keycloak: <http://localhost:8180> (`admin` / `admin`), realm `agentgov`, which has one

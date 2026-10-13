@@ -548,11 +548,11 @@ def _roles(f: Facts) -> Assessment:
 def _monitoring(f: Facts) -> Assessment:
     a = Assessment(
         IN_PLACE,
-        "AgentGov watches agents in production: posture checks and risk scores, findings "
+        "AgentGov watches agents in production: posture checks and risk scores, issues "
         "from the gateway and from Microsoft's services, issues sent to each agent's people "
         "until someone takes them on, and management rules for what lasts.",
         [
-            _row("Findings raised in the period", f.findings_raised, "#/findings"),
+            _row("Issues raised in the period", f.findings_raised, "#/findings"),
             _row("Resolved in the period", f.findings_resolved, "#/findings"),
             _row("Acknowledged in the period", f.acknowledged, "#/findings"),
             _row(
@@ -582,7 +582,7 @@ def _monitoring(f: Facts) -> Assessment:
             a.status = CONFIGURED
         a.gaps.append(
             "Posture checks are on, but none ran in the period: see the scan interval "
-            "(AGENTGOV_POSTURE_INTERVAL_SECONDS), or scan now from Findings."
+            "(AGENTGOV_POSTURE_INTERVAL_SECONDS), or scan now from Issues."
         )
     return a
 
@@ -590,11 +590,11 @@ def _monitoring(f: Facts) -> Assessment:
 def _incidents(f: Facts) -> Assessment:
     a = Assessment(
         IN_PLACE,
-        "Findings reach the people responsible as issues, and the security team's SIEMs and "
+        "Issues reach the people responsible for them, and the security team's SIEMs and "
         "chats get the ledger and alerts as they happen; reporting serious incidents to "
         "authorities stays with the organisation.",
         [
-            _row("Critical findings open", f.findings_open["critical"], "#/findings"),
+            _row("Critical issues open", f.findings_open["critical"], "#/findings"),
             _row("Destinations for the security team", f.destinations, "#/secops"),
             _row("Delivered in the period", f.delivered, "#/secops"),
             _row("Failing destinations", f.failing_destinations, "#/secops"),
@@ -626,10 +626,10 @@ def _risk(f: Facts) -> Assessment:
         IN_PLACE,
         "Agents' risk is assessed continuously: a risk tier from their blueprint, a score "
         "from what they do (refusals, credentials, injections, jailbreaks), posture "
-        "findings, and the level at which they are blocked.",
+        "issues, and the level at which they are blocked.",
         [
             _row("Agents at high or critical risk", risky, "#/agents"),
-            _row("Findings raised in the period", f.findings_raised, "#/findings"),
+            _row("Issues raised in the period", f.findings_raised, "#/findings"),
             _row("Risk-based access", f.modes.get("risk-based-access", "off"), "#/features"),
         ],
     )

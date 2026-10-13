@@ -66,9 +66,9 @@ A rule's name can't change: the ledger names it.
 | `inactive_days: N` | Nothing was seen of it for N days: no call through the gateway, and no use on another platform AgentGov reads |
 | `missing: [...]` | It has no `owner`, no `sponsors`, no `team` (its own or its blueprint's), no `blueprint`, or no `workload_identity`: any of those listed |
 | `attestation_overdue_days: N` | Its attestation expired N days ago or more |
-| `findings: [...]` | It has an open finding of one of these types, `*` wildcards allowed (such as `agent.stale` or `defender.*`); with `finding_severity`, one at least that severe |
+| `findings: [...]` | It has an open issue of one of these types, `*` wildcards allowed (such as `agent.stale` or `defender.*`); with `finding_severity`, one at least that severe |
 | `risk_level` | Its risk is at least `low`, `medium`, `high` or `critical` |
-| `status: [...]` | It is `pending`, `active`, `blocked` or `discovered` |
+| `status: [...]` | It is `pending`, `active`, `blocked` or `discovered` (unmanaged) |
 
 A rule doesn't guess. Agents on Microsoft 365 and Copilot Studio are inactive only by what
 AgentGov reads of their use from the [Purview audit log](microsoft-connections.md), and
@@ -76,7 +76,7 @@ only since it started reading it: while it doesn't, or its last read is more tha
 old, a rule can't tell, and the agent doesn't match. Previews list those agents apart. A
 blueprint and a workload identity are never missing for them: their platform governs that.
 
-Findings count while they are open: one whose risk was accepted, one dismissed, and one a
+Issues count while they are open: one whose risk was accepted, one dismissed, and one a
 failed sync can't vouch for (unverified) don't. Rules' own issues never count.
 
 ## Which agents
@@ -98,7 +98,7 @@ agents, can't be deleted while the rule does.
 An agent labelled `agentgov/exempt-rules` is left out of the rules it names (`inactive-agents,
 stale-registrations`), or of all of them (`*`); only administrators set labels under
 `agentgov/`. Each action also looks only at the agents
-it can do something to: a rule that blocks, at pending, active and discovered agents; one
+it can do something to: a rule that blocks, at pending, active and unmanaged agents; one
 that deletes, at any agent not deleted yet; one that revokes access, at agents that hold
 access packages; and one that gives an owner, at agents without one.
 

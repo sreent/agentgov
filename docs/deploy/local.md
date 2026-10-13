@@ -5,7 +5,7 @@ Three ways, for evaluation and development:
 | | What runs | For |
 |---|---|---|
 | [Docker Compose](#docker-compose) | The whole stack, with the demo's tool server, model and stand-ins | Trying AgentGov, the demo, end-to-end development |
-| [Just the inventory](#just-the-inventory) | The control plane and PostgreSQL, with Compose | An inventory of the agents on your platforms, their findings and issues, without the gateway |
+| [Just the inventory](#just-the-inventory) | The control plane and PostgreSQL, with Compose | An inventory of the agents on your platforms, their issues, without the gateway |
 | [Kubernetes with kind](#kubernetes-with-kind) | The Helm chart on a local cluster | Working on the chart, rehearsing a Kubernetes install |
 | [The control plane alone](#the-control-plane-alone) | The API and the admin UI, on a SQLite file | Working on the API or the UI |
 
@@ -78,7 +78,7 @@ comes with five demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (default
 | User | Realm role | What they can do |
 |---|---|---|
 | `admin` | `agentgov-admin` | Everything |
-| `alice` | `agentgov-approver` | Decide approval requests and findings; attest the agents they sponsor (the demo's `support-bot`) |
+| `alice` | `agentgov-approver` | Decide approval requests and issues; attest the agents they sponsor (the demo's `support-bot`) |
 | `sofia` | `agentgov-secops` | The security team: see everything, and triage, contain or decide as far as the hand-off to [security operations](../secops.md) allows |
 | `audrey` | `agentgov-auditor` | See everything, change nothing |
 | `sam` | none (group `support`) | A person agents act for: signs in to the demo app `agentgov-demo-chat`, and to AgentGov to decide the approval requests sent to them, while `approvals-by-person` is on ([acting for people](../acting-for-people.md)) |
@@ -295,7 +295,7 @@ docker compose -f deploy/compose/docker-compose.yml down -v   # removes all data
 * **Model usage stays empty**: the gateway's access logs reach the control plane through
   the collector. Check `docker compose ... logs otel-collector`.
 * **Calls are denied with "policy engine unavailable"**: OPA has no bundle yet. Check
-  `docker compose ... logs opa`; bundle errors also raise a finding (`agentgov findings`).
+  `docker compose ... logs opa`; bundle errors also raise an issue (`agentgov issues`).
   While no control at the gateway is enforced, such calls go through unchecked instead,
   and the ledger records them as `Not checked`
   ([when something is down](../features.md#when-something-is-down)).
@@ -308,7 +308,7 @@ docker compose -f deploy/compose/docker-compose.yml down -v   # removes all data
 ## Just the inventory
 
 To keep an inventory of the agents on your platforms (Microsoft 365, Copilot Studio, AWS,
-Google Cloud, Salesforce, Databricks, Microsoft Foundry), with their findings sent to the
+Google Cloud, Salesforce, Databricks, Microsoft Foundry), with their issues sent to the
 people responsible, AgentGov needs neither the gateway nor what checks its calls. The
 control plane and PostgreSQL do, in about 200 MB of memory:
 
@@ -331,7 +331,7 @@ reaches the control plane: the platforms' credentials
 It runs as its own Compose project, `agentgov-inventory`, with its own database, so the full
 stack beside it starts afresh (not at the same time: both use port 8000). On Kubernetes the
 same choice is a [profile](kubernetes.md#profiles), and adding the gateway later is an
-upgrade that keeps the registry, its findings and the ledger.
+upgrade that keeps the registry, its issues and the ledger.
 
 ## Kubernetes with kind
 

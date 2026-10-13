@@ -9,7 +9,7 @@ secrets of your own and none of the demo's parts. Two sizes:
 | [The inventory](#the-inventory) | The control plane and PostgreSQL | One: the control plane | About 250 MB |
 | [All of it](#all-of-it) | Also the gateway, the governance processor, OPA, Presidio, Keycloak, the OpenTelemetry Collector and the transparency log | Three: the control plane, the gateway and Keycloak | About 2.5 GB |
 
-Starting with the inventory and adding the gateway later keeps the registry, its findings
+Starting with the inventory and adding the gateway later keeps the registry, its issues
 and the ledger: it is the same control plane and database.
 
 One server is one place to fail. While it is down, nobody can approve anything, and agents'

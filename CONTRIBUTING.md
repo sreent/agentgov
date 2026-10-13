@@ -20,15 +20,18 @@ role, every licence, a clean directory, owners who stay, a Kubernetes team, the 
 system AgentGov talks to. Before a change is done, answer these for it, in the code and in
 the docs:
 
-* **Who gets it, and can they act on it?** Every message, issue and finding says what the
+* **Who gets it, and can they act on it?** Every message and issue says what the
   person it reaches can do about it, with the role they have, which is often none.
 * **What if they don't have what it needs?** A missing permission, licence, component or
   connection makes it say so and do less, not fail or pretend: it says what it needs, and
   who can give it.
-* **What does it look like at scale?** With 300 agents and 1,000 findings: paging,
+* **What does it look like at scale?** With 300 agents and 1,000 issues: paging,
   filters, bulk actions, and one message rather than hundreds.
-* **What if it's wrong?** People can undo what it did and see who did what, and why; a
-  finding dismissed or a risk accepted keeps a reason and a date.
+* **What if it's wrong?** People can undo what it did and see who did what, and why; an
+  issue dismissed or a risk accepted keeps a reason and a date.
+* **Does it use the same words?** One word for each thing, the one in the
+  [glossary](docs/glossary.md), in the admin center, the CLI, messages and the docs. The API
+  keeps its names; the glossary says what they are.
 * **What does it claim?** Statuses, scores and reports say what AgentGov saw and how much
   of the estate that covers, not how a setting is configured.
 * **What if it fails, or is restored from a backup?** It fails as its feature's failure

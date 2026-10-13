@@ -200,7 +200,7 @@ def test_the_cli(client, issue, monkeypatch) -> None:
     out = runner.invoke(
         cli.app, ["findings", "ask-exception", issue, "--reason", "Retiring it", "--until", "30"]
     )
-    assert out.exit_code == 0 and "exception asked for" in out.output, out.output
+    assert out.exit_code == 0 and "asked to accept its risk" in out.output, out.output
     out = runner.invoke(cli.app, ["findings", "not-mine", issue, "--reason", "Payments'"])
     assert "passed on to alice@example.com, bob" in out.output, out.output
     out = runner.invoke(cli.app, ["findings", "recheck", issue])

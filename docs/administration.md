@@ -87,8 +87,8 @@ answers, and `--hide` hides it; with the API, `GET` and `PUT /v1/start`
 | Role | Can |
 |---|---|
 | `admin` | Everything below, plus agent lifecycle, blueprints, access packages, [management rules](management-rules.md), tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations (SIEMs, chats and [service desks](tickets.md)), teams and which [features](features.md) are used |
-| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks, but not those of agents they are accountable for; attest the agents it sponsors; classify agents for the [classification register](evidence.md#a-classification-register) |
-| `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings, acknowledge issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
+| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); acknowledge, resolve, dismiss and reopen [issues](issues.md) and accept their risks, but not those of agents they are accountable for; attest the agents it sponsors; classify agents for the [classification register](evidence.md#a-classification-register) |
+| `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, acknowledge, resolve, dismiss and reopen issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing. They start on **Compliance** |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
 | `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)), and to attest the agents they sponsor; sees nothing else |
@@ -108,7 +108,7 @@ The admin center's menu has the overview first, then five groups:
 
 | Group | Pages | For |
 |---|---|---|
-| *Work* | **Approvals**, **Findings** | What waits for someone: decisions ([below](#approvals)), and issues to take on |
+| *Work* | **Approvals**, **Issues** | What waits for someone: decisions ([below](#approvals)), and issues to take on |
 | *Agents* | **Agents**, **Agent map**, **Platforms** | What there is: the registry, which agents call which, and the platforms agents come from |
 | *Gateway* | **Tool servers**, **Models**, **Policies**, **Developer tools** | What agents' calls through the gateway may reach, and the rules for them: unused [without the gateway](deploy/local.md#just-the-inventory) |
 | *Evidence* | **Ledger**, **Compliance**, **Register** | What happened, the reports for a framework, and how each agent is classified |
@@ -145,7 +145,7 @@ The same list is `agentgov inbox`, with the command that decides each kind, and
 | Sort and filter the agents, and download those shown as a spreadsheet | Agents → a column's header; *Where*, *Risk*, *Owner*; **Download CSV** | `agentgov agents list --source S --risk R --csv` (`-q`: only their names) | `GET /v1/agents?source=&risk_level=` |
 | Approve, block, unblock, delete or restore many agents at once ([many agents at once](#many-agents-at-once)) | Agents → tick them → **Approve**, **Block**, … | `agentgov agents approve\|block\|unblock\|delete\|restore REF REF ...` | `POST /v1/agents/bulk` |
 | Change the owner, team, sponsors or blueprint of many agents at once | Agents → tick them → **Edit…** | `agentgov agents update REF REF ... --owner T --add-sponsor P --remove-sponsor P` | `POST /v1/agents/bulk`, `action: update` |
-| Adopt a discovered agent | Agent → **Adopt** | `agentgov agents lifecycle REF adopt` | `POST /v1/agents/{ref}/adopt` |
+| Adopt an unmanaged agent | Agent → **Adopt** | `agentgov agents lifecycle REF adopt` | `POST /v1/agents/{ref}/adopt` |
 | Adopt agents at once, with their makers as owners | Agents → **Adopt n agents** | `agentgov agents adopt --platform copilot-studio --makers` | `POST /v1/agents/adopt` |
 | Delete a deleted agent permanently (otherwise it is purged after `AGENTGOV_SOFT_DELETE_RETENTION_DAYS`, 30 by default) | Agent → **Delete permanently** | `agentgov agents purge REF` | `DELETE /v1/agents/{ref}` |
 | Attest an agent: its sponsors, whatever their role, and administrators | Agent → **Attest**, or **Attest** on the issue that its review is due | `agentgov agents attest REF` | `POST /v1/agents/{ref}/attest` |
@@ -182,13 +182,13 @@ The same list is `agentgov inbox`, with the command that decides each kind, and
 | Export manifests | Policies → **Export manifests** | `agentgov export` | `GET /v1/export` |
 | Decide an approval request | Approvals → **Approve** / **Deny** | `agentgov approvals approve\|deny ID` | `POST /v1/approvals/{id}/approve\|deny` |
 | See the approval requests sent to you, as the person an agent acted for | Approvals → *Waiting for you* | `agentgov approvals list --mine` | `GET /v1/me/approvals` |
-| Resolve, dismiss, reopen findings | Findings | `agentgov findings resolve\|reopen ID`, `agentgov findings dismiss ID --reason R [--until DATE]` | `POST /v1/findings/{id}/resolve\|dismiss\|reopen` |
-| Do one of those to many findings at once, or acknowledge them or accept their risk ([issues](issues.md#many-at-once)) | Findings → tick them, or *Group by agent* and tick an agent | `agentgov findings acknowledge\|resolve\|dismiss\|accept\|reopen ID ID ...` | `POST /v1/findings/bulk` |
-| Download the findings shown as a spreadsheet | Findings → **Download CSV** | `agentgov findings list --csv` (`-q`: only their IDs) | `GET /v1/findings` |
-| See who an issue is with, its messages and its history ([issues](issues.md)) | Findings → **Details** | `agentgov findings get ID` | `GET /v1/findings/{id}` |
-| See the issues sent to you, as an owner, a sponsor or a team member | Findings → *Yours* (people without a role: *Your issues*) | `agentgov findings list --mine` | `GET /v1/me/issues` |
-| List findings, a page at a time, by type and severity | Findings: the type and severity filters, and **Show more** | `agentgov findings list --type T --severity S --limit N` | `GET /v1/findings?type=&severity=&limit=&offset=` (`X-Total-Count` says how many in all) |
-| Acknowledge an issue, or accept its risk until a date | Findings → **Acknowledge**, **Accept risk** | `agentgov findings acknowledge ID`, `agentgov findings accept ID --reason R --until DATE` | `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` |
+| Resolve, dismiss, reopen issues | Issues | `agentgov issues resolve\|reopen ID`, `agentgov issues dismiss ID --reason R [--until DATE]` | `POST /v1/findings/{id}/resolve\|dismiss\|reopen` |
+| Do one of those to many issues at once, or acknowledge them or accept their risk ([issues](issues.md#many-at-once)) | Issues → tick them, or *Group by agent* and tick an agent | `agentgov issues acknowledge\|resolve\|dismiss\|accept\|reopen ID ID ...` | `POST /v1/findings/bulk` |
+| Download the issues shown as a spreadsheet | Issues → **Download CSV** | `agentgov issues list --csv` (`-q`: only their IDs) | `GET /v1/findings` |
+| See who an issue is with, its messages and its history ([issues](issues.md)) | Issues → **Details** | `agentgov issues get ID` | `GET /v1/findings/{id}` |
+| See the issues sent to you, as an owner, a sponsor or a team member | Issues → *Yours* (people without a role: *Your issues*) | `agentgov issues list --mine` | `GET /v1/me/issues` |
+| List issues, a page at a time, by type and severity | Issues: the type and severity filters, and **Show more** | `agentgov issues list --type T --severity S --limit N` | `GET /v1/findings?type=&severity=&limit=&offset=` (`X-Total-Count` says how many in all) |
+| Acknowledge an issue, or accept its risk until a date | Issues → **Acknowledge**, **Accept risk** | `agentgov issues acknowledge ID`, `agentgov issues accept ID --reason R --until DATE` | `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` |
 | Add, edit and delete teams, and choose the default team | **Teams** | `agentgov teams create\|update\|delete`, `agentgov teams list` | `POST /v1/teams`, `PATCH`/`DELETE /v1/teams/{name}` |
 | Add, edit and delete access packages ([access packages](access-packages.md)) | Policies → *Access packages* | `agentgov access-packages create\|update\|delete`, `agentgov access-packages list` | `POST /v1/access-packages`, `PATCH`/`DELETE /v1/access-packages/{name}` |
 | Ask for an access package for an agent, or renew one | Agent → *Access packages* → **Request access**, **Renew** | `agentgov access-packages request AGENT PACKAGE --reason R` | `POST /v1/access-assignments` |

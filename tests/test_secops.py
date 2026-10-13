@@ -473,7 +473,7 @@ class TestEventsApi:
         level(client, "triage")
         view = client.get("/v1/secops", headers=key(client, "auditor")).json()
         assert (view["level"], view["sending"]) == ("triage", True)
-        assert view["secops_may"] == ["resolve, dismiss and reopen findings"]
+        assert view["secops_may"] == ["resolve, dismiss and reopen issues"]
         assert view["destinations"] == [] and view["ledger_head"] > 0
 
 
@@ -808,7 +808,7 @@ class TestDelivery:
         slack = [json.loads(r.content) for r in sink.requests if r.url.host == "hooks.slack.com"]
         titles = [m["blocks"][0]["text"]["text"] for m in slack]
         assert titles == [
-            "High finding: Prompt injection in a tool result",
+            "High-severity issue: Prompt injection in a tool result",
             "Approval needed: support-bot wants to call crm/delete_customer",
             "Agent support-bot blocked",
         ]
@@ -898,7 +898,7 @@ class TestDelivery:
         level(secops, "inform")
         assert rt.delivery.run() == {"soc": {"sent": 10}}
         titles = [json.loads(r.content)["blocks"][0]["text"]["text"] for r in sink.requests]
-        assert titles[0] == "Critical finding: Injection 0"
+        assert titles[0] == "Critical-severity issue: Injection 0"
         assert titles[-1] == "5 more alerts"
         assert not [t for t in titles if "old news" in t]
         with rt.db.session() as s:
@@ -934,10 +934,10 @@ class TestDelivery:
         assert rt.delivery.run() == {"soc": {"sent": 2}}
         titles = [json.loads(r.content)["blocks"][0]["text"]["text"] for r in sink.requests]
         assert titles == [
-            "High finding: Injection 0",
-            "High finding: Injection 1",  # refused
-            "High finding: Injection 1",
-            "High finding: Injection 2",
+            "High-severity issue: Injection 0",
+            "High-severity issue: Injection 1",  # refused
+            "High-severity issue: Injection 1",
+            "High-severity issue: Injection 2",
         ]
 
     def test_replicas_dont_send_the_same_entries_at_once(self, secops, sink) -> None:

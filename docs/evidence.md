@@ -126,7 +126,7 @@ Exports (`agentgov ledger export`) check the same way.
 **Operational records.** With `AGENTGOV_DATA_RETENTION_DAYS`, the records whose history
 is in the ledger go once older than that: agents' daily activity and model usage, risk
 signals, notifications sent, decided approval requests (with the arguments they held),
-resolved and dismissed findings, ended access assignments, and developers' MCP servers not
+resolved and dismissed issues, ended access assignments, and developers' MCP servers not
 reported since. An entry `retention.pruned` counts what went.
 
 ## Compliance reports
@@ -165,7 +165,7 @@ AgentGov saw of it:
 
 It also names the platforms not read in the period, or whose last read failed: what
 AgentGov holds about their agents may be out of date. An agent that is only in a platform's
-inventory can still have an owner, sponsors, posture findings and a classification; the
+inventory can still have an owner, sponsors, posture issues and a classification; the
 gateway's controls just don't reach it.
 
 **EU AI Act** (Regulation (EU) 2024/1689, as amended by Regulation (EU) 2026/1744, under
@@ -176,15 +176,15 @@ systems and 2 August 2028 for Annex I systems):
 |---|---|
 | 4 AI literacy | Outside AgentGov; its issues, approvals and previews put the people responsible in the loop |
 | 5, 6, 50 Classification | The [classification register](#a-classification-register): what each agent is under the Act, your role for it, why, and what it is for |
-| 9 Risk management | Risk tiers, risk scores, posture findings and risk-based blocking |
+| 9 Risk management | Risk tiers, risk scores, posture issues and risk-based blocking |
 | 12 Record-keeping | The ledger: every decision and action, each edit with what it changed from and to, hash-chained, checkpointed and time-stamped |
 | 14 Human oversight | Approvals for destructive actions, the kill switch, monitor modes |
 | 15 Accuracy, robustness and cybersecurity | The controls at the gateway, enforced or monitored |
 | 19, 26(6) Keeping the logs | Retention of at least six months, archives that verify offline |
 | 26(2) Oversight by competent people | Owners, sponsors, teams and roles |
-| 26(5) Monitoring the operation | Posture checks, findings, issues, management rules |
+| 26(5) Monitoring the operation | Posture checks, issues, management rules |
 | 72 Post-market monitoring | Monitoring in production, including calls between agents |
-| 73 Serious incidents | Findings and the hand-off to the security team; reporting to authorities is the organisation's |
+| 73 Serious incidents | Issues and the hand-off to the security team; reporting to authorities is the organisation's |
 
 **ISO/IEC 42001:2023, Annex A**: A.3.2 AI roles and responsibilities; A.4.2 Resource
 documentation; A.4.4 Tooling resources; A.5.2 AI system impact assessment process (outside

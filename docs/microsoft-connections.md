@@ -32,7 +32,7 @@ token is renewed (tokens last about an hour), or at once when an admin asks for 
 | [Copilot Studio inventory](platforms.md#copilot-studio-inventory) | Copilot Studio and Agent Builder agents, their settings and connectors | An admin signed in through Entra ID (or an exported file) |
 | [Microsoft Entra Agent ID](#microsoft-entra-agent-id) | Agents' Entra identities, linked to their agents; agents only Entra knows about | App permission `AgentIdentity.Read.All` |
 | [Microsoft Purview audit log](#microsoft-purview-audit-log) | Who uses each agent; jailbreak and cross-prompt injection attempts; makers' changes | App permission `AuditLogsQuery.Read.All` |
-| [Microsoft Defender alerts](#microsoft-defender-alerts) | Microsoft's threat detections for agents, as findings | App permission `SecurityAlert.Read.All`; a Microsoft Agent 365 licence for agent detections |
+| [Microsoft Defender alerts](#microsoft-defender-alerts) | Microsoft's threat detections for agents, as issues | App permission `SecurityAlert.Read.All`; a Microsoft Agent 365 licence for agent detections |
 | [Microsoft Entra access packages](#microsoft-entra-access-packages) | The access packages Entra assigns agents' identities, and issues before they expire; in manage mode, assigning and removing them | App permission `EntitlementManagement.Read.All` (to manage: `EntitlementManagement.ReadWrite.All`, or a catalog role); a Microsoft Agent 365 licence |
 | [Power Platform connector policies](#pushing-the-connector-allowlist-into-power-platform) | The connector allowlist enforced by Power Platform | An admin signed in through Entra ID with the Power Platform administrator role |
 | [Copilot Studio threat detection](#copilot-studio-threat-detection) | A decision from AgentGov's policies before each tool call a Copilot Studio agent makes | An HTTPS address Microsoft can reach; a Power Platform admin to connect it |
@@ -67,12 +67,12 @@ inventory's `entraAgentId` and the catalog's `agentIdentityId`. An agent identit
 object ID and app ID are the same, so either works. Identities that no other source
 reports, such as agents in Microsoft Foundry projects AgentGov doesn't read ([other
 platforms](other-platforms.md#microsoft-foundry)) or your own agents with an Entra agent
-ID, become discovered agents of their own (source `platform:entra-agent-id`).
+ID, become unmanaged agents of their own (source `platform:entra-agent-id`).
 
 The agent's page shows its identity: whether it is enabled, the blueprint it was created
 from (Copilot Studio's is named), and when. Identities deleted from Entra stay in the
 registry, marked as gone. If Microsoft disables an identity (for a violation of its
-services agreement), AgentGov raises an `entra.disabled_by_microsoft` finding, which adds
+services agreement), AgentGov raises an `entra.disabled_by_microsoft` issue, which adds
 25 points to the agent's risk score and resolves itself when Microsoft enables it again.
 
 AgentGov doesn't read identities' sponsors: Microsoft Graph lists them only for apps that
@@ -98,9 +98,9 @@ Each sync searches the audit log twice
   AgentGov records when each agent was last used, who used it lately (up to ten people)
   and in which apps (Teams, Outlook, and so on), and counts each interaction as one of the
   agent's model calls. When Microsoft detected a jailbreak attempt in a conversation, the
-  agent gets an `agent.jailbreak_attempts` finding and a risk signal. When it detected a
+  agent gets an `agent.jailbreak_attempts` issue and a risk signal. When it detected a
   cross-prompt injection attempt in a file or message the agent read, the agent gets an
-  `agent.cross_prompt_injection` finding and a prompt-injection risk signal.
+  `agent.cross_prompt_injection` issue and a prompt-injection risk signal.
 * **Copilot Studio makers' changes** (`BotCreate`, `BotDelete`,
   `BotUpdateOperation-BotPublish`, `BotUpdateOperation-BotShare`,
   `BotUpdateOperation-BotAuthUpdate`): each becomes a ledger entry
@@ -125,9 +125,9 @@ records are part of Microsoft Purview Audit (Standard).
 Each sync reads the alerts created or updated since the last one
 (`GET /v1.0/security/alerts_v2`; the first sync reads the last seven days) and keeps those
 about agents: alerts with AI agent evidence, or from Microsoft's security for AI. Each one
-becomes a `defender.alert` finding on the agent it names, with Defender's severity, its
+becomes a `defender.alert` issue on the agent it names, with Defender's severity, its
 recommended actions and a link to the alert. Open alerts add 20 points to the agent's
-risk score. When Defender resolves an alert, AgentGov resolves the finding.
+risk score. When Defender resolves an alert, AgentGov resolves the issue.
 
 Since 1 July 2026, Microsoft's threat detections for Copilot Studio and Foundry agents
 need a Microsoft Agent 365 licence. Without one, this connection still works, but finds no
@@ -184,7 +184,7 @@ preview ([licensing][entra-licensing]).
 
 ## Pushing the connector allowlist into Power Platform
 
-On its own, the [connector allowlist](platforms.md#connector-allowlist) raises findings
+On its own, the [connector allowlist](platforms.md#connector-allowlist) raises issues
 for agents that use other connectors; it doesn't stop them. Power Platform's [advanced
 connector policies][acp] do: a policy lists the connectors allowed, and Power Platform
 blocks every other one, at design time and at run time.
@@ -248,8 +248,8 @@ with its policies and the registry, using the same OPA that decides for the gate
 
 Every decision is in the ledger (`decision.copilot_studio`) with the tool, the
 environment, the user and Copilot Studio's correlation ID. It also counts towards the
-agent's activity and risk, and raises findings for credentials and injected instructions.
-A Copilot Studio agent that AgentGov doesn't know yet is allowed, with a finding asking
+agent's activity and risk, and raises issues for credentials and injected instructions.
+A Copilot Studio agent that AgentGov doesn't know yet is allowed, with an issue asking
 for the inventory to be synced.
 
 The controls named above apply as their [features](features.md) say: one in monitor mode

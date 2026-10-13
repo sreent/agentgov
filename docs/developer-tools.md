@@ -7,7 +7,7 @@ clients read: an **MCP registry**. GitHub Copilot can then offer developers only
 servers. Developers' MCP clients can reach the servers on the gateway with the developer's
 own token, which they sign in for as the MCP specification has them do, so the gateway's
 controls check their calls too. AgentGov also finds out which MCP servers developers have
-actually set up, and raises a finding for each one that isn't approved.
+actually set up, and raises an issue for each one that isn't approved.
 
 ## Listing servers for developers
 
@@ -168,14 +168,14 @@ as `--token` and `--api-key`, as `<redacted>`.
 AgentGov compares each server with the approved tool servers, by its address, or by
 the package or command that starts it:
 
-| Status | Meaning | Finding |
+| Status | Meaning | Issue |
 |---|---|---|
 | Approved | A tool server's gateway address, a developer server's own address, or an approved package | — |
 | Past the gateway | The address of a server agents reach through the gateway, used directly: none of the gateway's controls apply | `mcp.gateway_bypass` (high) |
 | Blocked | A blocked tool server | `mcp.blocked_server` (high) |
 | Not approved | Anything else: shadow MCP | `mcp.unapproved_server` (medium) |
 
-Findings resolve themselves when the server is approved, or no report includes it any
+Issues resolve themselves when the server is approved, or no report includes it any
 more. **Developer tools** lists every server reported, with the machines and people
 that have it; **Register** starts a tool server from one that isn't approved. In the
 CLI, `agentgov mcp sightings`; in the API, `GET /v1/mcp/sightings`. Servers no machine

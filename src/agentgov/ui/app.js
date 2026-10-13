@@ -378,9 +378,9 @@ function fileStamp() {
 const STATUS = {
   agent: {
     active: ['good', 'check-circle', 'Active'],
-    pending: ['warning', 'clock', 'Pending review'],
+    pending: ['warning', 'clock', 'Pending approval'],
     blocked: ['critical', 'ban', 'Blocked'],
-    discovered: ['serious', 'eye', 'Discovered'],
+    discovered: ['serious', 'eye', 'Unmanaged'],
     deleted: ['neutral', 'trash', 'Deleted'],
   },
   risk: {
@@ -411,7 +411,7 @@ const STATUS = {
   },
   server: {
     approved: ['good', 'check-circle', 'Approved'],
-    pending: ['warning', 'clock', 'Pending review'],
+    pending: ['warning', 'clock', 'Pending approval'],
     blocked: ['critical', 'ban', 'Blocked'],
     unregistered: ['serious', 'alert-circle', 'Unregistered'],
   },
@@ -940,10 +940,10 @@ const PAGES = [
   { re: /^\/map$/, nav: 'map', title: 'Agent map', render: renderMap },
   { re: /^\/approvals(?:\/(history))?$/, nav: 'approvals', title: 'Approvals', render: renderApprovals },
   { re: /^\/toolservers$/, nav: 'toolservers', title: 'Tool servers', render: renderToolservers },
-  { re: /^\/findings$/, nav: 'findings', title: 'Findings', render: renderFindings },
+  { re: /^\/findings$/, nav: 'findings', title: 'Issues', render: renderFindings },
   { re: /^\/findings\/teams$/, nav: 'teams', title: 'Teams', render: renderTeams },
-  { re: /^\/findings\/types$/, nav: 'findings', title: 'Finding types', render: renderFindingTypes },
-  { re: /^\/findings\/([^/]+)$/, nav: 'findings', title: 'Finding', render: renderFinding },
+  { re: /^\/findings\/types$/, nav: 'findings', title: 'Issue types', render: renderFindingTypes },
+  { re: /^\/findings\/([^/]+)$/, nav: 'findings', title: 'Issue', render: renderFinding },
   { re: /^\/policies$/, nav: 'policies', title: 'Policies', render: renderPolicies },
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
   { re: /^\/ledger\/compliance$/, nav: 'compliance', title: 'Compliance', render: renderCompliance },
@@ -1115,7 +1115,7 @@ function enterApp() {
     const label = list.getAttribute('aria-labelledby');
     if (label) document.getElementById(label).hidden = empty;
   }
-  $('#nav-findings-label').textContent = isPerson() ? 'Your issues' : 'Findings';
+  $('#nav-findings-label').textContent = isPerson() ? 'Your issues' : 'Issues';
   if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', home());
   route();
   refreshBadges();
@@ -1263,16 +1263,16 @@ function isPlatformAgent(a) {
 
 // What the unmanaged agents are: found on platforms, seen in traffic, or both.
 function unmanagedNote(all, onPlatforms) {
-  if (!all) return 'No unregistered agents seen';
+  if (!all) return 'None on your platforms or seen at runtime';
   if (onPlatforms === all) return 'Found on your platforms, not reviewed yet';
   if (!onPlatforms) return 'Seen at runtime, never registered';
   return `${fmt(onPlatforms)} found on your platforms, ${fmt(all - onPlatforms)} seen at runtime`;
 }
 
 async function renderOverview() {
-  const [ov, info, features, start] = await Promise.all([
+  const [ov, info, features, start, inbox] = await Promise.all([
     api('v1/overview'), getInfo(), api('v1/features').then((v) => v.features).catch(() => null),
-    api('v1/start').catch(() => null),
+    api('v1/start').catch(() => null), api('v1/inbox').catch(() => null),
   ]);
   updateBadges({ findings: ov.findings });
   // The gateway's panels once agents may call through it, or have: until then they would
@@ -1286,7 +1286,7 @@ async function renderOverview() {
       actions: [ledgerBadge(ov.ledger), refreshButton()],
     }),
     startCard(start),
-    kpiTiles(ov),
+    kpiTiles(ov, inbox),
     gateway ? h('div', { class: 'grid-2 grid-2--even' }, activityCard(ov.activity || []), decisionsCard(ov.decisions_24h || {})) : null,
     gateway ? h('div', { class: 'grid-2 grid-2--even' }, recentBlocksCard(ov.recent_blocks || []), riskyCard(ov.top_risky || []))
       : riskyCard(ov.top_risky || []),
@@ -1365,19 +1365,39 @@ function ledgerBadge(lg) {
     icon('octagon'), h('span', {}, h('strong', {}, `Ledger broken at #${lg.broken_at}`), ` · ${lg.problem}`));
 }
 
-function kpiTiles(ov) {
+// What waits for a decision, in a few words: the kinds with the most first.
+const INBOX_WORDS = {
+  calls: ['held call', 'held calls'],
+  access: ['access request', 'access requests'],
+  risks: ['risk to accept', 'risks to accept'],
+  agents: ['agent to approve', 'agents to approve'],
+  toolservers: ['tool server to approve', 'tool servers to approve'],
+  definitions: ['changed tool', 'changed tools'],
+  platform_agents: ['agent found on a platform', 'agents found on platforms'],
+};
+
+function inboxNote(inbox) {
+  const parts = inbox.kinds.filter((k) => k.count).sort((a, b) => b.count - a.count)
+    .map((k) => plural(k.count, ...(INBOX_WORDS[k.kind] || [k.title, k.title])));
+  return parts.length > 2 ? `${parts.slice(0, 2).join(' · ')} · more` : parts.join(' · ');
+}
+
+function kpiTiles(ov, inbox = null) {
   const agents = ov.agents || {};
   const findings = ov.findings || {};
   const byStatus = agents.by_status || {};
   const statusNote = ['active', 'pending', 'blocked', 'discovered']
-    .filter((k) => byStatus[k]).map((k) => `${fmt(byStatus[k])} ${k}`).join(' · ') || 'No agents registered yet';
+    .filter((k) => byStatus[k]).map((k) => `${fmt(byStatus[k])} ${statusMeta('agent', k)[2].toLowerCase()}`).join(' · ') || 'No agents registered yet';
   const bySev = findings.by_severity || {};
   const topSeverity = SEVERITY_ORDER.find((k) => bySev[k]);
   const sevNote = SEVERITY_ORDER.filter((k) => bySev[k]).map((k) => {
     const [tone, ic, label] = statusMeta('severity', k);
     return h('span', { class: 'sev-count' }, icon(ic, { cls: `t-${tone}` }), `${fmt(bySev[k])} ${label.toLowerCase()}`);
   });
-  const pending = ov.approvals?.pending ?? 0;
+  // Everything waiting for a decision of the signed-in person's, else the held calls.
+  const pending = inbox ? inbox.total : ov.approvals?.pending ?? 0;
+  const waitingNote = !pending ? 'Nothing waiting for a decision'
+    : inbox ? inboxNote(inbox) : 'Tool calls waiting for a decision';
   const tiles = [
     { label: 'Total agents', value: agents.total, note: statusNote, href: '#/agents' },
     {
@@ -1396,12 +1416,12 @@ function kpiTiles(ov) {
       note: 'High or critical risk score', tone: agents.at_risk ? 'serious' : null,
     },
     {
-      label: 'Pending approvals', value: pending, href: '#/approvals',
-      note: pending ? 'Tool calls waiting for a reviewer' : 'Nothing waiting for review', tone: pending ? 'warning' : null,
+      label: 'Waiting for a decision', value: pending, href: '#/approvals',
+      note: waitingNote, tone: pending ? 'warning' : null,
     },
     {
-      label: 'Open findings', value: findings.open, href: '#/findings',
-      note: sevNote.length ? sevNote : 'No open findings', tone: topSeverity ? toneOf('severity', topSeverity) : null,
+      label: 'Open issues', value: findings.open, href: '#/findings',
+      note: sevNote.length ? sevNote : 'No open issues', tone: topSeverity ? toneOf('severity', topSeverity) : null,
     },
   ];
   const flags = { warning: 'alert-circle', serious: 'triangle', critical: 'octagon' };
@@ -1730,7 +1750,7 @@ function opaNote(opa) {
 
 const AGENT_STATUS_FILTERS = [
   ['all', 'All'], ['active', 'Active'], ['pending', 'Pending'], ['blocked', 'Blocked'],
-  ['discovered', 'Discovered'], ['deleted', 'Deleted'],
+  ['discovered', 'Unmanaged'], ['deleted', 'Deleted'],
 ];
 
 // How the agents table sorts: by a column, or by "-" and a column the other way round.
@@ -1745,7 +1765,7 @@ const AGENT_SORTS = {
 // The columns whose first sort puts the most first: the riskiest, the most recently seen.
 const SORTS_DOWN = new Set(['risk', 'last_seen']);
 const RISK_FILTERS = [['', 'Any risk'], ['elevated', 'High or critical'], ['critical', 'Critical'], ['high', 'High'], ['medium', 'Medium'], ['low', 'Low']];
-const WHERE_WORDS = { registered: 'Registered in AgentGov', discovered: 'Discovered at runtime' };
+const WHERE_WORDS = { registered: 'Registered in AgentGov', discovered: 'Seen at runtime' };
 
 // Rows in the order a sort names, those without a value last either way; ties by name.
 function sortRows(rows, sort, keys) {
@@ -1960,7 +1980,7 @@ async function renderAgents({ params }) {
   return h('div', { class: 'page' },
     pageHead({
       title: 'Agents',
-      sub: 'Every agent identity the control plane knows about: registered, pending review, blocked, and discovered at runtime without registration.',
+      sub: 'Every agent the control plane knows about: active, pending approval, blocked, and unmanaged ones nobody has adopted yet, found on your platforms or seen at runtime.',
       actions: [
         can('admin') ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'register-agent', onclick: guarded(registerAgent) }, icon('plus'), 'Register agent') : null,
         refreshButton(),
@@ -2017,7 +2037,7 @@ const AGENTS_AT_ONCE = {
   block: { verb: 'Blocked', text: 'This is the kill switch. The gateway refuses every call from them as soon as OPA loads the updated policy bundle, usually within seconds. You can unblock them later.' },
   unblock: { verb: 'Unblocked', text: 'Calls from them will be evaluated against policy again.' },
   delete: { verb: 'Deleted', text: 'They leave the inventory and policy denies all of their calls. Deleted agents can be restored.' },
-  restore: { verb: 'Restored', text: 'They come back as pending review. Approve them to make them active again.' },
+  restore: { verb: 'Restored', text: 'They come back as pending approval. Approve them to make them active again.' },
 };
 
 // The actions on the agents chosen: each offered when it fits some of them, and done to those.
@@ -2154,7 +2174,7 @@ async function adoptMany(candidates) {
       h('span', { class: 'cell-sub' }, a.maker ? makerLine(a.maker) : 'Who made it isn\'t known'))))));
   const result = await ask({
     title: `Adopt ${plural(candidates.length, 'agent')}`,
-    text: `Each becomes pending review, with an owner and sponsors; approve them afterwards. AgentGov knows who made ${fmt(known)} of them.`,
+    text: `Each becomes pending approval, with an owner and sponsors; approve them afterwards. AgentGov knows who made ${fmt(known)} of them.`,
     iconName: 'user-check', confirm: 'Adopt', busy: 'Adopting…', wide: true,
     extra: list,
     fields: [
@@ -2179,7 +2199,7 @@ async function adoptMany(candidates) {
   const left = result.left || [];
   toast(left.length
     ? `Adopted ${plural(result.adopted.length, 'agent')}; ${fmt(left.length)} left: ${left.slice(0, 3).map((x) => `${x.agent} (${x.why})`).join('; ')}${left.length > 3 ? '…' : ''}`
-    : `Adopted ${plural(result.adopted.length, 'agent')}. They are pending review.`, left.length ? { tone: 'critical' } : undefined);
+    : `Adopted ${plural(result.adopted.length, 'agent')}. They are pending approval.`, left.length ? { tone: 'critical' } : undefined);
   refreshBadges();
   await refresh();
 }
@@ -2261,13 +2281,13 @@ const LIFECYCLE = {
   },
   restore: {
     label: 'Restore', icon: 'undo', cls: 'btn--primary', tone: 'primary', confirm: 'Restore agent',
-    text: 'The agent comes back as pending review. Approve it to make it active again.',
-    done: (n) => `Restored ${n}. It is pending review.`,
+    text: 'The agent comes back as pending approval. Approve it to make it active again.',
+    done: (n) => `Restored ${n}. It is pending approval.`,
   },
   adopt: {
     label: 'Adopt', icon: 'user-check', cls: 'btn--primary', tone: 'primary', confirm: 'Adopt agent',
     text: 'Adopting brings this unmanaged agent under governance as a pending registration. Give it an owner, at least one sponsor and a blueprint, then approve it.',
-    done: (n) => `Adopted ${n}. It is pending review.`,
+    done: (n) => `Adopted ${n}. It is pending approval.`,
   },
 };
 // Blocking or deleting a platform agent changes AgentGov's registry, not the platform.
@@ -3199,7 +3219,7 @@ async function forgetInstructions(a, x) {
   const done = await ask({
     title: `Forget ${(INSTRUCTION_SOURCES[x.source] || x.source).toLowerCase()} instructions?`,
     text: x.source === 'registered'
-      ? 'The registered instructions are removed. A finding about them is resolved.'
+      ? 'The registered instructions are removed. An issue about them is resolved.'
       : 'AgentGov forgets this copy. If the source reports the instructions again, they come back and are checked again.',
     tone: 'danger', iconName: 'trash', confirm: 'Forget', busy: 'Forgetting…',
     submit: () => api(`v1/agents/${encodeURIComponent(a.id)}/instructions?source=${encodeURIComponent(x.source)}`, { method: 'DELETE' }),
@@ -3221,9 +3241,9 @@ function agentFindingsCard(list) {
   if (list instanceof Error || !list.length) return null;
   const sorted = list.slice().sort((x, y) => SEVERITY_ORDER.indexOf(x.severity) - SEVERITY_ORDER.indexOf(y.severity));
   return card({
-    title: 'Open findings',
-    sub: plural(sorted.length, 'finding'),
-    actions: [h('a', { class: 'btn btn--sm btn--ghost', href: '#/findings' }, 'All findings', icon('arrow'))],
+    title: 'Open issues',
+    sub: plural(sorted.length, 'issue'),
+    actions: [h('a', { class: 'btn btn--sm btn--ghost', href: '#/findings' }, 'All issues', icon('arrow'))],
     flush: true,
     body: h('ul', { class: 'feed', role: 'list' }, sorted.map((f) => h('li', {},
       h('div', { class: 'feed-top' }, chip('severity', f.severity), h('span', { class: 'feed-meta' }, timeEl(f.last_seen))),
@@ -3586,9 +3606,9 @@ function mapLegend(model) {
     agentCalls.length ? item(arc('calls'), 'May call another agent') : null,
     agentCalls.some(isUngranted) ? item(arc('calls-ungranted'), 'Called an agent without a grant') : null,
     item(stripe('good'), 'Active / approved'),
-    item(stripe('warning'), 'Pending review'),
+    item(stripe('warning'), 'Pending approval'),
     item(stripe('critical'), 'Blocked'),
-    item(stripe('serious'), 'Discovered / unregistered'),
+    item(stripe('serious'), 'Unmanaged / unregistered'),
     item(h('span', { class: 'swatch', style: 'background:transparent; border:2px solid var(--serious); width:14px; height:12px; border-radius:3px' }), 'High-risk agent (outline)'));
 }
 
@@ -4145,7 +4165,7 @@ async function approveTool(ts, t) {
 /* ---------------------------------------------------------------- findings */
 
 const FINDING_STATUS = [
-  ['open', 'Open'], ['mine', 'Yours'], ['asked', 'Exceptions asked'], ['accepted', 'Risk accepted'], ['resolved', 'Resolved'], ['dismissed', 'Dismissed'], ['all', 'All'],
+  ['open', 'Open'], ['mine', 'Yours'], ['asked', 'Risk acceptance asked'], ['accepted', 'Risk accepted'], ['resolved', 'Resolved'], ['dismissed', 'Dismissed'], ['all', 'All'],
 ];
 const LEVEL_WORDS = { owner: 'its owner', sponsors: 'its sponsors', team: 'its team' };
 const FINDING_DONE = { resolve: 'Resolved', dismiss: 'Dismissed', reopen: 'Reopened', acknowledge: 'Acknowledged' };
@@ -4158,8 +4178,8 @@ function mayTriage() {
 
 function findingTabs(current) {
   if (isPerson()) return null;
-  return h('nav', { class: 'tabs', 'aria-label': 'Finding views' },
-    h('a', { class: 'tab', href: '#/findings', 'aria-current': current === 'findings' ? 'page' : null }, 'Findings'),
+  return h('nav', { class: 'tabs', 'aria-label': 'Issue views' },
+    h('a', { class: 'tab', href: '#/findings', 'aria-current': current === 'findings' ? 'page' : null }, 'Issues'),
     h('a', { class: 'tab', href: '#/findings/types', 'aria-current': current === 'types' ? 'page' : null }, 'Types'));
 }
 
@@ -4204,7 +4224,7 @@ async function renderFindings({ params }) {
   const badge = () => { if (state.status === 'open') refreshBadges(); };
   badge();
 
-  const statusHost = h('div', { class: 'seg', role: 'group', 'aria-label': 'Finding status' });
+  const statusHost = h('div', { class: 'seg', role: 'group', 'aria-label': 'Issue status' });
   const sevHost = h('div', { class: 'seg', role: 'group', 'aria-label': 'Severity' });
   const category = h('select', { id: 'finding-category', 'data-focus-key': 'finding-category' },
     [['', 'All categories'], ['threat', 'Threats'], ['posture', 'Posture']].map(([v, l]) => h('option', { value: v, selected: v === state.category }, l)));
@@ -4228,14 +4248,14 @@ async function renderFindings({ params }) {
   });
   const listHost = h('div', { class: 'finding-list' });
   const bulkHost = h('div', {});
-  const listTitle = h('h2', { class: 'sr-only', tabindex: '-1', id: 'finding-list-title' }, 'Findings');
+  const listTitle = h('h2', { class: 'sr-only', tabindex: '-1', id: 'finding-list-title' }, 'Issues');
   const groupBox = h('input', {
     type: 'checkbox', id: 'finding-group', checked: state.group, 'data-focus-key': 'finding-group',
     onchange: () => { state.group = groupBox.checked; keepFocus(apply); sync(); },
   });
   const csvButton = h('button', {
     type: 'button', class: 'btn btn--sm btn--ghost', 'data-focus-key': 'findings-csv',
-    title: 'The findings shown, as a spreadsheet', onclick: () => saveCsv(person ? 'agentgov-issues' : 'agentgov-findings', findingCsv(agentsById), shown),
+    title: 'The issues shown, as a spreadsheet', onclick: () => saveCsv('agentgov-issues', findingCsv(agentsById), shown),
   }, icon('download'), 'Download CSV');
 
   const sync = () => setHashQuiet('/findings', { status: state.status === 'open' ? '' : state.status, severity: state.severity, category: state.category, type: state.type, group: state.group ? 'agent' : '' });
@@ -4291,10 +4311,9 @@ async function renderFindings({ params }) {
     const rows = scoped
       .filter((f) => !state.severity || f.severity === state.severity)
       .sort((x, y) => SEVERITY_ORDER.indexOf(x.severity) - SEVERITY_ORDER.indexOf(y.severity) || String(y.last_seen).localeCompare(String(x.last_seen)));
-    const word = person || state.status === 'mine' ? 'issue' : 'finding';
     const which = ['all', 'mine', 'asked'].includes(state.status) ? '' : `${statusMeta('finding', state.status)[2].toLowerCase()} `;
-    // An exception asked for is counted as such.
-    const many = (n) => (state.status === 'asked' ? plural(n, 'exception asked for', 'exceptions asked for') : plural(n, `${which}${word}`));
+    // One whose people asked for its risk to be accepted is counted as such.
+    const many = (n) => (state.status === 'asked' ? plural(n, 'issue with risk acceptance asked', 'issues with risk acceptance asked') : plural(n, `${which}issue`));
     // Counted among those loaded: say so when there are more.
     const capped = total > list.length;
     countEl.textContent = !capped ? many(rows.length)
@@ -4338,9 +4357,9 @@ async function renderFindings({ params }) {
     apply();
   });
   apply();
-  return h('div', { class: 'page', 'data-title': person ? 'Your issues' : 'Findings' },
+  return h('div', { class: 'page', 'data-title': person ? 'Your issues' : 'Issues' },
     pageHead({
-      title: person ? 'Your issues' : 'Findings',
+      title: person ? 'Your issues' : 'Issues',
       sub: person
         ? 'Issues about agents you own or sponsor, and those sent to your teams. Acknowledge one to take it on: it then goes no further. Fix what it says and it closes by itself.'
         : 'Posture gaps from scheduled scans and threats detected at runtime, most severe first. Each goes to the people responsible: the agent\'s owner, then its sponsors, then its team.',
@@ -4378,7 +4397,7 @@ function findingGroups(rows, agentsById, card, choose) {
         const all = list.every((f) => choose.selected.has(f.id));
         box = h('input', {
           type: 'checkbox', checked: all, 'data-focus-key': `choose-group-${first.agent_id || first.subject}`,
-          'aria-label': `Choose the ${plural(list.length, 'finding')} about ${nameOf(list)}`,
+          'aria-label': `Choose the ${plural(list.length, 'issue')} about ${nameOf(list)}`,
           onchange: (e) => choose.onSelect(list.map((f) => f.id), e.target.checked),
         });
         box.indeterminate = !all && list.some((f) => choose.selected.has(f.id));
@@ -4389,7 +4408,7 @@ function findingGroups(rows, agentsById, card, choose) {
           h('h2', { id: headingId, class: 'finding-group-title break' },
             first.agent_id && !isPerson() ? agentLink(first.agent_id, nameOf(list)) : nameOf(list) || 'Not about an agent'),
           chip('severity', SEVERITY_ORDER[worst(list)]),
-          h('span', { class: 'muted small' }, plural(list.length, 'finding'))),
+          h('span', { class: 'muted small' }, plural(list.length, 'issue'))),
         h('div', { class: 'finding-list' }, list.map(card)));
     });
 }
@@ -4449,7 +4468,7 @@ function findingBulkBar(rows, choose, { clear, run }) {
         icon(spec.icon), n === chosen.length ? spec.label : `${spec.label} ${fmt(n)}`, ['accept', 'dismiss'].includes(action) ? '…' : ''));
     }
   }
-  return h('div', { class: ['bulk-bar', chosen.length ? null : 'bulk-bar--idle'], role: 'region', 'aria-label': 'Chosen findings' },
+  return h('div', { class: ['bulk-bar', chosen.length ? null : 'bulk-bar--idle'], role: 'region', 'aria-label': 'Chosen issues' },
     h('label', { class: 'check', for: 'choose-all-findings' }, box,
       chosen.length ? h('strong', { 'aria-live': 'polite' }, `${fmt(chosen.length)} of ${fmt(rows.length)} chosen`) : `Choose all ${fmt(rows.length)} shown`),
     buttons.length ? h('div', { class: 'btn-row' }, buttons) : null,
@@ -4480,10 +4499,10 @@ async function findingsAtOnce(chosen, action) {
     );
   }
   const others = chosen.length - fits.length;
-  if (others) text += ` ${plural(others, 'other finding')} chosen can't be ${spec.done}, and ${others === 1 ? 'stays as it is' : 'stay as they are'}.`;
+  if (others) text += ` ${plural(others, 'other issue')} chosen can't be ${spec.done}, and ${others === 1 ? 'stays as it is' : 'stay as they are'}.`;
   const result = await ask({
-    title: `${spec.label} ${plural(fits.length, 'finding')}?`,
-    text, iconName: spec.icon, confirm: `${spec.label} ${plural(fits.length, 'finding')}`, busy: 'Working…',
+    title: `${spec.label} ${plural(fits.length, 'issue')}?`,
+    text, iconName: spec.icon, confirm: `${spec.label} ${plural(fits.length, 'issue')}`, busy: 'Working…',
     extra: nameList(fits.map((f) => f.title)),
     fields,
     submit: (v) => {
@@ -4494,7 +4513,7 @@ async function findingsAtOnce(chosen, action) {
     },
   });
   if (!result) return false;
-  await manyDone(result, spec.verb, 'finding');
+  await manyDone(result, spec.verb, 'issue');
   return true;
 }
 
@@ -4502,8 +4521,8 @@ function emptyFindings(status, person) {
   if (status === 'mine' || (person && status === 'open')) {
     return emptyState('Nothing is waiting for you', 'Issues about agents you own or sponsor, and those sent to your teams, appear here.');
   }
-  if (status === 'open') return emptyState('No open findings', 'Posture scans and runtime detections raise findings here.');
-  return emptyState('No findings match these filters');
+  if (status === 'open') return emptyState('No open issues', 'Posture scans and runtime detections raise issues here.');
+  return emptyState('No issues match these filters');
 }
 
 // Who an issue is with, and what they did about it.
@@ -4539,7 +4558,7 @@ function findingActions(f, act, { yours = false, detail = false } = {}) {
       buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('not-mine') }, icon('arrow'), 'Not mine'));
     }
     if (yours && detail && !f.details?.exception_request) {
-      buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('exception') }, icon('shield-check'), 'Ask for an exception'));
+      buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('exception') }, icon('shield-check'), 'Ask to accept the risk'));
     }
     if (yours || triage) {
       buttons.push(h('button', { type: 'button', class: 'btn btn--sm', title: 'Say you fixed it: AgentGov checks it again now, where it can', onclick: () => act('recheck') }, icon('refresh'), 'I fixed it'));
@@ -4557,7 +4576,7 @@ function findingActions(f, act, { yours = false, detail = false } = {}) {
 }
 
 async function acceptRisk(f) {
-  // An exception its people asked for: what they asked, to agree to or change.
+  // What its people asked for, if they asked for its risk to be accepted: to agree to or change.
   const asked = f.details?.exception_request;
   const later = asked?.until?.slice(0, 10) || new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
   const done = await ask({
@@ -4565,7 +4584,7 @@ async function acceptRisk(f) {
     text: `${f.title}. It goes to nobody until the date you choose, then opens again if it still holds. A year at most: then someone decides again.`,
     iconName: 'shield-check', confirm: 'Accept risk',
     fields: [
-      { id: 'reason', label: 'Why it is acceptable', type: 'textarea', required: true, value: asked?.reason || null, hint: 'Recorded in the evidence ledger, and shown with the finding.' },
+      { id: 'reason', label: 'Why it is acceptable', type: 'textarea', required: true, value: asked?.reason || null, hint: 'Recorded in the evidence ledger, and shown with the issue.' },
       { id: 'until', label: 'Until', required: true, value: later, mono: true, hint: 'A date (YYYY-MM-DD), or a number of days.' },
     ],
     submit: (v) => api(`v1/findings/${encodeURIComponent(f.id)}/accept`, {
@@ -4577,7 +4596,7 @@ async function acceptRisk(f) {
 }
 
 // The answers that take a few words first: accepting the risk, saying an issue isn't
-// yours, asking for an exception, declining one, and saying you fixed it. Resolves to
+// yours, asking for its risk to be accepted, declining that, and saying you fixed it. Resolves to
 // whether something was done, or null for the other actions.
 async function answerIssue(f, action) {
   const path = `v1/findings/${encodeURIComponent(f.id)}`;
@@ -4596,7 +4615,7 @@ async function answerIssue(f, action) {
   if (action === 'exception') {
     const later = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
     const done = await ask({
-      title: 'Ask for an exception?',
+      title: 'Ask to accept the risk?',
       text: `${f.title}. An approver decides whether its risk is acceptable until the date you ask for. It stays with you meanwhile.`,
       iconName: 'shield-check', confirm: 'Ask',
       fields: [
@@ -4610,10 +4629,10 @@ async function answerIssue(f, action) {
   }
   if (action === 'decline-exception') {
     const done = await ask({
-      title: 'Decline the exception?',
-      text: `${f.title}. It stays with whoever asked, to fix.`,
+      title: 'Decline the request?',
+      text: `${f.title}. Its risk isn't accepted: it stays with whoever asked, to fix.`,
       iconName: 'x', confirm: 'Decline',
-      fields: [{ id: 'reason', label: 'Why not', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with the finding.' }],
+      fields: [{ id: 'reason', label: 'Why not', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with the issue.' }],
       submit: (v) => api(`${path}/exception/decline`, { method: 'POST', body: { reason: v.reason } }),
     });
     if (done) toast('Declined.');
@@ -4625,7 +4644,7 @@ async function answerIssue(f, action) {
       text: `${f.title}. Dismiss what is wrong: to live with a real risk, accept it. It goes to nobody; given a date, it opens again then if it still holds. A threat opens again when it happens again.`,
       iconName: 'minus', confirm: 'Dismiss',
       fields: [
-        { id: 'reason', label: 'Why it is wrong', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with the finding.' },
+        { id: 'reason', label: 'Why it is wrong', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with the issue.' },
         { id: 'until', label: 'Until', mono: true, hint: 'A date (YYYY-MM-DD) or a number of days. Empty: for good.' },
       ],
       submit: (v) => api(`${path}/dismiss`, {
@@ -4651,7 +4670,7 @@ function exceptionAsked(f, act) {
   return callout('warning', 'shield-check', h('div', { class: 'stack', style: 'gap:8px' },
     h('span', {}, h('strong', {}, `${asked.by} asks for its risk to be accepted until ${String(asked.until).slice(0, 10)}: `), asked.reason),
     mayTriage() ? h('div', { class: 'btn-row' },
-      h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => act('accept') }, icon('shield-check'), 'Accept the risk'),
+      h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => act('accept') }, icon('shield-check'), 'Accept risk'),
       h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('decline-exception') }, icon('x'), 'Decline')) : null));
 }
 
@@ -4671,7 +4690,7 @@ function findingCard(f, agentsById, act, { yours = false, choose = null } = {}) 
         chip('severity', f.severity), plainChip(humanize(f.category)),
         f.status !== 'open' ? chip('finding', f.status) : null,
         f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle', title: `${cap(f.unverified_reason || 'the sync that checks it failed')}: it may no longer hold.` }) : null,
-        f.status === 'open' && f.details?.exception_request ? plainChip('Exception asked', { tone: 'warning', iconName: 'shield-check', title: `${f.details.exception_request.by}: ${f.details.exception_request.reason}` }) : null,
+        f.status === 'open' && f.details?.exception_request ? plainChip('Risk acceptance asked', { tone: 'warning', iconName: 'shield-check', title: `${f.details.exception_request.by}: ${f.details.exception_request.reason}` }) : null,
         h('span', { class: 'ledger-type muted' }, f.type)),
       h('h3', { id: headingId, class: 'break' }, f.title),
       f.description ? h('p', { class: 'finding-desc small' }, f.description) : null,
@@ -4705,7 +4724,7 @@ async function renderFinding({ match }) {
   });
   const subject = f.agent_id && !person ? agentLink(f.agent_id, f.agent_name || f.subject) : h('code', {}, f.agent_name || f.subject);
   const crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Breadcrumb' },
-    h('a', { href: '#/findings' }, person ? 'Your issues' : 'Findings'), icon('chevron'), h('span', { 'aria-current': 'page' }, f.type));
+    h('a', { href: '#/findings' }, person ? 'Your issues' : 'Issues'), icon('chevron'), h('span', { 'aria-current': 'page' }, f.type));
   return h('div', { class: 'page', 'data-title': f.title },
     pageHead({ title: f.title, crumbs, actions: [refreshButton()] }),
     h('div', { class: 'chip-row' }, chip('severity', f.severity), chip('finding', f.status), plainChip(humanize(f.category)),
@@ -4852,6 +4871,13 @@ function notificationsCard(f) {
   });
 }
 
+// What happened to an issue, in the words its page uses rather than its ledger's.
+const HISTORY_WORDS = {
+  exception_requested: 'Risk acceptance asked',
+  exception_declined: 'Risk acceptance declined',
+  declined: "Said it isn't theirs",
+};
+
 function historyCard(f) {
   const rows = f.history || [];
   if (!rows.length) return null;
@@ -4859,7 +4885,7 @@ function historyCard(f) {
     title: 'History',
     sub: 'From the evidence ledger, newest first.',
     body: h('ul', { class: 'timeline', role: 'list' }, rows.map((e) => h('li', {},
-      h('div', { class: 'cell-title' }, humanize(e.type.replace(/^finding\./, ''))),
+      h('div', { class: 'cell-title' }, HISTORY_WORDS[e.type.replace(/^finding\./, '')] || humanize(e.type.replace(/^finding\./, ''))),
       h('div', { class: 'cell-sub break' }, e.actor, ' · ', timeEl(e.ts),
         e.details?.to ? ` · to ${e.details.to}` : '',
         e.details?.ticket ? ` · ${e.details.desk ? `${e.details.desk} ` : ''}${e.details.ticket}` : '',
@@ -4957,14 +4983,14 @@ async function deleteTeam(t) {
 
 /* ----------------------------------------------------------- finding types */
 
-// Which types of findings are raised here, and how severe each is (docs/issues.md).
+// Which types of issues are raised here, and how severe each is (docs/issues.md).
 async function renderFindingTypes() {
   if (isPerson()) { location.replace('#/findings'); return h('div'); }
   const types = await api('v1/finding-types');
   const admin = can('admin');
   const off = types.filter((t) => t.mode === 'off');
   const body = types.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
-    h('caption', { class: 'sr-only' }, 'Types of findings'),
+    h('caption', { class: 'sr-only' }, 'Types of issues'),
     h('thead', {}, h('tr', {}, ['Type', 'Raised', 'Severity', 'Open', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
     h('tbody', {}, types.map((t) => h('tr', { 'data-type': t.type },
       h('td', { 'data-label': 'Type', class: 'break' }, h('span', { class: 'cell-title mono' }, t.type),
@@ -4977,11 +5003,11 @@ async function renderFindingTypes() {
       h('td', { 'data-label': '' }, admin
         ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `ftype-${t.type}`, onclick: guarded(() => findingTypeForm(t)) }, icon('edit'), 'Change')
         : null))))))
-    : emptyState('No findings yet', 'A type is listed once AgentGov raises a finding of it, or once it is set up here.');
-  return h('div', { class: 'page', 'data-title': 'Finding types' },
+    : emptyState('No issues yet', 'A type is listed once AgentGov raises an issue of it, or once it is set up here.');
+  return h('div', { class: 'page', 'data-title': 'Issue types' },
     pageHead({
-      title: 'Findings',
-      sub: "Each type of finding AgentGov's checks raise. Turn off the types your organisation doesn't act on: they are still checked, but what they find is kept dismissed and reaches no one. Or say how severe a type is here.",
+      title: 'Issues',
+      sub: "Each type of issue AgentGov's checks raise. Turn off the types your organisation doesn't act on: they are still checked, but what they find is kept dismissed and reaches no one. Or say how severe a type is here.",
       actions: [
         admin ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'add-finding-type', onclick: guarded(() => findingTypeForm(null)) }, icon('plus'), 'Set up a type') : null,
         refreshButton(),
@@ -4992,12 +5018,12 @@ async function renderFindingTypes() {
       off.length === 1
         ? 'what it finds is kept dismissed. Turned on again, what its checks find again comes back the next time they run.'
         : 'what they find is kept dismissed. Turned on again, what their checks find again comes back the next time they run.')) : null,
-    card({ title: 'Types of findings', flush: Boolean(types.length), body }));
+    card({ title: 'Types of issues', flush: Boolean(types.length), body }));
 }
 
 async function findingTypeForm(t) {
   const saved = await ask({
-    title: t ? `Finding type ${t.type}` : 'Set up a type of finding',
+    title: t ? `Issue type ${t.type}` : 'Set up a type of issue',
     text: t ? 'Changes are recorded in the evidence ledger.' : 'Set up a type before its checks raise anything, such as agent.no_owner (docs/issues.md lists them). Changes are recorded in the evidence ledger.',
     iconName: 'edit', confirm: 'Save',
     fields: [
@@ -5008,7 +5034,7 @@ async function findingTypeForm(t) {
           { value: 'on', label: 'On: raised and sent to the people responsible' },
           { value: 'off', label: 'Off: checked, but what it finds is kept dismissed' },
         ],
-        hint: 'Turned off, its open findings are dismissed.',
+        hint: 'Turned off, its open issues are dismissed.',
       },
       {
         id: 'severity', label: 'Severity', type: 'select', value: t?.severity || '',
@@ -5590,12 +5616,12 @@ async function ruleForm(r, blueprints) {
       ] },
       { id: 'missing', label: 'No', value: (c.missing || []).join(', '), mono: true, hint: 'Any of owner, sponsors, team, blueprint, workload_identity, separated by commas.' },
       { type: 'row', fields: [
-        { id: 'findings', label: 'An open finding of type', value: (c.findings || []).join(', '), mono: true, placeholder: 'agent.stale', hint: '* wildcards, separated by commas.' },
+        { id: 'findings', label: 'An open issue of type', value: (c.findings || []).join(', '), mono: true, placeholder: 'agent.stale', hint: '* wildcards, separated by commas.' },
         { id: 'finding_severity', label: 'Of severity', type: 'select', value: c.finding_severity || '', options: options(['low', 'medium', 'high', 'critical'], 'Any') },
       ] },
       { type: 'row', fields: [
         { id: 'risk_level', label: 'Risk at least', type: 'select', value: c.risk_level || '', options: options(['low', 'medium', 'high', 'critical'], 'Any') },
-        { id: 'status', label: 'Status', value: (c.status || []).join(', '), mono: true, hint: 'pending, active, blocked or discovered.' },
+        { id: 'status', label: 'Status', value: (c.status || []).join(', '), mono: true, hint: 'pending, active, blocked or discovered (unmanaged).' },
       ] },
       { type: 'section', label: 'Which agents it looks at' },
       { type: 'row', fields: [
@@ -5847,7 +5873,7 @@ function whatIfCard(agents, servers, providers = []) {
   const agentSel = h('select', { id: 'wi-agent', name: 'agent' },
     registered.length ? h('optgroup', { label: 'Registered' }, registered.map((a) => h('option', { value: a.id, selected: a === preferred },
       `${a.name}${a.identity?.client_id ? ` (${a.identity.client_id})` : ''} · ${a.status}`))) : null,
-    discovered.length ? h('optgroup', { label: 'Discovered (unmanaged)' }, discovered.map((a) => h('option', { value: a.id, selected: a === preferred }, `${a.name} · no client ID`))) : null,
+    discovered.length ? h('optgroup', { label: 'Unmanaged' }, discovered.map((a) => h('option', { value: a.id, selected: a === preferred }, `${a.name} · no client ID`))) : null,
     h('option', { value: '__unregistered' }, 'An unregistered caller'));
 
   // A tool call: a tool server and one of its tools.
@@ -6672,7 +6698,7 @@ function checkpointsCard(kept, points) {
 
 const KEY_ROLES = [
   ['auditor', 'Auditor: reads everything, including the ledger, and changes nothing'],
-  ['approver', 'Approver: reads everything and decides approval requests and findings'],
+  ['approver', 'Approver: reads everything and decides approval requests and issues'],
   ['secops', "Security operations: the security team's SIEM or SOAR. Reads everything, and does what the hand-off to security operations allows"],
   ['registrar', 'Registrar: registers agents and tool servers for review (CI pipelines, developers)'],
   ['admin', 'Admin: everything'],
@@ -6995,7 +7021,7 @@ function connectorKey(id) {
 function syncCounts(c) {
   const parts = [`${fmt(c.created)} new`, `${fmt(c.updated)} updated`, `${fmt(c.skipped)} skipped`];
   if (c.gone) parts.push(`${fmt(c.gone)} gone from the platform`);
-  if (c.findings != null) parts.push(plural(c.findings, 'open finding'));
+  if (c.findings != null) parts.push(plural(c.findings, 'open issue'));
   return parts.join(', ');
 }
 
@@ -7283,7 +7309,7 @@ async function importCopilotStudio() {
     }, {
       id: 'complete', type: 'checkbox', value: false,
       label: 'This is the whole inventory, every environment',
-      hint: 'Agents missing from it are marked gone from Copilot Studio, and their findings close. Leave it unticked for an export of some environments, or one page of a larger one (import every page at once with `agentgov platforms import --complete`).',
+      hint: 'Agents missing from it are marked gone from Copilot Studio, and their issues close. Leave it unticked for an export of some environments, or one page of a larger one (import every page at once with `agentgov platforms import --complete`).',
     }],
     submit: (v) => {
       try {
@@ -7323,7 +7349,7 @@ function connectorsCard(usage, view, modes = {}) {
   const approved = rows.filter((r) => r.approved).length;
   const status = (r) => {
     if (r.approved) return chip('connector', 'approved', { title: [r.approved_by && `Approved by ${r.approved_by}`, r.approved_at && fullFmt.format(new Date(r.approved_at))].filter(Boolean).join(', ') || null });
-    return active ? chip('connector', 'unapproved', { title: 'Agents that use it get a finding' }) : chip('connector', 'unchecked', { title: 'The allowlist is empty, so nothing is flagged yet' });
+    return active ? chip('connector', 'unapproved', { title: 'Agents that use it get an issue' }) : chip('connector', 'unchecked', { title: 'The allowlist is empty, so nothing is flagged yet' });
   };
   const listed = (items, max, render) => [
     ...items.slice(0, max).map(render),
@@ -7332,8 +7358,8 @@ function connectorsCard(usage, view, modes = {}) {
   return card({
     title: 'Connectors',
     sub: active
-      ? 'The Power Platform connectors Copilot Studio agents use. An agent that uses a connector that is not approved gets a high-severity finding.'
-      : 'The Power Platform connectors Copilot Studio agents use. The allowlist is empty, so none is flagged yet: approve the connectors your organisation allows, and agents that use any other connector get a finding.',
+      ? 'The Power Platform connectors Copilot Studio agents use. An agent that uses a connector that is not approved gets a high-severity issue.'
+      : 'The Power Platform connectors Copilot Studio agents use. The allowlist is empty, so none is flagged yet: approve the connectors your organisation allows, and agents that use any other connector get an issue.',
     actions: can('admin') ? [
       pushable ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'push-policy', onclick: guarded(pushConnectorPolicy) }, icon('upload'), 'Push to Power Platform') : null,
       h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'approve-connector', onclick: guarded(() => approveConnector(null, active)) }, icon('plus'), 'Approve a connector'),
@@ -7405,10 +7431,10 @@ async function pushConnectorPolicy() {
 }
 
 async function approveConnector(row, active) {
-  const first = active ? '' : ' This is the first approved connector: from now on, agents that use connectors which are not approved get a finding.';
+  const first = active ? '' : ' This is the first approved connector: from now on, agents that use connectors which are not approved get an issue.';
   const done = await ask({
     title: row ? `Approve ${row.connector_id}?` : 'Approve a connector',
-    text: (row ? `Copilot Studio agents may use ${row.connector_id} without a finding.` : 'Add a Power Platform connector to the allowlist.') + first,
+    text: (row ? `Copilot Studio agents may use ${row.connector_id} without an issue.` : 'Add a Power Platform connector to the allowlist.') + first,
     iconName: 'check', confirm: 'Approve', busy: 'Approving…',
     fields: [
       row ? null : { id: 'connector', label: 'Connector ID', required: true, mono: true, placeholder: 'shared_office365', hint: 'As the inventory or the connector reference names it, with or without /providers/Microsoft.PowerApps/apis/.' },
@@ -7423,7 +7449,7 @@ async function approveConnector(row, active) {
 }
 
 async function unapproveConnector(row, approvedCount) {
-  const users = row.agents.length ? `${plural(row.agents.length, 'agent')} that use it will get a finding.` : 'No imported agent uses it.';
+  const users = row.agents.length ? `${plural(row.agents.length, 'agent')} that use it will get an issue.` : 'No imported agent uses it.';
   const last = approvedCount === 1 ? ' It is the last approved connector, so the allowlist stops being checked until you approve another.' : '';
   const done = await ask({
     title: `Remove ${row.connector_id} from the allowlist?`,
@@ -7901,12 +7927,12 @@ const DEST_EVENTS = {
   siem: [
     ['decisions', 'Decisions', 'tool and model calls at the gateway'],
     ['approvals', 'Approvals', 'requested, decided, used'],
-    ['findings', 'Findings', 'raised, resolved, dismissed'],
+    ['findings', 'Issues', 'raised, resolved, dismissed'],
     ['access', 'Access', 'sign-ins and API keys'],
     ['changes', 'Changes', 'everything else: what AgentGov governs, and who changed it'],
   ],
   chat: [
-    ['findings', 'Findings', 'from the minimum severity up'],
+    ['findings', 'Issues', 'from the minimum severity up'],
     ['approvals', 'Approval requests', 'whatever their severity'],
     ['blocks', 'Kill switches', 'agents, tool servers, model providers and identity issuers blocked, agents deleted'],
   ],
@@ -8099,7 +8125,7 @@ async function destinationForm(d) {
       {
         id: 'min_severity', label: 'Minimum severity', type: 'select', value: d?.min_severity || (destFamily(kind0) === 'siem' ? 'info' : 'high'),
         options: ['info', 'low', 'medium', 'high', 'critical'].map((value) => ({ value, label: humanize(value) })),
-        hint: 'For a chat, of findings: approval requests and kill switches always go.',
+        hint: 'For a chat, of issues: approval requests and blocks always go.',
       },
       editing ? null : { id: 'backfill', label: 'Send it the ledger from its start, not from now', type: 'checkbox', value: false },
       { id: 'description', label: 'Description', type: 'textarea', value: d?.description || '' },
@@ -8132,7 +8158,7 @@ async function destinationForm(d) {
         field('url').hidden = family === 'chat';
         field('format').hidden = kind !== 'webhook';
         const severityHint = field('min_severity').querySelector('.hint');
-        if (severityHint) severityHint.textContent = family === 'desk' ? 'Issues from this severity up become tickets.' : 'For a chat, of findings: approval requests and kill switches always go.';
+        if (severityHint) severityHint.textContent = family === 'desk' ? 'Issues from this severity up become tickets.' : 'For a chat, of issues: approval requests and blocks always go.';
         if (field('backfill')) {
           field('backfill').hidden = family === 'chat';
           field('backfill').querySelector('label').lastChild.nodeValue = family === 'desk'
@@ -8566,6 +8592,6 @@ function registerDraft(g) {
 async function registerSighting(g) {
   const created = await toolserverForm(null, registerDraft(g));
   if (!created) return;
-  toast(`Registered ${created.name}. Its finding resolves once AgentGov compares the reports again.`);
+  toast(`Registered ${created.name}. Its issue resolves once AgentGov compares the reports again.`);
   await refresh();
 }

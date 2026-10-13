@@ -27,7 +27,7 @@ Two checks run on every new set of instructions.
 
 **AgentGov's rules** run as soon as the instructions arrive. They are deterministic,
 explain what they found with an excerpt, and understand simple negation: "never ask
-users for their password" is advice, not a finding.
+users for their password" is advice, not an issue.
 
 | Rule | Severity | Finds instructions that |
 |---|---|---|
@@ -70,17 +70,17 @@ instructions. A "yes" counts as a high-severity problem: unlike the rules, it co
 without an excerpt, and on blatant text the model tends to answer yes to several
 criteria at once.
 
-## Findings and risk
+## Issues and risk
 
-All problems in an agent's instructions, from every source, become one finding per
+All problems in an agent's instructions, from every source, become one issue per
 agent, `agent.unsafe_instructions`, with the severity of the worst problem. It
 resolves itself when fixed instructions arrive. If it is a false positive, dismiss it:
 it stays dismissed until different problems appear.
 
-An open finding adds to the agent's risk score: 40 points if it is critical, 25 if
+An open issue adds to the agent's risk score: 40 points if it is critical, 25 if
 high and 10 if medium. For an agent at the gateway, scores of 50 and above raise an
-`agent.high_risk` finding, a threat when what it did adds to its risk, which resolves once
-its risk is below 50 again; an agent on another platform has none, its own findings saying
+`agent.high_risk` issue, a threat when what it did adds to its risk, which resolves once
+its risk is below 50 again; an agent on another platform has none, its own issues saying
 what adds to its risk. While
 `risk-based-access` is enforced (the default), the gateway refuses tool calls, model calls
 and calls between agents from agents at critical risk (75 points or more).

@@ -2,7 +2,7 @@
 
 The administration commands are a thin layer over the HTTP API and follow the
 admin UI's pages: agents, blueprints, tool servers, policies, approvals,
-findings, the ledger, access (API keys), platforms, features and security
+issues, the ledger, access (API keys), platforms, features and security
 operations, plus a checker for agent instructions. Whatever the UI can change,
 the CLI can change too, through the same endpoints and with the same role checks.
 """
@@ -48,8 +48,8 @@ policies_app = typer.Typer(
 )
 approvals_app = typer.Typer(help="Human-in-the-loop approvals.", no_args_is_help=True)
 findings_app = typer.Typer(
-    help="Posture and threat findings, and the issues they are for the people responsible "
-    "(lists open findings by default).",
+    help="Issues: posture gaps and threats AgentGov raises, and the people they go to "
+    "(lists the open ones by default; the API calls them findings).",
     invoke_without_command=True,
 )
 ledger_app = typer.Typer(help="The tamper-evident evidence ledger.", no_args_is_help=True)
@@ -61,7 +61,9 @@ app.add_typer(blueprints_app, name="blueprints")
 app.add_typer(toolservers_app, name="toolservers")
 app.add_typer(policies_app, name="policies")
 app.add_typer(approvals_app, name="approvals")
-app.add_typer(findings_app, name="findings")
+app.add_typer(findings_app, name="issues")
+# Their name before the admin center called them issues, for scripts that use it.
+app.add_typer(findings_app, name="findings", hidden=True)
 app.add_typer(ledger_app, name="ledger")
 app.add_typer(apikeys_app, name="apikeys")
 access_app = typer.Typer(
@@ -273,16 +275,21 @@ def _at_once(kind: str, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _many(
-    kind: str, out: dict[str, Any], outcome: str | None = None, note: str | None = None
+    kind: str,
+    out: dict[str, Any],
+    outcome: str | None = None,
+    note: str | None = None,
+    label: str | None = None,
 ) -> None:
-    """What one call did to many agents or findings: each done, then each left as it was,
-    and why. Fails if it left any."""
+    """What one call did to many agents or issues: each done, then each left as it was,
+    and why. Fails if it left any. ``label`` names them, when not as the API does."""
+    shown = label or kind
     for row in out["done"]:
-        _done(kind, row[kind], outcome or row["status"])
+        _done(shown, row[kind], outcome or row["status"])
     if note:
         typer.echo(note, err=True)
     for row in out["left"]:
-        typer.echo(f"{kind}/{row[kind]}: left as it was: {row['why']}", err=True)
+        typer.echo(f"{shown}/{row[kind]}: left as it was: {row['why']}", err=True)
     if out["left"]:
         raise typer.Exit(1)
 
@@ -1250,7 +1257,7 @@ def agents_create(
     redirect_uri: list[str] | None = REDIRECT_URI,
     approve: bool = typer.Option(False, "--approve", help="Activate it now (admins only)."),
 ) -> None:
-    """Register an agent. It waits in pending review unless --approve is given."""
+    """Register an agent. It waits for approval unless --approve is given."""
     body = (
         _model_fields(model_access, token_budget, False)
         | _team_field(team)
@@ -1525,7 +1532,7 @@ def agents_delete(refs: list[str] = AGENT_REFS, reason: str | None = REASON) -> 
 
 @agents_app.command("restore")
 def agents_restore(refs: list[str] = AGENT_REFS, reason: str | None = REASON) -> None:
-    """Restore deleted agents; they come back pending review."""
+    """Restore deleted agents; they come back pending approval."""
     _lifecycle(refs, "restore", reason)
 
 
@@ -1584,7 +1591,7 @@ def agents_lifecycle(
     action: str = typer.Argument(..., help="approve | block | unblock | delete | restore | adopt"),
     reason: str | None = None,
 ) -> None:
-    """Run any lifecycle action, including adopting a discovered agent."""
+    """Run any lifecycle action, including adopting an unmanaged agent."""
     _lifecycle(ref, action, reason)
 
 
@@ -2058,7 +2065,7 @@ def toolservers_create(
     authorization_server: str | None = AUTHORIZATION_SERVER,
     oauth_client_id: str | None = OAUTH_CLIENT_ID,
 ) -> None:
-    """Register a tool server (admins: approved at once; registrars: pending review)."""
+    """Register a tool server (admins: approved at once; registrars: pending approval)."""
     body = _toolserver_fields(
         url, description, owner, trust, classification, label,
         gateway=gateway, developers=developers, package=package, registry_name=registry_name,
@@ -2117,7 +2124,7 @@ def _server_action(name: str, action: str) -> None:
 
 @toolservers_app.command("approve")
 def toolservers_approve(name: str) -> None:
-    """Approve a server that is pending review."""
+    """Approve a server that is pending approval."""
     _server_action(name, "approve")
 
 
@@ -2366,7 +2373,7 @@ def approvals_deny(approval_id: str, note: str | None = None) -> None:
 INBOX_HOW = {
     "calls": "agentgov approvals approve|deny ID",
     "access": "agentgov access-packages approve|deny ID",
-    "risks": "agentgov findings accept|decline-exception ID",
+    "risks": "agentgov issues accept|decline-to-accept ID",
     "agents": "agentgov agents lifecycle NAME approve|block",
     "toolservers": "agentgov toolservers approve|block NAME",
     "definitions": "agentgov toolservers approve-tool SERVER TOOL",
@@ -2438,8 +2445,8 @@ def _with(f: dict[str, Any]) -> str:
     return f"{who}, acknowledged" if f.get("acknowledged_at") else who
 
 
-FINDING_TYPE = typer.Option(None, "--type", help="Only findings of this type.")
-FINDING_SEVERITY = typer.Option(None, help="Only findings of this severity.")
+FINDING_TYPE = typer.Option(None, "--type", help="Only issues of this type.")
+FINDING_SEVERITY = typer.Option(None, help="Only issues of this severity.")
 FINDING_LIMIT = typer.Option(500, help="At most this many, newest first (up to 2000).")
 FINDING_QUIET = typer.Option(
     False, "--quiet", "-q", help="Only their IDs, one a line: to give other commands."
@@ -2522,13 +2529,13 @@ def findings_list(
     as_csv: bool = AS_CSV,
     quiet: bool = FINDING_QUIET,
 ) -> None:
-    """List findings, newest first."""
+    """List issues, newest first."""
     _list_findings(status, mine, type_, severity, limit, as_csv, quiet)
 
 
 @findings_app.command("get")
 def findings_get(finding_id: str) -> None:
-    """Show a finding: who it goes to, the messages sent about it, and what happened to it."""
+    """Show an issue: who it goes to, the messages sent about it, and what happened to it."""
     f = _call("GET", f"/v1/findings/{quote(finding_id)}")
     typer.echo(f"{f['id']}  {f['severity']}  {f['status']}  {f['type']}")
     typer.echo(f["title"])
@@ -2555,12 +2562,13 @@ def findings_get(finding_id: str) -> None:
         _table(f["notifications"], ["level", "channel", "recipient", "status", "attempts"])
 
 
-FINDING_IDS = typer.Argument(..., help="The findings' IDs: one, or several at once.")
+FINDING_IDS = typer.Argument(..., help="The issues' IDs: one, or several at once.")
 
 
 def _findings_at_once(ids: list[str], action: str, **body: Any) -> None:
-    """Several findings at once: each on its own, those it can't do left as they are."""
-    _many("finding", _at_once("finding", _given(action=action, findings=ids, **body)))
+    """Several issues at once: each on its own, those it can't do left as they are."""
+    out = _at_once("finding", _given(action=action, findings=ids, **body))
+    _many("finding", out, label="issue")
 
 
 @findings_app.command("acknowledge")
@@ -2569,7 +2577,7 @@ def findings_acknowledge(finding_ids: list[str] = FINDING_IDS) -> None:
     if len(finding_ids) > 1:
         return _findings_at_once(finding_ids, "acknowledge")
     f = _call("POST", f"/v1/findings/{quote(finding_ids[0])}/acknowledge")
-    _done("finding", f["id"], f"acknowledged by {f['acknowledged_by']}")
+    _done("issue", f["id"], f"acknowledged by {f['acknowledged_by']}")
 
 
 @findings_app.command("accept")
@@ -2581,7 +2589,7 @@ def findings_accept(
         help="Until when: a date (2026-12-31), a time, or a number of days (90). A year at most.",
     ),
 ) -> None:
-    """Accept findings' risk until a date: each opens again then if it still holds."""
+    """Accept issues' risk until a date: each opens again then if it still holds."""
     when: str | int = int(until) if until.isdigit() else until
     if len(finding_ids) > 1:
         return _findings_at_once(finding_ids, "accept", reason=reason, until=when)
@@ -2590,7 +2598,7 @@ def findings_accept(
         f"/v1/findings/{quote(finding_ids[0])}/accept",
         json={"reason": reason, "until": when},
     )
-    _done("finding", f["id"], f"risk accepted until {f['accepted_until']}")
+    _done("issue", f["id"], f"risk accepted until {f['accepted_until']}")
 
 
 @findings_app.command("not-mine")
@@ -2608,7 +2616,8 @@ def findings_not_mine(
     )
 
 
-@findings_app.command("ask-exception")
+@findings_app.command("ask-to-accept")
+@findings_app.command("ask-exception", hidden=True)
 def findings_ask_exception(
     finding_id: str,
     reason: str = typer.Option(..., help="Why its risk is acceptable, for now."),
@@ -2623,10 +2632,11 @@ def findings_ask_exception(
         f"/v1/findings/{quote(finding_id)}/exception",
         json={"reason": reason, "until": when},
     )
-    _done("finding", f["id"], "exception asked for: an approver decides")
+    _done("issue", f["id"], "asked to accept its risk: an approver decides")
 
 
-@findings_app.command("decline-exception")
+@findings_app.command("decline-to-accept")
+@findings_app.command("decline-exception", hidden=True)
 def findings_decline_exception(
     finding_id: str, reason: str = typer.Option(..., help="Why not.")
 ) -> None:
@@ -2634,7 +2644,7 @@ def findings_decline_exception(
     f = _call(
         "POST", f"/v1/findings/{quote(finding_id)}/exception/decline", json={"reason": reason}
     )
-    _done("finding", f["id"], "exception declined")
+    _done("issue", f["id"], "its risk isn't accepted: it stays with whoever asked")
 
 
 @findings_app.command("recheck")
@@ -2643,7 +2653,7 @@ def findings_recheck(finding_id: str) -> None:
     out = _call("POST", f"/v1/findings/{quote(finding_id)}/recheck", timeout=LONG_TIMEOUT)
     outcome = "gone: resolved" if out["fixed"] else "still there"
     note = f" ({out['note']})" if out.get("note") else ""
-    _done("finding", out["finding"]["id"], f"checked again ({out['checked']}), {outcome}{note}")
+    _done("issue", out["finding"]["id"], f"checked again ({out['checked']}), {outcome}{note}")
     if not out["fixed"]:
         raise typer.Exit(1)
 
@@ -2652,12 +2662,12 @@ def _finding_action(finding_ids: list[str], action: str) -> None:
     if len(finding_ids) > 1:
         return _findings_at_once(finding_ids, action)
     f = _call("POST", f"/v1/findings/{quote(finding_ids[0])}/{action}")
-    _done("finding", f["id"], f["status"])
+    _done("issue", f["id"], f["status"])
 
 
 @findings_app.command("resolve")
 def findings_resolve(finding_ids: list[str] = FINDING_IDS) -> None:
-    """Mark findings as resolved."""
+    """Mark issues as resolved."""
     _finding_action(finding_ids, "resolve")
 
 
@@ -2669,25 +2679,25 @@ def findings_dismiss(
         None, help="Open it again then if it still holds: a date, a time, or a number of days."
     ),
 ) -> None:
-    """Dismiss findings that are wrong (to accept a risk, use accept)."""
+    """Dismiss issues that are wrong (to accept a risk, use accept)."""
     body: dict[str, Any] = {"reason": reason}
     if until:
         body["until"] = int(until) if until.isdigit() else until
     if len(finding_ids) > 1:
         return _findings_at_once(finding_ids, "dismiss", **body)
     f = _call("POST", f"/v1/findings/{quote(finding_ids[0])}/dismiss", json=body)
-    _done("finding", f["id"], f["status"])
+    _done("issue", f["id"], f["status"])
 
 
 @findings_app.command("reopen")
 def findings_reopen(finding_ids: list[str] = FINDING_IDS) -> None:
-    """Reopen resolved, dismissed or accepted findings."""
+    """Reopen resolved, dismissed or accepted issues."""
     _finding_action(finding_ids, "reopen")
 
 
 @findings_app.command("types")
 def findings_types() -> None:
-    """Each type of finding: on or off, its severity if set here, and how many are open."""
+    """Each type of issue: on or off, its severity if set here, and how many are open."""
     rows = _call("GET", "/v1/finding-types")
     for row in rows:
         row["severity"] = row["severity"] or "(its checks')"
@@ -2705,7 +2715,7 @@ def findings_type(
     ),
     yes: bool = YES,
 ) -> None:
-    """Set how a type of finding is handled here."""
+    """Set how a type of issue is handled here."""
     body: dict[str, Any] = {}
     if on is not None:
         body["mode"] = "on" if on else "off"
@@ -2715,7 +2725,7 @@ def findings_type(
         _fail("give --on, --off or --severity")
     if body.get("mode") == "off":
         _confirm(
-            f"Turn {type_} off? Its open findings are dismissed, and what it finds is kept "
+            f"Turn {type_} off? Its open issues are dismissed, and what it finds is kept "
             "dismissed.",
             yes,
         )
@@ -3059,7 +3069,7 @@ def _synced(source: str, verb: str, counts: dict[str, int]) -> None:
     if counts.get("gone"):
         outcome += f", {counts['gone']} gone from the platform"
     if "findings" in counts:
-        outcome += f"; {counts['findings']} open findings"
+        outcome += f"; {counts['findings']} open issues"
     _done("platform", source, f"{verb} ({outcome})")
 
 
@@ -3128,7 +3138,7 @@ def _sync_summary(source: str, c: dict[str, Any]) -> str:
         return f"{c['found']} people found, {c['not_found']} not users, {c['left']} left"
     summary = f"{c['created']} new, {c['updated']} updated, {c['skipped']} skipped"
     if source in OTHER_PLATFORMS:
-        summary += f", {c['findings']} open findings"
+        summary += f", {c['findings']} open issues"
         if c.get("failed"):
             summary += f"; {c['failed']} parts couldn't be read (see `agentgov platforms status`)"
     return summary
@@ -3233,7 +3243,7 @@ def platforms_import(
         False,
         "--complete",
         help="The files are the whole inventory, every environment: agents missing from "
-        "them are marked gone from Copilot Studio, and their findings close.",
+        "them are marked gone from Copilot Studio, and their issues close.",
     ),
 ) -> None:
     """Import Copilot Studio agents from a Power Platform inventory export."""
@@ -3330,7 +3340,7 @@ def platforms_approve_connector(
     connector_id: str = typer.Argument(..., help="For example shared_office365."),
     note: str | None = typer.Option(None, help="Why it is allowed."),
 ) -> None:
-    """Put a connector on the allowlist; agents using others get a finding."""
+    """Put a connector on the allowlist; agents using others get an issue."""
     out = _call(
         "PUT",
         f"/v1/platforms/connectors/{_connector(connector_id)}/approval",
@@ -4015,7 +4025,7 @@ def secops_events(
     after: int = typer.Option(0, help="From after this ledger entry (0: the start)."),
     limit: int = typer.Option(200, help="Events per request (up to 1000)."),
     events: str | None = typer.Option(
-        None, help="decisions, approvals, findings, access, changes (comma-separated)."
+        None, help="decisions, approvals, findings (issues), access, changes (comma-separated)."
     ),
     min_severity: str = typer.Option("info", help="info, low, medium, high or critical."),
     follow: bool = typer.Option(False, "--follow", "-f", help="Keep waiting for new ones."),
@@ -4070,8 +4080,8 @@ DEST_URL = typer.Option(
 DEST_EVENTS = typer.Option(
     None,
     "--events",
-    help="SIEMs: decisions, approvals, findings, access, changes. Chats: findings, approvals, "
-    "blocks. Comma-separated; all by default.",
+    help="SIEMs: decisions, approvals, findings (issues), access, changes. Chats: findings, "
+    "approvals, blocks. Comma-separated; all by default.",
 )
 DEST_SEVERITY = typer.Option(
     None, "--min-severity", help="info, low, medium, high or critical (chats: high by default)."
@@ -4682,14 +4692,16 @@ OVERDUE = typer.Option(
     None, "--attestation-overdue-days", help="Condition: attestation overdue for N days."
 )
 FINDING = typer.Option(
-    None, "--finding", help="Condition: an open finding of this type, * allowed (repeatable)."
+    None, "--finding", help="Condition: an open issue of this type, * allowed (repeatable)."
 )
 FINDING_SEVERITY = typer.Option(
-    None, "--finding-severity", help="Condition: the finding is at least this severe."
+    None, "--finding-severity", help="Condition: the issue is at least this severe."
 )
 RISK_LEVEL = typer.Option(None, "--risk-level", help="Condition: at least this risk level.")
 STATUS = typer.Option(
-    None, "--status", help="Condition: pending, active, blocked or discovered (repeatable)."
+    None,
+    "--status",
+    help="Condition: pending, active, blocked or discovered (unmanaged); repeatable.",
 )
 IN_BLUEPRINT = typer.Option(None, "--blueprint", help="Scope: agents on these blueprints.")
 IN_TEAM = typer.Option(None, "--team", help="Scope: agents of these teams.")

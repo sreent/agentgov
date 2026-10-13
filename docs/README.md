@@ -29,6 +29,8 @@
 * [Features](features.md): which parts of AgentGov you use, and how strictly
 * [Administration](administration.md): signing in, roles, and every task in the admin UI,
   the CLI and the API
+* [Glossary](glossary.md): the words AgentGov uses for each thing, and what the API calls
+  them
 
 ## Govern agents
 
@@ -50,7 +52,7 @@
   opinion on tool results, people's prompts and agents' answers
 * [Access packages](access-packages.md): tools, models and agents an agent holds for a
   while once approved, with reminders, renewals and reviews
-* [Issues](issues.md): findings sent to the people responsible for each agent (its owner,
+* [Issues](issues.md): issues sent to the people responsible for each agent (its owner,
   its sponsors, its team), escalated until someone takes them on
 * [Tickets in service desks](tickets.md): issues as tickets in ServiceNow, Jira Service
   Management or Freshservice, kept in step with them both ways
@@ -67,7 +69,7 @@
   Copilot Studio inventory, the connector allowlist, and acting as the signed-in admin
 * [Agents on other platforms](other-platforms.md): agents built on AWS, Google Cloud,
   Salesforce, Databricks and Microsoft Foundry, read into the registry with their risky
-  settings as findings
+  settings as issues
 * [Connecting AgentGov to Microsoft's services](microsoft-connections.md): Entra Agent ID,
   the Purview audit log, Defender alerts, Entra access packages, connector policies and
   Copilot Studio threat detection

@@ -87,7 +87,7 @@ AgentGov's examples. On one server, `docker-compose.server.yml` does most of wha
   `keycloak.demoUsers=false`, both before the first install) or use your own, and keep
   Keycloak's admin console (`/admin`) off the internet if your load balancer can.
 * Keep the controls at the gateway enforced, as they are by default, and the processor
-  fail-closed. Jailbreak detection starts in monitor mode: enforce it once its findings
+  fail-closed. Jailbreak detection starts in monitor mode: enforce it once its issues
   show what it would refuse. Monitor mode and turning a control off are for rollout and evaluation
   ([features](docs/features.md)). Both are recorded in the ledger as warnings, and only
   administrators can choose them. To keep the choice with the deployment, pin the
@@ -143,14 +143,14 @@ AgentGov's examples. On one server, `docker-compose.server.yml` does most of wha
 * The prompt-injection, jailbreak and tool-poisoning detectors are heuristics, and the
   classifier that can back up the first two is a model. They raise the cost of common and
   reworded attacks; they are not a guarantee. A verdict the classifier gives in the
-  background (its default, monitored) comes after the call went on: it raises a finding,
+  background (its default, monitored) comes after the call went on: it raises an issue,
   it doesn't stop the call ([detection](docs/detection.md)).
 * The gateway checks agents' answers to other agents as they stream, event by event. An
   answer, or an event, over 4 MiB, or one compressed although the gateway asked for it
   plain, is withheld where `data-protection` or `prompt-injection` is enforced, and goes
   through unchecked where neither is.
 * The checks on agents' instructions are rules plus, optionally, a model. Both can miss
-  reworded or obfuscated instructions and can flag legitimate ones; treat a finding as a
+  reworded or obfuscated instructions and can flag legitimate ones; treat an issue as a
   reason to review, and its absence as no proof of safety.
 * Agents on Microsoft 365 and Copilot Studio are read, not controlled: blocking one in
   AgentGov does not stop it. Block it in Microsoft's admin centers too, or have an admin

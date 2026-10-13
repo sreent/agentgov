@@ -67,7 +67,7 @@ CONNECTIONS: tuple[Connection, ...] = (
         "entra-agent-id",
         "Microsoft Entra Agent ID",
         "Agents' Entra identities, linked to the agents they belong to, and whether they are "
-        "enabled; agents that only Entra knows about are discovered",
+        "enabled; agents that only Entra knows about are added as unmanaged",
         via="app",
         permission="AgentIdentity.Read.All",
     ),

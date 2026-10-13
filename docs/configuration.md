@@ -168,7 +168,7 @@ never in a values file you share.
 | `AGENTGOV_SOFT_DELETE_RETENTION_DAYS` | `30` | Deleted agents can be restored for this many days, then they are purged (Agent 365 parity). 0 keeps them. |
 | `AGENTGOV_AUTO_BLOCK_RISK_SCORE` | `0` | When &gt; 0, agents whose risk score reaches this value are blocked. |
 | `AGENTGOV_RISK_WINDOW_HOURS` | `24` | How long risk signals (denied calls, credentials, prompt injections) count towards an agent's risk score. |
-| `AGENTGOV_STALE_AGENT_DAYS` | `30` | Agents not seen for this many days raise a stale-agent finding. |
+| `AGENTGOV_STALE_AGENT_DAYS` | `30` | Agents not seen for this many days raise a stale-agent issue. |
 | `AGENTGOV_POSTURE_INTERVAL_SECONDS` | `300` | Seconds between posture scans (owners, sponsors, attestations, stale agents); 0 turns the scheduled scan off. |
 
 ### Security operations
@@ -186,7 +186,7 @@ never in a values file you share.
 | `AGENTGOV_ISSUES_INTERVAL_SECONDS` | `60` | Seconds between rounds of routing issues, escalating them and sending what is due. |
 | `AGENTGOV_ISSUES_NOTIFY_SEVERITY` | `medium` | Issues below this severity reach people in AgentGov only, without an email or a chat message: by default, low and info ones wait there. info: every issue is sent. |
 | `AGENTGOV_ISSUES_QUIET_FIRST_SYNC` | `true` | What a platform's first sync finds reaches people in AgentGov only, without an email or a chat message: what was there before AgentGov looked doesn't flood inboxes. Found again after it is resolved, it is sent as any other. |
-| `AGENTGOV_THREAT_FINDING_DAYS` | `30` | Days a threat finding stays open without happening again before it is resolved (it opens again if it happens again). 0 keeps threats open until someone closes them. |
+| `AGENTGOV_THREAT_FINDING_DAYS` | `30` | Days a threat issue stays open without happening again before it is resolved (it opens again if it happens again). 0 keeps threats open until someone closes them. |
 | `AGENTGOV_ISSUES_DIGEST_AT` | — | The time of day, HH:MM, a digest of their open issues goes to each address and team chat that has some: one message a day, those issues below `AGENTGOV_ISSUES_NOTIFY_SEVERITY` included ([issues](issues.md#a-daily-digest)). Empty: none. |
 | `AGENTGOV_ISSUES_DIGEST_TIMEZONE` | `UTC` | The time zone of `AGENTGOV_ISSUES_DIGEST_AT`, such as Europe/London. |
 | `AGENTGOV_ISSUES_DIGEST_DAYS` | `mon,tue,wed,thu,fri` | The days the digest goes out: mon to sun, separated by commas. |
@@ -207,7 +207,7 @@ never in a values file you share.
 | `AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE` | — | AgentGov's key for the log: an ECDSA P-256 private key (PEM). `agentgov transparency-key DIR` makes one. |
 | `AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE` | — | The log's public key (PEM, Ed25519), to check each answer's proof that the log holds the entry. Unset, entries are kept unchecked. |
 | `AGENTGOV_LEDGER_REKOR_ORIGIN` | — | The log's name in its checkpoints (its origin). Unset: the URL's host name. |
-| `AGENTGOV_DATA_RETENTION_DAYS` | `0` | Days AgentGov keeps the operational records whose history the ledger has: daily activity and model usage, risk signals, notifications sent, decided approvals, resolved findings, ended access assignments, and developers' MCP servers not reported since. 0 keeps them; otherwise at least 30. |
+| `AGENTGOV_DATA_RETENTION_DAYS` | `0` | Days AgentGov keeps the operational records whose history the ledger has: daily activity and model usage, risk signals, notifications sent, decided approvals, resolved issues, ended access assignments, and developers' MCP servers not reported since. 0 keeps them; otherwise at least 30. |
 
 ### Keycloak (agent identity)
 

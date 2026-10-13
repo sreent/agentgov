@@ -47,7 +47,7 @@ flowchart LR
 
 | Component | Role | Agent 365 analogue |
 |---|---|---|
-| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, findings, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; reads agents from Microsoft 365, Copilot Studio and Entra Agent ID, and their use and alerts from Purview and Defender, and agents built on AWS, Google Cloud, Salesforce, Databricks and Microsoft Foundry ([other platforms](other-platforms.md)); answers Copilot Studio's threat-detection calls ([platforms](platforms.md), [connections](microsoft-connections.md)); sends the ledger to SIEMs as OCSF events and alerts to Teams and Slack ([security operations](secops.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance, Defender's SIEM connectors |
+| **Control plane** (this repo, `agentgov server`) | Registry, lifecycle, approvals, issues, risk, evidence ledger, API, UI; serves OPA bundles; writes gateway config; provisions Keycloak clients; reads agents from Microsoft 365, Copilot Studio and Entra Agent ID, and their use and alerts from Purview and Defender, and agents built on AWS, Google Cloud, Salesforce, Databricks and Microsoft Foundry ([other platforms](other-platforms.md)); answers Copilot Studio's threat-detection calls ([platforms](platforms.md), [connections](microsoft-connections.md)); sends the ledger to SIEMs as OCSF events and alerts to Teams and Slack ([security operations](secops.md)) | Microsoft 365 admin center *Agents*, Entra ID Governance, Defender's SIEM connectors |
 | **Governance processor** (this repo, `agentgov processor`) | agentgateway's MCP-aware external policy server, its guardrail webhook for model calls, and its external authorization for calls between agents and external processing for their answers: content inspection, OPA queries, approvals, redaction, the delegations agents pass on, decision records | Defender real-time protection, Purview DLP enforcement |
 | [Keycloak](https://www.keycloak.org) 26.8 | One OAuth client per agent; issues short-lived tokens with `agent_id` and the gateway audience, for the agent itself or, by token exchange, for a person it acts for ([acting for people](acting-for-people.md)); takes agents' own identities, Kubernetes service account tokens, SPIFFE JWT-SVIDs or other OpenID Connect issuers' tokens, in place of client secrets ([agents' own identities](agent-identity.md)); signs administrators in to the control plane (and can federate an existing directory). For MCP servers outside the gateway, the control plane gives agents identity assertions (ID-JAG), which those servers' authorization servers, Keycloak among them, trade for access tokens ([acting for people](acting-for-people.md#mcp-servers-outside-the-gateway)) | Entra Agent ID (including federated identity credentials), Entra ID sign-in |
 | [OPA](https://www.openpolicyagent.org) 1.21 | Policy decision point; evaluates the Rego library against registry data. Its decisions are also an AuthZEN decision point for other enforcement points, and the processor can ask an AuthZEN decision point of yours beside it ([AuthZEN](policies.md#authzen)) | Conditional Access |
@@ -88,7 +88,7 @@ sequenceDiagram
     P->>O: decision (phase: response)
     P-->>G: pass / redact / withhold
     G-->>A: result or refusal
-    P--)C: decision records (batched) → ledger, activity, risk, findings
+    P--)C: decision records (batched) → ledger, activity, risk, issues
 ```
 
 * **tools/list** responses also pass through the processor: each agent sees only the
@@ -157,7 +157,7 @@ processor also asks it about what the rules let through: tool results and agents
 answers (instructions aimed at the agent?) and people's prompts to models (a jailbreak?).
 Where the check it supports is enforced, and the classifier too, the call waits for its
 verdict, a few seconds at most; otherwise the call goes on and the verdict, given in the
-background, is recorded and raises a finding. [Detection](detection.md) has the details.
+background, is recorded and raises an issue. [Detection](detection.md) has the details.
 
 ## Developers' MCP clients
 
@@ -165,7 +165,7 @@ The tool servers listed for developers are also served as an MCP registry, at
 `<control plane>/registry` (the MCP Registry API, version 0.1), which GitHub Copilot in
 VS Code and other editors reads to offer developers only approved MCP servers.
 `agentgov mcp scan --report`, run on developers' machines, reports the MCP servers set
-up there, without their credentials, and the control plane raises findings for those
+up there, without their credentials, and the control plane raises issues for those
 that aren't approved or that skip the gateway. [Developer tools](developer-tools.md)
 has the details.
 
@@ -242,14 +242,14 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | Your decision point unreachable | Deny while `external-decision-point` is enforced; `AGENTGOV_AUTHZEN_FAILURE_MODE=open` lets AgentGov's own decision stand |
 | Granite Guardian unreachable or slow | The rules alone decide (`AGENTGOV_GUARDIAN_FAILURE_MODE=closed` refuses the calls that wait for it instead). A call that waits for the classifier waits `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` at most, and its decision says the classifier didn't answer; instructions to check stay queued until it is back |
 | A custom Rego policy fails to compile | Rejected at submission, after a compile and a smoke evaluation, so a broken module never reaches OPA |
-| OPA cannot activate a bundle anyway, or it doesn't verify | OPA keeps the last good bundle; its status report raises a critical finding |
+| OPA cannot activate a bundle anyway, or it doesn't verify | OPA keeps the last good bundle; its status report raises a critical issue |
 | A control-plane replica stops | The others answer; if it led, another takes the scheduled work over within seconds ([production](production.md#several-replicas)) |
 | The database restarts during a job | Another replica may start the job; the run that lost its lock stops at its next commit, with nothing more written |
 | A replica loses the database for a while | When it finds it again, it acts as if everything changed; meanwhile its bundles are at most a minute old |
 | Control plane down | Enforcement continues with the last bundle; decision records queue in the processor and are retried |
 | Database schema out of date | The control plane migrates it at start-up (one replica at a time, under a PostgreSQL advisory lock), or, with automatic migration off, refuses to start until `agentgov db upgrade` has run. A schema newer than the version knows stops it with a message |
 | Keycloak down | No new tokens; identity drift is reported on the agent and retried |
-| Keycloak refuses an identity issuer (a missing role, unreachable keys) | The issuer shows the error and raises a finding, high when a block hasn't reached Keycloak; agents with client secrets are unaffected |
+| Keycloak refuses an identity issuer (a missing role, unreachable keys) | The issuer shows the error and raises an issue, high when a block hasn't reached Keycloak; agents with client secrets are unaffected |
 | OPA unreachable during a Copilot Studio threat-detection call | AgentGov answers as `AGENTGOV_COPILOT_STUDIO_ON_ERROR` says (block by default, in enforce mode); if it doesn't answer within a second, Copilot Studio lets the tool run unless the environment is set to block |
 | A Microsoft connection fails or lacks a permission | That connection shows the error or the missing permission on the Platforms page; the others and the rest of AgentGov carry on |
 

@@ -261,6 +261,6 @@ class TestTheCli:
         # A title a spreadsheet would take for a formula stays text.
         assert "'=HYPERLINK" in sheet
         out = runner.invoke(cli.app, ["findings", "dismiss", a, b, "--reason", "A test agent"])
-        assert out.exit_code == 0 and f"finding/{a}: dismissed" in out.output, out.output
+        assert out.exit_code == 0 and f"issue/{a}: dismissed" in out.output, out.output
         out = runner.invoke(cli.app, ["findings", "reopen", a, b])
-        assert out.exit_code == 0 and f"finding/{b}: open" in out.output, out.output
+        assert out.exit_code == 0 and f"issue/{b}: open" in out.output, out.output

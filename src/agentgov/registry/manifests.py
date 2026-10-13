@@ -21,7 +21,7 @@ A ``Feature`` sets how strictly one of AgentGov's features applies
 control ``spec.scopes`` its exceptions, its mode for the agents in a scope
 (docs/features.md#exceptions).
 
-A ``FindingType`` says how one type of finding is handled (docs/issues.md#kinds-of-findings):
+A ``FindingType`` says how one type of finding is handled (docs/issues.md#kinds-of-issues):
 ``metadata.name`` is the type, such as ``agent.no_owner``; ``spec.mode`` on or off, and
 ``spec.severity`` its severity here.
 

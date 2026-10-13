@@ -46,8 +46,8 @@ Guardian's cookbook judges its own criteria.
 
 | `traffic-classifier` | The check (`prompt-injection` or `jailbreak-detection`) | The classifier |
 |---|---|---|
-| enforce | enforce | **Inline.** The call waits for its verdict, `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` (3) at most; what it flags is withheld or refused as what the rules flag is, and raises the same finding. Past the time, the rules alone decide, and the ledger says the classifier didn't answer |
-| enforce or monitor | monitor, or enforce with the classifier monitored | **In the background.** The call goes on at once; the classifier answers after, and what it flags goes to the ledger (`detection.classifier`) and raises the finding |
+| enforce | enforce | **Inline.** The call waits for its verdict, `AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` (3) at most; what it flags is withheld or refused as what the rules flag is, and raises the same issue. Past the time, the rules alone decide, and the ledger says the classifier didn't answer |
+| enforce or monitor | monitor, or enforce with the classifier monitored | **In the background.** The call goes on at once; the classifier answers after, and what it flags goes to the ledger (`detection.classifier`) and raises the issue |
 | off, or the check off | — | Not asked |
 
 It starts monitored: on real traffic, see what it would flag before calls wait for it.
@@ -65,21 +65,21 @@ second; on a CPU, several seconds, which only the background suits.
 * **Long texts in windows.** About 24,000 characters at a time, overlapping so that no
   sentence falls between two, and three windows at most: the ledger says when some of a
   text was left out. The rules read all of it.
-* **No excerpt.** A verdict says yes or no. The finding names what was flagged and where,
+* **No excerpt.** A verdict says yes or no. The issue names what was flagged and where,
   not the words.
 
 Granite Guardian runs inside your network, like Presidio: the processor sends it the
 content it judges.
 
-## Findings and evidence
+## Issues and evidence
 
-What the classifier flags raises the same findings as what the rules flag:
+What the classifier flags raises the same issues as what the rules flag:
 
-| Finding | When |
+| Issue | When |
 |---|---|
 | `toolserver.prompt_injection` | A tool's result carried instructions aimed at the agent |
 | `agent.prompt_injection` | A tool result in one of the agent's model conversations did |
-| `agent.prompt_injection_in_answers` | Another agent's answer did: the finding is about the agent that answered |
+| `agent.prompt_injection_in_answers` | Another agent's answer did: the issue is about the agent that answered |
 | `agent.jailbreak_attempts` | A person's prompt tried to jailbreak the agent's model |
 
 Each adds to the risk score of the agent it is about. A verdict given in the background is

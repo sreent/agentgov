@@ -16,7 +16,7 @@ helm install agentgov oci://ghcr.io/sreent/charts/agentgov --version 0.1.0 \
 
 To run less of it, start from a profile:
 [`profiles/inventory.yaml`](profiles/inventory.yaml), the agents on your platforms, their
-findings and issues, with no gateway, OPA, Presidio or Keycloak; or
+issues, with no gateway, OPA, Presidio or Keycloak; or
 [`profiles/monitor.yaml`](profiles/monitor.yaml), the gateway with every control watching
 rather than stopping, without Presidio
 ([profiles](../../../docs/deploy/kubernetes.md#profiles)).

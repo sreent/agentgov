@@ -29,7 +29,7 @@ The decision carries `monitored`, and the ledger records it.
 |---|---|---|
 | Caller is not a registered agent | deny | `unknown-callers` |
 | Agent is not `active` (pending, blocked, deleted) | deny | always |
-| Tool server unknown, pending review or blocked | deny | always |
+| Tool server unknown, pending approval or blocked | deny | always |
 | Tool not granted to the agent (least privilege) | deny, and hidden from `tools/list` | `least-privilege` |
 | Tool granted only by an access package that has expired | deny, and hidden from `tools/list` | `access-packages` |
 | Tool definition changed since it was approved (MCP rug pull) | deny until an admin approves the new definition | `tool-integrity` |

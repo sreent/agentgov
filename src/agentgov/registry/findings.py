@@ -27,7 +27,7 @@ UNVERIFIED = "unverified"
 # In a finding's details: found by a platform's first sync, there before AgentGov looked
 # (agentgov.registry.platforms.first_sync; agentgov.registry.issues sends it to no inbox).
 BASELINE = "baseline"
-# Why someone dismissed it, and until when (docs/issues.md#dismissing-a-finding).
+# Why someone dismissed it, and until when (docs/issues.md#dismissing-an-issue).
 DISMISSAL = "dismissal"
 # The severity its people were last told it had, when it was raised since at another.
 TOLD = "told_severity"

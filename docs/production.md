@@ -58,7 +58,7 @@ AgentGov serves many people at once; two things keep them from undoing each othe
 **Decisions take turns.** Deciding locks the row it decides until it commits: when two
 approvers decide the same approval request at the same moment, one decision stands and the
 other is told the request was already decided, rather than overwriting it. The same goes
-for access package requests (deciding, revoking, reviewing), findings (acknowledging,
+for access package requests (deciding, revoking, reviewing), issues (acknowledging,
 accepting the risk, resolving, dismissing), agents' lifecycle (approving, blocking,
 deleting, attesting), the status of tool servers, model providers, identity issuers and
 destinations, and an approval being used: two identical calls at once use it once. Each
@@ -193,7 +193,7 @@ after it started ([kind](deploy/local.md#kubernetes-with-kind)).
 The control plane signs each OPA bundle with its own key, and OPA refuses a bundle that
 doesn't verify against the matching certificate: whoever reaches OPA, or the path to it,
 can't hand it policies or registry data of their own. OPA keeps enforcing its last good
-bundle, and its status report raises a critical finding
+bundle, and its status report raises a critical issue
 ([architecture](architecture.md#trust-boundaries-and-failure-modes)).
 
 The signature is a JWT in the bundle's `.signatures.json` listing every other file with its

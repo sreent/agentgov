@@ -28,7 +28,7 @@ Notes are for the people who work tickets: ServiceNow's work notes, internal com
 Jira Service Management projects, Freshservice's private notes. AgentGov reads each open
 ticket back every five minutes or so, by asking the desk: the desk never needs to reach
 AgentGov, which suits a desk outside your network. To stop an issue for good, fix the problem
-or, in AgentGov, ask for an exception that an approver accepts: a ticket closed while the
+or, in AgentGov, ask an approver to accept its risk: a ticket closed while the
 problem is still there comes back.
 
 ## Which issues get one

@@ -584,7 +584,7 @@ def approve_tool(
 def toolserver_action(
     request: Request, ref: str, action: str, principal: Principal = Depends(kill_switch)
 ) -> dict[str, Any]:
-    """approve (pending review), block, unblock."""
+    """approve (pending approval), block, unblock."""
     rt = _rt(request)
     with rt.db.session() as s:
         handoff.check_kill_switch(s, principal, action)

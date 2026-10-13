@@ -1,6 +1,6 @@
 # Backing up and restoring
 
-AgentGov keeps what it knows in its database: the registry, the evidence ledger, findings
+AgentGov keeps what it knows in its database: the registry, the evidence ledger, issues
 and issues, tickets, approvals. A few things live outside it: the ledger's archives, the
 credentials and keys, Keycloak's own database, and the ledger's head kept apart so that a
 restore shows. This page says what to back up, how to restore, and what to check after.
@@ -19,7 +19,7 @@ restore shows. This page says what to back up, how to restore, and what to check
 
 `agentgov export` writes the registry as manifests ([registry as
 code](administration.md#registry-as-code)): a readable copy of what is governed, worth keeping
-in Git, but not a backup: it holds neither the ledger nor findings, issues and approvals.
+in Git, but not a backup: it holds neither the ledger nor issues and approvals.
 
 ### With Compose
 

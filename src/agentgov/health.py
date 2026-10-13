@@ -483,7 +483,7 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
             (
                 LIMITED,
                 "No catch-all team: issues that no agent's owner, sponsor or team takes, and "
-                "issues about AgentGov itself, reach nobody. Name one (Findings, Teams).",
+                "issues about AgentGov itself, reach nobody. Name one on the Teams page.",
             )
         )
     elif key == "security-operations" and not s.destinations:

@@ -2,7 +2,7 @@
 
 * off: nothing is sent, and the secops role reads, as auditors do;
 * inform: SIEMs get OCSF events, Teams and Slack get alerts, and the events API serves them;
-* triage: the secops role also resolves, dismisses and reopens findings;
+* triage: the secops role also resolves, dismisses and reopens issues;
 * contain: it also blocks and unblocks agents, tool servers, model providers and identity
   issuers;
 * decide: it also approves and denies the approval requests sent to approvers.
@@ -27,7 +27,7 @@ LEVELS = OFF, INFORM, TRIAGE, CONTAIN, DECIDE = features.HANDOFF
 ROLE = "secops"
 # What each level lets the secops role do, beyond reading.
 MAY = {
-    TRIAGE: "resolve, dismiss and reopen findings",
+    TRIAGE: "resolve, dismiss and reopen issues",
     CONTAIN: "block and unblock agents, tool servers, model providers and identity issuers",
     DECIDE: "approve and deny approval requests sent to approvers",
 }

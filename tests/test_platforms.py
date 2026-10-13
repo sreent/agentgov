@@ -704,7 +704,7 @@ class TestCli:
         export.write_text(json.dumps(inventory()))
         out = ok(self.run(client, monkeypatch, "platforms", "import", str(export)))
         assert out.strip() == (
-            "platform/copilot-studio: imported (2 new, 0 updated, 1 skipped; 3 open findings)"
+            "platform/copilot-studio: imported (2 new, 0 updated, 1 skipped; 3 open issues)"
         )
 
         result = self.run(client, monkeypatch, "platforms", "connectors")

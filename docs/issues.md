@@ -1,10 +1,10 @@
 # Issues
 
-AgentGov raises findings about agents: posture gaps from its scans, threats it detects at
+AgentGov raises issues about agents: posture gaps from its scans, threats it detects at
 runtime, and alerts from Microsoft Defender. Most of them only the people responsible for the
 agent can fix. Its maker can add a sponsor, change its connections in Copilot Studio, or
 retire it; an administrator of AgentGov often can't. So, with the **issues** feature (on by
-default), each finding goes to those people, one step at a time:
+default), each issue goes to those people, one step at a time:
 
 1. the agent's **owner**,
 2. then its **sponsors**,
@@ -17,7 +17,7 @@ approver can also **accept the risk** until a date, with a reason.
 
 ```mermaid
 flowchart LR
-    F[Finding raised] --> O[Owner]
+    F[Issue raised] --> O[Owner]
     O -->|not acknowledged in time| S[Sponsors]
     S -->|not acknowledged in time| T[Team]
     O & S & T -->|acknowledge| A[Taken on]
@@ -34,7 +34,7 @@ change an agent tells its people first, with the date, and again once it has.
 
 ## Who it goes to
 
-| A finding about | First | Then | Then |
+| An issue about | First | Then | Then |
 |---|---|---|---|
 | An agent | Its owner | Its sponsors | Its own team, else its blueprint's, else the default team |
 | A tool server | Its owner | | The default team |
@@ -42,7 +42,7 @@ change an agent tells its people first, with the date, and again once it has.
 
 An owner or a sponsor is a person, by email address or user name, or a team, by name. A
 person or team already reached at an earlier step isn't told again, and a step with nobody
-new at it is left out. A finding with nobody at all to go to stays in AgentGov's list: give
+new at it is left out. An issue with nobody at all to go to stays in AgentGov's list: give
 the agent an owner, or mark a team as the default.
 
 How each is reached:
@@ -102,10 +102,10 @@ them and sends what is due every `AGENTGOV_ISSUES_INTERVAL_SECONDS` (60).
 | Acknowledge | The people it reached so far (team members included), approvers and administrators, and the `secops` role from the triage level on | It goes no further up its chain. The people after them aren't told |
 | Fix the cause | Whoever can | The next check (the posture scan, or the next sync of the system it came from) resolves it |
 | Say it isn't yours, and why | The people it reached | It goes on to the next step of its chain at once (see [Answering an issue](#answering-an-issue)) |
-| Ask for an exception | The people it reached | An approver decides whether to accept its risk until the date asked for |
+| Ask to accept the risk | The people it reached | An approver decides whether to accept its risk until the date asked for |
 | Say you fixed it | The people it reached, approvers and administrators | AgentGov checks it again now, where it can, and resolves it if it is gone |
 | Accept the risk | Approvers and administrators, and the `secops` role from triage on | It goes to nobody until the date chosen, at most a year away, and opens again then if it still holds. A reason is required |
-| Resolve, dismiss | The same | As for any finding. Dismiss is for findings that are wrong, and says why ([dismissing a finding](#dismissing-a-finding)): to live with a real one, accept its risk |
+| Resolve, dismiss | The same | As for any issue. Dismiss is for issues that are wrong, and says why ([dismissing an issue](#dismissing-an-issue)): to live with a real one, accept its risk |
 | Reopen | The same | It starts its chain over |
 
 The people responsible for an agent acknowledge its issues, but don't accept its risks:
@@ -113,14 +113,14 @@ someone who isn't accountable for the agent signs that off. AgentGov refuses an 
 from the agent's owner, its sponsors and the people in its team (its own or its
 blueprint's), whatever their role.
 
-Raised again after it was resolved, or when its accepted risk runs out, a finding starts its
+Raised again after it was resolved, or when its accepted risk runs out, an issue starts its
 chain over, from the first step.
 
 | Where | How |
 |---|---|
-| Admin UI | **Findings**: who each issue is with, **Acknowledge** and **Accept risk**, the **Yours** and **Exceptions asked** filters, and a page per finding with its chain, its messages and its history, where the people it reached also say **Not mine**, **Ask for an exception** or **I fixed it**. People without a role see **Your issues** |
-| CLI | `agentgov findings list --mine`, `agentgov findings get ID`, `agentgov findings acknowledge ID`, `agentgov findings accept ID --reason "…" --until 2026-12-31` (or `--until 90`, in days), `agentgov findings not-mine ID --reason "…"`, `agentgov findings ask-exception ID --reason "…" --until 90`, `agentgov findings decline-exception ID --reason "…"`, `agentgov findings recheck ID` |
-| API | `GET /v1/me/issues`, `GET /v1/findings/{id}`, `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` with `{"reason": "…", "until": "2026-12-31"}`, `POST /v1/findings/{id}/not-mine` with `{"reason": "…"}`, `POST /v1/findings/{id}/exception` with `{"reason": "…", "until": 90}`, `POST /v1/findings/{id}/exception/decline`, `POST /v1/findings/{id}/recheck`, and `GET /v1/findings?asked=true` for the exceptions asked for |
+| Admin UI | **Issues**: who each issue is with, **Acknowledge** and **Accept risk**, the **Yours** and **Risk acceptance asked** filters, and a page per issue with its chain, its messages and its history, where the people it reached also say **Not mine**, **Ask to accept the risk** or **I fixed it**. People without a role see **Your issues** |
+| CLI | `agentgov issues list --mine`, `agentgov issues get ID`, `agentgov issues acknowledge ID`, `agentgov issues accept ID --reason "…" --until 2026-12-31` (or `--until 90`, in days), `agentgov issues not-mine ID --reason "…"`, `agentgov issues ask-to-accept ID --reason "…" --until 90`, `agentgov issues decline-to-accept ID --reason "…"`, `agentgov issues recheck ID` |
+| API | `GET /v1/me/issues`, `GET /v1/findings/{id}`, `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` with `{"reason": "…", "until": "2026-12-31"}`, `POST /v1/findings/{id}/not-mine` with `{"reason": "…"}`, `POST /v1/findings/{id}/exception` with `{"reason": "…", "until": 90}`, `POST /v1/findings/{id}/exception/decline`, `POST /v1/findings/{id}/recheck`, and `GET /v1/findings?asked=true` for those whose people asked for their risk to be accepted. The API calls issues findings |
 
 ### Answering an issue
 
@@ -131,18 +131,18 @@ On its page (the link in each email and chat message), besides acknowledging it,
   step of its chain at once, rather than when its time runs out, and the people there see
   why in its history. At the last step it stays there. Someone it reached at an earlier step
   can say so too: it is recorded, and the issue stays where it is.
-* **Ask for an exception.** They say why its risk is acceptable for now, and until when (a
-  year at most). The issue stays with them, acknowledged, and is listed under **Exceptions
-  asked** for approvers, who accept its risk (with what was asked, or changed) or decline,
+* **Ask to accept the risk.** They say why its risk is acceptable for now, and until when
+  (a year at most). The issue stays with them, acknowledged, and is listed under **Risk
+  acceptance asked**, and on **Approvals**, for approvers, who accept its risk (with what was asked, or changed) or decline,
   saying why; declined, it stays with whoever asked, to fix. The people accountable for the
   agent can't accept its risks themselves.
 * **Say they fixed it.** AgentGov checks it again at once where it can: with a posture
   scan, by reading the agent's platform again (one clean read is enough when someone asks,
   where a scheduled sync takes two), with its Microsoft connection, by computing the agent's
   risk again, or by checking its instructions again. If it is gone, it is resolved;
-  otherwise it stays open and says so. A Copilot Studio agent's findings come from the last
+  otherwise it stays open and says so. A Copilot Studio agent's issues come from the last
   import or sync, so a fix made in Copilot Studio shows after the next one. Threats and
-  findings from other systems can't be checked on demand: they resolve themselves, or an
+  issues from other systems can't be checked on demand: they resolve themselves, or an
   approver resolves them.
 
 ## People who leave
@@ -185,7 +185,7 @@ an hour. Each one sent
 is a `finding.notified` entry in the ledger, and each one given up on a
 `finding.notification_failed` warning. The control-plane replica that leads sends them
 ([production](production.md#several-replicas)), and claims each message for a minute
-before it sends it, so none goes twice while the lead moves. The finding's page lists its
+before it sends it, so none goes twice while the lead moves. The issue's page lists its
 messages and how each went.
 
 An email's subject reads `[AgentGov] Medium issue about agent support-bot: …`. It says why
@@ -215,14 +215,14 @@ Not every issue needs to reach an inbox:
   sent (`quiet`).
 * **A quiet first sync.** When AgentGov first reads a platform (AWS, Copilot Studio,
   Microsoft 365, ...), what it finds about the platform's agents was there before anyone
-  looked: their risky settings, and AgentGov's own findings about them. With
+  looked: their risky settings, and AgentGov's own issues about them. With
   `AGENTGOV_ISSUES_QUIET_FIRST_SYNC` (true by default), those go to their people in
   AgentGov without an email or a chat message, so that connecting a platform doesn't flood
-  inboxes; the finding's `details.baseline` says so. One message does go: the issue that
+  inboxes; the issue's `details.baseline` says so. One message does go: the issue that
   says how many of the platform's agents are left to review (`platform.agents_to_review`),
   to the catch-all team. What later syncs find is sent as usual, and so is a baseline
-  finding that comes back after it was resolved.
-* **Types turned off** reach no one at all ([below](#kinds-of-findings)).
+  issue that comes back after it was resolved.
+* **Types turned off** reach no one at all ([below](#kinds-of-issues)).
 
 ### A daily digest
 
@@ -233,7 +233,7 @@ default), each address and team chat with open issues gets one message a day tha
 them. Those waiting for someone to take them on come first, then those taken on and not
 fixed yet, the most severe first. Each has a link to it, says when it goes further unless
 someone takes it on, and is marked new if it was found since the last digest. An email lists
-25 and counts the rest; a chat message lists 10, and links to the findings in AgentGov.
+25 and counts the rest; a chat message lists 10, and links to the issues in AgentGov.
 
 Issues below `AGENTGOV_ISSUES_NOTIFY_SEVERITY` are in it too. So with
 `AGENTGOV_ISSUES_NOTIFY_SEVERITY=high` and a digest, critical and high issues are sent as
@@ -246,32 +246,32 @@ that can't be sent is tried again a little later, waiting longer each time; afte
 it is an `issues.digest_failed` warning, and waits for the next day's. With several
 replicas, the one that leads sends it, once.
 
-## Kinds of findings
+## Kinds of issues
 
-Every check raises findings of its own types, such as `agent.no_owner`,
+Every check raises issues of its own types, such as `agent.no_owner`,
 `platform.no_guardrail` or `agent.ungranted_tool_use`, at the severity it judges. An
 organisation that doesn't act on some of them, or judges them otherwise, says so per type:
 
 * **Off.** The check still runs, but what it finds is kept dismissed: in nobody's list and
-  no one's inbox. Its open findings are dismissed when it is turned off (each a
+  no one's inbox. Its open issues are dismissed when it is turned off (each a
   `finding.dismissed` entry, by the administrator, "its type is off"). Turned on again, what
-  its checks find again comes back, the next time they run; a finding someone dismissed by
+  its checks find again comes back, the next time they run; an issue someone dismissed by
   hand stays dismissed.
 * **A severity of its own.** For what the type finds from then on, and what it found that is
   still open; `default` (null) goes back to its checks' own.
 
 ```console
-$ agentgov findings type platform.shared_with_everyone --severity low
+$ agentgov issues type platform.shared_with_everyone --severity low
 finding-type/platform.shared_with_everyone: on, severity low
-$ agentgov findings type agent.no_sponsor --off
-$ agentgov findings types
+$ agentgov issues type agent.no_sponsor --off
+$ agentgov issues types
 TYPE                           MODE  SEVERITY       OPEN  TOTAL
 agent.no_owner                 on    (its checks')  3     5
 agent.no_sponsor               off   (its checks')  0     0
 platform.shared_with_everyone  on    low            12    12
 ```
 
-In the UI, **Findings > Types** lists every type AgentGov has raised, with how many are
+In the UI, **Issues > Types** lists every type AgentGov has raised, with how many are
 open, and an administrator changes one there, or sets up a type before anything of it is
 raised. The API is `GET /v1/finding-types` and `PUT /v1/finding-types/{type}` with
 `{"mode": "off"}` or `{"severity": "low"}`, and manifests have a `FindingType` kind:
@@ -288,16 +288,16 @@ off or lowers its severity.
 
 ## Checks that couldn't run
 
-Some findings come from another system's data: the Copilot Studio inventory, Microsoft
+Some issues come from another system's data: the Copilot Studio inventory, Microsoft
 Entra's agent identities, Defender's alerts, the other platforms AgentGov reads. When the
 sync that reads it fails, or reads some of it only (a region it may not read, an agent whose
 resource policy it can't see, more pages than it reads), AgentGov can't tell whether the
-open findings it would have checked still hold. They stay open, marked **unverified**, with
+open issues it would have checked still hold. They stay open, marked **unverified**, with
 why: "the last AWS sync couldn't read 111122223333/us-west-2: AccessDeniedException ...".
 The people they reached know they might not hold; the next sync that reads them verifies
 them again.
 
-A finding from another platform closes only after two syncs in a row find its cause gone, so
+An issue from another platform closes only after two syncs in a row find its cause gone, so
 one odd page of results doesn't close it and open it again.
 
 ## Threats that don't happen again
@@ -306,44 +306,44 @@ A threat is an event: an agent used a tool it isn't granted, or called another a
 the gateway. One that hasn't happened again for `AGENTGOV_THREAT_FINDING_DAYS` (30) is
 resolved, with a `finding.resolved` entry that says so; if it happens again, it opens again
 and starts its chain over. `0` keeps threats open until someone closes them. Posture
-findings aren't affected: they close when their check finds their cause gone.
+issues aren't affected: they close when their check finds their cause gone.
 
-## Dismissing a finding
+## Dismissing an issue
 
-Dismissing says a finding is wrong, and why: the reason is in the ledger and on the
-finding. It can be for a while (`until`: a date, or a number of days, a year at most), after
+Dismissing says an issue is wrong, and why: the reason is in the ledger and on the
+issue. It can be for a while (`until`: a date, or a number of days, a year at most), after
 which it opens again if it still holds and someone decides anew; without one, it is for
 good. A threat someone dismissed opens again as soon as it happens again, its history saying
 who dismissed it and why: each one is a new event.
 
 | Where | How |
 |---|---|
-| Admin UI | A finding's **Dismiss** asks why, and until when |
-| CLI | `agentgov findings dismiss ID --reason "…" [--until 30]` |
+| Admin UI | An issue's **Dismiss** asks why, and until when |
+| CLI | `agentgov issues dismiss ID --reason "…" [--until 30]` |
 | API | `POST /v1/findings/{id}/dismiss` with `{"reason": "…", "until": 30}` |
 
 ## When it gets worse
 
-A finding raised again at a higher severity than its people were told it had (medium,
+An issue raised again at a higher severity than its people were told it had (medium,
 then high) starts its chain over, from its first step: they are told again, and a step that
 had acknowledged it acknowledges it again (`finding.severity_raised`). Its severity
 settling back, or rising again only as far as they were told, tells nobody again.
 
 ## Many at once
 
-On **Findings**, tick findings, or all of those shown, or, with **Group by agent**, all of
+On **Issues**, tick issues, or all of those shown, or, with **Group by agent**, all of
 those about an agent, and act on them together: **Acknowledge**, **Resolve**, **Accept
 risk…** and **Dismiss…** (one reason, and one date, for all of them) and **Reopen**. Each is
 done on its own: one that can't be is left as it was, and AgentGov lists those left, with
 why. Accepting the risk of one about an agent you sponsor is left, for instance: someone
 else signs that off. The people an issue reached acknowledge theirs this way too; approvers,
 administrators and the `secops` role (from triage on) do the rest. **Download CSV** gives
-the findings shown as a spreadsheet: who each is with, how often it was seen, who closed it.
+the issues shown as a spreadsheet: who each is with, how often it was seen, who closed it.
 
 | Where | How |
 |---|---|
-| Admin UI | **Findings**: the boxes on findings and on agents' groups, the bar above them, **Group by agent**, **Download CSV** |
-| CLI | Name several: `agentgov findings dismiss ID ID --reason "A red-team exercise"`, and the same for `acknowledge`, `resolve`, `accept` and `reopen`. `agentgov findings list -q` prints only IDs, `--csv` every column |
+| Admin UI | **Issues**: the boxes on issues and on agents' groups, the bar above them, **Group by agent**, **Download CSV** |
+| CLI | Name several: `agentgov issues dismiss ID ID --reason "A red-team exercise"`, and the same for `acknowledge`, `resolve`, `accept` and `reopen`. `agentgov issues list -q` prints only IDs, `--csv` every column |
 | API | `POST /v1/findings/bulk` with `{"action": "dismiss", "findings": [...], "reason": "…", "until": 30}`: up to 500 a call. It answers with those `done`, and those `left`, each with `why` |
 
 ## In the ledger
@@ -387,5 +387,5 @@ lists what that channel got.
 ## Turning it off
 
 `agentgov features set issues off`, or **Features** in the UI. Then nothing is routed or sent,
-findings stay in AgentGov's list as before, and people without an AgentGov role can't sign in
+issues stay in AgentGov's list as before, and people without an AgentGov role can't sign in
 unless approvals-by-person is on. Accepted risks still open again at their dates.

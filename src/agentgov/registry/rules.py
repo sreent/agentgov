@@ -606,8 +606,8 @@ def assess(rule: ManagementRule, agent: Agent, ctx: _Context) -> Assessment:
         if not hits:
             return NO
         more = f" (and {len(hits) - 1} more)" if len(hits) > 1 else ""
-        reasons.append(f"open finding: {hits[0].title}{more}")
-        hints.append("fix its findings")
+        reasons.append(f"open issue: {hits[0].title}{more}")
+        hints.append("fix its issues")
     if "risk_level" in c:
         if RISK_LEVELS.index(agent.risk_level or "low") < RISK_LEVELS.index(c["risk_level"]):
             return NO

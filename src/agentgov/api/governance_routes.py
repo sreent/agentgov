@@ -330,7 +330,7 @@ def ask_for_exception(
         raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
     with _rt(request).db.session() as s:
         finding = findings.get(s, finding_id)
-        _theirs(s, finding, principal, "ask for an exception")
+        _theirs(s, finding, principal, "ask to accept its risk")
         asked = issues.ask_exception(
             s,
             finding,

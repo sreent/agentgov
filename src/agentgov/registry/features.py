@@ -227,8 +227,8 @@ CATALOG: tuple[Feature, ...] = (
         CONTROL,
         ENFORCE,
         {
-            ENFORCE: "Such results are withheld, and a finding is raised.",
-            MONITOR: "They reach the agent, are recorded and raise a finding.",
+            ENFORCE: "Such results are withheld, and an issue is raised.",
+            MONITOR: "They reach the agent, are recorded and raise an issue.",
             OFF: "Results aren't checked.",
         },
     ),
@@ -242,8 +242,8 @@ CATALOG: tuple[Feature, ...] = (
         CONTROL,
         MONITOR,
         {
-            ENFORCE: "Such prompts are refused, and a finding is raised.",
-            MONITOR: "They go through, are recorded and raise a finding.",
+            ENFORCE: "Such prompts are refused, and an issue is raised.",
+            MONITOR: "They go through, are recorded and raise an issue.",
             OFF: "Prompts aren't checked.",
         },
     ),
@@ -259,9 +259,9 @@ CATALOG: tuple[Feature, ...] = (
         {
             ENFORCE: "Where the check it supports is enforced too, calls wait for its verdict "
             "(AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS at most), and what it flags is withheld or "
-            "refused, and raises a finding.",
+            "refused, and raises an issue.",
             MONITOR: "It answers in the background, after the call went on: what it flags is "
-            "recorded and raises a finding.",
+            "recorded and raises an issue.",
             OFF: "It isn't asked.",
         },
         needs="IBM Granite Guardian (AGENTGOV_GUARDIAN_URL) where the processor runs",
@@ -291,7 +291,7 @@ CATALOG: tuple[Feature, ...] = (
         {
             ENFORCE: "Critical-risk agents are refused, and the automatic block applies.",
             MONITOR: "Their calls go through and are recorded; the automatic block only "
-            "raises a finding.",
+            "raises an issue.",
             OFF: "Risk is scored and shown but doesn't change what agents may do.",
         },
     ),
@@ -319,7 +319,7 @@ CATALOG: tuple[Feature, ...] = (
         {
             ENFORCE: "They are refused.",
             MONITOR: "They are let through and recorded, and with discovery on, added to the "
-            "inventory as discovered agents.",
+            "inventory as unmanaged agents.",
         },
     ),
     Feature(
@@ -363,11 +363,11 @@ CATALOG: tuple[Feature, ...] = (
         "Shadow-agent discovery",
         "detection",
         "Agents seen in telemetry or at the gateway that aren't registered are added to the "
-        "inventory as discovered.",
+        "inventory as unmanaged agents.",
         SWITCH,
         ON,
         {
-            ON: "Unregistered agents appear as discovered.",
+            ON: "Unregistered agents appear as unmanaged.",
             OFF: "They aren't added; registered agents' activity is still recorded.",
         },
     ),
@@ -397,13 +397,13 @@ CATALOG: tuple[Feature, ...] = (
         "posture-checks",
         "Posture checks",
         "detection",
-        "A regular scan raises findings for agents without owners or sponsors, attestations "
+        "A regular scan raises issues for agents without owners or sponsors, attestations "
         "that are due, stale agents, broad grants and tool servers awaiting review.",
         SWITCH,
         ON,
         {
             ON: "The scan runs every AGENTGOV_POSTURE_INTERVAL_SECONDS, and on demand.",
-            OFF: "No scans. Findings already raised stay until they are resolved.",
+            OFF: "No scans. Issues already raised stay until they are resolved.",
         },
     ),
     Feature(
@@ -460,12 +460,12 @@ CATALOG: tuple[Feature, ...] = (
         "developers",
         "The MCP servers developers have set up on their machines, as agentgov mcp scan "
         "reports them, are compared with the approved tool servers, and those that aren't "
-        "approved raise findings.",
+        "approved raise issues.",
         SWITCH,
         ON,
         {
-            ON: "Reports are taken, and unapproved servers raise findings.",
-            OFF: "Reports are refused. Findings already raised stay until resolved.",
+            ON: "Reports are taken, and unapproved servers raise issues.",
+            OFF: "Reports are refused. Issues already raised stay until resolved.",
         },
     ),
     Feature(
@@ -538,14 +538,14 @@ CATALOG: tuple[Feature, ...] = (
         "issues",
         "Issues to the people responsible",
         "lifecycle",
-        "Findings go to the people responsible for them: an agent's owner, then its sponsors, "
+        "Issues go to the people responsible for them: an agent's owner, then its sponsors, "
         "then its team, each told by email and in their team's chat, and the issue goes up "
         "the chain when nobody acknowledges it in time.",
         SWITCH,
         ON,
         {
-            ON: "Findings are routed, escalated and sent to the people responsible.",
-            OFF: "Findings stay in AgentGov's list only, as for administrators.",
+            ON: "Issues are routed, escalated and sent to the people responsible.",
+            OFF: "Issues stay in AgentGov's list only, as for administrators.",
         },
         needs="teams with email addresses or chat channels; a mail server "
         "(AGENTGOV_SMTP_URL) for email",
@@ -632,7 +632,7 @@ CATALOG: tuple[Feature, ...] = (
         "defender",
         "Microsoft Defender alerts",
         "microsoft",
-        "AgentGov turns Defender's alerts about agents into findings on those agents.",
+        "AgentGov turns Defender's alerts about agents into issues on those agents.",
         SWITCH,
         ON,
         {
@@ -699,7 +699,7 @@ CATALOG: tuple[Feature, ...] = (
         "platforms",
         "AgentGov reads the agents on AWS into the inventory (Amazon Bedrock agents, "
         "AgentCore's harnesses, agent runtimes and gateways, Amazon Quick's agents, and AWS "
-        "Agent Registry's agents and MCP servers), with their risky settings as findings, on a "
+        "Agent Registry's agents and MCP servers), with their risky settings as issues, on a "
         "schedule and on demand.",
         SWITCH,
         ON,
@@ -715,7 +715,7 @@ CATALOG: tuple[Feature, ...] = (
         "platforms",
         "AgentGov reads the agents on Google Cloud into the inventory (Agent Runtime agents, "
         "formerly Vertex AI Agent Engine, and Agent Registry's agents and MCP servers), with "
-        "their risky settings as findings, on a schedule and on demand.",
+        "their risky settings as issues, on a schedule and on demand.",
         SWITCH,
         ON,
         {
@@ -729,7 +729,7 @@ CATALOG: tuple[Feature, ...] = (
         "Salesforce agents",
         "platforms",
         "AgentGov reads the Agentforce agents in your Salesforce org into the inventory, with "
-        "their risky settings as findings and their topics' instructions checked, on a "
+        "their risky settings as issues and their topics' instructions checked, on a "
         "schedule and on demand.",
         SWITCH,
         ON,
@@ -745,7 +745,7 @@ CATALOG: tuple[Feature, ...] = (
         "platforms",
         "AgentGov reads the agents in your Databricks workspaces into the inventory (agents on "
         "Model Serving, Agent Bricks agents, Genie agents, and the MCP services in Unity "
-        "Catalog), with their risky settings as findings, on a schedule and on demand.",
+        "Catalog), with their risky settings as issues, on a schedule and on demand.",
         SWITCH,
         ON,
         {
@@ -759,7 +759,7 @@ CATALOG: tuple[Feature, ...] = (
         "Microsoft Foundry agents",
         "platforms",
         "AgentGov reads the agents in your Microsoft Foundry projects into the inventory "
-        "(prompt, hosted and workflow agents), with their risky settings as findings, linked to "
+        "(prompt, hosted and workflow agents), with their risky settings as issues, linked to "
         "their Entra agent identities, on a schedule and on demand.",
         SWITCH,
         ON,
@@ -784,7 +784,7 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "Nothing is sent, and the secops role only reads.",
             "inform": "SIEMs and chats get the destinations' events and alerts, and the "
             "events API serves them; the secops role reads.",
-            "triage": "As inform, and the secops role resolves, dismisses and reopens findings.",
+            "triage": "As inform, and the secops role resolves, dismisses and reopens issues.",
             "contain": "As triage, and the secops role blocks and unblocks agents, tool "
             "servers, model providers and identity issuers.",
             "decide": "As contain, and the secops role approves and denies approval "

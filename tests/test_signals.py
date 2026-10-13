@@ -1,5 +1,5 @@
 """What a finding says over time: why it was dismissed and until when, a threat that happens
-again, and a severity that rises (docs/issues.md#dismissing-a-finding)."""
+again, and a severity that rises (docs/issues.md#dismissing-an-issue)."""
 
 from __future__ import annotations
 

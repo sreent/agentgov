@@ -266,7 +266,7 @@ def set_status(session: Session, ts: ToolServer, action: str, *, actor: str) -> 
     if action == "unblock" and ts.status != BLOCKED:
         raise InvalidTransition("tool server is not blocked")
     if action == "approve" and ts.status != PENDING:
-        raise InvalidTransition("tool server is not pending review")
+        raise InvalidTransition("tool server is not pending approval")
     previous, ts.status = ts.status, targets[action]
     ledger.append(
         session,

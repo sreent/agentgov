@@ -489,7 +489,7 @@ class TestEnforce:
         with rt.db.session() as s:
             s.get(Finding, finding.id).severity = "medium"
         assert _run(client, ids.utcnow())[name]["acted"] == 1
-        assert "open finding: Agent support-bot is stale" in _issues(client)[0].title
+        assert "open issue: Agent support-bot is stale" in _issues(client)[0].title
         with rt.db.session() as s:
             # A finding a failed sync can't vouch for doesn't count.
             s.get(Finding, finding.id).verified = False

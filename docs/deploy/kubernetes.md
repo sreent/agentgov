@@ -75,7 +75,7 @@ the chart, and add your values after it:
 |---|---|---|---|
 | (the defaults) | Everything: the control plane, the gateway and its processor, OPA, Presidio, the OpenTelemetry Collector, PostgreSQL and Keycloak | 810m CPU, 3.1 GiB | Governing agents' calls, and the inventory |
 | [`profiles/monitor.yaml`](../../deploy/helm/agentgov/profiles/monitor.yaml) | The same without Presidio, with every control watching rather than stopping ([starting points](../features.md#starting-points)) | 710m, 1.6 GiB | Seeing what the gateway's controls would do before they do it |
-| [`profiles/inventory.yaml`](../../deploy/helm/agentgov/profiles/inventory.yaml) | The control plane, the OpenTelemetry Collector and PostgreSQL: no gateway, processor, OPA, Presidio or Keycloak | 250m, 576 MiB | The agents on your platforms, their findings and issues, management rules and the evidence ledger, with nothing enforced on agents' calls |
+| [`profiles/inventory.yaml`](../../deploy/helm/agentgov/profiles/inventory.yaml) | The control plane, the OpenTelemetry Collector and PostgreSQL: no gateway, processor, OPA, Presidio or Keycloak | 250m, 576 MiB | The agents on your platforms, their issues, management rules and the evidence ledger, with nothing enforced on agents' calls |
 
 ```bash
 helm install agentgov deploy/helm/agentgov -n agentgov --create-namespace --wait \
@@ -91,7 +91,7 @@ sign in with your identity provider (`AGENTGOV_OIDC_ISSUER` and `AGENTGOV_OIDC_C
 `controlPlane.env`, its client's secret as `oidc-client-secret` in the Secret;
 [Microsoft Entra ID](#signing-in-with-microsoft-entra-id)) or an API token. Moving from the
 inventory to the gateway later is an upgrade with the other values: the registry, its
-findings and the ledger stay; turn the gateway's features on in **Features**.
+issues and the ledger stay; turn the gateway's features on in **Features**.
 
 ## Before others rely on it
 
@@ -272,7 +272,7 @@ The chart always sets `AGENTGOV_OIDC_CLIENT_SECRET` from the Secret, so a value 
 | `featurePreset` | — | The features' starting modes, applied once: `monitor` or `inventory` ([starting points](../features.md#starting-points)) |
 | `controlPlane.ingress`, `gateway.ingress`, `keycloak.ingress` | off | Ingresses, at the hosts of the addresses above unless `host` is set |
 | `controlPlane.httpRoute`, `gateway.httpRoute`, `keycloak.httpRoute` | off | Gateway API routes instead, attached to the Gateway in `parentRefs`, with optional `timeouts` |
-| `gateway.enabled` | `true` | The gateway and its governance processor (and Presidio): what enforces on agents' calls. Off, AgentGov keeps the inventory, findings and issues ([profiles](#profiles)) |
+| `gateway.enabled` | `true` | The gateway and its governance processor (and Presidio): what enforces on agents' calls. Off, AgentGov keeps the inventory and its issues ([profiles](#profiles)) |
 | `opa.enabled` | `true` | OPA, which the gateway needs; the control plane asks it about Copilot Studio's tool calls and AuthZEN's questions |
 | `gateway.replicas`, `processor.replicas`, `opa.replicas` | `1` | The decision path; scale them together |
 | `gateway.configInterval` | `5` | Seconds between the gateway's checks for configuration changes |
