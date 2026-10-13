@@ -172,7 +172,8 @@ class NewTicket:
 
     marker: str  # finds it again, should AgentGov not hear back that it was opened
     summary: str
-    description: str
+    description: str  # the issue, with what agents, platforms and people wrote
+    footer: str  # AgentGov's own words, with its link: the only text a desk may render
     severity: str
     group: str | int | None
     fields: dict[str, Any] = field(default_factory=dict)
@@ -220,27 +221,27 @@ def new_ticket(
         " · ".join(_about(session, finding, ticket.team)),
         f"Severity: {severity} · Kind: {finding.type} · First seen: "
         f"{ids.isoformat(finding.first_seen)}",
-        "",
     ]
     if ticket.replaces:
         lines += [
+            "",
             f"It takes over from {ticket.replaces}, which was resolved while AgentGov still "
             "finds the problem.",
-            "",
         ]
-    lines += [
-        f"In AgentGov: {link(settings, finding)}",
-        "",
+    footer = (
+        f"In AgentGov: {link(settings, finding)}\n\n"
         "AgentGov keeps this ticket in step with the issue: it adds a note when the issue "
         "changes, and resolves the ticket once the problem is gone. Assigning the ticket, or "
         "starting work on it, tells AgentGov that someone has taken the issue on. To accept "
-        "the risk instead of fixing it, ask for that in AgentGov: an approver decides.",
-    ]
+        "the risk instead of fixing it, ask for that in AgentGov: an approver decides."
+    )
     cfg = desk.tickets or {}
     return NewTicket(
         marker=marker(ticket),
-        summary=summary,
+        # One line: a desk refuses a summary that breaks (Jira does).
+        summary=" ".join(summary.split()),
         description="\n".join(lines),
+        footer=footer,
         severity=severity,
         group=desks.group_for(cfg, ticket.team),
         fields=dict(cfg.get("fields") or {}),

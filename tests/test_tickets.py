@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import re
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -280,6 +281,8 @@ def issue(
     severity: str = "high",
     type_: str = "agent.no_owner",
     category: str = findings.POSTURE,
+    title: str = "Agent support-bot has no owner",
+    description: str = "Nobody owns it.",
 ) -> str:
     """A finding, routed to its people: an issue."""
     rt = rt_of(client)
@@ -290,8 +293,8 @@ def issue(
             severity=severity,
             subject=agent_id,
             agent_id=agent_id,
-            title="Agent support-bot has no owner",
-            description="Nobody owns it.",
+            title=title,
+            description=description,
             remediation="Give it an owner.",
             category=category,
         )
@@ -726,6 +729,130 @@ class TestJira:
         (comment,) = made["comments"]
         assert "dismissed the issue in AgentGov" in comment["body"]
         assert comment["properties"] == [{"key": "sd.public.comment", "value": {"internal": True}}]
+
+
+class TestWhatOthersWrote:
+    """Tickets carry what agents, platforms and people wrote: a Copilot Studio maker names
+    the agent, anyone an issue reaches gives a reason. In the desk, it shows as written."""
+
+    # Jira's wiki markup, which its REST API 2 renders in descriptions and comments.
+    JIRA = {
+        "link": "[Sign in again|https://evil.example/sso]",
+        "mention": "[~accountid:5b10ac8d82e05b22cc7d4ef5]",
+        "image": "!https://evil.example/pixel.png!",
+        "macro": "{color:red}urgent{color} {html}<b>x</b>{html}",
+        "formatting": "*bold* _italic_ +under+ ^sup^ {{mono}}\nh1. Heading\n* item",
+        "line break": "C:\\\\temp \\[x|https://evil.example\\]",
+        "end of the block": "{noformat}[x|https://evil.example]{NoFormat:title=y}",
+    }
+    BLOCK = re.compile(r"\{noformat(?::[^}]*)?\}", re.IGNORECASE)
+
+    def split(self, text: str) -> tuple[str, str]:
+        """What Jira renders as markup (outside {noformat} blocks), and what it shows as it
+        is (inside them, zero-width spaces aside)."""
+        parts = self.BLOCK.split(text)
+        assert len(parts) % 2 == 1, f"a block left open: {text!r}"
+        return "".join(parts[0::2]), "".join(parts[1::2]).replace("\u200b", "")
+
+    @pytest.mark.parametrize("construct", JIRA)
+    def test_jira_shows_markup_as_text(
+        self,
+        desks_client: TestClient,
+        secrets: Path,
+        fake: FakeDesks,
+        agent: dict[str, Any],
+        construct: str,
+    ) -> None:
+        written = self.JIRA[construct]
+        desk(desks_client, secrets, "jsm", "jira", JIRA, tickets={"group": "OPS"})
+        fid = issue(
+            desks_client,
+            agent["id"],
+            title=f"{written} is published without user authentication",
+            description=f"Its description: {written}",
+        )
+        run(desks_client)
+        (made,) = fake.jira.values()
+        rendered, shown = self.split(made["fields"]["description"])
+        assert written not in rendered and "evil.example" not in rendered
+        assert f"{written} is published" in shown and f"Its description: {written}" in shown
+        # AgentGov's own link stays a link.
+        assert f"In AgentGov: https://agentgov.example.com/ui/#/findings/{fid}" in rendered
+        assert "[~" not in made["fields"]["description"]
+        # A reason someone gives goes as a comment, as written too.
+        rt = rt_of(desks_client)
+        with rt.db.session() as s:
+            issues.ask_exception(
+                s,
+                findings.get(s, fid),
+                actor="person:alice@example.com",
+                name="alice@example.com",
+                reason=written,
+                until=30,
+            )
+        run(desks_client)
+        rendered, shown = self.split(made["comments"][-1]["body"])
+        assert written not in rendered and "evil.example" not in rendered
+        assert written in shown and "[~" not in made["comments"][-1]["body"]
+        assert f"https://agentgov.example.com/ui/#/findings/{fid}" in rendered
+
+    def test_a_summary_is_one_line(
+        self, desks_client: TestClient, secrets: Path, fake: FakeDesks, agent: dict[str, Any]
+    ) -> None:
+        desk(desks_client, secrets, "jsm", "jira", JIRA, tickets={"group": "OPS"})
+        issue(desks_client, agent["id"], title="support-bot\nis published\r\nwithout auth")
+        run(desks_client)
+        (made,) = fake.jira.values()
+        assert made["fields"]["summary"] == (
+            "[AgentGov] High: support-bot is published without auth"
+        )
+
+    # Between [code] and [/code], ServiceNow renders HTML in work notes.
+    SNOW = {
+        "code": "[code]<a href='https://evil.example/sso'>Sign in again</a>[/code]",
+        "any case": "[CODE]<img src='https://evil.example/p.png'>[/Code]",
+        "spaces": "[ code ]<b>x</b>[ / code ]",
+    }
+    CODE_TAG = re.compile(r"\[\s*/?\s*code\s*\]", re.IGNORECASE)
+
+    @pytest.mark.parametrize("construct", SNOW)
+    def test_servicenow_opens_no_code_tag(
+        self,
+        desks_client: TestClient,
+        secrets: Path,
+        fake: FakeDesks,
+        agent: dict[str, Any],
+        construct: str,
+    ) -> None:
+        written = self.SNOW[construct]
+        desk(desks_client, secrets, "itsm", "servicenow", SNOW)
+        fid = issue(desks_client, agent["id"], title=f"{written} has no owner")
+        run(desks_client)
+        rt = rt_of(desks_client)
+        with rt.db.session() as s:
+            issues.ask_exception(
+                s,
+                findings.get(s, fid),
+                actor="person:alice@example.com",
+                name="alice@example.com",
+                reason=written,
+                until=30,
+            )
+        run(desks_client)
+        with rt.db.session() as s:
+            findings.dismiss(s, s.get(Finding, fid), actor="admin:ada", reason=written)
+        run(desks_client)
+        record = fake.snow["sys1"]
+        texts = [
+            record["short_description"],
+            record["description"],
+            record["close_notes"],
+            *record["notes"],
+        ]
+        assert len(record["notes"]) >= 2
+        for text in texts:
+            assert not self.CODE_TAG.search(text), text
+            assert written in text.replace("\u200b", ""), text
 
 
 class TestFreshservice:
