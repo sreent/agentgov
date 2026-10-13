@@ -254,7 +254,8 @@ there.
 ### Upgrading
 
 The control plane keeps its database schema current: when a new version starts, it applies
-the migrations it brings. Back up PostgreSQL first, then:
+the migrations it brings. Back up PostgreSQL first ([backing up](../backup.md#with-compose)),
+then:
 
 ```bash
 git pull

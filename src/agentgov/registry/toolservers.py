@@ -31,7 +31,7 @@ from agentgov.db import lock, mark_changed
 from agentgov.models import BLOCKED, PENDING, ToolServer
 from agentgov.registry import findings, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 APPROVED = "approved"
 FIELDS = (
@@ -252,7 +252,7 @@ def update(
             type="toolserver.updated",
             actor=actor,
             resource=f"toolserver/{ts.name}",
-            details={k: getattr(ts, k) for k in changed},
+            details={**{k: getattr(ts, k) for k in changed}, "changes": changes(ts)},
         )
         mark_changed(session, "toolservers")
     return changed

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 
-from agentgov import ids, ledger
+from agentgov import ids, ledger, witness
 from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.models import (
     DELETED,
@@ -636,6 +636,10 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
                 ledger.with_trace_link(ledger.to_dict(e), rt.settings.trace_url) for e in recent
             ],
             "ledger": head,
+            # Whether the database lost ledger entries AgentGov wrote (docs/backup.md).
+            "witness": (
+                witness.compare(s, path).to_dict() if (path := rt.settings.witness_file()) else None
+            ),
             "opa": {**opa_status(s), "bundle_revision": bundle_revision},
             "replicas": rt.coordination.replicas(s),
         }

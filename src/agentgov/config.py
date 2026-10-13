@@ -13,6 +13,7 @@ import functools
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 _GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
@@ -182,6 +183,11 @@ class Settings:
     # Where the ledger's archives go, as gzipped JSON Lines files (a mounted volume, or a
     # bucket mounted as one). Needed with AGENTGOV_LEDGER_RETENTION_DAYS.
     ledger_archive_dir: str | None = None
+    # A file where the control plane keeps the ledger's head outside the database, to notice
+    # a database restored from an older backup or rolled back (docs/backup.md): on storage
+    # that restoring the database doesn't touch. By default ledger-head.json in
+    # AGENTGOV_LEDGER_ARCHIVE_DIR, when that is set; "off" keeps none.
+    ledger_witness_file: str | None = None
     # Hours between ledger checkpoints: the chain's head, kept, and time-stamped when a
     # time-stamping authority is set. 0 makes them only on demand.
     ledger_checkpoint_hours: int = 24
@@ -870,6 +876,14 @@ class Settings:
                 "sat, sun"
             )
         return {WEEKDAYS.index(d) for d in days}
+
+    def witness_file(self) -> str | None:
+        """Where the ledger's head is kept outside the database, if anywhere."""
+        if self.ledger_witness_file:
+            return None if self.ledger_witness_file == "off" else self.ledger_witness_file
+        if self.ledger_archive_dir:
+            return str(Path(self.ledger_archive_dir) / "ledger-head.json")
+        return None
 
     def escalation_delays(self) -> dict[str, float]:
         """Hours an issue of each severity waits at a step of its chain."""

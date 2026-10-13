@@ -54,7 +54,7 @@ from agentgov.platforms import connections
 from agentgov.registry import access_packages, features, findings, scopes, teams, validation
 from agentgov.registry import agents as agents_svc
 from agentgov.registry.errors import Conflict, NotFound, RegistryError, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 FEATURE = "management-rules"
 POSTURE = "posture-checks"
@@ -365,7 +365,7 @@ def update(
             type="rule.updated",
             actor=actor,
             resource=f"rule/{rule.name}",
-            details={k: _details(rule)[k] for k in changed},
+            details={**{k: _details(rule)[k] for k in changed}, "changes": changes(rule)},
         )
     return changed
 

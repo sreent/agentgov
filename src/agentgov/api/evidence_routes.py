@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import select
 
-from agentgov import compliance, ids, ledger, retention, timestamping, transparency
+from agentgov import compliance, ids, ledger, retention, timestamping, transparency, witness
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.models import LedgerCheckpoint
 from agentgov.runtime import JOB_WAIT_SECONDS
@@ -47,6 +47,26 @@ def make_checkpoint(request: Request, _: Principal = Depends(admin)) -> dict[str
     if point is None:
         raise HTTPException(409, "the ledger is empty")
     return point
+
+
+@router.get("/ledger/witness")
+def ledger_witness(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+    """The database's ledger against its head kept outside it (docs/backup.md): whether it
+    lost entries, or holds another history, since AgentGov last looked."""
+    rt = _rt(request)
+    path = rt.settings.witness_file()
+    if path is None:
+        return {"configured": False}
+    with rt.db.session() as s:
+        return {"configured": True, **witness.compare(s, path).to_dict()}
+
+
+@router.post("/ledger/witness/accept")
+def accept_rewind(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
+    """Accept that the ledger lost entries (a database restored on purpose): what is missing
+    is written into the ledger (``ledger.rewound``), and it goes on from the head it has."""
+    status = _rt(request).accept_rewind(actor=principal.actor)
+    return {"configured": True, **status.to_dict()}
 
 
 @router.get("/ledger/checkpoints/{seq}/timestamp")

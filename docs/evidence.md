@@ -13,6 +13,9 @@ handing it to the people who assess compliance:
 * **Retention**: the ledger keeps every entry, or keeps them for a period and then
   archives them, checked link by link, before they leave the database. Operational records
   whose history is in the ledger go after a period of their own.
+* **A database restored from an older backup** shows: the ledger's head is kept outside it
+  too, and the entries it lost are recorded once someone accepts the restore
+  ([backing up and restoring](backup.md#a-rewound-ledger)).
 * **Compliance reports** say what AgentGov does towards the EU AI Act, ISO/IEC 42001 and
   the NIST AI RMF, how far that is set up, and the evidence. An **evidence pack** bundles
   them with the ledger for the period, so that an assessor can check it without AgentGov.
@@ -174,7 +177,7 @@ systems and 2 August 2028 for Annex I systems):
 | 4 AI literacy | Outside AgentGov; its issues, approvals and previews put the people responsible in the loop |
 | 5, 6, 50 Classification | The [classification register](#a-classification-register): what each agent is under the Act, your role for it, why, and what it is for |
 | 9 Risk management | Risk tiers, risk scores, posture findings and risk-based blocking |
-| 12 Record-keeping | The ledger: every decision and action, hash-chained, checkpointed and time-stamped |
+| 12 Record-keeping | The ledger: every decision and action, each edit with what it changed from and to, hash-chained, checkpointed and time-stamped |
 | 14 Human oversight | Approvals for destructive actions, the kill switch, monitor modes |
 | 15 Accuracy, robustness and cybersecurity | The controls at the gateway, enforced or monitored |
 | 19, 26(6) Keeping the logs | Retention of at least six months, archives that verify offline |
@@ -294,3 +297,4 @@ evidence pack for the day.
 | `ledger.archived` | Entries were archived, then removed: the range, the archive and its SHA-256 |
 | `retention.pruned` | Operational records past their retention were removed: how many of each |
 | `agent.classified` | An agent was classified, or its classification changed or was cleared: what it was and what it is |
+| `ledger.rewound` (critical) | An administrator accepted that the database lost ledger entries (a restore): which, and when AgentGov had written them ([backing up and restoring](backup.md#a-rewound-ledger)) |

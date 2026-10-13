@@ -330,6 +330,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Running in production](docs/production.md): several control-plane replicas, people
   working at once, mutual TLS between the components, with certificates from SPIRE if you
   like, and signed policy bundles
+* [Backing up and restoring](docs/backup.md): what to back up, restoring, and a restored
+  database's missing ledger entries noticed and recorded
 * [Policies](docs/policies.md), and AuthZEN both ways
 * [Landscape and standards](docs/landscape.md)
 * [Architecture decision records](docs/adr)

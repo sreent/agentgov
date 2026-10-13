@@ -35,7 +35,7 @@ from agentgov.registry import (
     validation,
 )
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 # action -> (allowed source states, target state)
 TRANSITIONS: dict[str, tuple[frozenset[str], str]] = {
@@ -389,7 +389,7 @@ def update(
             actor=actor,
             agent=agent,
             reason=reason,
-            details={"changed": changed},
+            details={"changed": changed, "changes": changes(agent)},
         )
         mark_changed(session, "agents")
     return changed

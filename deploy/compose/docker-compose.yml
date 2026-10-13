@@ -120,6 +120,9 @@ services:
       AGENTGOV_LEDGER_REKOR_URL: ${AGENTGOV_LEDGER_REKOR_URL:-http://rekor:3000}
       AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE: /tls/transparency/key.pem
       AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE: ${AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE:-/tls/transparency/log.pub}
+      # The ledger's head, kept outside PostgreSQL: a database restored from an older backup
+      # shows (docs/backup.md). Its volume isn't PostgreSQL's: don't restore it with that.
+      AGENTGOV_LEDGER_WITNESS_FILE: ${AGENTGOV_LEDGER_WITNESS_FILE:-/var/lib/agentgov/witness/ledger-head.json}
       # Features the deployment pins, e.g. "least-privilege=monitor" (docs/features.md).
       # Administrators choose the others on the Features page.
       AGENTGOV_FEATURES: ${AGENTGOV_FEATURES:-}
@@ -152,6 +155,7 @@ services:
     volumes:
       - ${AGENTGOV_DESTINATION_SECRETS_DIR:-./destination-secrets}:/destination-secrets:ro
       - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: control-plane}}
+      - ledger-witness:/var/lib/agentgov/witness
     ports:
       - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:8000:8000"
     depends_on:
@@ -371,6 +375,7 @@ services:
 
 volumes:
   postgres-data:
+  ledger-witness:
   gateway-config:
   certs:
   rekor-data:

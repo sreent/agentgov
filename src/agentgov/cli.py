@@ -2690,6 +2690,36 @@ def ledger_checkpoint() -> None:
     _done("checkpoint", str(out["seq"]), f"{out['hash']}{stamped}")
 
 
+@ledger_app.command("witness")
+def ledger_witness() -> None:
+    """Whether the database lost ledger entries AgentGov wrote: a restore from an older
+    backup, or a roll-back (docs/backup.md)."""
+    out = _call("GET", "/v1/ledger/witness")
+    if not out["configured"]:
+        typer.echo(
+            "No file keeps the ledger's head outside the database (AGENTGOV_LEDGER_WITNESS_FILE)."
+        )
+        return
+    typer.echo(out["message"])
+    if out.get("error"):
+        typer.echo(f"The file {out['file']}: {out['error']}")
+    if out["rewound"]:
+        raise typer.Exit(1)
+
+
+@ledger_app.command("accept-restore")
+def ledger_accept_restore(yes: bool = YES) -> None:
+    """Accept that the database lost ledger entries (a restore you made on purpose): what
+    is missing is written into the ledger, and it goes on from the head it has."""
+    seen = _call("GET", "/v1/ledger/witness")
+    if not seen.get("rewound"):
+        _fail("the ledger has every entry AgentGov wrote: nothing to accept")
+    typer.echo(seen["message"])
+    _confirm("Record the missing entries in the ledger and go on?", yes)
+    out = _call("POST", "/v1/ledger/witness/accept")
+    _done("ledger", "restore", f"accepted; it goes on from entry {out['head_seq']}")
+
+
 @ledger_app.command("proof")
 def ledger_proof(
     seq: int,

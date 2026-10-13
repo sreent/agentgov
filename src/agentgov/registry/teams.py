@@ -20,7 +20,7 @@ from agentgov.models import DELETED, Agent, Blueprint, Destination, Team
 from agentgov.registry import scopes, validation
 from agentgov.registry.destinations import CHAT
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 FIELDS = ("description", "members", "emails", "destinations", "default")
 # Good enough to catch typos; the mail server has the last word.
@@ -178,7 +178,7 @@ def update_team(
             type="team.updated",
             actor=actor,
             resource=f"team/{team.name}",
-            details={k: _details(team)[k] for k in changed},
+            details={**{k: _details(team)[k] for k in changed}, "changes": changes(team)},
         )
     return changed
 

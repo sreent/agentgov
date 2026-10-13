@@ -52,8 +52,12 @@ services:
       AGENTGOV_FEATURE_PRESET: ${AGENTGOV_FEATURE_PRESET:-inventory}
       # Destinations' credentials (docs/secops.md): a file per destination, named after it.
       AGENTGOV_DESTINATION_SECRETS_DIR: /destination-secrets
+      # The ledger's head, kept outside PostgreSQL: a database restored from an older backup
+      # shows (docs/backup.md). Its volume isn't PostgreSQL's: don't restore it with that.
+      AGENTGOV_LEDGER_WITNESS_FILE: ${AGENTGOV_LEDGER_WITNESS_FILE:-/var/lib/agentgov/witness/ledger-head.json}
     volumes:
       - ${AGENTGOV_DESTINATION_SECRETS_DIR:-./destination-secrets}:/destination-secrets:ro
+      - ledger-witness:/var/lib/agentgov/witness
     ports:
       - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:8000:8000"
     depends_on:
@@ -67,3 +71,4 @@ services:
 
 volumes:
   postgres-data:
+  ledger-witness:

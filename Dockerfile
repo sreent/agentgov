@@ -20,8 +20,10 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     if [ -f /run/secrets/extra_ca ]; then export PIP_CERT=/run/secrets/extra_ca; fi; \
     pip install --no-cache-dir ".[postgres,otlp-protobuf]" \
     && useradd --uid 10001 --create-home agentgov \
-    # Shared with agentgateway: the control plane writes its config here.
-    && mkdir -p /gateway && chown agentgov /gateway
+    # Shared with agentgateway: the control plane writes its config here. And where it
+    # keeps the ledger's head outside the database (docs/backup.md), on a volume of its own.
+    && mkdir -p /gateway /var/lib/agentgov/witness \
+    && chown agentgov /gateway /var/lib/agentgov/witness
 USER agentgov
 WORKDIR /home/agentgov
 # psycopg's own copies of libpq and OpenSSL look for trusted certificate authorities

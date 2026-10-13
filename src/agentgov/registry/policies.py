@@ -14,7 +14,7 @@ from agentgov.opa import bundle as opa_bundle
 from agentgov.opa import rego
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
-from agentgov.registry.versions import start_edit
+from agentgov.registry.versions import changes, start_edit
 
 
 def get(session: Session, ref: str) -> Policy:
@@ -93,7 +93,13 @@ def update(
         type="policy.updated",
         actor=actor,
         resource=f"policy/{policy.name}",
-        details={"version": policy.version, "enabled": enabled},
+        details={
+            "version": policy.version,
+            "enabled": enabled,
+            "changes": changes(policy),
+            # The policy as it now is: the ledger holds each version that was in force.
+            **({"rego": source} if "rego" in changes(policy) else {}),
+        },
     )
     mark_changed(session, "policies")
     return True

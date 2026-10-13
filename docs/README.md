@@ -21,6 +21,8 @@
 * [Running in production](production.md): several control-plane replicas, people working
   at once, mutual TLS between the components, with certificates from SPIRE if you like, and
   signed policy bundles
+* [Backing up and restoring](backup.md): what to back up, restoring, and a restored
+  database's missing ledger entries noticed and recorded
 * [Features](features.md): which parts of AgentGov you use, and how strictly
 * [Administration](administration.md): signing in, roles, and every task in the admin UI,
   the CLI and the API

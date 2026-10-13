@@ -1676,7 +1676,9 @@ function controlPlaneCard(ov, info, features, gateway = true) {
         opaNote(ov.opa)),
       cell('Replicas', replicasValue(ov.replicas), replicasNote(ov.replicas)),
       cell('Evidence ledger', ov.ledger ? plural(ov.ledger.checked, 'entry', 'entries') : 'Not verified',
-        ov.ledger?.head ? ['Head ', h('span', { class: 'hash', title: ov.ledger.head }, shortHash(ov.ledger.head))] : null, '#/ledger'),
+        ov.witness?.rewound
+          ? h('span', { style: 'color: var(--critical-ink)' }, 'Entries are missing: the database was restored')
+          : ov.ledger?.head ? ['Head ', h('span', { class: 'hash', title: ov.ledger.head }, shortHash(ov.ledger.head))] : null, '#/ledger'),
       gateway ? cell('Gateway', info?.gateway_url ? copyable(info.gateway_url, 'gateway URL') : 'Not configured',
         features ? [
           features.find((f) => f.key === 'unknown-callers')?.mode === 'monitor' ? 'Unknown callers let through' : 'Unknown callers refused',
@@ -6028,7 +6030,29 @@ function ledgerDetail(e) {
       ['Hash', h('code', { class: 'hash break' }, e.hash)],
       ['Previous hash', h('code', { class: 'hash break' }, e.prev_hash)],
     ]),
+    changesTable(e.details?.changes),
     Object.keys(e.details || {}).length ? jsonBlock(e.details) : null);
+}
+
+// What an edit changed, from what to what (long text by its length and SHA-256).
+function changedValue(value) {
+  if (value === null || value === undefined || value === '') return h('span', { class: 'muted' }, '—');
+  if (typeof value === 'object' && value.sha256 && value.length) {
+    return h('span', { class: 'muted', title: `SHA-256 ${value.sha256}` }, `${fmt(value.length)} characters (${value.sha256.slice(0, 12)}…)`);
+  }
+  return h('code', { class: 'break' }, typeof value === 'string' ? value : JSON.stringify(value));
+}
+
+function changesTable(changes) {
+  const rows = Object.entries(changes || {});
+  if (!rows.length) return null;
+  return h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('caption', { class: 'sr-only' }, 'What changed'),
+    h('thead', {}, h('tr', {}, ['Changed', 'From', 'To'].map((t) => h('th', { scope: 'col' }, t)))),
+    h('tbody', {}, rows.map(([field, { from, to }]) => h('tr', {},
+      h('td', { 'data-label': 'Changed' }, humanize(field)),
+      h('td', { 'data-label': 'From' }, changedValue(from)),
+      h('td', { 'data-label': 'To' }, changedValue(to)))))));
 }
 
 const clockFmt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
@@ -6209,8 +6233,9 @@ async function renderLedger({ params }) {
     if (err.status === 401) throw err;
     renderEntries([], err);
   }
-  const [kept, points] = await Promise.all([
+  const [kept, points, witness] = await Promise.all([
     api('v1/ledger/retention').catch(() => null), api('v1/ledger/checkpoints?limit=10').catch(() => null),
+    api('v1/ledger/witness').catch(() => null),
   ]);
 
   return h('div', { class: 'page' },
@@ -6220,6 +6245,7 @@ async function renderLedger({ params }) {
       actions: [verifyBtn, exportBtn],
     }),
     ledgerTabs('entries'),
+    rewoundCallout(witness),
     banner,
     h('div', { class: 'filters' },
       h('div', { class: 'field' }, h('label', { for: 'ledger-agent' }, 'Agent'), agentInput, agentList),
@@ -6230,6 +6256,30 @@ async function renderLedger({ params }) {
       countEl),
     h('section', { class: 'card', 'aria-label': 'Ledger entries' }, tableHost),
     kept && points ? checkpointsCard(kept, points) : null);
+}
+
+// The database lost ledger entries AgentGov wrote (a restore): what, and accepting it.
+function rewoundCallout(witness) {
+  if (!witness?.rewound) return null;
+  const accept = can('admin') ? h('button', {
+    type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'accept-rewind',
+    onclick: guarded(async () => {
+      const done = await ask({
+        title: 'Accept the restore?',
+        text: 'AgentGov writes into the ledger which entries are missing and when they were written, then goes on from the entries the database has. Do it once you know why they are missing: a backup you restored on purpose, say.',
+        tone: 'danger', iconName: 'shield-check', confirm: 'Accept and record it',
+        submit: () => api('v1/ledger/witness/accept', { method: 'POST' }),
+      });
+      if (!done) return;
+      toast('Recorded in the ledger: entry ledger.rewound.');
+      await refresh();
+    }),
+  }, icon('shield-check'), 'Accept the restore') : null;
+  return callout('critical', 'octagon', h('div', { class: 'stack' },
+    h('span', {}, h('strong', {}, witness.state === 'behind' ? 'Entries are missing. ' : 'Another history. '), witness.message,
+      ' The chain still verifies: only the head kept outside the database tells.'),
+    h('span', { class: 'small' }, `The head is kept in ${witness.file} (docs/backup.md).`),
+    accept ? h('div', { class: 'btn-row' }, accept) : null));
 }
 
 function ledgerTabs(current) {

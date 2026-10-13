@@ -28,7 +28,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agentgov import __version__, ids, ledger, transparency
+from agentgov import __version__, ids, ledger, transparency, witness
 from agentgov.config import LEDGER_MIN_DAYS, Settings
 from agentgov.models import (
     ACTIVE,
@@ -141,6 +141,8 @@ class Facts:
     denied: int = 0
     monitored: int = 0
     chain: dict[str, Any] = field(default_factory=dict)
+    # The ledger against its head kept outside the database (agentgov.witness), if kept.
+    witness: dict[str, Any] | None = None
     checkpoints: int = 0
     stamped: int = 0
     latest_stamp: datetime | None = None
@@ -201,6 +203,8 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
         )
     )
     f.chain = ledger.verify(session)
+    path = settings.witness_file()
+    f.witness = witness.compare(session, path).to_dict() if path else None
     points = list(session.scalars(select(LedgerCheckpoint)))
     f.checkpoints = len(points)
     stamps = [p.timestamped_at for p in points if p.timestamp is not None and p.timestamped_at]
@@ -347,6 +351,12 @@ def _logging(f: Facts) -> Assessment:
     if not f.chain.get("valid"):
         a.status = ATTENTION
         a.gaps.append("The ledger's chain is broken: find out why before relying on it.")
+    elif f.witness and f.witness["rewound"]:
+        a.status = ATTENTION
+        a.gaps.append(
+            f"{f.witness['message']} If that was a restore, an administrator accepts it under "
+            "Ledger, which records the gap in the ledger."
+        )
     elif not f.settings.ledger_tsa_url:
         a.status = PARTLY
         a.gaps.append(

@@ -42,7 +42,7 @@ from agentgov.db import lock, mark_changed
 from agentgov.models import DESTINATION_KINDS, Destination, LedgerHead, Team
 from agentgov.registry import desks, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 OTLP, WEBHOOK, SPLUNK_HEC, SLACK, TEAMS, SERVICENOW, JIRA, FRESHSERVICE = DESTINATION_KINDS
 SIEM = (OTLP, WEBHOOK, SPLUNK_HEC)
@@ -382,7 +382,10 @@ def update(
             type="destination.updated",
             actor=actor,
             resource=f"destination/{destination.name}",
-            details={k: getattr(destination, k) for k in changed},
+            details={
+                **{k: getattr(destination, k) for k in changed},
+                "changes": changes(destination),
+            },
         )
         mark_changed(session, "destinations")
     return changed

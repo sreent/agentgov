@@ -35,7 +35,7 @@ from agentgov.registry.errors import (
     NotFound,
     ValidationError,
 )
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 FEATURE = "access-packages"
 FIELDS = (
@@ -194,7 +194,7 @@ def update(
             type="access_package.updated",
             actor=actor,
             resource=f"access-package/{package.name}",
-            details={k: _details(package)[k] for k in changed},
+            details={**{k: _details(package)[k] for k in changed}, "changes": changes(package)},
         )
     return changed
 

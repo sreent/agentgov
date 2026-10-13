@@ -12,7 +12,7 @@ from agentgov.db import mark_changed
 from agentgov.models import Agent, Blueprint
 from agentgov.registry import scopes, teams, validation
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 FIELDS = (
     "description",
@@ -131,7 +131,7 @@ def update(
             type="blueprint.updated",
             actor=actor,
             resource=f"blueprint/{bp.name}",
-            details={k: getattr(bp, k) for k in changed},
+            details={**{k: getattr(bp, k) for k in changed}, "changes": changes(bp)},
         )
         mark_changed(session, "blueprints")
     return changed

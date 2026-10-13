@@ -10,7 +10,16 @@ from typing import Any
 
 import httpx
 
-from agentgov import health, ids, ledger, migrations, retention, timestamping, transparency
+from agentgov import (
+    health,
+    ids,
+    ledger,
+    migrations,
+    retention,
+    timestamping,
+    transparency,
+    witness,
+)
 from agentgov.config import Settings
 from agentgov.coordination import Coordinator
 from agentgov.db import Database
@@ -289,6 +298,8 @@ class Runtime:
             with self.db.session() as session:
                 features.apply_deployment_preset(session, self.settings)
                 features.apply_pins(session, self.settings)
+        # A database restored from an older backup shows before anything is written to it.
+        self.check_witness()
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self.init_db()
@@ -479,9 +490,88 @@ class Runtime:
             out["logged"] = self.log_checkpoints()
             with self.db.session() as session:
                 out["archived"] = retention.archive(session, self.settings)
+            checked = self.check_witness()
+            out["witness"] = checked.state if checked is not None else None
             with self.db.session() as session:
                 out["pruned"] = retention.prune_records(session, self.settings)
             return out
+
+    def check_witness(self) -> witness.Status | None:
+        """Compare the database's ledger with its head kept outside it (docs/backup.md), and
+        keep that head up to date while they agree. A ledger behind it, or with another
+        history, is a critical finding until an administrator accepts it."""
+        path = self.settings.witness_file()
+        if path is None:
+            return None
+        with self.coordination.job("witness"):
+            with self.db.session() as session:
+                status = witness.compare(session, path)
+                if status.rewound:
+                    if status.restored_at is None:
+                        # Noticed now: where the database's ledger ended stays the start of
+                        # the gap, whatever is written after.
+                        status.restored_at = status.head_seq
+                    findings.raise_finding(
+                        session,
+                        type=witness.FINDING,
+                        severity="critical",
+                        subject="ledger",
+                        title="The ledger lost entries: the database was restored or changed",
+                        description=status.message(),
+                        details={
+                            "restored_at": status.restored_at,
+                            "witness": witness.kept_head(status),
+                        },
+                        remediation="If the database was restored on purpose (after a failed "
+                        "upgrade, say), accept the restore under Ledger: AgentGov writes what is "
+                        "missing into the ledger. If nobody restored it, find out who changed "
+                        "the database.",
+                    )
+            if not status.rewound and status.error is None:
+                try:
+                    witness.write(path, status.head_seq, status.head_hash)
+                except witness.WitnessError as exc:
+                    status.error = str(exc)
+            if status.error:
+                log.warning("ledger witness: %s", status.error)
+        return status
+
+    def accept_rewind(self, *, actor: str) -> witness.Status:
+        """An administrator accepts that the ledger lost entries (a restore): what is missing
+        goes into the ledger itself, and it goes on from the head it has."""
+        path = self.settings.witness_file()
+        if path is None:
+            raise Conflict("no file keeps the ledger's head (AGENTGOV_LEDGER_WITNESS_FILE)")
+        with self.coordination.job("witness"):
+            with self.db.session() as session:
+                status = witness.compare(session, path)
+                if not status.rewound:
+                    raise Conflict("the ledger has every entry AgentGov wrote: nothing to accept")
+                ledger.append(
+                    session,
+                    type="ledger.rewound",
+                    actor=actor,
+                    severity="critical",
+                    resource="ledger",
+                    reason=status.message(),
+                    details={
+                        "state": status.state,
+                        "head": {"seq": status.head_seq, "hash": status.head_hash},
+                        "witness": {**witness.kept_head(status), "at": status.witness_at},
+                        **({"missing": status.missing()} if status.missing() else {}),
+                        **(
+                            {"restored_at": status.restored_at}
+                            if status.restored_at is not None
+                            else {}
+                        ),
+                    },
+                )
+            with self.db.session() as session:
+                findings.resolve_key(session, f"{witness.FINDING}:ledger", actor=actor)
+                seq, hash_ = witness.head(session)
+            witness.write(path, seq, hash_)
+            with self.db.session() as session:
+                return witness.compare(session, path)
 
     def make_checkpoint(self, *, wait: float | None = None) -> dict[str, Any] | None:
         """A checkpoint at the chain's head now (None for an empty ledger), time-stamped
