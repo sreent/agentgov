@@ -1,0 +1,29 @@
+# HTTPS in front of AgentGov on one server (docs/deploy/server.md): Caddy gets and renews a
+# certificate for each address in .env, and passes each address's requests on to its part
+# of the stack. Started by docker-compose.server.yml with COMPOSE_PROFILES=https.
+
+import certificates.caddy
+
+# The control plane: people, the CLI and developers' tools.
+{$AGENTGOV_PUBLIC_URL} {
+	import certificates-{$AGENTGOV_CERTIFICATES:letsencrypt}
+	reverse_proxy control-plane:8000
+}
+
+# The gateway: agents' calls to tool servers, model providers and other agents.
+{$AGENTGOV_GATEWAY_PUBLIC_URL} {
+	import certificates-{$AGENTGOV_CERTIFICATES:letsencrypt}
+	reverse_proxy agentgateway:8080
+}
+
+# Keycloak: people's sign-in and agents' tokens. Its admin console only from the addresses
+# in AGENTGOV_KEYCLOAK_CONSOLE_FROM: private ones, unless set.
+{$AGENTGOV_KEYCLOAK_PUBLIC_URL} {
+	import certificates-{$AGENTGOV_CERTIFICATES:letsencrypt}
+	@console {
+		path /admin /admin/*
+		not remote_ip {$AGENTGOV_KEYCLOAK_CONSOLE_FROM:private_ranges}
+	}
+	respond @console "Keycloak's admin console is open only to AGENTGOV_KEYCLOAK_CONSOLE_FROM" 403
+	reverse_proxy keycloak:8080
+}

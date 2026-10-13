@@ -3,6 +3,7 @@
 | Where | Guide | For |
 |---|---|---|
 | Your machine | [Local](local.md): Docker Compose, Kubernetes with kind, or the control plane alone | Evaluation and development |
+| One Linux server | [One server](server.md): Docker Compose, with HTTPS from Caddy | Production without Kubernetes: the inventory, or all of it |
 | Any Kubernetes cluster | [Kubernetes](kubernetes.md): the Helm chart | Your own clusters, on premises or in any cloud |
 | Google Cloud | [GKE](gcp.md), with Cloud SQL and Secret Manager | Production on Google Cloud |
 | Microsoft Azure | [AKS](azure.md), with Azure Database for PostgreSQL, Key Vault and Microsoft Entra ID | Production on Azure, and Microsoft 365 shops |

@@ -603,6 +603,14 @@ def server(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     settings = Settings.from_env()
+    known = settings.well_known_secrets()
+    if known and not settings.only_this_machine():
+        _fail(
+            f"{', '.join(known)} {'holds' if len(known) == 1 else 'hold'} a value from "
+            f"AgentGov's examples, which everybody knows, and people reach this control plane "
+            f"at {settings.public_url}: give {'it' if len(known) == 1 else 'each'} a random "
+            "value of its own (openssl rand -hex 32)"
+        )
     if not settings.tls_dir:
         uvicorn.run(
             "agentgov.api.app:create_app",
@@ -800,6 +808,54 @@ def transparency_key(
         transparency.generate_log_key(directory) if log else transparency.generate(directory)
     )
     typer.echo(f"key: {key}\npublic key: {public}")
+
+
+@app.command("keycloak-realm")
+def keycloak_realm(
+    source: Path = typer.Argument(
+        ..., help="AgentGov's realm, as it comes: deploy/compose/keycloak/agentgov-realm.json."
+    ),
+    public_url: str | None = typer.Option(
+        None,
+        "--public-url",
+        help="The control plane's address (AGENTGOV_PUBLIC_URL), where Keycloak sends "
+        "administrators back after they sign in.",
+    ),
+    demo_users: bool = typer.Option(
+        True,
+        "--demo-users/--no-demo-users",
+        help="Keep the demo's people (admin, alice, sofia, ...), whose password everybody "
+        "knows, and the demo app they sign in to.",
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o", help="Write it here, for Keycloak to import (default: print it)."
+    ),
+) -> None:
+    """AgentGov's Keycloak realm made for an installation: administrators sent back to its
+    address, and, with --no-demo-users, none of the demo's people (docs/deploy/server.md).
+    Keycloak imports a realm on its first start only."""
+    from agentgov.identity import realm
+
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except OSError as exc:
+        _fail(f"can't read {source}: {exc.strerror}")
+    except ValueError:
+        _fail(f"{source} isn't a Keycloak realm (JSON)")
+    try:
+        made = realm.for_installation(data, public_url=public_url, demo_users=demo_users)
+    except ValueError as exc:
+        _fail(str(exc))
+    text = json.dumps(made, indent=2) + "\n"
+    if output is None:
+        typer.echo(text, nl=False)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
+    people = [u["username"] for u in made.get("users", []) if "serviceAccountClientId" not in u]
+    typer.echo(
+        f"realm: {output} ({'people: ' + ', '.join(people) if people else 'no demo people'})"
+    )
 
 
 @app.command("gateway-config")

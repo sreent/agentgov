@@ -9,9 +9,9 @@ Three ways, for evaluation and development:
 | [Kubernetes with kind](#kubernetes-with-kind) | The Helm chart on a local cluster | Working on the chart, rehearsing a Kubernetes install |
 | [The control plane alone](#the-control-plane-alone) | The API and the admin UI, on a SQLite file | Working on the API or the UI |
 
-None of them is for anything others rely on. [Deploying AgentGov](README.md) covers
-servers and the cloud, and [SECURITY.md](../../SECURITY.md) what to do before anyone else
-can reach it.
+None of them is for anything others rely on: [one server](server.md) is, with Compose, and
+[Deploying AgentGov](README.md) covers Kubernetes and the cloud. [SECURITY.md](../../SECURITY.md)
+says what to do before anyone else can reach it.
 
 ## Docker Compose
 
@@ -39,10 +39,8 @@ The demo then walks through each control with a real MCP client (the
 [demo](../demo.md) lists the steps).
 
 The stack listens on this machine only: its defaults, the tokens and the demo users'
-password, are known to everyone. For anything beyond evaluation on your own machine, copy
-`deploy/compose/.env.example` to `deploy/compose/.env` first and replace every value in it;
-then, to take connections from other machines, set `AGENTGOV_LISTEN_ADDRESS=0.0.0.0` there
-(plain HTTP: put HTTPS in front of it).
+password, are known to everyone. For others to use it, run it as [one server](server.md):
+your own secrets, HTTPS in front, and none of the demo's parts.
 
 ### Endpoints
 
@@ -237,6 +235,7 @@ To start with every control watching rather than stopping, set
 | `docker-compose.yml` | The services and how they connect |
 | `docker-compose.inventory.yml` | The control plane and PostgreSQL alone ([below](#just-the-inventory)) |
 | `docker-compose.no-presidio.yml`, `docker-compose.langfuse.yml`, `docker-compose.guardian.yml` | Overrides: without Presidio, with Langfuse, with Granite Guardian (above) |
+| `docker-compose.server.yml`, `caddy/`, `https/` | For others to rely on: the stack on [one server](server.md), with HTTPS from Caddy, and your own certificate if you have one |
 | `.env.example` | Every secret the stack uses, and its optional settings |
 | `keycloak/agentgov-realm.json` | The realm, imported on Keycloak's first start: the control plane's provisioning client, the `agentgov-admin` sign-in client, the AgentGov roles, the demo users and the demo app people use agents from, `agentgov-demo-chat` |
 | `opa/config.yaml` | OPA's bundle, decision log and status services, all served by the control plane on its internal port, and the key bundles are signed with |
@@ -320,9 +319,8 @@ docker compose -f deploy/compose/docker-compose.inventory.yml up -d --build --wa
 
 Open <http://localhost:8000/ui> with that token (`grep ADMIN_TOKEN deploy/compose/.env`).
 Unlike the full stack, this one has no token everybody knows: it won't start without one.
-It listens on this machine only. To reach it from others, put HTTPS in front of it (a
-reverse proxy on the same machine), or set `AGENTGOV_LISTEN_ADDRESS=0.0.0.0` in `.env` to
-take connections on every address, in plain HTTP. On its first start the control plane applies the inventory starting point: the gateway's
+It listens on this machine only; for others to reach it, [one server](server.md#the-inventory)
+puts HTTPS in front. On its first start the control plane applies the inventory starting point: the gateway's
 features off, and discovery, posture checks, issues, management rules and the platforms on
 ([starting points](../features.md#starting-points)). Every setting in `deploy/compose/.env`
 reaches the control plane: the platforms' credentials

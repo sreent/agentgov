@@ -15,8 +15,29 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 _GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+# The secrets AgentGov's own stacks, .env.example and docs come with: anybody who reaches a
+# control plane that holds one is in.
+WELL_KNOWN_SECRETS = frozenset(
+    {
+        "change-me",
+        "dev",
+        "dev-admin-token",
+        "dev-service-token",
+        "dev-signing-secret",
+        "dev-keycloak-secret",
+        "dev-oidc-secret",
+    }
+)
+SECRET_SETTINGS = (
+    "admin_token",
+    "service_token",
+    "signing_secret",
+    "keycloak_client_secret",
+    "oidc_client_secret",
+)
 M365_PACKAGE_TYPES = ("custom", "shared", "external", "microsoft")
 # The least the ledger keeps its entries for, when it doesn't keep them all: six months, as
 # the EU AI Act asks of providers' and deployers' logs (Articles 19 and 26(6)).
@@ -876,6 +897,19 @@ class Settings:
                 "sat, sun"
             )
         return {WEEKDAYS.index(d) for d in days}
+
+    def well_known_secrets(self) -> list[str]:
+        """The settings holding a secret AgentGov's stacks and examples come with."""
+        return [
+            f"AGENTGOV_{name.upper()}"
+            for name in SECRET_SETTINGS
+            if getattr(self, name) in WELL_KNOWN_SECRETS
+        ]
+
+    def only_this_machine(self) -> bool:
+        """Whether people reach the control plane on this machine only (AGENTGOV_PUBLIC_URL)."""
+        host = urlsplit(self.public_url).hostname or ""
+        return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
 
     def witness_file(self) -> str | None:
         """Where the ledger's head is kept outside the database, if anywhere."""

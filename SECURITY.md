@@ -57,7 +57,10 @@ AgentGov is pre-1.0. Security fixes are made on `main` and included in the next 
 ## Deploying safely
 
 The defaults of the Compose stack and of the Helm chart are for evaluation
-([checklist](docs/deploy/README.md#before-others-rely-on-it)). For anything else:
+([checklist](docs/deploy/README.md#before-others-rely-on-it)). The control plane refuses to
+start when people reach it anywhere but on its own machine and it holds a secret from
+AgentGov's examples. On one server, `docker-compose.server.yml` does most of what follows
+([one server](docs/deploy/server.md)). For anything else:
 
 * Replace every default secret (`deploy/compose/.env.example` lists them), in particular
   `AGENTGOV_ADMIN_TOKEN`, `AGENTGOV_SERVICE_TOKEN`, the Keycloak client secrets and

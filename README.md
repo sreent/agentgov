@@ -156,7 +156,8 @@ starting point, `profiles/monitor.yaml`: every control records what it would hav
 and stops nothing ([Kubernetes](docs/deploy/kubernetes.md#profiles)). Then enforce the
 controls one at a time ([rolling out a control](docs/features.md#rolling-out-a-control)).
 Guides for [Google Cloud](docs/deploy/gcp.md), [Azure](docs/deploy/azure.md) and
-[AWS](docs/deploy/aws.md) add each cloud's database, secrets and load balancer.
+[AWS](docs/deploy/aws.md) add each cloud's database, secrets and load balancer. Without
+Kubernetes, all of it runs on [one server](docs/deploy/server.md) with Docker Compose.
 
 ### The full demo
 
@@ -276,7 +277,7 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 [The documentation's index](docs/README.md) lists every page. Among them:
 
 * [Deploying AgentGov](docs/deploy/README.md): [on your machine](docs/deploy/local.md),
-  [on Kubernetes](docs/deploy/kubernetes.md), and on [Google Cloud](docs/deploy/gcp.md),
+  [on one server](docs/deploy/server.md), [on Kubernetes](docs/deploy/kubernetes.md), and on [Google Cloud](docs/deploy/gcp.md),
   [Azure](docs/deploy/azure.md) and [AWS](docs/deploy/aws.md); all of it, or less: an
   [inventory without the gateway](docs/deploy/kubernetes.md#profiles), or the gateway
   watching before it enforces

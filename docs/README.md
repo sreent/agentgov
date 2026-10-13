@@ -13,7 +13,10 @@
 
 * [Deploying AgentGov](deploy/README.md): choosing where, and a checklist before others
   rely on it
-* [Kubernetes](deploy/kubernetes.md): the Helm chart on any cluster, its values, upgrades
+* [One server](deploy/server.md): Docker Compose on a Linux server, with HTTPS, for
+  production without Kubernetes
+* [Kubernetes](deploy/kubernetes.md): the Helm chart on any cluster, its values, upgrades,
+  and checking the published image's signature
 * [Google Cloud](deploy/gcp.md), [Azure](deploy/azure.md) and [AWS](deploy/aws.md): GKE,
   AKS and EKS with each cloud's database, secrets, load balancer and certificates
 * [Configuration](configuration.md): every setting, where to set it, and which the

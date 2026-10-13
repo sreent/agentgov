@@ -11,16 +11,18 @@
 #
 #   echo "AGENTGOV_ADMIN_TOKEN=$(openssl rand -hex 32)" > .env
 #
-# The admin UI and API are at http://localhost:8000, on this machine only: to reach them
-# from others, put HTTPS in front, or set AGENTGOV_LISTEN_ADDRESS=0.0.0.0. Every setting
-# in .env (the platforms' credentials, AGENTGOV_OIDC_* for administrators' sign-in,
-# AGENTGOV_SMTP_* for issues' emails; docs/configuration.md) reaches the control plane.
+# The admin UI and API are at http://localhost:8000, on this machine only. For others to
+# reach them, COMPOSE_PROFILES=https in .env puts Caddy in front, with HTTPS at
+# AGENTGOV_PUBLIC_URL (docs/deploy/server.md). Every setting in .env (the platforms'
+# credentials, AGENTGOV_OIDC_* for administrators' sign-in, AGENTGOV_SMTP_* for issues'
+# emails; docs/configuration.md) reaches the control plane.
 
 name: agentgov-inventory
 
 services:
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: agentgov
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentgov}
@@ -36,8 +38,10 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: agentgov:local
+    # Built from this checkout, or the published image (docs/deploy/server.md).
+    image: ${AGENTGOV_IMAGE:-agentgov:local}
     command: ["server"]
+    restart: unless-stopped
     env_file:
       - path: .env
         required: false
@@ -69,6 +73,35 @@ services:
       timeout: 5s
       retries: 30
 
+  # HTTPS in front of the control plane, for others to reach it at AGENTGOV_PUBLIC_URL:
+  # only with COMPOSE_PROFILES=https in .env. Its certificates come from AGENTGOV_CERTIFICATES
+  # (caddy/certificates.caddy), and are kept on the caddy-data volume.
+  caddy:
+    image: caddy:2.11.7-alpine
+    profiles: [https]
+    restart: unless-stopped
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        case "$$AGENTGOV_PUBLIC_URL" in https://*) ;; *) echo "set AGENTGOV_PUBLIC_URL in
+        .env to the https:// address people reach AgentGov at" >&2; exit 1 ;; esac;
+        exec caddy run --config /etc/caddy/inventory.Caddyfile --adapter caddyfile
+    environment:
+      AGENTGOV_PUBLIC_URL: ${AGENTGOV_PUBLIC_URL:-}
+      AGENTGOV_CERTIFICATES: ${AGENTGOV_CERTIFICATES:-letsencrypt}
+      AGENTGOV_ACME_CA: ${AGENTGOV_ACME_CA:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - ${AGENTGOV_HTTPS_DIR:-./https}:/https:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
 volumes:
   postgres-data:
   ledger-witness:
+  caddy-data:
+  caddy-config:

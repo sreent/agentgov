@@ -1,0 +1,25 @@
+# Where the HTTPS certificates come from: AGENTGOV_CERTIFICATES in .env, one of the four
+# below (docs/deploy/server.md#certificates). Imported by both stacks' Caddyfiles.
+
+# From Let's Encrypt: the addresses' names are in public DNS, and it reaches this server on
+# ports 80 and 443.
+(certificates-letsencrypt) {
+}
+
+# From an ACME server of your own (AGENTGOV_ACME_CA: its directory URL).
+(certificates-acme) {
+	tls {
+		ca {$AGENTGOV_ACME_CA}
+	}
+}
+
+# From Caddy's own authority, whose root people's and agents' machines must trust.
+(certificates-internal) {
+	tls internal
+}
+
+# Your own: one certificate for every address (with its chain), and its key, in
+# AGENTGOV_HTTPS_DIR.
+(certificates-files) {
+	tls /https/tls.crt /https/tls.key
+}

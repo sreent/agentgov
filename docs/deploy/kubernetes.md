@@ -11,8 +11,25 @@ This page covers any cluster; the [Google Cloud](gcp.md), [Azure](azure.md) and
 
 Each release will publish the AgentGov image to `ghcr.io/sreent/agentgov` (amd64 and arm64)
 and the chart to `oci://ghcr.io/sreent/charts/agentgov`; the chart installs its own version of
-the image. Until the first release, or to run a build of your own, build the image and push it
-to a registry your cluster pulls from:
+the image. Both are signed with Sigstore's keyless signing: the signature says that this
+repository's release workflow built them from a version tag, as GitHub vouches for it. Check
+it before installing, with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+(the same for the chart, `ghcr.io/sreent/charts/agentgov:0.1.0`):
+
+```bash
+cosign verify ghcr.io/sreent/agentgov:0.1.0 \
+  --certificate-identity-regexp '^https://github\.com/sreent/ai-agent-governance-platform/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+An admission controller (Sigstore's policy-controller, Kyverno) can check the same before
+any pod runs it. The image's index also holds its SBOM and how it was built (SLSA
+provenance), covered by the signature:
+`docker buildx imagetools inspect ghcr.io/sreent/agentgov:0.1.0 --format '{{ json .SBOM }}'`
+(`.Provenance` for the build).
+
+Until the first release, or to run a build of your own, build the image and push it to a
+registry your cluster pulls from:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \

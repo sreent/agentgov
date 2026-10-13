@@ -15,6 +15,7 @@ restore shows. This page says what to back up, how to restore, and what to check
 | The ledger's head, kept apart | `AGENTGOV_LEDGER_WITNESS_FILE` ([below](#a-rewound-ledger)) | Nothing to back up | **No**: it is what notices that the database went back |
 | Credentials and keys | Destinations' and model providers' secret files, the bundle signing key, the transparency log's key, certificates, `AGENTGOV_SIGNING_SECRET`, the admin token, single sign-on's client secret | Your secret store, which backs them up | — |
 | Configuration | `.env` and `docker-compose.override.yml`, or the Helm values | With your infrastructure's code | — |
+| Caddy's own authority, with `AGENTGOV_CERTIFICATES=internal` ([one server](deploy/server.md#certificates)) | The `caddy-data` volume | Copy it; it changes only when Caddy renews | — |
 
 `agentgov export` writes the registry as manifests ([registry as
 code](administration.md#registry-as-code)): a readable copy of what is governed, worth keeping

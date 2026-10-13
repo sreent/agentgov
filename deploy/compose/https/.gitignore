@@ -1,0 +1,4 @@
+# Your own HTTPS certificate, when AGENTGOV_CERTIFICATES=files (docs/deploy/server.md):
+# tls.crt (with its chain) and tls.key, for every address. Git ignores them.
+*
+!.gitignore
