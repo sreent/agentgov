@@ -39,10 +39,12 @@ Microsoft 365 admin center (**Agents**), in the Power Platform admin center (**M
 Inventory**), or from AgentGov itself if admins sign in through Microsoft Entra ID (see
 [Acting as the signed-in admin](#acting-as-the-signed-in-admin)). Microsoft's APIs for
 blocking agents accept only a signed-in administrator, not an application, so AgentGov
-can only block an agent on behalf of an admin who signed in. With [Copilot Studio threat
-detection](microsoft-connections.md#copilot-studio-threat-detection) enforcing, blocking a
-Copilot Studio agent in AgentGov also stops its tool calls, because Copilot Studio asks
-AgentGov before each one.
+can only block an agent on behalf of an admin who signed in. Until someone does, an issue
+asks the agent's people to stop it there, and closes once a sync shows it stopped ([Blocked
+in AgentGov, still running](#blocked-in-agentgov-still-running)). With [Copilot Studio
+threat detection](microsoft-connections.md#copilot-studio-threat-detection) enforcing,
+blocking a Copilot Studio agent in AgentGov also stops its tool calls, because Copilot
+Studio asks AgentGov before each one.
 
 ## Microsoft 365 agent catalog
 
@@ -226,6 +228,49 @@ nothing: use Power Platform data policies (DLP) as well, and keep them consisten
 allowlist. The **Connectors** table on the Platforms page says what happens to calls
 through connectors that aren't approved, as things are set now.
 
+## Blocked in AgentGov, still running
+
+Most deployments read their platforms and can't change them: AgentGov's access is a
+read-only app, an exported inventory, or no Microsoft admin who signs in. So blocking a
+platform's agent in AgentGov hands the stop to the people who can do it, and checks that
+they did:
+
+1. Blocked in AgentGov while its platform still runs it, the agent gets a
+   `platform.still_running` issue (high): "*sales-helper* is blocked in AgentGov but still
+   runs in Copilot Studio". It goes to the agent's owner, then its sponsors, then its team,
+   as every issue does ([issues](issues.md)), and through a service desk to theirs
+   ([tickets](tickets.md)). It says who can stop the agent there and how, and holds the
+   agent's IDs there (its environment, for a Copilot Studio agent).
+2. Someone stops it in the platform, as the table below says.
+3. The next sync or import shows it stopped, or gone, and the issue closes. The agent's
+   page says *Blocked in AgentGov only* until then.
+
+Unblocked or deleted in AgentGov, its issue closes too, whatever became of it (dismissed,
+or its risk accepted): blocked again later, it is raised afresh. An agent stopped in a way
+its platform doesn't report (its permissions taken away, say) stays "still running" to
+AgentGov: dismiss the issue saying how it was stopped. Blocking it from AgentGov as a
+signed-in admin ([below](#acting-as-the-signed-in-admin)) closes the issue at once.
+
+| Platform | Who can stop it there, and how | AgentGov sees it stopped when |
+|---|---|---|
+| Copilot Studio | A Power Platform, AI or Global administrator quarantines it (Power Platform admin center, **Manage > Inventory**, or the Power Platform API); its owner can unpublish or delete it | The inventory reports it quarantined, or a whole-inventory import no longer lists it |
+| Microsoft 365 | An AI or Global administrator blocks it in the Microsoft 365 admin center (**Agents**) | The catalog reports it blocked, or no longer lists it |
+| Microsoft Entra Agent ID (an agent known only by its identity) | An administrator of its agent identity disables it in the Entra admin center | The identity is disabled (by an administrator or by Microsoft), or deleted |
+| AWS, Google Cloud | Someone with rights over it in its account or project deletes it, or takes away who may call it | It is gone from a part read in full (permissions taken away don't show) |
+| Salesforce | A Salesforce administrator deactivates it in Agentforce Builder | It has no active version, or is gone |
+| Databricks | Someone who can manage it stops it (an app) or deletes it | The app's compute is stopped, or the agent is gone |
+| Microsoft Foundry | Someone with rights over its project disables or deletes it | It is disabled, or gone |
+
+An agent reported by two platforms is stopped where it runs: a Copilot Studio agent
+published to Microsoft 365 counts as stopped once Copilot Studio quarantines it, since a
+block in the Microsoft 365 admin center keeps it out of Microsoft 365 Copilot and Teams only.
+Its issue says so when Microsoft 365 has it blocked and Copilot Studio still runs it.
+
+Management rules don't block agents AgentGov can't stop: their issue says to stop the agent
+in its platform instead ([management rules](management-rules.md)). The issue type can be
+turned off, or given another severity, like any other ([kinds of
+issues](issues.md#kinds-of-issues)).
+
 ## Acting as the signed-in admin
 
 Some of Microsoft's admin APIs accept only a signed-in administrator: quarantining a
@@ -346,6 +391,7 @@ See [Signing in](administration.md#signing-in) for how the CLI keeps its session
 | Who made an agent, and whom adopting it suggests | Agent page > Owner and sponsors | `agentgov agents get REF` | `makers` and `suggested_owner` in `GET /v1/agents/{ref}` |
 | Adopt agents at once | Agents > **Adopt n agents** | `agentgov agents adopt REF... \| --platform P --makers --owner TEAM` | `POST /v1/agents/adopt` |
 | Quarantine or block an agent in its platform, as you | Agent > Copilot Studio or Microsoft 365 card, or **Block** / **Unblock** | `agentgov agents platform-block\|platform-unblock REF`, or `agentgov agents block\|unblock REF --in-platform` | `POST /v1/agents/{ref}/platform/block\|unblock` |
+| The agents blocked in AgentGov that their platform still runs | Issues, or the agent's page (*Blocked in AgentGov only*) | `agentgov issues list --type platform.still_running` | `GET /v1/findings?type=platform.still_running`, or `still_runs_in` in `GET /v1/agents/{ref}` |
 | List the agents from one platform | Platforms > *n agents* | `agentgov agents list --source platform:copilot-studio` | `GET /v1/agents?source=platform:copilot-studio` |
 | See the connectors in use | Platforms > Connectors | `agentgov platforms connectors` | `GET /v1/platforms/connectors` |
 | Approve a connector | Platforms > **Approve** | `agentgov platforms approve-connector shared_office365 --note "…"` | `PUT /v1/platforms/connectors/{id}/approval` |

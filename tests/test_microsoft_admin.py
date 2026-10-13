@@ -19,7 +19,7 @@ from agentgov import cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.identity.delegation import Delegations
-from agentgov.models import MicrosoftGrant
+from agentgov.models import Finding, MicrosoftGrant
 from agentgov.registry import platforms
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
@@ -317,6 +317,28 @@ class TestQuarantine:
         entra_client.post("/v1/agents/sales-helper/platform/unblock", headers=CSRF)
         assert apis.calls[-1][1].endswith("/SetAsUnquarantined?api-version=1")
         assert entra.refreshes == [f"{POWER_PLATFORM}/.default"]  # the token was reused
+
+    def test_quarantining_it_closes_the_issue_that_asks_for_it(
+        self, entra_client, entra, apis
+    ) -> None:
+        import_bots(entra_client)
+        admin_signs_in(entra_client, entra)
+        resp = entra_client.post("/v1/agents/sales-helper/block", json={}, headers=CSRF)
+        assert resp.json()["still_runs_in"] == "Copilot Studio"
+        rt = entra_client.app.state.rt
+        key = f"{platforms.STILL_RUNNING}:{resp.json()['id']}"
+        with rt.db.session() as s:
+            asked = s.scalar(select(Finding).where(Finding.key == key))
+            assert asked.status == "open"
+            # Admins can do it from AgentGov here: the issue says so.
+            assert "from its page in AgentGov (Quarantine)" in asked.remediation
+        entra_client.post("/v1/agents/sales-helper/platform/block", headers=CSRF).raise_for_status()
+        with rt.db.session() as s:
+            asked = s.scalar(select(Finding).where(Finding.key == key))
+            assert asked.status == "resolved"
+            assert asked.resolved_by == "admin:alice@example.com"
+        view = entra_client.get("/v1/agents/sales-helper", headers=ADMIN).json()
+        assert view["still_runs_in"] is None
 
     def test_microsoft_365_agents_are_blocked_through_graph(self, entra_client, entra, apis):
         rt = entra_client.app.state.rt

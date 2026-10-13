@@ -1454,15 +1454,24 @@ def _lifecycle(refs: str | list[str], action: str, reason: str | None) -> None:
             "POST", f"/v1/agents/{names[0]}/{action}", json={"reason": reason} if reason else {}
         )
         _done("agent", agent["name"], agent["status"])
+        if agent.get("still_runs_in"):
+            typer.echo(
+                f"It still runs in {agent['still_runs_in']}: an issue asks its people to stop "
+                "it there, and closes once that platform reports it stopped."
+            )
         return
     out = _at_once("agent", _given(action=action, agents=names, reason=reason))
     elsewhere = sorted({row["platform"] for row in out["done"] if row.get("platform")})
-    note = (
-        f"Those on {', '.join(elsewhere)} still run there: this changed AgentGov, not "
-        f"{'it' if len(elsewhere) == 1 else 'them'}."
-        if elsewhere and action in ("block", "delete")
-        else None
-    )
+    note = None
+    if elsewhere and action in ("block", "delete"):
+        from agentgov.registry.platforms import SOURCES
+
+        note = (
+            f"Those on {', '.join(SOURCES.get(p, p) for p in elsewhere)} still run there: "
+            f"this changed AgentGov, not {'it' if len(elsewhere) == 1 else 'them'}."
+        )
+        if action == "block":
+            note += " For each one still running there, an issue asks its people to stop it."
     _many("agent", out, note=note)
 
 
@@ -1490,19 +1499,22 @@ def agents_block(
     if in_platform and len(refs) > 1:
         _fail("--in-platform blocks one agent at a time")
     # AgentGov first, then the platform: if the platform refuses, AgentGov has still blocked it.
-    _lifecycle(refs, "block", reason)
-    if in_platform:
-        try:
-            _platform_block(refs[0], blocked=True)
-        except typer.Exit:
-            typer.secho(
-                f"{refs[0]} is blocked in AgentGov, but still runs in its platform: quarantine "
-                "it there (the Power Platform admin center for Copilot Studio), or have an "
-                "administrator who can do it there run `agentgov agents platform-block`.",
-                fg=typer.colors.YELLOW,
-                err=True,
-            )
-            raise
+    if not in_platform:
+        _lifecycle(refs, "block", reason)
+        return
+    agent = _call("POST", f"/v1/agents/{refs[0]}/block", json={"reason": reason} if reason else {})
+    _done("agent", agent["name"], agent["status"])
+    try:
+        _platform_block(refs[0], blocked=True)
+    except typer.Exit:
+        typer.secho(
+            f"{refs[0]} is blocked in AgentGov, but still runs in its platform: an issue asks "
+            "its people to stop it there, or an administrator who can do it there can run "
+            "`agentgov agents platform-block`.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        raise
 
 
 @agents_app.command("unblock")

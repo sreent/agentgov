@@ -777,4 +777,5 @@ def foundry_agent(
         external_ids=external_ids,
         risks=risks,
         instructions=definition.get("instructions") or None,
+        stopped=agent.get("state") == "disabled" if agent.get("state") else None,
     )

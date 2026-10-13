@@ -456,6 +456,10 @@ def transition(
     if action == "adopt":
         # Adopting a discovered agent is the answer to its "unmanaged agent" finding.
         findings.resolve_key(session, f"agent.unmanaged:{agent.id}", actor=actor)
+    from agentgov.registry import platforms  # it imports this module
+
+    # Blocked here, an agent on another platform still runs there until someone stops it.
+    platforms.check_stop(session, settings, agent, actor=actor)
     mark_changed(session, "agents")
     return agent
 

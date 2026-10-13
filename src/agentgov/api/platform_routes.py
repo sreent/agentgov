@@ -421,7 +421,9 @@ def _platform_block(request: Request, ref: str, principal: Principal, *, blocked
         raise HTTPException(502, str(exc)) from exc
     with rt.db.session() as s:
         agent = agents.get(s, ref)
-        platforms.record_platform_block(s, agent, where, blocked=blocked, actor=principal.actor)
+        platforms.record_platform_block(
+            s, rt.settings, agent, where, blocked=blocked, actor=principal.actor
+        )
     return {"agent": agent.name, "platform": platforms.SOURCES[where["source"]], "blocked": blocked}
 
 

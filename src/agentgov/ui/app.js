@@ -2106,7 +2106,7 @@ async function agentsAtOnce(chosen, action) {
   const onPlatforms = fits.filter(platformOf).length;
   if (onPlatforms && ['block', 'unblock', 'delete'].includes(action)) {
     text += ` ${onPlatforms === fits.length ? 'They run' : `${fmt(onPlatforms)} of them run`} on ${elsewhere.join(', ')}: this changes AgentGov's registry, not ${elsewhere.length > 1 ? 'those platforms' : elsewhere[0]}.`;
-    if (action === 'block') text += ` Block them there too.`;
+    if (action === 'block') text += ' For each one its platform still runs, an issue asks its people to stop it there.';
   }
   if (fits.length < chosen.length) {
     text += ` ${plural(chosen.length - fits.length, 'other agent')} chosen ${chosen.length - fits.length === 1 ? 'isn\'t' : 'aren\'t'} in a state for it, and ${chosen.length - fits.length === 1 ? 'stays as it is' : 'stay as they are'}.`;
@@ -2299,10 +2299,10 @@ const PLATFORM_LIFECYCLE = {
   approve: (p) => ({ text: `The agent becomes active in AgentGov's registry, with an owner, sponsors and periodic review. It runs in ${p} either way. Activation needs at least one sponsor.` }),
   block: (p) => ({
     label: 'Block', confirm: 'Block in AgentGov',
-    text: `This marks the agent as blocked in AgentGov's registry and ledger. It does not stop the agent in ${p}: block it in ${p}'s admin center too.`,
-    done: (n) => `Blocked ${n} in AgentGov. Block it in ${p} too.`,
+    text: `This marks the agent as blocked in AgentGov's registry and ledger. It doesn't stop the agent in ${p}: while ${p} still runs it, an issue asks its people to stop it there, and closes once ${p} reports it stopped.`,
+    done: (n, runsIn) => (runsIn ? `Blocked ${n} in AgentGov. It still runs in ${runsIn}: an issue asks its people to stop it there.` : `Blocked ${n} in AgentGov.`),
   }),
-  unblock: (p) => ({ text: `The agent is no longer marked as blocked in AgentGov. This doesn't change ${p}.` }),
+  unblock: (p) => ({ text: `The agent is no longer marked as blocked in AgentGov, and no issue asks to stop it in ${p} any more. This doesn't change ${p}.` }),
   delete: (p) => ({ text: `The agent leaves AgentGov's inventory but stays in ${p}. Deleted agents can be restored.` }),
   adopt: (p) => ({ text: `Adopting brings this ${p} agent under governance as a pending registration. Give it an owner and at least one sponsor, then approve it.` }),
 };
@@ -2366,6 +2366,9 @@ function agentHeader(a) {
     h('div', { class: 'title-row' }, h('h1', { tabindex: '-1' }, a.name), chip('agent', a.status), riskChip(a.risk)),
     a.description ? h('p', { style: 'color:var(--ink-2); max-width:72ch' }, a.description) : null,
     showReason ? callout(toneOf('agent', a.status), 'info', h('span', {}, h('strong', {}, `${statusLabel}: `), a.status_reason)) : null,
+    a.status === 'blocked' && a.still_runs_in ? callout('warning', 'triangle', h('span', {},
+      h('strong', {}, `Blocked in AgentGov only: ${a.still_runs_in} still runs it. `),
+      `An issue asks its people to stop it there, and closes once ${a.still_runs_in} reports it stopped.`)) : null,
     agentToolbar(a));
 }
 
@@ -2449,22 +2452,25 @@ async function runLifecycle(a, action) {
       }
       // AgentGov first: if it refuses (an unblock needs a sponsor), the platform is left
       // alone. If the platform then refuses, the agent is still blocked where it runs.
-      await api(`v1/agents/${encodeURIComponent(a.id)}/${action}`, { method: 'POST', body });
-      if (!values.in_platform) return { inPlatform: false };
+      const changed = await api(`v1/agents/${encodeURIComponent(a.id)}/${action}`, { method: 'POST', body });
+      // Blocked here, the platform that still runs it, where an issue asks to stop it.
+      const runsIn = changed?.still_runs_in || null;
+      if (!values.in_platform) return { inPlatform: false, runsIn };
       try {
         await api(`v1/agents/${encodeURIComponent(a.id)}/platform/${action}`, { method: 'POST' });
         return { inPlatform: true };
       } catch (err) {
-        return { inPlatform: false, platformError: err };
+        return { inPlatform: false, platformError: err, runsIn };
       }
     },
   });
   if (!done) return;
   if (done.platformError) {
     const verb = action === 'block' ? 'Blocked' : 'Unblocked';
-    toast(`${verb} ${a.name} in AgentGov. ${done.platformError.message}`, { tone: 'critical' });
+    const handedOff = done.runsIn ? ` An issue asks its people to stop it in ${done.runsIn}.` : '';
+    toast(`${verb} ${a.name} in AgentGov. ${done.platformError.message}${handedOff}`, { tone: 'critical' });
   } else {
-    toast(done.inPlatform ? (action === 'block' ? where.blocked(a.name) : where.unblocked(a.name)) : spec.done(a.name));
+    toast(done.inPlatform ? (action === 'block' ? where.blocked(a.name) : where.unblocked(a.name)) : spec.done(a.name, done.runsIn));
   }
   refreshBadges();
   await refresh();
@@ -7168,15 +7174,16 @@ function otherPlatformsCard(view) {
 
 function platformsCallout(view) {
   const enforcing = view.threat_detection?.mode === 'enforce';
+  // Blocked here, an agent its platform still runs gets an issue asking its people to stop it there.
+  const handOff = 'An agent blocked here that its platform still runs gets an issue asking its people to stop it there, which closes once a sync shows it stopped.';
   if (!view.admin_actions && !enforcing) {
-    return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov reads these platforms; on its own it does not change them. '),
-      "Blocking one of their agents here marks it in AgentGov only. To stop it, block it in the Microsoft 365 admin center or the Power Platform admin center, or connect the services below."));
+    return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov reads these platforms; on its own it does not change them. '), handOff));
   }
   const can = [
     view.admin_actions ? 'admins signed in through Microsoft Entra ID can quarantine and block these agents from here' : null,
     enforcing ? "AgentGov's policies decide about each tool call Copilot Studio agents make, so blocking one here stops its tool calls" : null,
   ].filter(Boolean);
-  return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov works alongside these platforms: '), `${can.join(', and ')}.`));
+  return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov works alongside these platforms: '), `${can.join(', and ')}. ${handOff}`));
 }
 
 const CONNECTION_COUNTS = {
@@ -7580,7 +7587,7 @@ function usageRows(v) {
 function inventoryCard(v) {
   const notes = v.in_inventory === false
     ? [callout('warning', 'triangle', `${v.source_name} no longer reports this agent. Delete it here when you no longer need its record.`)]
-    : [];
+    : v.stopped ? [callout('neutral', 'ban', `Stopped in ${v.source_name}: it takes no calls there.`)] : [];
   const value = (f) => {
     if (f.tone) return plainChip(f.value, { tone: f.tone, iconName: f.tone === 'serious' ? 'triangle' : 'alert-circle' });
     return f.code ? h('code', {}, f.value) : f.value;

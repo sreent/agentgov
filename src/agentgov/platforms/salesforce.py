@@ -620,6 +620,8 @@ def agentforce_agent(
         instructions=instructions or None,
         complete=not unread,
         missing=[f"{_and(unread)} couldn't be read"] if unread else [],
+        # Deactivated, an agent has no active version.
+        stopped=version.get("Status") != "Active" if version else None,
     )
 
 

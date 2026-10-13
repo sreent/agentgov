@@ -133,6 +133,8 @@ def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[
             **agents.to_dict(agent),
             # What Microsoft 365 or Copilot Studio reports, for agents that run there.
             "platforms": platforms.for_agent(s, agent.id),
+            # Blocked in AgentGov, the platform that still runs it, if one does.
+            "still_runs_in": platforms.still_runs_in(s, agent),
             # Who made it and owns it there, and whom adopting it would make its owner.
             "makers": makers,
             "suggested_owner": people.suggested(makers),
@@ -389,7 +391,8 @@ def agent_lifecycle(
         if agent.on_platform:
             # Those waiting to be reviewed on their platforms: blocked or deleted, they aren't.
             platforms.review_summary(s)
-        return agents.to_dict(agent)
+        # Blocked here, it may still run on its platform: an issue asks its people to stop it.
+        return {**agents.to_dict(agent), "still_runs_in": platforms.still_runs_in(s, agent)}
 
 
 @router.delete("/agents/{ref}", tags=["agents"])

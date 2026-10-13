@@ -604,11 +604,18 @@ def app_agent(app: dict[str, Any], acl: list[dict[str, Any]] | None, host: str) 
             )
         )
     scopes = app.get("effective_user_api_scopes") or app.get("user_api_scopes") or []
+    # The app's compute: STOPPED when someone stopped it, and it serves nothing.
+    compute = (app.get("compute_status") or {}).get("state")
     facts = _facts(
         _fact("Workspace", host, code=True),
         _fact("App", name, code=True),
         _fact("URL", app.get("url"), code=True),
-        _fact("State", (app.get("app_status") or {}).get("state")),
+        _fact(
+            "State",
+            "Stopped: it serves nothing"
+            if compute == "STOPPED"
+            else (app.get("app_status") or {}).get("state"),
+        ),
         _fact("Runs as", app.get("service_principal_name")),
         _fact("Acts for its users with", ", ".join(scopes)),
         _who_fact(acl, everyone, named),
@@ -627,6 +634,7 @@ def app_agent(app: dict[str, Any], acl: list[dict[str, Any]] | None, host: str) 
         risks=risks,
         complete=acl is not None,
         maker=app.get("creator"),
+        stopped=compute == "STOPPED" if compute else None,
     )
 
 

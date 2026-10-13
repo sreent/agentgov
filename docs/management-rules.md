@@ -117,7 +117,9 @@ their calls. For them, a rule's issue says so, and says to do it in that platfor
 center. The exception is blocking a Copilot Studio agent while [Copilot Studio threat
 detection](microsoft-connections.md#copilot-studio-threat-detection) is enforced: Copilot
 Studio then asks AgentGov before each tool call, so a rule blocks the agent and its tool
-calls stop. Otherwise its issue says to quarantine the agent.
+calls stop. It still answers people, so an issue then asks its people to quarantine it
+([Blocked in AgentGov, still running](platforms.md#blocked-in-agentgov-still-running)).
+Otherwise the rule's issue says to quarantine the agent.
 
 ## Telling first, and what stops a rule
 

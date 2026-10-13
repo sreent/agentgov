@@ -8,7 +8,9 @@ same registry, risk scores and evidence ledger as every other agent.
 
 **AgentGov reads these platforms; it doesn't change them.** Blocking or deleting one of
 their agents in AgentGov records the decision in the registry and the ledger, but the agent
-keeps running: stop it in its platform's console as well.
+keeps running: stop it in its platform's console as well. While a blocked agent still runs
+there, an issue asks its people to stop it, and closes once a sync shows it stopped or gone
+([Blocked in AgentGov, still running](platforms.md#blocked-in-agentgov-still-running)).
 
 | Platform | What AgentGov reads | Set up |
 |---|---|---|
