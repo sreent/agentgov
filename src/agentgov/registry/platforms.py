@@ -28,6 +28,7 @@ import contextlib
 import json
 import re
 from collections import defaultdict
+from collections.abc import Iterator
 from typing import Any
 
 from sqlalchemy import func, select
@@ -41,6 +42,7 @@ from agentgov.models import (
     DISCOVERED,
     Agent,
     ApprovedConnector,
+    Finding,
     PlatformAgent,
     PlatformSync,
 )
@@ -93,6 +95,11 @@ SYNCED_FINDINGS = {
     "entra-access-packages": {"entra.access_expiring", "entra.access_failed"},
 }
 SYSTEM_ACTOR = "system:platforms"
+SYNC_NAMES = {
+    **SOURCES,
+    "defender": "Microsoft Defender",
+    "entra-access-packages": "Microsoft Entra access packages",
+}
 INVENTORY_TYPE = "microsoft.copilotstudio/agents"
 _CONNECTOR_ID = re.compile(r"^[A-Za-z0-9_.\-]{1,200}$")
 
@@ -643,7 +650,54 @@ def evaluate(session: Session) -> int:
         actor=SYSTEM_ACTOR,
         subjects=subjects(session, "copilot-studio"),
     )
+    sync = session.get(PlatformSync, "copilot-studio")
+    if sync is not None and not sync.ok:
+        # Raised again from what an earlier sync stored, which may no longer hold: they stay
+        # unverified until a sync succeeds.
+        findings.mark_unverified(
+            session,
+            types=FINDING_TYPES,
+            subjects=subjects(session, "copilot-studio"),
+            reason=failed_sync("copilot-studio", sync.message),
+        )
     return len(present)
+
+
+@contextlib.contextmanager
+def first_sync(session: Session, source: str) -> Iterator[None]:
+    """Around a sync of ``source``: if it is its first, what it finds about its agents
+    (theirs, and AgentGov's own, such as unmanaged or high risk) was there before AgentGov
+    looked, so it is marked as such (findings.BASELINE) and reaches people in AgentGov
+    rather than in their inboxes (AGENTGOV_ISSUES_QUIET_FIRST_SYNC)."""
+    last = session.get(PlatformSync, source)
+    # None read anything before (a sync that failed reads nothing).
+    first = last is None or (
+        not last.ok
+        and session.scalar(select(PlatformAgent.id).where(PlatformAgent.source == source).limit(1))
+        is None
+    )
+    since = ids.utcnow()
+    yield
+    if not first:
+        return
+    for finding in session.scalars(
+        select(Finding).where(
+            Finding.status == "open",
+            Finding.level.is_(None),
+            Finding.first_seen >= since,
+            Finding.agent_id.in_(
+                select(PlatformAgent.agent_id).where(PlatformAgent.source == source)
+            ),
+        )
+    ):
+        finding.details = {**(finding.details or {}), findings.BASELINE: True}
+
+
+def failed_sync(source: str, message: str | None) -> str:
+    """Why the findings a failed sync checks are unverified."""
+    return f"the last {SYNC_NAMES.get(source, source)} sync failed" + (
+        f": {message}" if message else ""
+    )
 
 
 def record_inventory(
@@ -660,7 +714,7 @@ def record_inventory(
     counts = {"created": 0, "updated": 0, "skipped": 0}
     seen: set[str] = set()
     present: set[str] = set()
-    partial: set[str] = set()  # agents read in part: their findings can't be resolved
+    partial: dict[str, str] = {}  # agents read in part: their findings can't be resolved
     # An agent with an Entra agent identity (Foundry's) is the agent Entra Agent ID reports.
     index = _entra_index(session)
     for item in inventory.found:
@@ -683,7 +737,9 @@ def record_inventory(
         )
         counts["created" if created else "updated"] += 1
         if not item.complete:
-            partial.add(agent.id)
+            partial[agent.id] = f"the last {SOURCES[source]} sync read it in part: " + (
+                "; ".join(item.missing) or "some of it couldn't be read"
+            )
         if agent.status == DELETED:
             continue
         if item.instructions and item.instructions.strip():
@@ -710,14 +766,21 @@ def record_inventory(
             )
             present.add(finding.key)
     # Agents gone from what was read stay in the registry, marked as gone.
-    unread: set[str] = set(partial)
+    unread: dict[str, str] = dict(partial)  # agent: why its findings can't be checked
+    name = SOURCES[source]
     for record in session.scalars(select(PlatformAgent).where(PlatformAgent.source == source)):
         part = (record.data or {}).get("part")
-        if part in inventory.failed or (part not in inventory.read and record.id not in seen):
-            unread.add(record.agent_id)
+        if part in inventory.failed:
+            unread[record.agent_id] = (
+                f"the last {name} sync couldn't read {part}: {inventory.failed[part]}"
+            )
+        elif part not in inventory.read and record.id not in seen:
+            unread.setdefault(
+                record.agent_id, f"the last {name} sync didn't read {part or 'the part it is in'}"
+            )
         elif record.id not in seen and (record.data or {}).get("in_inventory", True):
             record.data = {**(record.data or {}), "in_inventory": False}
-    checked = subjects(session, source) - unread
+    checked = subjects(session, source) - set(unread)
     findings.resolve_absent(
         session,
         types=INVENTORY_FINDINGS,
@@ -726,9 +789,13 @@ def record_inventory(
         subjects=checked,
         clean=2,  # one odd answer from the platform doesn't close and reopen them
     )
-    findings.mark_unverified(
-        session, types=INVENTORY_FINDINGS, subjects=unread, present_keys=present
-    )
+    by_reason: dict[str, set[str]] = {}
+    for agent_id, why in unread.items():
+        by_reason.setdefault(why, set()).add(agent_id)
+    for why, agent_ids in by_reason.items():
+        findings.mark_unverified(
+            session, types=INVENTORY_FINDINGS, subjects=agent_ids, present_keys=present, reason=why
+        )
     counts["findings"] = len(present)
     if inventory.failed:
         counts["failed"] = len(inventory.failed)
@@ -741,7 +808,12 @@ def sync_failed(session: Session, source: str, message: str, *, actor: str | Non
     """A connector couldn't read its platform at all: its agents' findings stay open,
     unverified, until a sync succeeds."""
     set_sync(session, source, ok=False, counts={}, message=message, actor=actor)
-    findings.mark_unverified(session, types=INVENTORY_FINDINGS, subjects=subjects(session, source))
+    findings.mark_unverified(
+        session,
+        types=INVENTORY_FINDINGS,
+        subjects=subjects(session, source),
+        reason=failed_sync(source, message),
+    )
 
 
 def refresh_risk(session: Session, settings: Settings) -> None:
@@ -821,6 +893,7 @@ def set_sync(
             verified=ok,
             # Defender's and Entra's findings come from those sources alone.
             subjects=subjects(session, source) if source == "copilot-studio" else None,
+            reason=failed_sync(source, message),
         )
     if actor:
         ledger.append(

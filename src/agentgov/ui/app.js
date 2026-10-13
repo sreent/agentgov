@@ -903,6 +903,7 @@ const PAGES = [
   { re: /^\/toolservers$/, nav: 'toolservers', title: 'Tool servers', render: renderToolservers },
   { re: /^\/findings$/, nav: 'findings', title: 'Findings', render: renderFindings },
   { re: /^\/findings\/teams$/, nav: 'findings', title: 'Teams', render: renderTeams },
+  { re: /^\/findings\/types$/, nav: 'findings', title: 'Finding types', render: renderFindingTypes },
   { re: /^\/findings\/([^/]+)$/, nav: 'findings', title: 'Finding', render: renderFinding },
   { re: /^\/policies$/, nav: 'policies', title: 'Policies', render: renderPolicies },
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
@@ -1071,10 +1072,14 @@ function enterApp() {
   if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', isPerson() ? personHome() : '#/overview');
   route();
   refreshBadges();
-  getInfo().then((info) => {
+  getInfo().then(async (info) => {
     if (!info) return;
     const who = me ? ` · signed in as ${me.actor}${me.via === 'session' ? ' (single sign-on)' : ''}` : '';
-    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'Keycloak identities' : 'no identity provider'} · OPA ${info.opa ? 'connected' : 'not configured'}${who}`;
+    // Whether the control plane reaches OPA now, not only whether it is set up.
+    const components = await api('v1/components').catch(() => null);
+    const opa = components?.control_plane?.opa;
+    const opaWords = !info.opa ? 'not configured' : opa ? (opa.ok ? 'reachable' : 'unreachable') : 'set up';
+    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'Keycloak identities' : 'no identity provider'} · OPA ${opaWords}${who}`;
   });
 }
 
@@ -2441,6 +2446,9 @@ function identityCard(a) {
         a.platform ? ['Platform', a.platform] : null,
         (a.models || []).length ? ['Models', h('div', { class: 'chip-row' }, a.models.map((m) => plainChip(m, { mono: true })))] : null,
         labels.length ? ['Labels', h('div', { class: 'chip-row' }, labels.map(([k, v]) => plainChip(`${k}=${v}`, { mono: true })))] : null,
+        Object.keys(a.control_modes || {}).length ? ['Controls for it', h('div', { class: 'stack-tight' },
+          Object.entries(a.control_modes).map(([key, c]) => h('div', {},
+            h('a', { href: '#/features' }, key), `: ${(MODE_WORDS[c.mode] || c.mode).toLowerCase()} (${c.why})`)))] : null,
         external.length ? ['External IDs', h('div', { class: 'chip-row' }, external.map(([k, v]) => plainChip(`${k}: ${v}`, { mono: true })))] : null,
         ['Created', [timeEl(a.created_at), a.created_by ? ` by ${a.created_by}` : '']],
         ['Last seen', timeEl(a.last_seen_at, { empty: 'Never' })],
@@ -3504,7 +3512,8 @@ function findingTabs(current) {
   if (isPerson()) return null;
   return h('nav', { class: 'tabs', 'aria-label': 'Finding views' },
     h('a', { class: 'tab', href: '#/findings', 'aria-current': current === 'findings' ? 'page' : null }, 'Findings'),
-    h('a', { class: 'tab', href: '#/findings/teams', 'aria-current': current === 'teams' ? 'page' : null }, 'Teams'));
+    h('a', { class: 'tab', href: '#/findings/teams', 'aria-current': current === 'teams' ? 'page' : null }, 'Teams'),
+    h('a', { class: 'tab', href: '#/findings/types', 'aria-current': current === 'types' ? 'page' : null }, 'Types'));
 }
 
 async function renderFindings({ params }) {
@@ -3691,7 +3700,7 @@ function findingCard(f, agentsById, act, { yours = false } = {}) {
     h('div', { class: 'finding-main' },
       h('div', { class: 'finding-top' }, chip('severity', f.severity), plainChip(humanize(f.category)),
         f.status !== 'open' ? chip('finding', f.status) : null,
-        f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle', title: 'The sync that checks it failed: it may no longer hold.' }) : null,
+        f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle', title: `${cap(f.unverified_reason || 'the sync that checks it failed')}: it may no longer hold.` }) : null,
         h('span', { class: 'ledger-type muted' }, f.type)),
       h('h3', { id: headingId, class: 'break' }, f.title),
       f.description ? h('p', { class: 'finding-desc small' }, f.description) : null,
@@ -3731,7 +3740,7 @@ async function renderFinding({ match }) {
     h('div', { class: 'chip-row' }, chip('severity', f.severity), chip('finding', f.status), plainChip(humanize(f.category)),
       f.verified === false ? plainChip('Unverified', { tone: 'warning', iconName: 'triangle' }) : null),
     f.verified === false ? callout('warning', 'triangle', h('span', {}, h('strong', {}, 'Unverified: '),
-      'the latest sync that checks it failed, so it may no longer hold. It stays open until a sync succeeds.')) : null,
+      `${f.unverified_reason || 'the latest sync that checks it failed'}, so it may no longer hold. It stays open until its check runs again.`)) : null,
     card({
       title: 'What it is',
       body: h('div', { class: 'stack' },
@@ -3917,6 +3926,76 @@ async function deleteTeam(t) {
   });
   if (!done) return;
   toast(`Deleted team ${t.name}.`);
+  await refresh();
+}
+
+/* ----------------------------------------------------------- finding types */
+
+// Which types of findings are raised here, and how severe each is (docs/issues.md).
+async function renderFindingTypes() {
+  if (isPerson()) { location.replace('#/findings'); return h('div'); }
+  const types = await api('v1/finding-types');
+  const admin = can('admin');
+  const off = types.filter((t) => t.mode === 'off');
+  const body = types.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+    h('caption', { class: 'sr-only' }, 'Types of findings'),
+    h('thead', {}, h('tr', {}, ['Type', 'Raised', 'Severity', 'Open', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+    h('tbody', {}, types.map((t) => h('tr', { 'data-type': t.type },
+      h('td', { 'data-label': 'Type', class: 'break' }, h('span', { class: 'cell-title mono' }, t.type),
+        t.changed_by ? h('div', { class: 'cell-sub' }, `Set by ${t.changed_by.replace(/^[a-z]+:/, '')} `, timeEl(t.changed_at)) : null),
+      h('td', { 'data-label': 'Raised' }, t.mode === 'off'
+        ? plainChip('Off', { tone: 'warning', iconName: 'minus', title: 'Checked, but what it finds is kept dismissed' })
+        : plainChip('On', { tone: 'good', iconName: 'check-circle' })),
+      h('td', { 'data-label': 'Severity' }, t.severity ? chip('severity', t.severity) : h('span', { class: 'muted' }, "Its checks' own")),
+      h('td', { 'data-label': 'Open' }, `${fmt(t.open)} of ${fmt(t.total)}`),
+      h('td', { 'data-label': '' }, admin
+        ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': `ftype-${t.type}`, onclick: guarded(() => findingTypeForm(t)) }, icon('edit'), 'Change')
+        : null))))))
+    : emptyState('No findings yet', 'A type is listed once AgentGov raises a finding of it, or once it is set up here.');
+  return h('div', { class: 'page', 'data-title': 'Finding types' },
+    pageHead({
+      title: 'Findings',
+      sub: "Each type of finding AgentGov's checks raise. Turn off the types your organisation doesn't act on: they are still checked, but what they find is kept dismissed and reaches no one. Or say how severe a type is here.",
+      actions: [
+        admin ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'add-finding-type', onclick: guarded(() => findingTypeForm(null)) }, icon('plus'), 'Set up a type') : null,
+        refreshButton(),
+      ],
+    }),
+    findingTabs('types'),
+    off.length ? callout('neutral', 'info', h('span', {}, h('strong', {}, `${plural(off.length, 'type')} off: `),
+      off.length === 1
+        ? 'what it finds is kept dismissed. Turned on again, what its checks find again comes back the next time they run.'
+        : 'what they find is kept dismissed. Turned on again, what their checks find again comes back the next time they run.')) : null,
+    card({ title: 'Types of findings', flush: Boolean(types.length), body }));
+}
+
+async function findingTypeForm(t) {
+  const saved = await ask({
+    title: t ? `Finding type ${t.type}` : 'Set up a type of finding',
+    text: t ? 'Changes are recorded in the evidence ledger.' : 'Set up a type before its checks raise anything, such as agent.no_owner (docs/issues.md lists them). Changes are recorded in the evidence ledger.',
+    iconName: 'edit', confirm: 'Save',
+    fields: [
+      t ? null : { id: 'type', label: 'Type', required: true, mono: true, placeholder: 'agent.no_owner' },
+      {
+        id: 'mode', label: 'Raised', type: 'select', value: t?.mode || 'on',
+        options: [
+          { value: 'on', label: 'On: raised and sent to the people responsible' },
+          { value: 'off', label: 'Off: checked, but what it finds is kept dismissed' },
+        ],
+        hint: 'Turned off, its open findings are dismissed.',
+      },
+      {
+        id: 'severity', label: 'Severity', type: 'select', value: t?.severity || '',
+        options: [{ value: '', label: "Its checks' own" }, ...SEVERITY_ORDER.map((k) => ({ value: k, label: statusMeta('severity', k)[2] }))],
+        hint: 'For what it finds from now on, and what it found that is still open.',
+      },
+    ].filter(Boolean),
+    submit: (v) => api(`v1/finding-types/${encodeURIComponent(t ? t.type : v.type)}`, {
+      method: 'PUT', body: { mode: v.mode, severity: v.severity || null },
+    }),
+  });
+  if (!saved) return;
+  toast(`${saved.type}: ${saved.mode === 'off' ? 'off' : 'on'}, ${saved.severity ? `severity ${saved.severity}` : "its checks' severity"}.`);
   await refresh();
 }
 
@@ -6213,23 +6292,128 @@ function featureSummary(list) {
   return parts.length ? `Features: ${parts.join(', ')}` : 'Features: the defaults';
 }
 
+// Whether a feature can do what its mode says (agentgov.health): words and tone.
+const FEATURE_STATUS = {
+  failing: ['Stopping more than it should', 'critical', 'alert-circle'],
+  inactive: ['Doing nothing', 'warning', 'triangle'],
+  limited: ['Doing part of it', 'warning', 'triangle'],
+};
+
 async function renderFeatures() {
-  const view = await api('v1/features');
+  const [view, components, presets] = await Promise.all([api('v1/features'), api('v1/components'), api('v1/feature-presets')]);
   const monitored = view.features.filter((f) => f.mode === 'monitor' && f.group === 'controls');
+  const failing = view.features.filter((f) => f.status === 'failing');
+  const short = view.features.filter((f) => f.status === 'inactive' || f.status === 'limited');
   return h('div', { class: 'page' },
     pageHead({
       title: 'Features',
       sub: 'Choose which parts of AgentGov you use, and how strictly. In monitor mode a control decides and records what it would have done, but lets the call through: try it on real traffic before you enforce it.',
       actions: [refreshButton()],
     }),
+    failing.length ? callout('critical', 'alert-circle', h('span', {},
+      h('strong', {}, `${plural(failing.length, 'feature')} stopping more than ${failing.length === 1 ? 'it' : 'they'} should: `),
+      failing.map((f) => f.title).join(', '), '. See why below.')) : null,
+    short.length ? callout('warning', 'triangle', h('span', {},
+      h('strong', {}, `${plural(short.length, 'feature')} not doing all ${short.length === 1 ? 'its mode says' : 'their modes say'}: `),
+      short.map((f) => f.title).join(', '), '. Turn off the ones you don\'t use; for the others, see below what each needs.')) : null,
     monitored.length ? callout('warning', 'eye', h('span', {},
       h('strong', {}, `${plural(monitored.length, 'control')} in monitor mode. `),
       'Calls they would have stopped go through, and the ledger records them as warnings. ',
       h('a', { href: '#/ledger?decision=monitored' }, 'See what they would have stopped'), '.')) : null,
+    componentsCard(components),
+    presetsCard(presets),
     Object.entries(view.groups).map(([group, title]) => {
       const list = view.features.filter((f) => f.group === group);
       return list.length ? featuresCard(title, list) : null;
     }));
+}
+
+// What the control plane reaches itself, and what each governance processor says it reaches.
+const CHECK_NAMES = { opa: 'OPA', keycloak: "Keycloak's keys", presidio: 'Presidio', guardian: 'Granite Guardian', authzen: 'Your decision point' };
+
+function checkChip(name, c) {
+  const label = CHECK_NAMES[name] || name;
+  if (!c || !c.configured) {
+    // A processor with no AGENTGOV_OPA_URL still asks one, at its default address.
+    if (c && c.detail) return plainChip(`${label}: ${c.ok ? 'reachable' : 'unreachable'}`, { tone: c.ok ? 'good' : 'critical', iconName: c.ok ? 'check' : 'alert-circle', title: c.detail });
+    return plainChip(`${label}: not set up`, { title: `Not set up where it runs` });
+  }
+  return c.ok
+    ? plainChip(`${label}: reachable`, { tone: 'good', iconName: 'check' })
+    : plainChip(`${label}: unreachable`, { tone: 'critical', iconName: 'alert-circle', title: c.detail || null });
+}
+
+// What a governance processor does when what it depends on fails (AGENTGOV_*_FAILURE_MODE).
+const FAILURE_WORDS = {
+  gateway_failure_mode: ['Calls it can\'t check', { modes: 'refused while a control is enforced', closed: 'refused', open: 'let through, recorded' }],
+  presidio_failure_mode: ['Presidio down', { closed: 'refused while data protection is enforced', open: 'personal data not looked for' }],
+  guardian_failure_mode: ['Granite Guardian down', { open: 'the rules decide alone', closed: 'refused where it is waited for' }],
+  authzen_failure_mode: ['Your decision point down', { closed: 'refused while it is enforced', open: 'AgentGov decides alone' }],
+};
+
+function failureLine(settings) {
+  const parts = Object.entries(FAILURE_WORDS)
+    .filter(([k]) => settings?.[k])
+    .map(([k, [label, words]]) => `${label}: ${words[settings[k]] || settings[k]}`);
+  return parts.length ? h('div', { class: 'cell-sub' }, `${parts.join('. ')}.`) : null;
+}
+
+function componentsCard(view) {
+  const cp = view.control_plane || {};
+  const processors = view.processors || [];
+  const rows = [
+    ['Control plane', h('div', { class: 'chip-row' }, ['opa', 'keycloak'].map((n) => checkChip(n, cp[n])))],
+    ...processors.map((p) => [
+      h('span', {}, 'Governance processor ', h('code', {}, p.instance)),
+      h('div', {},
+        h('div', { class: 'chip-row' }, ['opa', 'presidio', 'guardian', 'authzen'].map((n) => checkChip(n, p.checks[n]))),
+        h('div', { class: 'cell-sub' }, p.fresh ? 'Reported ' : 'Out of touch: last reported ', timeEl(p.reported_at)),
+        failureLine(p.settings),
+        ...Object.entries(p.checks).filter(([, c]) => c.configured && !c.ok && c.detail).map(([n, c]) => h('div', { class: 'cell-sub' }, `${CHECK_NAMES[n] || n}: ${c.detail}`))),
+    ]),
+  ];
+  return card({
+    title: 'What AgentGov can reach',
+    sub: 'Checked now by the control plane, and reported every minute by each governance processor where it runs. A feature that needs what isn\'t reachable says so below.',
+    body: h('div', {},
+      processors.length ? null : callout('warning', 'triangle', 'No governance processor has reported. The controls at the gateway check only calls through AgentGov\'s gateway, and nothing is known to check them.'),
+      facts(rows)),
+  });
+}
+
+// Starting points that set many modes at once.
+function presetsCard(view) {
+  const applied = view.applied ? ` The deployment applied ${view.applied} (AGENTGOV_FEATURE_PRESET).` : '';
+  return card({
+    title: 'Starting points',
+    sub: `Set many modes at once, then change them one by one. Each change goes into the ledger with the preset's name; features the deployment pins keep their modes.${applied}`,
+    body: h('ul', { class: 'apply-results', role: 'list' }, view.presets.map((p) => h('li', { 'data-preset': p.preset },
+      h('div', {},
+        h('span', { class: 'cell-title' }, p.title),
+        h('div', { class: 'cell-sub' }, p.description),
+        h('div', { class: 'cell-sub' }, p.changes.length ? `Would change ${plural(p.changes.length, 'feature')} now.` : 'Changes nothing now.')),
+      can('admin') && p.changes.length
+        ? h('button', { type: 'button', class: 'btn', onclick: guarded(() => applyPreset(p)) }, `Apply ${p.title.toLowerCase()}…`)
+        : null))),
+  });
+}
+
+async function applyPreset(p) {
+  const words = (m) => (MODE_WORDS[m] || humanize(m)).toLowerCase();
+  const weakens = p.changes.some((c) => c.to === 'off' || (c.from === 'enforce' && c.to === 'monitor'));
+  const result = await ask({
+    title: `${p.title}?`,
+    text: p.description,
+    tone: weakens ? 'danger' : 'primary', iconName: weakens ? 'triangle' : 'info',
+    confirm: `Change ${plural(p.changes.length, 'feature')}`, busy: 'Changing…',
+    extra: h('div', { class: 'stack-tight' },
+      h('ul', { class: 'apply-results', role: 'list' }, p.changes.map((c) => h('li', {},
+        h('span', {}, c.title), h('span', { class: 'cell-sub' }, `${words(c.from)} to ${words(c.to)}`)))),
+      p.kept.length ? h('p', { class: 'cell-sub' }, 'Left as they are: ', p.kept.map((c) => `${c.title} (${c.reason})`).join('; '), '.') : null),
+    submit: () => api(`v1/feature-presets/${encodeURIComponent(p.preset)}`, { method: 'POST' }),
+  });
+  if (result?.changes) toast(`${p.title}: ${plural(result.changes.length, 'feature')} changed.`);
+  await refresh();
 }
 
 function featuresCard(title, list) {
@@ -6243,9 +6427,20 @@ function featuresCard(title, list) {
         h('td', { 'data-label': 'Feature' },
           h('span', { class: 'cell-title' }, f.title), h('div', { class: 'cell-sub' }, f.description),
           f.needs ? h('div', { class: 'cell-sub' }, `Needs ${f.needs}.`) : null),
-        h('td', { 'data-label': 'Mode' }, modeControl(f)),
-        h('td', { 'data-label': 'Now' }, h('div', {}, f.effect), featureProvenance(f))))))),
+        h('td', { 'data-label': 'Mode' }, modeControl(f), exceptionsBlock(f)),
+        h('td', { 'data-label': 'Now' }, featureNow(f), featureProvenance(f))))))),
   });
+}
+
+// What the mode does, or, when it can't do all of it, what stops it.
+function featureNow(f) {
+  const status = FEATURE_STATUS[f.status];
+  if (!status || !(f.problems || []).length) return h('div', {}, f.effect);
+  const [words, tone, iconName] = status;
+  return h('div', { class: 'stack-tight' },
+    plainChip(words, { tone, iconName }),
+    (f.problems || []).map((p) => h('div', { class: 'break' }, p)),
+    h('div', { class: 'cell-sub' }, `Its mode: ${f.effect}`));
 }
 
 function featureProvenance(f) {
@@ -6254,6 +6449,83 @@ function featureProvenance(f) {
   }
   if (f.set_by === 'admin') return h('div', { class: 'cell-sub' }, `Set by ${f.changed_by} `, timeEl(f.changed_at));
   return h('div', { class: 'cell-sub' }, 'The default');
+}
+
+// A control's exceptions: its mode for the agents in a scope, the first that matches.
+function plainScopes(f) {
+  return (f.scopes || []).map(({ describe, ...e }) => e);
+}
+
+function exceptionsBlock(f) {
+  if (!f.scopable) return null;
+  const pinned = f.set_by === 'deployment';
+  const editable = can('admin') && !pinned;
+  const list = f.scopes || [];
+  if (!list.length && !editable) return null;
+  return h('div', { class: 'exceptions' },
+    list.length ? h('ul', { class: 'exception-list', role: 'list' }, list.map((e, i) => h('li', {},
+      plainChip(MODE_WORDS[e.mode] || e.mode, { tone: e.mode === 'enforce' ? 'good' : e.mode === 'monitor' ? 'warning' : null }),
+      h('span', { class: 'exception-scope' }, ruleScope(e.scope), e.note ? h('span', { class: 'cell-sub' }, ` (${e.note})`) : null),
+      editable ? h('button', {
+        type: 'button', class: 'icon-btn', title: 'Remove this exception',
+        'aria-label': `Remove the exception: ${MODE_WORDS[e.mode] || e.mode} for ${ruleScope(e.scope)}`,
+        onclick: guarded(() => removeException(f, i)),
+      }, icon('x')) : null))) : null,
+    pinned && list.length ? h('div', { class: 'cell-sub' }, 'Not applied: the deployment pins this feature for every agent.') : null,
+    editable ? h('button', { type: 'button', class: 'btn btn--sm btn--ghost', onclick: guarded(() => addException(f)) }, icon('plus'), 'Add an exception') : null);
+}
+
+async function addException(f) {
+  const result = await ask({
+    title: `${f.title}: an exception`,
+    text: 'Its mode for the agents in a scope. Every box you fill in must match; the first exception that matches an agent applies to it, and the others have the feature\'s mode.',
+    confirm: 'Add the exception', busy: 'Saving…',
+    fields: [
+      { id: 'mode', label: 'Mode for these agents', type: 'select', required: true, value: f.mode === 'enforce' ? 'monitor' : 'enforce', options: f.modes.map((m) => ({ value: m, label: MODE_WORDS[m] || humanize(m) })) },
+      { type: 'row', fields: [
+        { id: 'blueprints', label: 'Blueprints', mono: true },
+        { id: 'teams', label: 'Teams', mono: true },
+      ] },
+      { type: 'row', fields: [
+        { id: 'platforms', label: 'Platforms', mono: true, hint: 'gateway, microsoft-365, copilot-studio, aws, google-cloud, salesforce, databricks or microsoft-foundry.' },
+        { id: 'environments', label: 'Environments', mono: true },
+      ] },
+      { id: 'labels', label: 'With labels', mono: true, hint: 'key=value, separated by commas.' },
+      { id: 'note', label: 'Why', hint: 'For whoever reads it next.' },
+    ],
+    submit: async (v) => {
+      const scope = {};
+      for (const key of ['blueprints', 'teams', 'platforms', 'environments']) {
+        const list = parseList(v[key]);
+        if (list.length) scope[key] = list;
+      }
+      const labels = parseLabels(v.labels);
+      if (Object.keys(labels).length) scope.labels = labels;
+      if (!Object.keys(scope).length) throw new Error('Say which agents: a blueprint, a team, a platform, an environment or a label.');
+      const entry = { mode: v.mode, scope };
+      if (v.note) entry.note = v.note;
+      return api(`v1/features/${encodeURIComponent(f.key)}`, { method: 'PUT', body: { scopes: [...plainScopes(f), entry] } });
+    },
+  });
+  if (result?.scopes) toast(`${f.title}: ${plural(result.scopes.length, 'exception')}.`);
+  await refresh();
+}
+
+async function removeException(f, i) {
+  const e = f.scopes[i];
+  const ok = await ask({
+    title: 'Remove this exception?',
+    text: `${f.title}: ${(MODE_WORDS[e.mode] || e.mode).toLowerCase()} for ${ruleScope(e.scope)}. These agents then have the feature's mode, ${(MODE_WORDS[f.mode] || f.mode).toLowerCase()}, unless a later exception takes them in.`,
+    tone: 'danger', iconName: 'triangle', confirm: 'Remove it',
+  });
+  if (!ok) return;
+  try {
+    const out = await api(`v1/features/${encodeURIComponent(f.key)}`, { method: 'PUT', body: { scopes: plainScopes(f).filter((_, j) => j !== i) } });
+    toast(`${f.title}: ${plural(out.scopes.length, 'exception')} left.`);
+  } catch (err) {
+    toast(err.message, { tone: 'critical' });
+  }
+  await refresh();
 }
 
 function modeControl(f) {

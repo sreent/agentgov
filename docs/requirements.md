@@ -1,7 +1,10 @@
 # Requirements
 
 What AgentGov needs to run: for evaluation on one machine, and on Kubernetes for others
-to rely on. [Deploying AgentGov](deploy/README.md) has the guides.
+to rely on. [Deploying AgentGov](deploy/README.md) has the guides. Everything below is for
+the whole of AgentGov; an inventory of your platforms' agents without the gateway needs
+only the control plane and PostgreSQL ([on Kubernetes](deploy/kubernetes.md#profiles),
+[with Compose](deploy/local.md#just-the-inventory)).
 
 ## At a glance
 
@@ -66,6 +69,10 @@ The Helm chart reserves:
 | Keycloak (bundled) | 200m, 768 MiB | 1.5 GiB |
 | **Total** | **810m CPU, 3.1 GiB** (510m, 2.1 GiB without the bundled two) | |
 
+The [profiles](deploy/kubernetes.md#profiles) reserve less: 710m CPU and 1.6 GiB to monitor
+(no Presidio), and 250m and 576 MiB for the inventory alone (the control plane, the
+collector and PostgreSQL).
+
 Each component's `resources` value changes them ([Kubernetes](deploy/kubernetes.md)); GKE
 Autopilot and AKS Automatic raise requests below their minimums, so AgentGov reserves a
 little more there. The
@@ -123,7 +130,7 @@ Only what you turn on needs any:
 | Read the agents on AWS | AWS credentials, or a role per account, allowed to read Bedrock agents, AgentCore's harnesses, runtimes and gateways, Amazon Quick's agents and AWS Agent Registry's records ([other platforms](other-platforms.md#aws)) |
 | Read the agents on Google Cloud | Google credentials allowed, in each project, to list Agent Runtime agents and read their IAM policies, and to list Agent Registry's agents and MCP servers ([other platforms](other-platforms.md#google-cloud)) |
 | Read the agents on Databricks | A service principal with an OAuth secret, a workspace admin in each workspace it reads, and `READ METADATA` on the metastore for its MCP services ([other platforms](other-platforms.md#databricks)) |
-| Read the agents in Microsoft Foundry | AgentGov's Microsoft app with a role that may read the projects' agents (a custom role with the agents' read data action), and Reader on the subscriptions it finds projects in ([other platforms](other-platforms.md#microsoft-foundry)) |
+| Read the agents in Microsoft Foundry | AgentGov's Microsoft app with a role that may read the projects' agents and connections (a custom role with their read data actions), and Reader on the subscriptions it finds projects in ([other platforms](other-platforms.md#microsoft-foundry)) |
 | Read the agents on Salesforce | An integration user with API Enabled, View Setup and Configuration and View All Users, and an External Client App it signs in through ([other platforms](other-platforms.md#salesforce)) |
 | Model calls | Each provider's API key, given to the gateway only ([model calls](models.md)) |
 | Security operations | Your SIEM's endpoint or token, and Teams or Slack webhooks ([security operations](secops.md)) |

@@ -98,7 +98,9 @@ flowchart LR
 1. When an agent is approved, the control plane creates its Keycloak client. The agent
    requests short-lived tokens with the client-credentials grant.
 2. Every MCP request goes through agentgateway, which validates the token and passes the
-   call to the governance processor (agentgateway's `ExtMcp` hook, fail-closed).
+   call to the governance processor (agentgateway's `ExtMcp` hook; when it can't be
+   checked, a call is refused while a control is enforced, as
+   [features](docs/features.md#when-something-is-down) explains).
 3. The processor scans arguments and results (Presidio for personal data; detectors for
    secrets, prompt injection and poisoned tool descriptions) and asks OPA for a
    decision. OPA evaluates the Rego library and your own policies against live registry
@@ -148,7 +150,10 @@ the gateway. It shows each control in turn:
 5. **Indirect prompt injection**: a poisoned tool result is withheld.
 6. **Ungranted tools** are refused even when called directly.
 7. **Monitor mode**: with least privilege monitored, the same call goes through and the
-   ledger records what would have stopped it; enforced again, it is refused.
+   ledger records what would have stopped it; enforced again, it is refused. Monitored
+   for the customer-support blueprint's agents only (an
+   [exception](docs/features.md#exceptions)), it goes through again; without the
+   exception, it is refused.
 8. **Human in the loop**: a destructive tool waits for an approver; once approved, the
    agent's retry goes through.
 9. **Access packages**: alice, the agent's sponsor, asks for the crm-export package for it;
@@ -218,6 +223,12 @@ the gateway. It shows each control in turn:
 25. **Signing out everywhere**: alice signs in to AgentGov, then signs out at Keycloak
     itself; Keycloak tells AgentGov, and her AgentGov session ends at once
     ([administration](docs/administration.md#signing-out-everywhere)).
+26. **Is it working?**: the governance processor has told the control plane what it can
+    reach, OPA and Presidio, so least privilege and data protection can do what their
+    modes say ([features](docs/features.md#is-it-working)); and what it does when OPA
+    can't decide, and what the monitor-first starting point would change
+    ([when something is down](docs/features.md#when-something-is-down),
+    [starting points](docs/features.md#starting-points)).
 
 Then look around:
 
@@ -351,7 +362,9 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 
 * [Deploying AgentGov](docs/deploy/README.md): [on your machine](docs/deploy/local.md),
   [on Kubernetes](docs/deploy/kubernetes.md), and on [Google Cloud](docs/deploy/gcp.md),
-  [Azure](docs/deploy/azure.md) and [AWS](docs/deploy/aws.md)
+  [Azure](docs/deploy/azure.md) and [AWS](docs/deploy/aws.md); all of it, or less: an
+  [inventory without the gateway](docs/deploy/kubernetes.md#profiles), or the gateway
+  watching before it enforces
 * [Configuration](docs/configuration.md): every setting, and
   [requirements](docs/requirements.md): versions, resources and network
 * [Agent 365 baseline and parity matrix](docs/baseline-agent365.md)
@@ -375,7 +388,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 * [Access packages](docs/access-packages.md): tools, models and agents an agent holds for a
   while once approved, with reminders, renewals and reviews
 * [Issues](docs/issues.md): findings sent to each agent's owner, sponsors and team, by email
-  and in their chats, until someone takes them on
+  and in their chats, until someone takes them on; which kinds of findings are raised, how
+  severe each is, and which reach inboxes
 * [Management rules](docs/management-rules.md): what to do about agents that meet some
   conditions for long enough, such as blocking agents nobody uses, after telling their people
 * [Evidence](docs/evidence.md): checkpoints time-stamped by an authority and published in a

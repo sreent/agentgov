@@ -386,6 +386,20 @@ class Policy(Base):
     updated_at: Mapped[datetime] = _updated()
 
 
+class FindingType(Base):
+    """How findings of one type are handled here (``agentgov.registry.finding_types``):
+    raised or not, and how severe. Types nobody configured have no row."""
+
+    __tablename__ = "finding_types"
+
+    type: Mapped[str] = mapped_column(String(128), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(8), default="on")
+    # Instead of the severity its check gives it; None keeps that one.
+    severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    changed_by: Mapped[str] = mapped_column(String(200))
+    changed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
 class FeatureSetting(Base):
     """The mode chosen for one of AgentGov's features (``agentgov.registry.features``).
 
@@ -400,6 +414,9 @@ class FeatureSetting(Base):
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     changed_by: Mapped[str] = mapped_column(String(200))
     changed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # Its exceptions: another mode for the agents in a scope, the first that matches
+    # ({"mode", "scope", "note"}; docs/features.md#exceptions).
+    scopes: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, server_default="[]")
 
 
 class ApiKey(Base):
@@ -511,6 +528,24 @@ class PlatformSync(Base):
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     message: Mapped[str] = mapped_column(Text, default="")
     counts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ComponentReport(Base):
+    """What one instance of a component (a governance processor) last said it can reach:
+    OPA, Presidio, Granite Guardian, a decision point of your own (agentgov.health)."""
+
+    __tablename__ = "component_reports"
+
+    component: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instance: Mapped[str] = mapped_column(String(200), primary_key=True)
+    reported_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    version: Mapped[str] = mapped_column(String(32), default="")
+    # Seconds between its reports: it is out of touch after a few missed ones.
+    interval: Mapped[int] = mapped_column(Integer, default=60)
+    # {"opa": {"configured": bool, "ok": bool, "detail": str}, ...}
+    checks: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # The settings that decide what a failed check does (Presidio's failure mode).
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class IntegrationState(Base):

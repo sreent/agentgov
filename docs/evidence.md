@@ -187,6 +187,7 @@ A zip for the last N days:
 | `inventory.json` | The agents, with their owners, sponsors, teams, status, risk and attestations |
 | `manifests.yaml` | The registry as code: blueprints, tool servers, policies, rules, packages, features |
 | `features.json` | Which features are on, and how strictly |
+| `feature-exceptions.json` | Controls' exceptions: their mode for the agents in a scope ([features](features.md#exceptions)) |
 
 ## Where
 

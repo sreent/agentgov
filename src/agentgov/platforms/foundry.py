@@ -12,6 +12,11 @@ Each agent is reported with the version its endpoint serves: its model, instruct
 Microsoft 365 and Teams (:func:`foundry_agent`). An agent with an Entra agent identity of its
 own is linked to that identity, which AgentGov also reads from Microsoft Entra Agent ID.
 
+A project's connections are read when one of its agents' MCP, OpenAPI or A2A tools signs in
+through one, for how it signs in: with one credential everyone who uses the agent shares, as
+each user, or as the agent. AgentGov lists them without their credentials and never asks for
+those.
+
 Secrets never leave Foundry: of MCP servers' headers and hosted agents' environment variables
 AgentGov keeps the names, and of URLs the host.
 """
@@ -33,6 +38,14 @@ from agentgov.platforms.base import Found, Inventory, PlatformError, Risk
 API_VERSION = "v1"
 ARM_VERSION = "2025-06-01"
 MAX_PAGES = 50
+
+
+def _capped(what: str) -> str:
+    """Why a list read only up to MAX_PAGES pages fails: the part it is in wasn't read in
+    full, so its agents are left as the last full read saw them (agentgov.platforms.base)."""
+    return f"more than {MAX_PAGES} pages of {what}: the rest weren't read"
+
+
 RETRIES = (0.5, 1.0, 2.0)
 SECRET_NAME = re.compile(r"(secret|passw(or)?d|token|api[_-]?key|private[_-]?key|credential)", re.I)
 # A value that refers to a secret rather than holding one (a Key Vault reference), or that the
@@ -105,6 +118,29 @@ OPENAPI_AUTH = {
 }
 # Tool types whose tools have a name of their own; the rest are Foundry's.
 NAMED = {"mcp", "openapi", "a2a", "a2a_preview", "azure_function", "function", "custom"}
+# Tools that sign in to a server of their own, which may be through a project connection.
+SIGNS_IN = {"mcp", "openapi", "a2a", "a2a_preview"}
+# How a project connection signs a tool in, by its credential type (in lower case): (how,
+# whether it is one credential for everyone who uses the agent). Foundry: "People who have
+# access to the project can access an API key stored in a project connection."
+CREDENTIALS = {
+    "apikey": ("with one shared API key", True),
+    "customkeys": ("with shared custom keys", True),
+    "pat": ("with one shared personal access token", True),
+    "usernamepassword": ("with one shared user name and password", True),
+    "accountkey": ("with one shared account key", True),
+    "accesskey": ("with one shared access key", True),
+    "sas": ("with one shared access signature", True),
+    "serviceprincipal": ("as one service principal, with its secret", True),
+    "oauth2": ("as each user, who signs in (OAuth identity passthrough)", False),
+    "userentratoken": ("as each user, with their Microsoft Entra sign-in", False),
+    "agenticidentitytoken": ("as the agent's identity (Microsoft Entra)", False),
+    "agenticidentitytoken_preview": ("as the agent's identity (Microsoft Entra)", False),
+    "projectmanagedidentity": ("as the project's managed identity (Microsoft Entra)", False),
+    "managedidentity": ("as a managed identity (Microsoft Entra)", False),
+    "aad": ("with Microsoft Entra ID", False),
+    "none": ("with no sign-in", False),
+}
 
 
 def project_part(endpoint: str) -> str:
@@ -143,7 +179,7 @@ class FoundryConnector:
         for endpoint in projects:
             part = project_part(endpoint)
             try:
-                found = self._project(endpoint, part)
+                found = self._project(endpoint, part, inventory)
             except PlatformError as exc:
                 inventory.failed[part] = str(exc)
                 continue
@@ -218,6 +254,8 @@ class FoundryConnector:
             yield from (v for v in page.get("value") or [] if isinstance(v, dict))
             # The next link is opaque and carries the API version itself.
             next_url, params = page.get("nextLink"), None
+        if next_url:
+            raise PlatformError(_capped(url))
 
     # -- projects and agents --------------------------------------------------------
 
@@ -249,10 +287,36 @@ class FoundryConnector:
                     found.append(endpoint)
         return found
 
-    def _project(self, endpoint: str, part: str) -> list[Found]:
+    def _connections(self, endpoint: str) -> dict[str, dict[str, Any]]:
+        """The project's connections, by ID and by name. Listed without their credentials,
+        which AgentGov never asks for (``getConnectionWithCredentials``)."""
+        audience = self.settings.foundry_audience
+        found: dict[str, dict[str, Any]] = {}
+        url: str | None = f"{endpoint}/connections"
+        params: dict[str, Any] | None = {"api-version": API_VERSION}
+        for _ in range(MAX_PAGES):
+            if not url:
+                break
+            page = self._get(url, audience, params)
+            for connection in page.get("value") or []:
+                if isinstance(connection, dict) and connection.get("name"):
+                    found[str(connection["name"])] = connection
+                    if connection.get("id"):
+                        found[str(connection["id"])] = connection
+            url = page.get("nextLink")
+            params = None if url and "api-version=" in url else {"api-version": API_VERSION}
+        if url:
+            raise PlatformError(_capped(f"{endpoint}/connections"))
+        return found
+
+    def _project(self, endpoint: str, part: str, inventory: Inventory) -> list[Found]:
         audience = self.settings.foundry_audience
         found = []
         after = None
+        # Read when an agent's tool first signs in through one; None until then, or when
+        # AgentGov may not read them (``refused`` says why).
+        connections: dict[str, dict[str, Any]] | None = None
+        refused: str | None = None
         for _ in range(MAX_PAGES):
             params = {
                 "api-version": API_VERSION,
@@ -276,16 +340,37 @@ class FoundryConnector:
                         if exc.status not in (403, 404):
                             raise
                         why = f"the version it serves ({served}) couldn't be read: {exc}"
-                item = foundry_agent(agent, endpoint, part, version=version)
-                if why:
+                notes = [why] if why else []
+                if _connection_refs(version) and connections is None:
+                    if refused is None:
+                        try:
+                            connections = self._connections(endpoint)
+                        except PlatformError as exc:
+                            if exc.status not in (403, 404):
+                                raise
+                            refused = str(exc)
+                            inventory.failed[f"{part} (its connections)"] = refused
+                    if connections is None:
+                        notes.append(
+                            f"how its tools' connections sign in couldn't be read: {refused}"
+                        )
+                item = foundry_agent(
+                    agent, endpoint, part, version=version, connections=connections
+                )
+                if notes:
+                    # Its findings stay as they were rather than close unchecked.
                     item.complete = False
-                    item.details["facts"].append(
-                        {"label": "Not read in full", "value": why, "tone": "warning"}
-                    )
+                    item.missing += notes
+                    item.details["facts"] += [
+                        {"label": "Not read in full", "value": note, "tone": "warning"}
+                        for note in notes
+                    ]
                 found.append(item)
             after = page.get("last_id")
             if not agents or not after or page.get("has_more") is False:
                 break
+        else:
+            raise PlatformError(_capped(f"{endpoint}/agents"))
         return found
 
 
@@ -349,16 +434,67 @@ def _words(value: Any) -> str:
     return str(value or "").replace("_", " ").strip().capitalize()
 
 
-def _tool(tool: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    """One tool as AgentGov shows it, and the names of credentials its definition holds."""
+def _connection_ref(tool: dict[str, Any]) -> str | None:
+    """The project connection an MCP, OpenAPI or A2A tool signs in through: MCP tools name it,
+    the others give its ID."""
+    if tool.get("type") == "openapi":
+        auth = (tool.get("openapi") or {}).get("auth") or {}
+        if auth.get("type") != "project_connection":
+            return None
+        ref = (auth.get("security_scheme") or {}).get("project_connection_id")
+    elif tool.get("type") in SIGNS_IN:
+        ref = tool.get("project_connection_id")
+    else:
+        return None
+    return str(ref) if ref else None
+
+
+def _connection_refs(version: dict[str, Any]) -> list[str]:
+    tools = (version.get("definition") or {}).get("tools") or []
+    return [ref for t in tools if isinstance(t, dict) and (ref := _connection_ref(t))]
+
+
+def _through(ref: str, connections: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+    """How a tool signs in through the connection ``ref``: ``text`` to show, its ``tone``,
+    the ``connection``'s name and the ``server`` it reaches, and whether everyone who uses
+    the agent shares its credential (``shared``, with ``how``)."""
+    short = ref.rstrip("/").rsplit("/", 1)[-1]
+    if connections is None:  # AgentGov may not read them
+        return {"text": f"through the connection {short}", "connection": short}
+    connection = connections.get(ref) or connections.get(short)
+    if connection is None:
+        return {"text": f"its connection {short} is gone", "tone": "warning", "connection": short}
+    kind = str((connection.get("credentials") or {}).get("type") or "")
+    how, shared = CREDENTIALS.get(kind.lower(), (f"with its {kind} credential", False))
+    label = str(connection.get("name") or short)
+    text = f"through the connection {label}"
+    return {
+        "text": f"{text} {how}" if kind else text,
+        "tone": "warning" if shared or kind.lower() == "none" else None,
+        "connection": label,
+        "server": _host(connection.get("target")),
+        "shared": shared,
+        "how": how,
+    }
+
+
+def _tool(
+    tool: dict[str, Any], connections: dict[str, dict[str, Any]] | None = None
+) -> tuple[dict[str, Any], list[str], dict[str, Any] | None]:
+    """One tool as AgentGov shows it, the names of credentials its definition holds, and how
+    it signs in through a project connection (:func:`_through`), if it does."""
     kind_key = str(tool.get("type") or "")
     kind, tone, _ = TOOLS.get(kind_key, (_words(kind_key) or "Tool", None, None))
     name, detail, secrets = None, [], []
+    ref = _connection_ref(tool)
+    via = _through(ref, connections) if ref else None
     if kind_key == "mcp":
         name = tool.get("server_label")
         tunnel = tool.get("tunnel_id")
         detail.append(
-            _host(tool.get("server_url"))
+            # Its connection's endpoint is the one Foundry calls, when the two differ.
+            (via or {}).get("server")
+            or _host(tool.get("server_url"))
             or tool.get("connector_id")
             or (f"through the Secure MCP Tunnel {tunnel}" if tunnel else None)
         )
@@ -369,18 +505,20 @@ def _tool(tool: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         if held:
             secrets += [f"{name or 'MCP server'}: {h}" for h in held]
             detail.append("credentials in its definition: " + ", ".join(held))
-        if tool.get("project_connection_id"):
-            detail.append(f"signs in with the connection {tool['project_connection_id']}")
+        detail.append((via or {}).get("text"))
         approval = tool.get("require_approval")
-        never = (approval.get("never") or {}) if isinstance(approval, dict) else {}
+        never = approval.get("never") if isinstance(approval, dict) else None
+        if isinstance(never, list):  # the short form: the tools' names
+            never = {"tool_names": never}
+        never = never if isinstance(never, dict) else {}
         if approval == "never":
             detail.append("its tools run without asking")
             tone = tone or "warning"
-        elif isinstance(never, dict) and never.get("tool_names"):
+        elif never.get("tool_names"):
             names = ", ".join(str(n) for n in never["tool_names"])
             detail.append(f"these of its tools run without asking: {names}")
             tone = tone or "warning"
-        elif isinstance(never, dict) and never.get("read_only"):
+        elif never.get("read_only"):
             detail.append("its read-only tools run without asking")
         if held:
             tone = "serious"
@@ -388,11 +526,16 @@ def _tool(tool: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         spec = tool.get("openapi") or {}
         name = spec.get("name")
         auth = str((spec.get("auth") or {}).get("type") or "")
-        detail.append(OPENAPI_AUTH.get(auth, _words(auth) or None))
+        detail.append((via or {}).get("text") or OPENAPI_AUTH.get(auth, _words(auth) or None))
         if auth == "anonymous":
             tone = "warning"
     elif kind_key in ("a2a", "a2a_preview"):
-        name = _host(tool.get("base_url")) or tool.get("project_connection_id")
+        name = (
+            _host(tool.get("base_url"))
+            or (via or {}).get("server")
+            or (via or {}).get("connection")
+        )
+        detail.append((via or {}).get("text"))
     elif kind_key == "azure_function":
         name = ((tool.get("azure_function") or {}).get("function") or {}).get("name")
     elif kind_key in ("function", "custom"):
@@ -407,6 +550,8 @@ def _tool(tool: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         detail.append(f"{len(stores)} vector store{'s' if len(stores) != 1 else ''}")
     elif kind_key == "memory_search_preview":
         detail.append(tool.get("memory_store_name"))
+    if via and via.get("tone") and tone != "serious":
+        tone = via["tone"]
     own = name or tool.get("name")
     entry = {
         "name": str(own or kind),
@@ -415,7 +560,7 @@ def _tool(tool: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         "detail": " · ".join(str(d) for d in detail if d) or None,
         **({"tone": tone} if tone else {}),
     }
-    return entry, secrets
+    return entry, secrets, via
 
 
 def foundry_agent(
@@ -424,9 +569,11 @@ def foundry_agent(
     part: str,
     *,
     version: dict[str, Any] | None = None,
+    connections: dict[str, dict[str, Any]] | None = None,
 ) -> Found:
     """A Foundry agent (from its project's list) as of ``version``, the one its endpoint
-    serves (by default its latest)."""
+    serves (by default its latest), with its project's ``connections`` when AgentGov read
+    them."""
     name = str(agent["name"])
     version = version or (agent.get("versions") or {}).get("latest") or {}
     definition = version.get("definition") or {}
@@ -444,16 +591,18 @@ def foundry_agent(
     activity = protocols.get("activity") or {}
     risks: list[Risk] = []
 
-    tools, risky, secrets = [], [], []
+    tools, risky, secrets, shared = [], [], [], []
     for tool in definition.get("tools") or []:
         if not isinstance(tool, dict):
             continue
-        entry, held = _tool(tool)
+        entry, held, via = _tool(tool, connections)
         tools.append(entry)
         secrets += held
         label, _, level = TOOLS.get(str(tool.get("type")), (None, None, None))
         if level:
             risky.append((label, level))
+        if via and via.get("shared"):
+            shared.append((entry["name"], via["connection"], via["how"]))
     if risky:
         risks.append(
             Risk(
@@ -487,6 +636,23 @@ def foundry_agent(
                 "Keep credentials in a project connection (or Key Vault) and refer to them, and "
                 "rotate the ones that were in its definition.",
                 {"credentials": secrets, "variables": plain},
+            )
+        )
+    if shared:
+        risks.append(
+            Risk(
+                "platform.maker_credentials",
+                "medium",
+                f"{name} acts with one shared credential",
+                "These tools sign in through project connections that hold one credential for "
+                "everyone who uses the agent, so its users act there with that credential's "
+                "access, not their own, and anyone with access to the project can read it: "
+                + "; ".join(f"{tool} (connection {conn}, {how})" for tool, conn, how in shared)
+                + ".",
+                "Have the connections sign each user in (OAuth identity passthrough) or sign in as "
+                "the agent (Microsoft Entra agent identity), or confirm the shared access is "
+                "intended and dismiss this finding.",
+                {"connections": sorted({conn for _, conn, _ in shared})},
             )
         )
     shared_identity = not principal and kind_key in ("prompt", "hosted", "workflow", "voice")

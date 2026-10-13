@@ -2,10 +2,10 @@
 {{- if .Values.podDisruptionBudget.enabled }}
 {{- $parts := list
   (list "control-plane" .Values.controlPlane.replicas true)
-  (list "processor" .Values.processor.replicas true)
-  (list "gateway" .Values.gateway.replicas true)
-  (list "opa" .Values.opa.replicas true)
-  (list "presidio" .Values.presidio.replicas .Values.presidio.enabled)
+  (list "processor" .Values.processor.replicas .Values.gateway.enabled)
+  (list "gateway" .Values.gateway.replicas .Values.gateway.enabled)
+  (list "opa" .Values.opa.replicas .Values.opa.enabled)
+  (list "presidio" .Values.presidio.replicas (and .Values.presidio.enabled .Values.gateway.enabled))
   (list "keycloak" .Values.keycloak.replicas .Values.keycloak.enabled) }}
 {{- range $parts }}
 {{- $component := index . 0 }}

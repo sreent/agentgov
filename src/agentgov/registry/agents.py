@@ -299,6 +299,11 @@ def workload_identity(agent: Agent) -> dict[str, str] | None:
     return {"issuer": agent.workload_issuer, "subject": agent.workload_subject or ""}
 
 
+# Labels under this prefix change what AgentGov does to an agent (agentgov/exempt-rules,
+# agentgov/exempt-controls): only administrators set them.
+RESERVED_LABELS = "agentgov/"
+
+
 def register(
     session: Session,
     settings: Settings,
@@ -306,9 +311,21 @@ def register(
     *,
     actor: str,
     approve: bool = False,
+    admin: bool = True,
 ) -> Agent:
-    """Register an agent. It starts ``pending`` unless ``approve`` is set."""
+    """Register an agent. It starts ``pending`` unless ``approve`` is set. Only an
+    administrator (``admin``) sets the labels that exempt it from rules or controls."""
     name = validation.slug(data.get("name"), "name")
+    reserved = sorted(
+        k
+        for k in (data.get("labels") or {} if isinstance(data.get("labels"), dict) else {})
+        if str(k).startswith(RESERVED_LABELS)
+    )
+    if reserved and not admin:
+        raise ValidationError(
+            f"label(s) {', '.join(reserved)}: labels under {RESERVED_LABELS} are set by "
+            "administrators"
+        )
     if session.scalar(select(Agent).where(Agent.name == name)):
         raise Conflict(f"agent {name!r} already exists")
     agent = Agent(
@@ -521,7 +538,7 @@ def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.Ris
     # Auto-block is a gateway kill switch: it can't stop an agent on another platform.
     threshold = settings.auto_block_risk_score
     if threshold and result.score >= threshold and agent.status == ACTIVE and not agent.on_platform:
-        mode = features.mode(session, "risk-based-access")
+        mode = features.mode_for(session, agent, "risk-based-access")
         if mode == features.ENFORCE:
             transition(
                 session,

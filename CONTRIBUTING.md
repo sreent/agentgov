@@ -40,9 +40,11 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build control-plane 
 request. Run it before you open one:
 
 ```bash
-scripts/ci.sh             # ruff, the docs, opa fmt/check/test, pytest, the Helm chart, the image
+scripts/ci.sh             # ruff, the docs, the Compose files, opa fmt/check/test, pytest,
+                          # the Helm chart, the image
 scripts/ci.sh --e2e       # also: the demo and ledger verification against the Compose
-                          # stack and against the Helm chart's pods run with Docker
+                          # stack and against the Helm chart's pods run with Docker,
+                          # and the inventory stack
 scripts/ci.sh --kind      # also: the Helm chart on a kind cluster, with the same demo
 scripts/ci.sh --spire     # --kind, with SPIRE on the cluster issuing the components'
                           # certificates
@@ -99,7 +101,7 @@ pull requests that change code or the deployment.
 | `deploy/kubernetes` | Values and manifests for the cloud guides |
 | `examples` | Manifests, a demo MCP server, model, workload identity issuer and agent other agents call, a stand-in for the security team's tools, a developer's machine, and the demo agent |
 | `docs` | The documentation ([index](docs/README.md)) and the ADRs |
-| `scripts` | `ci.sh`, the docs checks, `chart-on-docker.py`, `new-migration.sh` and `gen-protos.sh` |
+| `scripts` | `ci.sh`, the docs checks, `chart-on-docker.py`, `check-inventory.py`, `new-migration.sh` and `gen-protos.sh` |
 | `tests` | Unit and integration tests |
 
 If you change a protocol definition in `src/agentgov/processor/proto` (agentgateway's

@@ -101,13 +101,14 @@ def process(
     opa: FakeOpa | None = None,
     presidio: Any = None,
     traffic_classifier: Any = None,
+    settings: Settings | None = None,
 ) -> tuple[list[pb.ProcessingResponse], FakeControlPlane]:
     cp = FakeControlPlane()
 
     async def go() -> list[pb.ProcessingResponse]:
         recorder = DecisionRecorder(cp)
         processor = GovernanceProcessor(
-            Settings(),
+            settings or Settings(),
             opa=opa or FakeOpa(decide),
             control_plane=cp,
             recorder=recorder,

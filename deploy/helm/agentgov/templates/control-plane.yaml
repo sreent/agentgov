@@ -58,7 +58,7 @@ spec:
             {{- end }}
           env:
             {{- include "agentgov.commonEnv" . | nindent 12 }}
-            {{- include "agentgov.tlsPeersEnv" (list . (list "processor" "gateway" "opa" "otel-collector")) | nindent 12 }}
+            {{- include "agentgov.tlsPeersEnv" (list . (without (splitList " " (include "agentgov.parts" .)) "control-plane")) | nindent 12 }}
             - name: AGENTGOV_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: admin-token}
@@ -81,6 +81,10 @@ spec:
             - name: AGENTGOV_FEATURES
               value: {{ include "agentgov.features" $ | quote }}
             {{- end }}
+            {{- with .Values.featurePreset }}
+            - name: AGENTGOV_FEATURE_PRESET
+              value: {{ . | quote }}
+            {{- end }}
             {{- $apps := .Values.peopleApps }}
             {{- if and .Values.keycloak.enabled .Values.keycloak.demoUsers }}
             {{- $apps = append $apps "agentgov-demo-chat" }}
@@ -91,8 +95,11 @@ spec:
             {{- end }}
             - name: AGENTGOV_PUBLIC_URL
               value: {{ .Values.urls.controlPlane | trimSuffix "/" | quote }}
+            {{- if .Values.gateway.enabled }}
             - name: AGENTGOV_GATEWAY_PUBLIC_URL
               value: {{ .Values.urls.gateway | trimSuffix "/" | quote }}
+            {{- end }}
+            {{- if $keycloak }}
             - name: AGENTGOV_KEYCLOAK_URL
               value: {{ $keycloak | quote }}
             - name: AGENTGOV_KEYCLOAK_REALM
@@ -104,22 +111,26 @@ spec:
             - name: AGENTGOV_KEYCLOAK_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: keycloak-client-secret}
-            # Administrators sign in through the same Keycloak (agentgov-admin client).
+            {{- end }}
+            # Administrators sign in through the same Keycloak (agentgov-admin client), or
+            # through your identity provider (AGENTGOV_OIDC_ISSUER in controlPlane.env).
             - name: AGENTGOV_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: {{ $secret }}, key: oidc-client-secret}
             - name: AGENTGOV_DESTINATION_SECRETS_DIR
               value: /destination-secrets
             {{- include "agentgov.guardianEnv" . | nindent 12 }}
+            {{- if .Values.gateway.enabled }}
             - name: AGENTGOV_PROCESSOR_ADDRESS
               value: "{{ include "agentgov.name" (list . "processor") }}:50051"
             - name: AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS
               value: "{{ include "agentgov.name" (list . "processor") }}:8091"
+            {{- end }}
             {{- if .Values.otelCollector.enabled }}
             - name: AGENTGOV_GATEWAY_OTLP_ENDPOINT
               value: "http://{{ include "agentgov.name" (list . "otel-collector") }}:4317"
             {{- end }}
-            {{- if .Values.bundleSigning.enabled }}
+            {{- if and .Values.bundleSigning.enabled .Values.opa.enabled }}
             - name: AGENTGOV_BUNDLE_SIGNING_KEY_FILE
               value: /bundle-signing/key.pem
             {{- end }}
@@ -176,7 +187,7 @@ spec:
               mountPath: /destination-secrets
               readOnly: true
             {{- include "agentgov.tlsMount" . | nindent 12 }}
-            {{- if .Values.bundleSigning.enabled }}
+            {{- if and .Values.bundleSigning.enabled .Values.opa.enabled }}
             - name: bundle-signing
               mountPath: /bundle-signing
               readOnly: true
@@ -208,7 +219,7 @@ spec:
             secretName: {{ include "agentgov.destinationSecretsSecret" . }}
             optional: true
         {{- include "agentgov.tlsVolume" (list . "control-plane") | nindent 8 }}
-        {{- if .Values.bundleSigning.enabled }}
+        {{- if and .Values.bundleSigning.enabled .Values.opa.enabled }}
         # Only the key, out of the bundle-signing Secret.
         - name: bundle-signing
           secret:

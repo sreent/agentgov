@@ -1,0 +1,18 @@
+# The stack without Presidio, which takes about 1.5 GB of its 2.5 GB: the governance
+# processor still checks for secrets, prompt injection and poisoned tools, but not personal
+# data, and the Features page says so (docs/features.md#is-it-working). The demo's
+# personal-data steps need Presidio.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.no-presidio.yml up -d --build --wait
+services:
+  presidio-analyzer:
+    # Not started unless asked for (--profile presidio).
+    profiles: [presidio]
+  processor:
+    environment:
+      AGENTGOV_PRESIDIO_URL: ""
+    depends_on: !override
+      control-plane:
+        condition: service_healthy
+      opa:
+        condition: service_started

@@ -39,7 +39,12 @@ region, a Salesforce org, a Databricks workspace's agents on Model Serving). Age
 part it read in full stay in the registry, marked as gone, so their history is kept: delete
 them when you no longer need the record. A part that can't be read (its region refuses, say) is
 named on the Platforms page; its agents are left as the last sync saw them, and their findings
-stay open, marked unverified, until it can be read again.
+stay open, marked unverified with why, until it can be read again. So does a part with more
+than 50 pages of results, a cap that keeps one sync from running for hours: what is past the
+cap isn't read, so AgentGov can't tell which of its agents are gone.
+
+What a platform's first sync finds reaches the people responsible in AgentGov, without an
+email or a chat message ([issues](issues.md#fewer-messages)).
 
 AgentGov never copies secrets: of an agent's environment variables, it keeps only their
 names. Its instructions (a system prompt) go through the same [instruction
@@ -114,6 +119,9 @@ runtimes), `agentcore-gateways`, `quick` and `agent-registry`, all by default.
 | `platform.plain_secret` | an environment variable whose name says it holds a secret (a password, token or key) has a value that isn't a reference to Secrets Manager or Parameter Store |
 | `platform.shared_with_everyone` | an Amazon Quick agent is shared with a whole namespace, every user in it |
 | `platform.maker_credentials` | an Amazon Quick agent's action connectors sign in with one credential for everyone (an API key, a user name and password, an OAuth client or an IAM role), so its users act with that credential's access rather than their own |
+
+A runtime or gateway whose resource policy AgentGov may not read is shown as read in part, and
+its findings about who may call it stay as they were, unverified, rather than close.
 
 ### Setting it up
 
@@ -354,6 +362,12 @@ people with a Foundry role or for everyone in the organisation), its protocols, 
 published to Microsoft 365 and Teams, and the identity it acts with. Of an MCP server's URL
 only the host is kept, and of its headers only the names.
 
+An MCP server, an OpenAPI tool or an agent called over A2A that signs in through one of the
+project's connections is shown with how the connection signs in: with one credential that
+everyone who uses the agent shares (an API key, custom keys, a token), as each user (OAuth
+identity passthrough), or as the agent (its Entra agent identity). AgentGov lists a project's
+connections, without their credentials, when one of its agents' tools uses one.
+
 An agent made since Foundry gives each agent an Entra agent identity of its own is linked to
 that identity: what [Microsoft Entra Agent ID](microsoft-connections.md#microsoft-entra-agent-id)
 reports and what Foundry reports are one agent in AgentGov, and so is the Microsoft 365
@@ -364,6 +378,7 @@ shared identity. Agent Applications, the older way Foundry published agents, are
 |---|---|
 | `platform.risky_tool` | an agent has a shell or computer use (high), or a code interpreter, a browser or file edits (medium) |
 | `platform.plain_secret` | an MCP server's headers or access token are in the agent's definition, or a hosted agent's environment variable whose name says it holds a secret has a value that isn't a Key Vault reference |
+| `platform.maker_credentials` | an MCP server, OpenAPI tool or A2A agent signs in through a connection that holds one credential for everyone who uses the agent, which anyone with access to the project can also read; one that signs each user in, or signs in as the agent, raises nothing |
 | `platform.broad_identity` | an agent acts with its project's shared agent identity, so it has whatever any of the project's older agents is given |
 | `platform.shared_with_everyone` | an agent is published to Microsoft 365 and Teams for everyone in the organisation (`BotServiceTenant`) |
 
@@ -375,16 +390,19 @@ Prompt agents' instructions go through the instruction checks.
    connections](microsoft-connections.md) use (`AGENTGOV_M365_TENANT_ID`,
    `AGENTGOV_M365_CLIENT_ID` and `AGENTGOV_M365_CLIENT_SECRET`). Give the app a role that may
    read agents on each project, or on the Foundry resources that hold them. Foundry has no
-   built-in role that reads agents without changing them, so make one with only the agents'
-   read data action:
+   built-in role that reads agents without changing them, so make one with only the read data
+   actions for agents and for connections:
 
    ```json
    {
      "Name": "AgentGov Foundry agent reader",
      "IsCustom": true,
-     "Description": "Reads Foundry agents, for AgentGov's inventory.",
+     "Description": "Reads Foundry agents and how their connections sign in, for AgentGov's inventory.",
      "Actions": [],
-     "DataActions": ["Microsoft.CognitiveServices/accounts/AIServices/agents/read"],
+     "DataActions": [
+       "Microsoft.CognitiveServices/accounts/AIServices/agents/read",
+       "Microsoft.CognitiveServices/accounts/AIServices/connections/read"
+     ],
      "AssignableScopes": ["/subscriptions/<subscription-id>"]
    }
    ```
@@ -395,8 +413,11 @@ Prompt agents' instructions go through the instruction checks.
      --scope /subscriptions/<subscription-id>/resourceGroups/<group>/providers/Microsoft.CognitiveServices/accounts/<resource>
    ```
 
-   The action reads agents' conversations too, which AgentGov doesn't. **Foundry User** works
-   as well, but may change agents.
+   The agents action reads agents' conversations too, which AgentGov doesn't. The connections
+   action lists a project's connections without their credentials, which take an action of
+   their own that AgentGov doesn't need. Without it, agents are still read, and the Platforms
+   page names the projects whose connections couldn't be read; their agents' findings about
+   connections stay as they were. **Foundry User** works as well, but may change agents.
 2. Name the projects, by their endpoints, or the subscriptions to find them in; finding them
    needs **Reader** on the subscription, to list its Foundry resources and their projects:
 

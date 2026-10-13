@@ -141,11 +141,15 @@ listeners take: the components (list . "processor" ...) that call it. */}}
 {{- end }}
 {{- end -}}
 
+{{- /* Keycloak's address in the cluster: the bundled one's, or yours. Empty without either,
+  which only a release without the gateway may be: the gateway checks agents' tokens. */}}
 {{- define "agentgov.keycloakUrl" -}}
 {{- if .Values.keycloak.enabled -}}
 http://{{ include "agentgov.name" (list . "keycloak") }}:8080
-{{- else -}}
-{{- required "keycloak.enabled=false needs externalKeycloak.url" .Values.externalKeycloak.url | trimSuffix "/" -}}
+{{- else if .Values.externalKeycloak.url -}}
+{{- .Values.externalKeycloak.url | trimSuffix "/" -}}
+{{- else if .Values.gateway.enabled -}}
+{{- fail "keycloak.enabled=false needs externalKeycloak.url: the gateway checks agents' tokens with Keycloak (or set gateway.enabled=false for an inventory without the gateway)" -}}
 {{- end -}}
 {{- end -}}
 
@@ -177,14 +181,33 @@ capabilities:
 {{- end -}}
 
 {{/* The settings the AgentGov containers share. */}}
+{{- /* AgentGov's own components this release runs, each with a certificate for mutual TLS,
+  space-separated. */}}
+{{- define "agentgov.parts" -}}
+{{- if and .Values.gateway.enabled (not .Values.opa.enabled) -}}
+{{- fail "gateway.enabled needs opa.enabled: the gateway's processor asks OPA about every call" -}}
+{{- end -}}
+{{- $parts := list "control-plane" -}}
+{{- if .Values.gateway.enabled -}}{{- $parts = append $parts "processor" -}}{{- end -}}
+{{- if .Values.opa.enabled -}}{{- $parts = append $parts "opa" -}}{{- end -}}
+{{- if .Values.gateway.enabled -}}{{- $parts = append $parts "gateway" -}}{{- end -}}
+{{- if .Values.otelCollector.enabled -}}{{- $parts = append $parts "otel-collector" -}}{{- end -}}
+{{- join " " $parts -}}
+{{- end -}}
+
 {{- define "agentgov.commonEnv" -}}
 - name: AGENTGOV_SERVICE_TOKEN
   valueFrom:
     secretKeyRef:
       name: {{ include "agentgov.secretName" . }}
       key: service-token
+{{- if .Values.opa.enabled }}
 - name: AGENTGOV_OPA_URL
   value: {{ if .Values.internalTLS.enabled }}https{{ else }}http{{ end }}://{{ include "agentgov.name" (list . "opa") }}:8181
+{{- end }}
+{{- /* The control plane configures the gateway with it; the processor acts on it. */}}
+- name: AGENTGOV_GATEWAY_FAILURE_MODE
+  value: {{ .Values.gatewayFailureMode | default "modes" | quote }}
 {{- if .Values.internalTLS.enabled }}
 - name: AGENTGOV_TLS_DIR
   value: /tls

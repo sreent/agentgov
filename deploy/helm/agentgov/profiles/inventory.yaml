@@ -1,0 +1,23 @@
+# An inventory of your agents, without the gateway (docs/deploy/kubernetes.md#profiles):
+# the control plane and its database read the agents on your platforms (Microsoft 365,
+# Copilot Studio, AWS, Google Cloud, Salesforce, Databricks, Microsoft Foundry), raise
+# their findings and send them to the people responsible. Nothing is enforced on agents'
+# calls, so neither the gateway nor what checks its calls runs: no processor, OPA,
+# Presidio or Keycloak. 250m CPU and 576 MiB of requests, with the bundled PostgreSQL.
+#
+#   helm install agentgov deploy/helm/agentgov -f deploy/helm/agentgov/profiles/inventory.yaml
+#
+# Administrators sign in with your identity provider (AGENTGOV_OIDC_ISSUER and
+# AGENTGOV_OIDC_CLIENT_ID in controlPlane.env, the client's secret in the Secret's
+# oidc-client-secret) or with an API token. The platforms' own settings go in
+# controlPlane.env too (docs/other-platforms.md, docs/microsoft-connections.md).
+gateway:
+  enabled: false
+opa:
+  enabled: false
+presidio:
+  enabled: false
+keycloak:
+  enabled: false
+# The gateway's features off; inventory, findings, issues and rules on.
+featurePreset: inventory

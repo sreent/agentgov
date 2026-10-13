@@ -2092,7 +2092,8 @@ def findings_get(finding_id: str) -> None:
     if f.get("remediation"):
         typer.echo(f"\nWhat to do: {f['remediation']}")
     if f.get("verified") is False:
-        typer.echo("\nUnverified: the sync that checks it failed; it may no longer hold.")
+        why = f.get("unverified_reason") or "the sync that checks it failed"
+        typer.echo(f"\nUnverified: {why}; it may no longer hold.")
     if f.get("status") == "accepted":
         typer.echo(f"\nRisk accepted until {f['accepted_until']}: {f['accepted_reason']}")
     if f.get("acknowledged_at"):
@@ -2154,6 +2155,45 @@ def findings_dismiss(finding_id: str) -> None:
 def findings_reopen(finding_id: str) -> None:
     """Reopen a resolved, dismissed or accepted finding."""
     _finding_action(finding_id, "reopen")
+
+
+@findings_app.command("types")
+def findings_types() -> None:
+    """Each type of finding: on or off, its severity if set here, and how many are open."""
+    rows = _call("GET", "/v1/finding-types")
+    for row in rows:
+        row["severity"] = row["severity"] or "(its checks')"
+    _table(rows, ["type", "mode", "severity", "open", "total"])
+
+
+@findings_app.command("type")
+def findings_type(
+    type_: str = typer.Argument(..., metavar="TYPE", help="Such as agent.no_owner."),
+    on: bool | None = typer.Option(
+        None, "--on/--off", help="Raise it, or keep what it finds dismissed."
+    ),
+    severity: str | None = typer.Option(
+        None, help="info, low, medium, high or critical; 'default' for its checks' own."
+    ),
+    yes: bool = YES,
+) -> None:
+    """Set how a type of finding is handled here."""
+    body: dict[str, Any] = {}
+    if on is not None:
+        body["mode"] = "on" if on else "off"
+    if severity is not None:
+        body["severity"] = None if severity == "default" else severity
+    if not body:
+        _fail("give --on, --off or --severity")
+    if body.get("mode") == "off":
+        _confirm(
+            f"Turn {type_} off? Its open findings are dismissed, and what it finds is kept "
+            "dismissed.",
+            yes,
+        )
+    out = _call("PUT", f"/v1/finding-types/{quote(type_)}", json=body)
+    severity_text = f"severity {out['severity']}" if out["severity"] else "its checks' severity"
+    _done("finding-type", type_, f"{out['mode']}, {severity_text}")
 
 
 # -------------------------------------------------------------------- ledger
@@ -2747,18 +2787,59 @@ def instructions_check(
 
 @features_app.command("list")
 def features_list() -> None:
-    """Every feature, its mode and what that mode does."""
+    """Every feature, its mode, whether it can do what its mode says, and what it does or
+    what stops it."""
     view = _call("GET", "/v1/features")
     rows = [
         {
             "feature": f["key"],
             "mode": f["mode"],
+            # Its mode for some agents: how many exceptions (agentgov features get shows them).
+            "exceptions": len(f.get("scopes") or []) or "",
+            "status": f.get("status"),
             "set_by": f["set_by"],
-            "does": f["effect"],
+            "does": (f.get("problems") or [f["effect"]])[0],
         }
         for f in view["features"]
     ]
-    _table(rows, ["feature", "mode", "set_by", "does"])
+    _table(rows, ["feature", "mode", "exceptions", "status", "set_by", "does"])
+
+
+@app.command()
+def components() -> None:
+    """What the control plane reaches itself, and what each governance processor says it
+    reaches: whether features can do what their modes say comes from these."""
+    view = _call("GET", "/v1/components")
+    rows = []
+
+    def add(where: str, reported: str | None, checks: dict[str, Any]) -> None:
+        for name, c in checks.items():
+            state = ("reachable" if c["ok"] else "unreachable") if c["configured"] else "not set up"
+            rows.append(
+                {
+                    "component": where,
+                    "check": name,
+                    "state": state,
+                    "reported": reported,
+                    "detail": c.get("detail") or "",
+                }
+            )
+
+    add("control plane", "now", view["control_plane"])
+    for p in view["processors"]:
+        where = f"processor {p['instance']}" + ("" if p["fresh"] else " (out of touch)")
+        add(where, p["reported_at"], p["checks"])
+    if not view["processors"]:
+        rows.append(
+            {
+                "component": "processor",
+                "check": "",
+                "state": "none has reported",
+                "reported": "",
+                "detail": "nothing is known to check calls through the gateway",
+            }
+        )
+    _table(rows, ["component", "check", "state", "reported", "detail"])
 
 
 @features_app.command("get")
@@ -2785,6 +2866,122 @@ def features_set(
         )
     out = _call("PUT", f"/v1/features/{quote(key)}", json={"mode": mode})
     _done("feature", key, f"{out['mode']}: {out['effect']}")
+
+
+@features_app.command("scope")
+def features_scope(
+    key: str,
+    mode: str = typer.Argument(..., help="The control's mode for these agents."),
+    blueprint: list[str] = typer.Option(None, "--blueprint", help="Repeatable."),
+    team: list[str] = typer.Option(None, "--team", help="Repeatable."),
+    environment: list[str] = typer.Option(None, "--environment", help="Repeatable."),
+    platform: list[str] = typer.Option(
+        None, "--platform", help="gateway, aws, microsoft-365, ... Repeatable."
+    ),
+    label: list[str] = typer.Option(None, "--label", help="key=value. Repeatable."),
+    note: str | None = typer.Option(None, "--note", help="Why, for whoever reads it next."),
+    yes: bool = YES,
+) -> None:
+    """Add an exception to a control: its mode for the agents in a scope (every option
+    given must match). The first exception that matches an agent applies to it."""
+    current = _call("GET", f"/v1/features/{quote(key)}")
+    scope: dict[str, Any] = {
+        k: _split(v)
+        for k, v in (
+            ("blueprints", blueprint),
+            ("teams", team),
+            ("environments", environment),
+            ("platforms", platform),
+        )
+        if v
+    }
+    if label:
+        scope["labels"] = _labels(label)
+    if not scope:
+        _fail("say which agents: --blueprint, --team, --environment, --platform or --label")
+    entry: dict[str, Any] = {"mode": mode, "scope": scope}
+    if note:
+        entry["note"] = note
+    modes = current["modes"]
+    if mode in modes and modes.index(mode) < modes.index(current["mode"]):
+        _confirm(f"{current['title']}: {mode} for these agents, {current['mode']} for others?", yes)
+    scopes = [{k: v for k, v in e.items() if k != "describe"} for e in current.get("scopes") or []]
+    out = _call("PUT", f"/v1/features/{quote(key)}", json={"scopes": [*scopes, entry]})
+    _done(
+        "feature",
+        key,
+        f"{len(out['scopes'])} exception(s): "
+        + "; ".join(f"{e['mode']} for {e['describe']}" for e in out["scopes"]),
+    )
+
+
+@features_app.command("unscope")
+def features_unscope(
+    key: str,
+    number: int = typer.Argument(
+        ..., help="Which exception, as agentgov features get lists them (1 is the first)."
+    ),
+    yes: bool = YES,
+) -> None:
+    """Remove one of a control's exceptions."""
+    current = _call("GET", f"/v1/features/{quote(key)}")
+    scopes = [{k: v for k, v in e.items() if k != "describe"} for e in current.get("scopes") or []]
+    if not 1 <= number <= len(scopes):
+        _fail(f"{key} has {len(scopes)} exception(s)")
+    gone = current["scopes"][number - 1]
+    _confirm(f"{current['title']}: remove {gone['mode']} for {gone['describe']}?", yes)
+    out = _call(
+        "PUT", f"/v1/features/{quote(key)}", json={"scopes": scopes[: number - 1] + scopes[number:]}
+    )
+    _done("feature", key, f"{len(out['scopes'])} exception(s) left")
+
+
+@features_app.command("presets")
+def features_presets() -> None:
+    """Starting points that set many modes at once, and what each would change now."""
+    view = _call("GET", "/v1/feature-presets")
+    rows: list[dict[str, Any]] = []
+    for preset in view["presets"]:
+        name = preset["preset"]
+        rows += [
+            {"preset": name, "feature": c["key"], "from": c["from"], "to": c["to"], "note": ""}
+            for c in preset["changes"]
+        ]
+        rows += [
+            {
+                "preset": name,
+                "feature": c["key"],
+                "from": c["from"],
+                "to": c["to"],
+                "note": f"kept: {c['reason']}",
+            }
+            for c in preset["kept"]
+        ]
+        if not preset["changes"] and not preset["kept"]:
+            rows.append({"preset": name, "note": "changes nothing now"})
+    _table(rows, ["preset", "feature", "from", "to", "note"])
+    if view.get("applied"):
+        typer.echo(f"The deployment applied {view['applied']} (AGENTGOV_FEATURE_PRESET).")
+
+
+@features_app.command("preset")
+def features_preset(
+    name: str = typer.Argument(..., help="monitor or inventory."), yes: bool = YES
+) -> None:
+    """Apply a starting point: set the modes it sets, but for features the deployment pins
+    (agentgov features presets shows what it would change)."""
+    view = _call("GET", "/v1/feature-presets")
+    plan = next((p for p in view["presets"] if p["preset"] == name), None)
+    if plan is None:
+        _fail(f"no preset {name!r}; presets: {', '.join(p['preset'] for p in view['presets'])}")
+    if not plan["changes"]:
+        _done("preset", name, "nothing to change")
+        return
+    summary = "; ".join(f"{c['key']} {c['from']} to {c['to']}" for c in plan["changes"])
+    _confirm(f"{plan['title']}: {summary}?", yes)
+    out = _call("POST", f"/v1/feature-presets/{quote(name)}")
+    count = len(out["changes"])
+    _done("preset", name, f"{count} feature{'' if count == 1 else 's'} changed")
 
 
 # ----------------------------------------------------------------------- mcp

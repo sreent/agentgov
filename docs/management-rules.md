@@ -92,7 +92,8 @@ failed sync can't vouch for (unverified) don't. Rules' own issues never count.
 | `labels` | With all these labels |
 
 An agent labelled `agentgov/exempt-rules` is left out of the rules it names (`inactive-agents,
-stale-registrations`), or of all of them (`*`). Each action also looks only at the agents
+stale-registrations`), or of all of them (`*`); only administrators set labels under
+`agentgov/`. Each action also looks only at the agents
 it can do something to: a rule that blocks, at pending, active and discovered agents; one
 that deletes, at any agent not deleted yet; one that revokes access, at agents that hold
 access packages; and one that gives an owner, at agents without one.

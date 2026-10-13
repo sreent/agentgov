@@ -14,6 +14,13 @@ helm install agentgov oci://ghcr.io/sreent/charts/agentgov --version 0.1.0 \
   -n agentgov --create-namespace --wait
 ```
 
+To run less of it, start from a profile:
+[`profiles/inventory.yaml`](profiles/inventory.yaml), the agents on your platforms, their
+findings and issues, with no gateway, OPA, Presidio or Keycloak; or
+[`profiles/monitor.yaml`](profiles/monitor.yaml), the gateway with every control watching
+rather than stopping, without Presidio
+([profiles](../../../docs/deploy/kubernetes.md#profiles)).
+
 The defaults are for evaluation. The guides cover the rest:
 
 * [Kubernetes](../../../docs/deploy/kubernetes.md): trying it, the image, what to change
@@ -25,6 +32,6 @@ The defaults are for evaluation. The guides cover the rest:
 * [Requirements](../../../docs/requirements.md): versions, resources and network
 
 [`values.yaml`](values.yaml) documents every value. CI checks the chart with `helm lint`,
-renders it with the default, production and cloud values and validates the result with
-kubeconform, runs its pods with Docker (`scripts/ci.sh --e2e`) and installs it on kind
+renders it with the default, production, profiles' and cloud values and validates the
+result with kubeconform, runs its pods with Docker (`scripts/ci.sh --e2e`) and installs it on kind
 (`scripts/ci.sh --kind`), each time with the demo.

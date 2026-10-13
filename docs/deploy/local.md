@@ -5,6 +5,7 @@ Three ways, for evaluation and development:
 | | What runs | For |
 |---|---|---|
 | [Docker Compose](#docker-compose) | The whole stack, with the demo's tool server, model and stand-ins | Trying AgentGov, the demo, end-to-end development |
+| [Just the inventory](#just-the-inventory) | The control plane and PostgreSQL, with Compose | An inventory of the agents on your platforms, their findings and issues, without the gateway |
 | [Kubernetes with kind](#kubernetes-with-kind) | The Helm chart on a local cluster | Working on the chart, rehearsing a Kubernetes install |
 | [The control plane alone](#the-control-plane-alone) | The API and the admin UI, on a SQLite file | Working on the API or the UI |
 
@@ -211,11 +212,27 @@ control plane, so `AGENTGOV_PUBLIC_URL` must be an HTTPS address Microsoft can r
 [Agents on Microsoft 365 and Copilot Studio](../platforms.md) and
 [connecting AgentGov to Microsoft's services](../microsoft-connections.md) have the details.
 
+### Optional: without Presidio
+
+Presidio takes about 1.5 GB of the stack's 2.5 GB. Without it, the governance processor still
+checks for secrets, prompt injection and poisoned tools, but not personal data, and the
+**Features** page says so; the demo's personal-data steps fail:
+
+```bash
+docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.no-presidio.yml up -d --build --wait
+```
+
+To start with every control watching rather than stopping, set
+`AGENTGOV_FEATURE_PRESET=monitor` in `.env` before the first start
+([starting points](../features.md#starting-points)).
+
 ### What's in `deploy/compose`
 
 | File | What it is |
 |---|---|
 | `docker-compose.yml` | The services and how they connect |
+| `docker-compose.inventory.yml` | The control plane and PostgreSQL alone ([below](#just-the-inventory)) |
+| `docker-compose.no-presidio.yml`, `docker-compose.langfuse.yml`, `docker-compose.guardian.yml` | Overrides: without Presidio, with Langfuse, with Granite Guardian (above) |
 | `.env.example` | Every secret the stack uses, and its optional settings |
 | `keycloak/agentgov-realm.json` | The realm, imported on Keycloak's first start: the control plane's provisioning client, the `agentgov-admin` sign-in client, the AgentGov roles, the demo users and the demo app people use agents from, `agentgov-demo-chat` |
 | `opa/config.yaml` | OPA's bundle, decision log and status services, all served by the control plane on its internal port, and the key bundles are signed with |
@@ -275,11 +292,39 @@ docker compose -f deploy/compose/docker-compose.yml down -v   # removes all data
   the collector. Check `docker compose ... logs otel-collector`.
 * **Calls are denied with "policy engine unavailable"**: OPA has no bundle yet. Check
   `docker compose ... logs opa`; bundle errors also raise a finding (`agentgov findings`).
+  While no control at the gateway is enforced, such calls go through unchecked instead,
+  and the ledger records them as `Not checked`
+  ([when something is down](../features.md#when-something-is-down)).
 * **Single sign-on stops at Keycloak with "Invalid parameter: redirect_uri"**, or the UI
   says the identity provider could not complete the sign-in: Keycloak imports the realm
   only on its first start, so later changes to `AGENTGOV_PUBLIC_URL` or
   `AGENTGOV_OIDC_CLIENT_SECRET` must be made on the `agentgov-admin` client in Keycloak too
   (or start over). The control plane's log names the cause.
+
+## Just the inventory
+
+To keep an inventory of the agents on your platforms (Microsoft 365, Copilot Studio, AWS,
+Google Cloud, Salesforce, Databricks, Microsoft Foundry), with their findings sent to the
+people responsible, AgentGov needs neither the gateway nor what checks its calls. The
+control plane and PostgreSQL do, in about 200 MB of memory:
+
+```bash
+docker compose -f deploy/compose/docker-compose.inventory.yml up -d --build --wait
+```
+
+Open <http://localhost:8000/ui> with the token `dev-admin-token` (`AGENTGOV_ADMIN_TOKEN`).
+On its first start the control plane applies the inventory starting point: the gateway's
+features off, and discovery, posture checks, issues, management rules and the platforms on
+([starting points](../features.md#starting-points)). Every setting in `deploy/compose/.env`
+reaches the control plane: the platforms' credentials
+([other platforms](../other-platforms.md), [Microsoft](../microsoft-connections.md)),
+`AGENTGOV_OIDC_*` to sign administrators in with your identity provider, and
+`AGENTGOV_SMTP_*` for issues' emails ([configuration](../configuration.md)).
+
+It runs as its own Compose project, `agentgov-inventory`, with its own database, so the full
+stack beside it starts afresh (not at the same time: both use port 8000). On Kubernetes the
+same choice is a [profile](kubernetes.md#profiles), and adding the gateway later is an
+upgrade that keeps the registry, its findings and the ledger.
 
 ## Kubernetes with kind
 

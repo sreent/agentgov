@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from agentgov import ids, ledger, migrations, retention, timestamping, transparency
+from agentgov import health, ids, ledger, migrations, retention, timestamping, transparency
 from agentgov.config import Settings
 from agentgov.coordination import Coordinator
 from agentgov.db import Database
@@ -35,6 +35,7 @@ from agentgov.registry import (
     access_packages,
     entra_access,
     features,
+    findings,
     instructions,
     issues,
     mcp_sightings,
@@ -125,6 +126,10 @@ class Runtime:
         self.settings = settings
         # This component's certificate, for mutual TLS with the others (agentgov.tls).
         self.tls = settings.tls()
+        # What the control plane reaches itself, for whether features can do their work.
+        self.health = health.Cached(
+            settings, verify=lambda: self.tls.client_context() if self.tls else True
+        )
         self.db = Database(settings.database_url, on_commit=self._on_commit)
         # OPA's bundles, signed when a key is set (agentgov.opa.signing).
         signer = (
@@ -234,6 +239,7 @@ class Runtime:
             if settings.issues_interval_seconds > 0
             else None
         )
+        # Whatever connectors there are when it runs: one may be added after this.
         self._platforms_worker = (
             _Worker(
                 "platform-sync",
@@ -241,7 +247,7 @@ class Runtime:
                 settings.platform_sync_interval_seconds,
                 leading=leading,
             )
-            if self.platforms and settings.platform_sync_interval_seconds > 0
+            if settings.platform_sync_interval_seconds > 0
             else None
         )
         self._started = False
@@ -270,6 +276,7 @@ class Runtime:
             with self.db.session() as session:
                 ledger.ensure_head(session)
             with self.db.session() as session:
+                features.apply_deployment_preset(session, self.settings)
                 features.apply_pins(session, self.settings)
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
@@ -283,42 +290,24 @@ class Runtime:
                 leading=lambda: self.coordination.leading,
                 exclusive=lambda: self.coordination.job("identity"),
             )
-        if self.settings.gateway_config_path:
-            self._gateway_worker.start()
-        if self._posture_worker is not None:
-            self._posture_worker.start()
-        if self._m365_worker is not None:
-            self._m365_worker.start()
         if self._classifier_worker is not None:
             with self.db.session() as session:
                 instructions.queue_unclassified(session)
-            self._classifier_worker.start()
-        self._recheck_worker.start()
-        self._mcp_worker.start()
-        self._retention_worker.start()
-        if self._delivery_worker is not None:
-            self._delivery_worker.start()
-        if self._issues_worker is not None:
-            self._issues_worker.start()
+        # Every scheduled job, so that none is built and left idle.
+        for worker in self._workers():
+            worker.start()
         self._started = True
+
+    def _workers(self) -> list[_Worker]:
+        gateway = [self._gateway_worker] if self.settings.gateway_config_path else []
+        delivery = [self._delivery_worker] if self._delivery_worker is not None else []
+        return gateway + delivery + self._leader_workers()
 
     def stop(self) -> None:
         if self.identity is not None:
             self.identity.stop()
-        self._gateway_worker.stop()
-        if self._posture_worker is not None:
-            self._posture_worker.stop()
-        if self._m365_worker is not None:
-            self._m365_worker.stop()
-        if self._classifier_worker is not None:
-            self._classifier_worker.stop()
-        self._recheck_worker.stop()
-        self._mcp_worker.stop()
-        self._retention_worker.stop()
-        if self._delivery_worker is not None:
-            self._delivery_worker.stop()
-        if self._issues_worker is not None:
-            self._issues_worker.stop()
+        for worker in self._workers():
+            worker.stop()
         # Last: another replica takes the lead once this one lets go.
         self.coordination.stop()
         self.db.dispose()
@@ -510,16 +499,24 @@ class Runtime:
     def run_issues(self) -> dict[str, Any]:
         """Expire access packages and raise their reminders and reviews; route findings to
         the people responsible, escalate those nobody acknowledged, open accepted risks
-        whose time ran out, and send what is due."""
+        whose time ran out, resolve threats that haven't happened for a while, and send
+        what is due."""
         with self.coordination.job("issues"):
             with self.db.session() as session:
                 access = access_packages.check(session, self.settings)
             with self.db.session() as session:
                 reopened = issues.reopen_accepted(session)
+                stale = findings.close_stale_threats(session, self.settings.threat_finding_days)
                 if not features.is_on(session, "issues"):
-                    return {"reopened": reopened, **access}
+                    return {"reopened": reopened, "stale_threats": stale, **access}
                 routed = issues.route(session, self.settings)
-            return {"reopened": reopened, **access, **routed, **self.notifier.run()}
+            return {
+                "reopened": reopened,
+                "stale_threats": stale,
+                **access,
+                **routed,
+                **self.notifier.run(),
+            }
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;
@@ -572,7 +569,7 @@ class Runtime:
                     found[package_id] = declarative_instructions(self.m365.package(package_id))
                 except PlatformError as exc:
                     log.warning("could not read package %s: %s", package_id, exc)
-            with self.db.session() as session:
+            with self.db.session() as session, platforms.first_sync(session, "microsoft-365"):
                 counts = platforms.record_microsoft_365(
                     session,
                     packages,
@@ -672,7 +669,7 @@ class Runtime:
                 with self.db.session() as session:
                     platforms.sync_failed(session, source, str(exc), actor=actor)
                 raise
-            with self.db.session() as session:
+            with self.db.session() as session, platforms.first_sync(session, source):
                 counts = platforms.record_inventory(
                     session, source, inventory, actor=actor, classify=self.guardian is not None
                 )
@@ -700,7 +697,7 @@ class Runtime:
         except PlatformError as exc:
             self._failed("entra-agent-id", exc, actor)
             raise
-        with self.db.session() as session:
+        with self.db.session() as session, platforms.first_sync(session, "entra-agent-id"):
             counts = platforms.record_agent_identities(session, identities, actor=actor)
             platforms.refresh_risk(session, self.settings)
             return counts

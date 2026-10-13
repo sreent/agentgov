@@ -22,6 +22,16 @@ M365_PACKAGE_TYPES = ("custom", "shared", "external", "microsoft")
 LEDGER_MIN_DAYS = 183
 # The least operational records are kept: risk windows and budgets look back that far.
 DATA_MIN_DAYS = 30
+# Starting points for the features' modes (agentgov.registry.features.PRESETS).
+FEATURE_PRESETS = ("monitor", "inventory")
+# What the governance processor does when what it depends on fails, which it tells the
+# control plane (docs/features.md#when-something-is-down).
+FAILURE_SETTINGS = (
+    "gateway_failure_mode",
+    "presidio_failure_mode",
+    "guardian_failure_mode",
+    "authzen_failure_mode",
+)
 # Settings that became features (docs/features.md), and the feature that replaced each.
 RETIRED = {
     "AGENTGOV_UNKNOWN_AGENT_MODE": "unknown-callers",
@@ -96,6 +106,11 @@ class Settings:
     # Features pinned by the deployment, e.g. "least-privilege=monitor,discovery=off"
     # (docs/features.md). Administrators choose the others in the app.
     features: str = ""
+    # A starting point for the features' modes, applied once, when the control plane starts
+    # with one it hasn't applied yet: "monitor" (every control records what it would do and
+    # stops nothing) or "inventory" (no gateway: AgentGov finds agents and checks them).
+    # Administrators change the modes from there; pinned features keep their pins.
+    feature_preset: str = ""
     # How long an approval request waits for a decision before it expires.
     approval_ttl_seconds: int = 86400
     # Deleted agents can be restored for this many days, then they are purged (Agent 365
@@ -127,6 +142,16 @@ class Settings:
     issue_escalation_hours: str = "critical:4,high:24,medium:72,low:168,info:168"
     # Seconds between rounds of routing issues, escalating them and sending what is due.
     issues_interval_seconds: int = 60
+    # Issues below this severity reach people in AgentGov only, without an email or a chat
+    # message. info: every issue is sent.
+    issues_notify_severity: str = "info"
+    # What a platform's first sync finds reaches people in AgentGov only, without an email
+    # or a chat message: what was there before AgentGov looked doesn't flood inboxes. Found
+    # again after it is resolved, it is sent as any other.
+    issues_quiet_first_sync: bool = True
+    # Days a threat finding stays open without happening again before it is resolved (it
+    # opens again if it happens again). 0 keeps threats open until someone closes them.
+    threat_finding_days: int = 30
     # The mail server for issues' emails: smtp://host:587 (STARTTLS) or smtps://host:465
     # (TLS). Without it, issues reach people in AgentGov and in their teams' chats only.
     smtp_url: str | None = None
@@ -367,8 +392,13 @@ class Settings:
     # The longest one classifier call may take.
     guardian_timeout_seconds: float = 60.0
     # How long the processor waits for the classifier's verdict on a call where it is
-    # enforced; past that, the rules alone decide, and the ledger says so.
+    # enforced; past that, AGENTGOV_GUARDIAN_FAILURE_MODE says what happens, and the ledger
+    # says so.
     classifier_timeout_seconds: float = 3.0
+    # Where the processor waits for the classifier and gets no verdict (it is down, or too
+    # slow): "open" lets the rules decide alone; "closed" counts the text as flagged, so
+    # the call is refused.
+    guardian_failure_mode: str = "open"
     # Classifier calls one processor makes at a time. In the background, what waits
     # beyond a few hundred goes unclassified rather than piling up.
     classifier_concurrency: int = 4
@@ -386,6 +416,10 @@ class Settings:
     authzen_token: str | None = None
     # Seconds to wait for its answer.
     authzen_timeout_seconds: float = 2.0
+    # When it can't be asked while the external-decision-point feature is enforced:
+    # "closed" refuses the call; "open" lets AgentGov's own decision stand. Monitored, it
+    # never stops a call.
+    authzen_failure_mode: str = "closed"
     # Longest a bundle long-poll request is held open.
     bundle_long_poll_seconds: int = 30
     # A PEM private key (RSA, or EC P-256 or P-384) the control plane signs OPA's bundles
@@ -410,6 +444,13 @@ class Settings:
     processor_address: str = "processor:50051"
     # ...and for model calls and calls between agents (HTTP).
     processor_webhook_address: str = "processor:8091"
+    # When a call through the gateway can't be checked (OPA can't decide, or the governance
+    # processor can't be reached or fails): "closed" refuses it; "open" lets it through
+    # unchecked, and recorded where the processor can; "modes" refuses it only while a
+    # control at the gateway is enforced, so that controls in monitor mode never stop a
+    # call. Set it alike where the control plane (which configures the gateway) and the
+    # processor run.
+    gateway_failure_mode: str = "modes"
     # OTLP/gRPC endpoint for gateway traces, e.g. http://otel-collector:4317.
     gateway_otlp_endpoint: str | None = None
     # agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts.
@@ -451,6 +492,10 @@ class Settings:
     processor_webhook_listen: str = "0.0.0.0:8091"
     # Control plane URL as seen from the processor.
     control_plane_url: str = "http://localhost:8000"
+    # Seconds between the processor's reports to the control plane of what it can reach
+    # (OPA, Presidio, Granite Guardian, your decision point), which say on the Features page
+    # whether each control can do what its mode says; 0 sends none.
+    component_report_seconds: int = 60
     # Presidio's analyzer, such as http://presidio-analyzer:3000. Without it, personal
     # data isn't looked for.
     presidio_url: str | None = None
@@ -502,12 +547,27 @@ class Settings:
     def validate(self) -> None:
         if not 0 < self.prompt_injection_threshold <= 1:
             raise ValueError("AGENTGOV_PROMPT_INJECTION_THRESHOLD must be in (0, 1]")
-        if self.presidio_failure_mode not in ("open", "closed"):
-            raise ValueError("AGENTGOV_PRESIDIO_FAILURE_MODE must be 'open' or 'closed'")
+        for name in ("presidio", "authzen", "guardian"):
+            if getattr(self, f"{name}_failure_mode") not in ("open", "closed"):
+                raise ValueError(f"AGENTGOV_{name.upper()}_FAILURE_MODE must be 'open' or 'closed'")
+        if self.feature_preset not in ("", *FEATURE_PRESETS):
+            raise ValueError(
+                f"AGENTGOV_FEATURE_PRESET is one of {', '.join(FEATURE_PRESETS)} (or empty)"
+            )
+        if self.gateway_failure_mode not in ("modes", "open", "closed"):
+            raise ValueError("AGENTGOV_GATEWAY_FAILURE_MODE must be 'modes', 'open' or 'closed'")
         if self.delivery_interval_seconds < 0:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
         if self.issues_interval_seconds < 0:
             raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
+        if self.issues_notify_severity not in ("info", "low", "medium", "high", "critical"):
+            raise ValueError(
+                "AGENTGOV_ISSUES_NOTIFY_SEVERITY is one of info, low, medium, high, critical"
+            )
+        if self.threat_finding_days < 0:
+            raise ValueError("AGENTGOV_THREAT_FINDING_DAYS must be 0 (never) or more")
+        if self.component_report_seconds < 0:
+            raise ValueError("AGENTGOV_COMPONENT_REPORT_SECONDS must be 0 (none) or more")
         if self.platform_sync_interval_seconds < 0:
             raise ValueError(
                 "AGENTGOV_PLATFORM_SYNC_INTERVAL_SECONDS must be 0 (on demand only) or more"

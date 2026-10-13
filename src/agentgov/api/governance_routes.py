@@ -33,6 +33,7 @@ from agentgov.registry import (
     agents,
     approvals,
     discovery,
+    finding_types,
     findings,
     issues,
     manifests,
@@ -115,6 +116,27 @@ def decide_approval(
 
 
 # --------------------------------------------------------------------- findings
+
+
+@router.get("/finding-types", tags=["findings"])
+def list_finding_types(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+    """Each type of finding AgentGov has raised or is set up for: whether it is on, its
+    severity if set here, and how many of its findings are open (docs/issues.md)."""
+    with _rt(request).db.session() as s:
+        return finding_types.listing(s)
+
+
+@router.put("/finding-types/{type_}", tags=["findings"])
+def configure_finding_type(
+    request: Request,
+    type_: str,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(admin),
+) -> dict[str, Any]:
+    """Turn a type of finding off or on, ``{"mode": "off"}``, or set its severity here,
+    ``{"severity": "low"}`` (null: its checks' own)."""
+    with _rt(request).db.session() as s:
+        return finding_types.configure(s, type_, body, actor=principal.actor)
 
 
 @router.get("/findings", tags=["findings"])

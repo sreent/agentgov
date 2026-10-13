@@ -185,6 +185,94 @@ class TestRouting:
             assert (f.status, f.level, f.assignees, f.round) == ("open", None, [], 1)
 
 
+class TestQuiet:
+    def test_issues_below_the_floor_reach_people_in_agentgov_only(self, client, agent) -> None:
+        rt = _rt(client)
+        settings = dataclasses.replace(
+            rt.settings,
+            smtp_url="smtp://mail:25",
+            smtp_from="a@b.c",
+            issues_notify_severity="high",
+        )
+        medium = _raise(client, agent["id"], severity="medium")
+        with rt.db.session() as s:
+            high, _ = findings.raise_finding(
+                s,
+                type="agent.stale",
+                severity="high",
+                subject=agent["id"],
+                agent_id=agent["id"],
+                title="Agent support-bot is stale",
+            )
+            high_id = high.id
+        with rt.db.session() as s:
+            assert issues.route(s, settings)["assigned"] == 2
+            # Both are with its owner; only the high one is in their inbox.
+            assert findings.get(s, medium).level == "owner"
+            sent = {n.finding_id for n in s.scalars(select(Notification))}
+            assert sent == {high_id}
+        with rt.db.session() as s:  # the ledger is written as the transaction commits
+            [quiet] = [
+                e
+                for e in s.scalars(
+                    select(LedgerEntry).where(LedgerEntry.type == "finding.assigned")
+                )
+                if e.details["finding_id"] == medium
+            ]
+            assert quiet.details["quiet"] == "below high, the severity that is sent"
+            assert quiet.details["notifications"] == 0
+
+    def test_the_floor_is_a_severity(self, settings) -> None:
+        with pytest.raises(ValueError, match="AGENTGOV_ISSUES_NOTIFY_SEVERITY"):
+            dataclasses.replace(settings, issues_notify_severity="urgent").validate()
+        with pytest.raises(ValueError, match="AGENTGOV_THREAT_FINDING_DAYS"):
+            dataclasses.replace(settings, threat_finding_days=-1).validate()
+
+
+class TestStaleThreats:
+    def _threat(self, client: TestClient, agent_id: str) -> str:
+        with _rt(client).db.session() as s:
+            finding, _ = findings.raise_finding(
+                s,
+                type="agent.ungranted_tool",
+                severity="high",
+                subject=agent_id,
+                agent_id=agent_id,
+                category=findings.THREAT,
+                title="support-bot called a tool it isn't granted",
+            )
+            return finding.id
+
+    def test_a_threat_that_doesnt_happen_again_is_resolved(self, client, agent) -> None:
+        fid = self._threat(client, agent["id"])
+        posture = _raise(client, agent["id"])
+        later = ids.utcnow() + timedelta(days=31)
+        with _rt(client).db.session() as s:
+            assert findings.close_stale_threats(s, 30, ids.utcnow() + timedelta(days=29)) == 0
+            assert findings.close_stale_threats(s, 0, later) == 0  # 0: never
+            assert findings.close_stale_threats(s, 30, later) == 1
+            f = findings.get(s, fid)
+            assert (f.status, f.resolved_by) == ("resolved", findings.SYSTEM)
+            # Posture findings hold until their check finds them gone.
+            assert findings.get(s, posture).status == "open"
+        with _rt(client).db.session() as s:
+            [entry] = s.scalars(
+                select(LedgerEntry).where(LedgerEntry.type == "finding.resolved")
+            ).all()
+            assert entry.details["why"] == "it hasn't happened for 30 days"
+        # Happening again opens it again.
+        self._threat(client, agent["id"])
+        with _rt(client).db.session() as s:
+            assert findings.get(s, fid).status == "open"
+
+    def test_the_issues_job_resolves_them(self, client, agent) -> None:
+        fid = self._threat(client, agent["id"])
+        rt = _rt(client)
+        with rt.db.session() as s:
+            findings.get(s, fid).last_seen = ids.utcnow() - timedelta(days=31)
+        assert rt.run_issues()["stale_threats"] == 1
+
+
 class TestChecks:
     def test_findings_from_syncs_close_after_two_clean_checks(self, client, agent) -> None:
         fid = _raise(client, agent["id"])

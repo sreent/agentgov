@@ -729,7 +729,10 @@ async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
             allowed, payload = await call(client, "export_customers", {})
             report(allowed, payload, expect_allowed=False)
 
-            step("7. Monitor mode: try a control on real traffic before enforcing it")
+            step(
+                "7. Monitor mode: try a control on real traffic before enforcing it, for "
+                "every agent or for some"
+            )
             admin("PUT", "/v1/features/least-privilege", json={"mode": "monitor"})
             print("  least-privilege set to monitor")
             try:
@@ -746,6 +749,28 @@ async def run_scenarios(name: str, creds: dict[str, str], token: str) -> None:
             finally:
                 admin("PUT", "/v1/features/least-privilege", json={"mode": "enforce"})
                 print("  least-privilege set back to enforce")
+            allowed, payload = await once_mode_applies(
+                client, "export_customers", {}, allowed=False
+            )
+            report(allowed, payload, expect_allowed=False)
+            # Or monitored for some agents only: an exception (docs/features.md#exceptions).
+            exception = {"mode": "monitor", "scope": {"blueprints": ["customer-support"]}}
+            admin("PUT", "/v1/features/least-privilege", json={"scopes": [exception]})
+            print("  least-privilege monitored for the customer-support blueprint's agents only")
+            try:
+                allowed, payload = await once_mode_applies(
+                    client, "export_customers", {}, allowed=True
+                )
+                report(allowed, payload, expect_allowed=True)
+                mine = admin("GET", f"/v1/agents/{name}").get("control_modes", {})
+                show(
+                    "its own mode:",
+                    mine.get("least-privilege", {}).get("mode") == "monitor",
+                    json.dumps(mine.get("least-privilege") or {}),
+                )
+            finally:
+                admin("PUT", "/v1/features/least-privilege", json={"scopes": []})
+                print("  exception removed")
             allowed, payload = await once_mode_applies(
                 client, "export_customers", {}, allowed=False
             )
@@ -1592,6 +1617,53 @@ def identity_assertions() -> None:
         admin("PUT", "/v1/features/identity-assertions", json={"mode": "off"})
 
 
+def component_health() -> None:
+    step("26. Is it working? What the governance processor reaches, and so what the controls do")
+
+    def fresh() -> list[dict[str, Any]]:
+        return [p for p in admin("GET", "/v1/components")["processors"] if p["fresh"]]
+
+    until(lambda: bool(fresh()))
+    processors = fresh()
+    reached = [
+        f"{p['instance']}: "
+        + ", ".join(
+            f"{name} {'reachable' if c['ok'] else 'unreachable'}"
+            for name, c in p["checks"].items()
+            if c["configured"]
+        )
+        for p in processors
+    ]
+    ok = bool(processors) and all(
+        p["checks"]["opa"]["ok"] and p["checks"]["presidio"]["ok"] for p in processors
+    )
+    show("processor:", ok, "; ".join(reached) or "none has reported")
+    for key in ("least-privilege", "data-protection"):
+        f = admin("GET", f"/v1/features/{key}")
+        show(
+            f"{key}:",
+            f["status"] == "active",
+            f"{f['mode']}, {f['status']}" + (f": {f['problems'][0]}" if f["problems"] else ""),
+        )
+    # What happens to a call when OPA can't decide, as the processor is set.
+    failure = (processors[0].get("settings") or {}).get("gateway_failure_mode") if ok else None
+    show(
+        "when OPA can't decide:",
+        failure == "modes",
+        f"AGENTGOV_GATEWAY_FAILURE_MODE={failure}: refused while a control is enforced, "
+        "let through unchecked, and recorded, while every one is monitored",
+    )
+    # A monitor-first starting point, shown and not applied: the steps above enforce.
+    presets = admin("GET", "/v1/feature-presets")["presets"]
+    monitor = next(p for p in presets if p["preset"] == "monitor")
+    show(
+        "the monitor starting point:",
+        bool(monitor["changes"]),
+        f"would put {len(monitor['changes'])} enforced controls in monitor mode "
+        "(agentgov features preset monitor)",
+    )
+
+
 def back_channel_logout() -> None:
     step("25. Signing out everywhere: alice signs out at Keycloak, and AgentGov signs her out")
     alice = agentgov_session("alice")
@@ -1644,6 +1716,7 @@ def main() -> None:
         asyncio.run(developer_sign_in())
         identity_assertions()
         back_channel_logout()
+        component_health()
         admin("POST", f"/v1/agents/{name}/delete", json={"reason": "demo finished"})
         print(f"\n{DIM}{name} soft-deleted (restorable for 30 days).{RESET}")
         print(f"{DIM}Open {CONTROL_PLANE}/ui for the admin view.{RESET}")

@@ -80,6 +80,44 @@ call(client, server, tool) := {
 	"detections": {"categories": []},
 }
 
+# A call about the server as a whole: listing its prompts or resources, say.
+about_server(client, server, method) := {
+	"phase": "request",
+	"method": method,
+	"agent": {"client_id": client},
+	"resource": {"server": server, "name": null},
+	"arguments": {},
+	"detections": {"categories": []},
+}
+
+test_listing_a_servers_prompts_needs_no_grant if {
+	d := mcp.decision with input as about_server("agent-support-bot", "crm", "prompts/list")
+		with data.registry as registry
+	d.effect == "allow"
+	d.monitored == []
+}
+
+test_calls_about_a_server_get_the_checks_every_call_gets if {
+	unknown := mcp.decision with input as about_server("agent-nobody", "crm", "resources/list")
+		with data.registry as registry
+	"Caller is not a registered agent" in unknown.reasons
+	blocked := mcp.decision with input as about_server("agent-rogue", "crm", "resources/list")
+		with data.registry as registry
+	"Agent rogue is blocked" in blocked.reasons
+	server := mcp.decision with input as about_server("agent-analyst", "shady", "prompts/list")
+		with data.registry as registry
+	"Tool server shady is blocked" in server.reasons
+	risky := mcp.decision with input as about_server("agent-risky", "crm", "a/method-mcp-adds-later")
+		with data.registry as registry
+	risky.effect == "deny"
+}
+
+test_completing_an_argument_of_a_prompt_needs_the_prompt if {
+	inp := object.union(call("agent-support-bot", "crm", "export_all"), {"method": "completion/complete"})
+	d := mcp.decision with input as inp with data.registry as registry
+	"crm/export_all is not granted to agent support-bot" in d.reasons
+}
+
 test_granted_tool_is_allowed if {
 	d := mcp.decision with input as call("agent-support-bot", "crm", "lookup_customer")
 		with data.registry as registry
@@ -273,6 +311,39 @@ test_least_privilege_off_neither_denies_nor_records if {
 		with data.registry as with_modes({"least-privilege": "off"})
 	d.effect == "allow"
 	d.monitored == []
+}
+
+# An agent's own mode (docs/features.md#exceptions): its exceptions, from the bundle.
+with_agent_modes(modes, agent_modes) := object.union(with_modes(modes), {"agents": {"agt_support": object.union(
+	registry.agents.agt_support,
+	{"modes": agent_modes},
+)}})
+
+test_an_exception_monitors_a_control_for_its_agents_only if {
+	reg := with_agent_modes({"least-privilege": "enforce"}, {"least-privilege": "monitor"})
+	d := mcp.decision with input as call("agent-support-bot", "crm", "export_all") with data.registry as reg
+	d.effect == "allow"
+	d.monitored == ["least-privilege: crm/export_all is not granted to agent support-bot"]
+
+	# Others are still refused.
+	other := mcp.decision with input as call("agent-risky", "crm", "export_all") with data.registry as reg
+	other.effect == "deny"
+}
+
+test_an_exception_enforces_a_control_for_its_agents if {
+	reg := with_agent_modes({"least-privilege": "monitor"}, {"least-privilege": "enforce"})
+	d := mcp.decision with input as call("agent-support-bot", "crm", "export_all") with data.registry as reg
+	d.effect == "deny"
+}
+
+test_the_processor_asks_for_a_callers_modes if {
+	reg := with_agent_modes({"least-privilege": "enforce", "approvals": "enforce"}, {"approvals": "monitor"})
+	modes := ctx.caller_modes with input as {"agent": {"client_id": "agent-support-bot"}} with data.registry as reg
+	modes == {"least-privilege": "enforce", "approvals": "monitor"}
+
+	# A caller AgentGov doesn't know has the features' modes.
+	unknown := ctx.caller_modes with input as {"agent": {"client_id": "nobody"}} with data.registry as reg
+	unknown == {"least-privilege": "enforce", "approvals": "enforce"}
 }
 
 test_monitored_approval_lets_destructive_calls_through if {

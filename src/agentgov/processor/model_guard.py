@@ -133,7 +133,10 @@ class ModelGuard:
         try:
             payload = await request.json()
             return JSONResponse(await self.check_prompt(payload, request.headers))
-        except Exception:
+        except Exception as exc:
+            if self._let_through(request.headers, "request", exc):
+                log.exception("checking a prompt failed; letting it through unchecked")
+                return JSONResponse(PASS)
             log.exception("checking a prompt failed; refusing it")
             return JSONResponse(
                 refuse(503, ["Governance processor error; the prompt was not sent"])
@@ -143,11 +146,32 @@ class ModelGuard:
         try:
             payload = await request.json()
             return JSONResponse(await self.check_answer(payload, request.headers))
-        except Exception:
+        except Exception as exc:
+            if self._let_through(request.headers, "response", exc):
+                log.exception("checking an answer failed; passing it on unchecked")
+                return JSONResponse(PASS)
             log.exception("checking an answer failed; withholding it")
             return JSONResponse(
                 refuse(503, ["Governance processor error; the answer was withheld"])
             )
+
+    def _let_through(self, headers: Any, phase: str, exc: Exception) -> bool:
+        """Whether a prompt or an answer that couldn't be checked goes on
+        (AGENTGOV_GATEWAY_FAILURE_MODE); if so, it is recorded."""
+        if not self.p.unchecked(self.p.features.last(self._identity(headers))):
+            return False
+        provider, model = headers.get(PROVIDER) or "unknown", headers.get(MODEL) or ""
+        self.p.note_unchecked(
+            f"the governance processor failed: {type(exc).__name__}",
+            kind="model",
+            phase=phase,
+            method="chat",
+            server=provider,
+            target=model,
+            resource=f"{provider}/{model}" if model else provider,
+            identity=self._identity(headers),
+        )
+        return True
 
     @staticmethod
     def _identity(headers: Any) -> dict[str, Any]:
@@ -194,6 +218,7 @@ class ModelGuard:
             agent: dict[str, Any] | None = None,
             redacted: list[str] | None = None,
             decision_id: str | None = None,
+            unchecked: str | None = None,
         ) -> None:
             self.p._record(
                 kind="model",
@@ -214,6 +239,7 @@ class ModelGuard:
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
                 trace_id=trace_id,
                 delegation=_delegation(chain),
+                unchecked=unchecked,
             )
 
         return finish
@@ -225,7 +251,7 @@ class ModelGuard:
         ]
         provider, model = headers.get(PROVIDER) or "unknown", headers.get(MODEL) or ""
         identity = self._identity(headers)
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(identity)
         inspection = await self.p._inspect(
             messages, protect=modes["data-protection"] != "off", check_injection=False
         )
@@ -258,6 +284,13 @@ class ModelGuard:
             reasons = ["Content inspection is unavailable, so the prompt was not sent"]
             finish("deny", reasons)
             return refuse(503, reasons)
+        if self.p.classifier_closed(inspection):
+            reasons = [
+                f"The classifier gave no verdict ({inspection.classifier_error}), so the "
+                "prompt was not sent"
+            ]
+            finish("deny", reasons)
+            return refuse(503, reasons)
         opa_input = {
             "kind": "model",
             "phase": "request",
@@ -278,6 +311,10 @@ class ModelGuard:
             )
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
+            if self.p.unchecked(modes):
+                why = f"the policy engine is unavailable: {exc}"
+                finish("allow", [self.p.unchecked_reason(why)], unchecked=why)
+                return PASS
             reasons = ["Policy engine unavailable; the prompt was not sent"]
             finish("deny", reasons)
             return refuse(503, reasons)
@@ -346,7 +383,7 @@ class ModelGuard:
 
     # ------------------------------------------------------------------ answers
     async def check_answer(self, payload: dict[str, Any], headers: Any) -> dict[str, Any]:
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(self._identity(headers))
         if modes["data-protection"] == "off":
             return PASS  # the only control that looks at answers
         choices = [
@@ -374,6 +411,10 @@ class ModelGuard:
             decision, decision_id = await self.p.opa.evaluate("agentgov/models/decision", opa_input)
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
+            if self.p.unchecked(modes):
+                why = f"the policy engine is unavailable: {exc}"
+                finish("allow", [self.p.unchecked_reason(why)], unchecked=why)
+                return PASS
             reasons = ["Policy engine unavailable; the answer was withheld"]
             finish("deny", reasons)
             return refuse(503, reasons)

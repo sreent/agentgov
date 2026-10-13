@@ -40,7 +40,7 @@ from agentgov.models import (
     ToolServer,
 )
 from agentgov.opa.signing import SIGNATURES, Signer
-from agentgov.registry import access_packages, features, model_providers, model_usage
+from agentgov.registry import access_packages, features, model_providers, model_usage, scopes
 from agentgov.registry import agents as agents_svc
 
 log = logging.getLogger(__name__)
@@ -78,6 +78,8 @@ drop if startswith(input.path, "agentgov/a2a")
 drop if startswith(input.path, "agentgov/idjag")
 
 drop if startswith(input.path, "registry")
+
+drop if startswith(input.path, "agentgov/context")
 """
 
 
@@ -107,15 +109,24 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
     names: dict[str, str] = {}
     used = model_usage.tokens_used(session)
     held = access_packages.held(session)
+    current = features.modes(session)
+    exceptions = features.all_scopes(session)
+    scoped = False
     for agent in session.scalars(select(Agent).where(Agent.status != DELETED)).unique():
         bp = agent.blueprint
         budget = model_providers.effective_budget(agent)
+        # The controls whose mode differs for this agent (docs/features.md#exceptions).
+        own = {k: v["mode"] for k, v in features.exceptions_for(agent, current, exceptions).items()}
+        scoped = scoped or bool(own)
         agents[agent.id] = {
             "id": agent.id,
             "name": agent.name,
             "status": agent.status,
             "client_id": agent.client_id,
             "blueprint": bp.name if bp else None,
+            "team": scopes.team(agent),
+            "platform": scopes.platform(agent),
+            "modes": own,
             "owner": agent.owner,
             "sponsors": agent.sponsors or [],
             "labels": {**((bp.labels or {}) if bp else {}), **(agent.labels or {})},
@@ -189,8 +200,10 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
         "model_providers": providers,
         "blueprints": blueprints,
         "connector_allowlist": {"active": bool(approved), "approved": approved},
-        # The mode of each feature: the policies apply each control as its mode says.
-        "features": features.modes(session),
+        # The mode of each feature: the policies apply each control as its mode says, but
+        # for the agents with a mode of their own (agents.<id>.modes).
+        "features": current,
+        "scoped_modes": scoped,
     }
 
 

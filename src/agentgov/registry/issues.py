@@ -25,8 +25,16 @@ from sqlalchemy.orm import Session
 from agentgov import ids
 from agentgov.config import Settings
 from agentgov.db import lock
-from agentgov.models import Agent, Destination, Finding, LedgerEntry, Notification, ToolServer
-from agentgov.registry import findings, teams
+from agentgov.models import (
+    SEVERITIES,
+    Agent,
+    Destination,
+    Finding,
+    LedgerEntry,
+    Notification,
+    ToolServer,
+)
+from agentgov.registry import finding_types, findings, teams
 from agentgov.registry.errors import InvalidTransition, ValidationError
 
 OWNER, SPONSORS, TEAM = "owner", "sponsors", "team"
@@ -156,7 +164,8 @@ def _give(
     finding.assignees = [p.describe() for p in people]
     hours = settings.escalation_delays()[finding.severity]
     finding.escalate_at = now + timedelta(hours=hours) if _next(steps, level) else None
-    queued = _queue(session, settings, finding, level, people)
+    quiet = _quiet(settings, finding)
+    queued = 0 if quiet else _queue(session, settings, finding, level, people)
     findings.record(
         session,
         finding,
@@ -166,7 +175,19 @@ def _give(
         level=level,
         assignees=finding.assignees,
         notifications=queued,
+        **({"quiet": quiet} if quiet else {}),
     )
+
+
+def _quiet(settings: Settings, finding: Finding) -> str | None:
+    """Why no email or chat message goes out for it, if none does: the people it is with
+    see it in AgentGov all the same."""
+    floor = settings.issues_notify_severity
+    if SEVERITIES.index(finding.severity) < SEVERITIES.index(floor):
+        return f"below {floor}, the severity that is sent"
+    if settings.issues_quiet_first_sync and (finding.details or {}).get(findings.BASELINE):
+        return "found by its platform's first sync"
+    return None
 
 
 def _queue(
@@ -221,8 +242,11 @@ def route(session: Session, settings: Settings, now: datetime | None = None) -> 
     now = now or ids.utcnow()
     assigned = escalated = 0
     directory = Directory(session)
+    off = finding_types.off_types(session)
     open_findings = session.scalars(select(Finding).where(Finding.status == "open")).all()
     for finding in open_findings:
+        if finding.type in off:
+            continue  # reopened by hand while its type is off: nobody is told
         steps = chain(session, finding, directory)
         if finding.level is None:
             first = _next(steps, None)
@@ -248,9 +272,13 @@ def reopen_accepted(session: Session, now: datetime | None = None) -> int:
     condition is gone, the next check resolves them."""
     now = now or ids.utcnow()
     count = 0
+    off = finding_types.off_types(session)
     for finding in session.scalars(
         select(Finding).where(Finding.status == "accepted", Finding.accepted_until <= now)
     ):
+        if finding.type in off:
+            finding_types.suppress(finding, now)
+            continue
         finding.status = "open"
         finding.accepted_until = None
         findings.restart_chain(finding)

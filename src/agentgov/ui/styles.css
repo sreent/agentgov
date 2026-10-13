@@ -361,6 +361,7 @@ legend { padding: 0; }
 .grid-2--even { align-items: stretch; }
 .grid-halves { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
 .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.stack-tight { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; min-width: 0; }
 @media (max-width: 1080px) {
   .grid-2, .grid-halves { grid-template-columns: minmax(0, 1fr); }
 }
@@ -863,6 +864,13 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 .dialog-section { font-size: var(--fs-sm); font-weight: 650; color: var(--ink-2); border-top: 1px solid var(--line); padding-top: 12px; margin-top: 2px; }
 .apply-results { list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-sm); max-height: 50vh; overflow-y: auto; }
 .apply-results li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; justify-content: space-between; }
+/* A control's exceptions, under its mode. */
+.exceptions { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 8px; }
+.exception-list { list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); }
+.exception-list li { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 8px; align-items: center; }
+.exception-list .icon-btn { width: 24px; height: 24px; }
+.exception-list .icon-btn .ico { width: 14px; height: 14px; }
+.exception-scope { overflow-wrap: anywhere; }
 .dialog::backdrop { background: var(--scrim); }
 .dialog-form { display: flex; flex-direction: column; gap: 14px; padding: 20px; }
 .dialog-head { display: flex; gap: 12px; align-items: flex-start; }

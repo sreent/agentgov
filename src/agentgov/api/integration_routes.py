@@ -16,6 +16,7 @@ from typing import Any
 import anyio.to_thread
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
+from agentgov import health
 from agentgov.api.auth import Principal, require
 from agentgov.gateway import etag_of
 from agentgov.opa.bundle import BUNDLE_CONTENT_TYPE, parse_prefer_wait, record_status
@@ -175,6 +176,18 @@ def internal_decisions(
         raise ValidationError("records must be a list")
     with rt.db.session() as s:
         return {"stored": decisions.record_mcp_decisions(s, rt.settings, records)}
+
+
+@router.post("/v1/internal/components", tags=["internal"])
+def internal_components(
+    request: Request, body: Any = Body(...), _: Principal = Depends(service)
+) -> dict[str, Any]:
+    """A governance processor's report of what it can reach (agentgov.health). The answer
+    gives it the features' modes, which it otherwise reads from OPA: it then knows them
+    while OPA can't be asked."""
+    with _rt(request).db.session() as s:
+        health.record(s, body)
+        return {"recorded": "ok", "features": features.modes(s)}
 
 
 @router.post("/v1/internal/catalog", tags=["internal"])

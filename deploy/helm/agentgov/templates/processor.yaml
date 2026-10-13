@@ -1,3 +1,4 @@
+{{- if .Values.gateway.enabled }}
 {{- $name := include "agentgov.name" (list . "processor") }}
 {{- $v := .Values.processor }}
 # agentgateway's policy server: inspects every governed MCP call (ExtMcp, gRPC) and every
@@ -100,3 +101,4 @@ spec:
     - name: webhook
       port: 8091
       targetPort: webhook
+{{- end }}

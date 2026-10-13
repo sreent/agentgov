@@ -140,6 +140,8 @@ class GoogleConnector:
             token = page.get("nextPageToken")
             if not token:
                 return
+        # The part this list is in wasn't read in full: its agents stay as last read.
+        raise PlatformError(f"more than {MAX_PAGES} pages of {url}: the rest weren't read")
 
     def _policy(self, url: str) -> dict[str, Any] | None:
         """An IAM policy, or None when AgentGov may not read it."""

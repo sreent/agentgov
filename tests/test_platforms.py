@@ -389,6 +389,31 @@ class TestCopilotStudio:
         assert open_findings(client, hr["id"]) == {"agent.unmanaged"}
         assert "platform.imported" in ledger_types(client)
 
+    def test_findings_stay_unverified_while_the_sync_fails(self, client) -> None:
+        from agentgov.registry import platforms
+
+        import_inventory(client)
+        sales = agent_named(client, "sales-helper")
+
+        def shared() -> dict[str, Any]:
+            rows = client.get("/v1/findings", params={"status": "open"}, headers=ADMIN).json()
+            return next(
+                f
+                for f in rows
+                if f["agent_id"] == sales["id"] and f["type"] == "platform.shared_with_everyone"
+            )
+
+        assert shared()["verified"] is True
+        rt = client.app.state.rt
+        with rt.db.session() as s:
+            platforms.set_sync(s, "copilot-studio", ok=False, counts={}, message="refused")
+        assert shared()["verified"] is False
+        # The posture scan checks them again from the data the last good sync stored.
+        client.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
+        assert shared()["verified"] is False
+        import_inventory(client)  # a sync that succeeds
+        assert shared()["verified"] is True
+
     def test_platform_findings_count_towards_risk(self, client) -> None:
         import_inventory(client)
         sales = agent_named(client, "sales-helper")

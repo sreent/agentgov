@@ -21,9 +21,10 @@ the label: a JSON-RPC response in its result or its error, any other JSON whole.
 agent's card passes as it is (agentgateway pointed it at itself already), and so do
 failures and answers that aren't JSON, gRPC's among them. The gateway asks agents for
 answers that aren't compressed; one compressed anyway can't be read, and, like one too
-long to hold, is withheld while a control that looks at answers is enforced, and passes
-on unchecked otherwise. Answers in which something was found, masked or withheld are in
-the ledger (decision.a2a.response), linked to their call by its trace.
+long to hold, is withheld while a control that looks at answers is enforced (unless
+AGENTGOV_GATEWAY_FAILURE_MODE is open), and passes on unchecked otherwise. Answers in
+which something was found, masked or withheld are in the ledger
+(decision.a2a.response), linked to their call by its trace.
 
 While a2a-masking is enforced, the gateway sends the messages agents send each other (the
 requests) here too, once the call was decided (agentgov.processor.a2a_guard, which records
@@ -59,7 +60,8 @@ CARD = "/.well-known/agent-card.json"
 # gRPC's binding: not JSON, and the gateway publishes JSON-RPC's.
 GRPC = "application/grpc"
 # A JSON answer, or an event, held at most. Past it, the answer is withheld while a
-# control that looks at answers is enforced, and passes on unchecked otherwise.
+# control that looks at answers is enforced (unless AGENTGOV_GATEWAY_FAILURE_MODE is open),
+# and passes on unchecked otherwise.
 MAX_HELD = 4 * 1024 * 1024
 # The JSON-RPC error a withheld answer becomes (as a refused call's, agentgov.processor.
 # a2a_guard).
@@ -226,7 +228,21 @@ class Message:
         body, self.held = self.held, b""
         try:
             return await self._mask(body)
-        except Exception:
+        except Exception as exc:
+            if self.p.unchecked(self.p.features.last(self.identity)):
+                log.exception("masking a message to agent %s failed; it goes on", self.target)
+                self.p.note_unchecked(
+                    f"masking it failed: {type(exc).__name__}",
+                    kind="a2a",
+                    phase="request",
+                    method="message",
+                    server=self.target,
+                    target=self.target,
+                    resource=self.target,
+                    identity=self.identity,
+                    user=self.person,
+                )
+                return body
             # Enforced masking that can't be done: the call fails rather than go unmasked.
             log.exception("masking a message to agent %s failed", self.target)
             raise
@@ -237,7 +253,7 @@ class Message:
         parts = message.get("parts") if message is not None else None
         if not isinstance(parts, list) or not parts:
             return body
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(self.identity)
         if modes["a2a-masking"] != "enforce" or modes["data-protection"] == "off":
             return body
         inspection = await self.p._inspect(parts, protect=True, check_injection=False)
@@ -298,7 +314,7 @@ class Answer:
             return []
         if self.encoding is None:
             return ["content-length"]  # what passes on may differ in length
-        if not await self._enforced():
+        if not await self._withheld_unchecked():
             self.checked = False  # nothing enforced looks at it: it passes, unchecked
             return []
         self.unreadable = [f"The answer is compressed ({self.encoding}), so it can't be checked"]
@@ -344,10 +360,12 @@ class Answer:
     def _frame(self, data: bytes) -> bytes:
         return b"data: " + data + b"\n\n" if self.events else data
 
-    async def _enforced(self) -> bool:
-        """Whether a control that looks at answers is enforced."""
-        modes = await self.p.features.current()
-        return "enforce" in (modes["data-protection"], modes["prompt-injection"])
+    async def _withheld_unchecked(self) -> bool:
+        """Whether an answer that can't be checked is withheld: while a control that
+        looks at answers is enforced, unless AGENTGOV_GATEWAY_FAILURE_MODE is open."""
+        modes = await self.p.features.for_caller(self.identity)
+        enforced = "enforce" in (modes["data-protection"], modes["prompt-injection"])
+        return enforced and not self.p.unchecked(modes)
 
     def _refuse(self, reasons: list[str]) -> bytes:
         """The answer withheld without a look at it: an error, and nothing after it."""
@@ -357,7 +375,7 @@ class Answer:
 
     async def _too_long(self) -> bytes:
         held, self.held = self.held, b""
-        if await self._enforced():
+        if await self._withheld_unchecked():
             return self._refuse([f"The answer is longer than {MAX_HELD} bytes, too long to check"])
         # Nothing enforced looks at it: it passes on, unchecked, from what was held.
         self.checked = False
@@ -384,12 +402,24 @@ class Answer:
     async def _check(self, value: Any) -> Any:
         """The answer to pass on: ``value`` itself, masked as decided, or an error in its
         place (and then nothing more of a stream passes). A JSON-RPC response is looked at
-        in its result, or its error; anything else (A2A's REST binding) whole."""
+        in its result, or its error; anything else (A2A's REST binding) whole. When it
+        can't be checked, it passes as it is if AGENTGOV_GATEWAY_FAILURE_MODE says so."""
+        try:
+            return await self._decide(value)
+        except Exception as exc:
+            if not self.p.unchecked(self.p.features.last(self.identity)):
+                raise
+            log.exception("checking an answer from agent %s failed; it goes on", self.target)
+            why = f"the governance processor failed: {type(exc).__name__}"
+            self._record("allow", [self.p.unchecked_reason(why)], {}, None, None, unchecked=why)
+            return value
+
+    async def _decide(self, value: Any) -> Any:
         started = time.perf_counter()
         rpc = value if isinstance(value, dict) else {}
         key = next((k for k in ("result", "error") if k in rpc), None)
         content = value[key] if key else value
-        modes = await self.p.features.current()
+        modes = await self.p.features.for_caller(self.identity)
         inspection = await self.p._inspect(
             content,
             protect=modes["data-protection"] != "off",
@@ -409,6 +439,13 @@ class Answer:
 
         if inspection.scan.pii_error and self.p._fail_closed(modes):
             return withhold(["Content inspection is unavailable, so the answer was withheld"])
+        if self.p.classifier_closed(inspection):
+            return withhold(
+                [
+                    f"The classifier gave no verdict ({inspection.classifier_error}), so the "
+                    "answer was withheld"
+                ]
+            )
         opa_input: dict[str, Any] = {
             "kind": "a2a",
             "phase": "response",
@@ -423,6 +460,18 @@ class Answer:
             decision, decision_id = await self.p.opa.evaluate("agentgov/a2a/decision", opa_input)
         except OpaError as exc:
             log.error("policy evaluation failed: %s", exc)
+            if self.p.unchecked(modes):
+                why = f"the policy engine is unavailable: {exc}"
+                self._record(
+                    "allow",
+                    [self.p.unchecked_reason(why)],
+                    inspection.summary,
+                    None,
+                    None,
+                    started=started,
+                    unchecked=why,
+                )
+                return value
             return withhold(["Policy engine unavailable; the answer was withheld"])
         agent, called = decision.get("agent"), decision.get("target")
         monitored = list(decision.get("monitored") or [])
@@ -478,6 +527,7 @@ class Answer:
         redacted: list[str] | None = None,
         monitored: list[str] | None = None,
         decision_id: str | None = None,
+        unchecked: str | None = None,
     ) -> None:
         self.p._record(
             kind="a2a",
@@ -498,4 +548,5 @@ class Answer:
             latency_ms=round((time.perf_counter() - started) * 1000, 1) if started else None,
             trace_id=self.trace_id,
             a2a={"target": self.target, "target_id": (called or {}).get("id")},
+            unchecked=unchecked,
         )

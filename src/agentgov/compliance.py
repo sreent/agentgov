@@ -47,6 +47,7 @@ from agentgov.models import (
     ToolServer,
 )
 from agentgov.registry import features
+from agentgov.registry import scopes as scope_rules
 
 IN_PLACE, PARTLY, NOT_SET_UP, ATTENTION, OUTSIDE = (
     "in_place",
@@ -117,6 +118,8 @@ class Facts:
     settings: Settings
     modes: dict[str, str]
     agents: list[Agent]
+    # Controls' exceptions: their mode for some agents (docs/features.md#exceptions).
+    exceptions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     entries: int = 0
     by_type: Counter[str] = field(default_factory=Counter)
     denied: int = 0
@@ -151,6 +154,7 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     since = now - timedelta(days=days)
     agents = list(session.scalars(select(Agent).where(Agent.status != DELETED)).unique())
     f = Facts(now, since, settings, features.modes(session), agents)
+    f.exceptions = features.all_scopes(session)
     for type_, decision, n in session.execute(
         select(LedgerEntry.type, LedgerEntry.decision, func.count())
         .where(LedgerEntry.ts >= since)
@@ -341,6 +345,30 @@ def _security(f: Facts) -> Assessment:
     if weak:
         a.status = PARTLY if len(weak) < len(SAFEGUARDS) else NOT_SET_UP
         a.gaps.append(f"Not enforced: {', '.join(weak)}.")
+    # Enforced, but not for every agent: exceptions, and agents exempt by their label.
+    partly = [
+        f"{key} ("
+        + "; ".join(
+            f"{e['mode']} for {scope_rules.describe(e['scope'])}"
+            for e in f.exceptions.get(key, [])
+            if e["mode"] != "enforce"
+        )
+        + ")"
+        for key in SAFEGUARDS
+        if modes[key] == "enforce"
+        and any(e["mode"] != "enforce" for e in f.exceptions.get(key, []))
+    ]
+    exempt = sorted(a.name for a in f.agents if features.exempted(a) & set(SAFEGUARDS))
+    if partly:
+        a.gaps.append(f"Enforced, but not for some agents: {', '.join(partly)}.")
+    if exempt:
+        a.gaps.append(
+            f"Exempt from enforcement by their {features.EXEMPT_LABEL} label: "
+            f"{', '.join(exempt[:10])}"
+            + (f" and {len(exempt) - 10} more." if len(exempt) > 10 else ".")
+        )
+    if (partly or exempt) and a.status == IN_PLACE:
+        a.status = PARTLY
     return a
 
 
@@ -828,6 +856,7 @@ def pack(session: Session, settings: Settings, days: int) -> SpooledTemporaryFil
         z.writestr("inventory.json", json.dumps([_agent(a) for a in f.agents], indent=2))
         z.writestr("manifests.yaml", manifests.dump(manifests.export(session)))
         z.writestr("features.json", json.dumps(f.modes, indent=2, sort_keys=True))
+        z.writestr("feature-exceptions.json", json.dumps(f.exceptions, indent=2, sort_keys=True))
     out.seek(0)
     return out
 

@@ -216,14 +216,15 @@ def scan(
     # What this scan looked for resolves when it's gone; what it didn't look for (the
     # feature off, or no test this time) stays open, unverified, until it looks again.
     checked = set(POSTURE_TYPES)
-    unchecked = set()
-    for type_, looked in (
-        (reachability.UNDECLARED, reachability.on(modes)),
-        (reachability.REACHABLE, tested is not None),
+    for type_, looked, why in (
+        (reachability.UNDECLARED, reachability.on(modes), "the check for it is off"),
+        (reachability.REACHABLE, tested is not None, "the last posture scan didn't test it"),
     ):
-        (checked if looked else unchecked).add(type_)
+        if looked:
+            checked.add(type_)
+        else:
+            findings.mark_unverified(session, types={type_}, reason=why)
     resolved = findings.resolve_absent(session, types=checked, present_keys=present)
-    findings.mark_unverified(session, types=unchecked)
     return {
         "checked_agents": len(agents),
         "open_posture_findings": len(present),

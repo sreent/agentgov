@@ -1,7 +1,7 @@
 {{- $root := . }}
 {{- $entries := list
   (dict "component" "control-plane" "ingress" .Values.controlPlane.ingress "url" .Values.urls.controlPlane "port" .Values.controlPlane.service.port)
-  (dict "component" "gateway" "ingress" .Values.gateway.ingress "url" .Values.urls.gateway "port" .Values.gateway.service.port)
+  (dict "component" "gateway" "ingress" .Values.gateway.ingress "url" .Values.urls.gateway "port" .Values.gateway.service.port "enabled" .Values.gateway.enabled)
   (dict "component" "keycloak" "ingress" .Values.keycloak.ingress "url" .Values.urls.keycloak "port" 8080 "enabled" .Values.keycloak.enabled) }}
 {{- range $entries }}
 {{- if and .ingress.enabled (ne (toString .enabled) "false") }}

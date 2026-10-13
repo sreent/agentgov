@@ -264,6 +264,18 @@ lint_docs() {
   python scripts/check-docs.py && python scripts/settings-doc.py --check
 }
 
+# The Compose files, alone and with each override: they parse, and their variables resolve.
+lint_compose() {
+  local file
+  for file in docker-compose.yml docker-compose.inventory.yml; do
+    docker compose -f "deploy/compose/$file" config --quiet || return 1
+  done
+  for file in deploy/compose/docker-compose.*.yml; do
+    case "$file" in */docker-compose.inventory.yml) continue ;; esac
+    docker compose -f deploy/compose/docker-compose.yml -f "$file" config --quiet || return 1
+  done
+}
+
 lint_rego() {
   local unformatted
   unformatted=$(opa fmt --list src/agentgov/policies examples/manifests/policies) || return 1
@@ -318,8 +330,8 @@ postgres_tests() {
   return "$rc"
 }
 
-# The chart: lint, render the default and a production-like configuration, and
-# validate every manifest against the Kubernetes API schemas.
+# The chart: lint, render the default, a production-like configuration and the profiles,
+# and validate every manifest against the Kubernetes API schemas.
 lint_chart() {
   local out rc=0
   setup_chart_tools || return 1
@@ -348,8 +360,22 @@ lint_chart() {
       --set keycloak.replicas=2 --set keycloak.ingress.enabled=true \
       --set networkPolicy.enabled=true --set urls.keycloak=https://auth.example.com \
       >"$out/production-keycloak.yaml" &&
+    helm lint --strict "$CHART" -f "$CHART/profiles/inventory.yaml" >/dev/null &&
+    helm template agentgov "$CHART" -f "$CHART/profiles/inventory.yaml" \
+      --set networkPolicy.enabled=true >"$out/inventory.yaml" &&
+    helm lint --strict "$CHART" -f "$CHART/profiles/monitor.yaml" >/dev/null &&
+    helm template agentgov "$CHART" -f "$CHART/profiles/monitor.yaml" \
+      --set networkPolicy.enabled=true >"$out/monitor.yaml" &&
     kubeconform -strict -summary -cache .venv/kubeconform-cache -kubernetes-version 1.30.0 \
-      "$out/default.yaml" "$out/production.yaml" "$out/production-keycloak.yaml" || rc=1
+      "$out/default.yaml" "$out/production.yaml" "$out/production-keycloak.yaml" \
+      "$out/inventory.yaml" "$out/monitor.yaml" || rc=1
+  # The profiles run what they say: no gateway, OPA, Presidio or Keycloak in the inventory;
+  # no Presidio when monitoring.
+  if grep -qE 'name: agentgov-(gateway|processor|opa|presidio|keycloak)$' "$out/inventory.yaml" ||
+    grep -qE 'name: agentgov-presidio$' "$out/monitor.yaml"; then
+    echo "a profile renders a part it leaves out"
+    rc=1
+  fi
   # cert-manager issuing the components' certificates, from an authority of the release's
   # own, against the CRDs catalog's schemas of its resources.
   helm template agentgov "$CHART" --set internalTLS.certManager.enabled=true \
@@ -505,6 +531,30 @@ end_to_end() {
   else
     "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   fi
+  return "$rc"
+}
+
+# The inventory stack (docker-compose.inventory.yml): the control plane and PostgreSQL
+# alone start, apply the inventory starting point, and keep a ledger that verifies.
+inventory_end_to_end() {
+  local compose=(docker compose -p agentgov-ci-inventory -f deploy/compose/docker-compose.inventory.yml)
+  local rc=0
+  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  if port_in_use 8000; then
+    echo "port 8000 in use. Stop the stack that has it first"
+    return 1
+  fi
+  if ! "${compose[@]}" up -d --no-build --wait --wait-timeout 300 >/dev/null; then
+    "${compose[@]}" logs --no-color --tail 100 || true
+    "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+    return 1
+  fi
+  AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=dev-admin-token \
+    python scripts/check-inventory.py &&
+    AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=dev-admin-token agentgov ledger verify ||
+    rc=1
+  [ "$rc" = 0 ] || "${compose[@]}" logs --no-color --tail 100 || true
+  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   return "$rc"
 }
 
@@ -838,6 +888,11 @@ fi
 if [ "$lint" = 1 ]; then
   run "Lint (ruff)" lint_python
   run "Docs (links, settings reference)" lint_docs
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    run "Compose files (config)" lint_compose
+  else
+    skip "Compose files (config)" "no docker compose"
+  fi
   run "Rego (opa fmt, check --strict, test)" lint_rego
 fi
 if [ "$tests" = 1 ]; then
@@ -869,6 +924,7 @@ if [ "$e2e" = 1 ]; then
   if docker_ready; then
     run "End to end (stack + demo + ledger)" end_to_end
     run "End to end (Helm chart's pods on Docker + demo + ledger)" chart_on_docker
+    run "End to end (inventory stack + ledger)" inventory_end_to_end
   else
     skip "End to end (stack + demo + ledger)" "no Docker daemon"
   fi

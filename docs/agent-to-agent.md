@@ -376,6 +376,10 @@ demo cluster) that looks customers up in the CRM through the gateway. The
 * Calls that go around the gateway aren't governed, and AgentGov can't stop them: the
   network or the agent must ([calls around the gateway](#calls-around-the-gateway)). The
   plain headers are only as trustworthy as that.
+* A call the gateway can't check (the processor or OPA down) goes through unchecked while
+  no control at the gateway is enforced, or while `AGENTGOV_GATEWAY_FAILURE_MODE` is open
+  ([when something is down](features.md#when-something-is-down)). It carries no
+  delegation from AgentGov, so agents that refuse calls without one refuse it too.
 * A delegation is a bearer token: whoever holds one can present it until it expires. The
   agent it was given to holds it, and sends it with its calls through the gateway; the
   `iat` check above keeps an agent from taking it as proof for a later call.

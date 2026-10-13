@@ -1,7 +1,7 @@
 {{- if .Values.internalTLS.enabled }}
 {{- $root := . }}
 {{- $ns := .Release.Namespace }}
-{{- $parts := list "control-plane" "processor" "opa" "gateway" "otel-collector" }}
+{{- $parts := splitList " " (include "agentgov.parts" .) }}
 {{- if .Values.internalTLS.spire.enabled }}
 {{- $spire := .Values.internalTLS.spire }}
 {{- /* SPIRE: each component's pod gets an X.509-SVID of its own, with its Service's names,
@@ -56,6 +56,7 @@ data:
     key_file_mode = 0600
     daemon_mode = {{ eq $mode "daemon" }}
   {{- end }}
+{{- if .Values.opa.enabled }}
 ---
 # OPA takes only the processor and the control plane, by their SPIFFE IDs.
 apiVersion: v1
@@ -71,7 +72,7 @@ data:
     import rego.v1
 
     peers := {
-      {{- range list "processor" "control-plane" }}
+      {{- range without $parts "opa" "gateway" "otel-collector" }}
       {{ include "agentgov.spiffeId" (list $root .) | quote }},
       {{- end }}
     }
@@ -83,6 +84,7 @@ data:
       some uri in cert.URIs
       sprintf("%s://%s%s", [uri.Scheme, uri.Host, uri.Path]) in peers
     }
+{{- end }}
 {{- else if .Values.internalTLS.certManager.enabled }}
 {{- $cm := .Values.internalTLS.certManager }}
 {{- $issuer := $cm.issuerRef }}

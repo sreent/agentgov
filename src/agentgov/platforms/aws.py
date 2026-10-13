@@ -52,6 +52,14 @@ QUICK = "quick"
 REGISTRY = "agent-registry"
 # Each kind of list is paged this far at most.
 MAX_PAGES = 50
+
+
+def _capped(what: str) -> str:
+    """Why a list read only up to MAX_PAGES pages fails: the part it is in wasn't read in
+    full, so its agents are left as the last full read saw them (agentgov.platforms.base)."""
+    return f"more than {MAX_PAGES} pages of {what}: the rest weren't read"
+
+
 # Throttled or failing requests are tried again after these pauses (seconds).
 RETRIES = (0.5, 1.0, 2.0)
 # Environment variables whose names say they hold a secret, unless their value refers to one.
@@ -160,8 +168,14 @@ def _refused(exc: PlatformError) -> str | None:
     raise exc
 
 
+# A resource policy AgentGov may not read: who may call the resource is unknown, so the
+# findings about it stay as they were rather than close.
+UNREAD_POLICY = "its resource policy, which says who may call it, couldn't be read"
+
+
 def _partial(found: Found, why: str) -> Found:
     found.complete = False
+    found.missing.append(why)
     found.details["facts"].append({"label": "Not read in full", "value": why, "tone": "warning"})
     return found
 
@@ -253,6 +267,8 @@ def _agentcore(api: _Api, account: str, region: str, part: str) -> list[Found]:
         policy = None
         if why is None and runtime.get("agentRuntimeArn") and not _jwt(runtime):
             policy = api.resource_policy(*CONTROL, runtime["agentRuntimeArn"])
+            if policy is None:
+                why = UNREAD_POLICY
         item = agent_runtime(runtime, account, region, part, policy=policy)
         found.append(_partial(item, why) if why else item)
     return found
@@ -285,6 +301,8 @@ def _gateways(api: _Api, account: str, region: str, part: str) -> list[Found]:
         policy = None
         if why is None and gateway.get("authorizerType") == "AWS_IAM" and gateway.get("gatewayArn"):
             policy = api.resource_policy(*CONTROL, gateway["gatewayArn"])
+            if policy is None:
+                why = UNREAD_POLICY
         item = agentcore_gateway(gateway, targets, account, region, part, policy=policy)
         found.append(_partial(item, why) if why else item)
     return found
@@ -307,6 +325,8 @@ def _quick(api: _Api, account: str, region: str, part: str) -> list[Found]:
             token = page.get("NextToken")
             if not token:
                 break
+        else:
+            raise PlatformError(_capped("Amazon Quick's agents"))
     except PlatformError as exc:
         if exc.status == 404 or any(kind in str(exc) for kind in NO_QUICK):
             raise _NotOffered(str(exc)) from exc
@@ -511,6 +531,7 @@ class _Api:
             token = page.get("nextToken")
             if not token:
                 return
+        raise PlatformError(_capped(path))
 
     def resource_policy(self, service: str, endpoint: str, arn: str) -> dict[str, Any] | None:
         """A resource's policy: ``{}`` when it has none, None when AgentGov may not read it."""

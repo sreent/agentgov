@@ -152,6 +152,10 @@ def test_a_region_that_failed_leaves_its_agents_alone(client, connector) -> None
     assert triage["in_inventory"] is True
     finding = open_findings(client, "triage")["platform.no_guardrail"]
     assert finding["verified"] is False
+    assert finding["unverified_reason"] == (
+        "the last AWS sync couldn't read 111122223333/us-west-2: "
+        "AccessDeniedException: not authorized"
+    )
     status = {s["source"]: s for s in client.get("/v1/platforms", headers=ADMIN).json()["sources"]}
     assert status["aws"]["last_sync"]["ok"] is False
     assert "us-west-2: AccessDeniedException" in status["aws"]["last_sync"]["message"]
@@ -164,9 +168,83 @@ def test_a_sync_that_fails_outright(client, connector) -> None:
     connector.next = PlatformError("no AWS credentials")
     resp = client.post("/v1/platforms/aws/sync", headers=ADMIN)
     assert resp.status_code == 502 and "no AWS credentials" in resp.text
-    assert open_findings(client, "billing-helper")["platform.no_guardrail"]["verified"] is False
+    unverified = open_findings(client, "billing-helper")["platform.no_guardrail"]
+    assert unverified["verified"] is False
+    assert unverified["unverified_reason"] == "the last AWS sync failed: no AWS credentials"
     status = {s["source"]: s for s in client.get("/v1/platforms", headers=ADMIN).json()["sources"]}
     assert status["aws"]["last_sync"]["message"] == "no AWS credentials"
+    # Read again: verified, and the reason is gone.
+    connector.next = Inventory(found=[found("billing-helper", part, NO_GUARDRAIL)], read={part})
+    sync(client)
+    verified = open_findings(client, "billing-helper")["platform.no_guardrail"]
+    assert verified["verified"] is True and verified["unverified_reason"] is None
+    assert "unverified" not in verified["details"]
+
+
+def test_an_agent_read_in_part_says_what_was_missing(client, connector) -> None:
+    part = "111122223333/us-east-1"
+    connector.next = Inventory(found=[found("billing-helper", part, NO_GUARDRAIL)], read={part})
+    sync(client)
+    partial = found("billing-helper", part)
+    partial.complete = False
+    partial.missing = ["its resource policy couldn't be read"]
+    connector.next = Inventory(found=[partial], read={part})
+    sync(client)
+    sync(client)
+    finding = open_findings(client, "billing-helper")["platform.no_guardrail"]
+    assert finding["verified"] is False
+    assert finding["unverified_reason"] == (
+        "the last AWS sync read it in part: its resource policy couldn't be read"
+    )
+
+
+def test_what_the_first_sync_finds_reaches_no_inbox(client, connector, settings) -> None:
+    from dataclasses import replace
+
+    from sqlalchemy import select
+
+    from agentgov.models import Notification
+    from agentgov.registry import findings, issues, teams
+
+    rt = client.app.state.rt
+    with rt.db.session() as s:
+        teams.create(
+            s, {"name": "ai-gov", "emails": ["gov@example.com"], "default": True}, actor="a:b"
+        )
+    mail = replace(settings, smtp_url="smtp://mail:25", smtp_from="agentgov@example.com")
+    part = "111122223333/us-east-1"
+    connector.next = Inventory(found=[found("billing-helper", part, NO_GUARDRAIL)], read={part})
+    sync(client)
+    found_first = open_findings(client, "billing-helper")
+    # All it found about the agents it read: theirs, and AgentGov's own about them.
+    assert {"platform.no_guardrail", "agent.unmanaged", "agent.high_risk"} <= set(found_first)
+    assert all(f["details"][findings.BASELINE] is True for f in found_first.values())
+    first = found_first["platform.no_guardrail"]
+    connector.next = Inventory(
+        found=[found("billing-helper", part, NO_GUARDRAIL, PLAIN_SECRET)], read={part}
+    )
+    sync(client)
+    later = open_findings(client, "billing-helper")["platform.plain_secret"]
+    assert findings.BASELINE not in later["details"]
+    with rt.db.session() as s:
+        issues.route(s, mail)
+        sent = {n.finding_id for n in s.scalars(select(Notification))}
+        # Both are with the default team; only the new one is in its inbox.
+        assert findings.get(s, first["id"]).level == "team"
+        assert sent == {later["id"]}
+    # Gone, then back: news like any other.
+    with rt.db.session() as s:
+        findings.set_status(s, first["id"], "resolved", "admin:test")
+    sync(client)
+    again = open_findings(client, "billing-helper")["platform.no_guardrail"]
+    assert findings.BASELINE not in again["details"]
+    with rt.db.session() as s:
+        issues.route(s, mail)
+        assert first["id"] in {n.finding_id for n in s.scalars(select(Notification))}
+    # Or every first sync's findings are sent, if the deployment says so.
+    with rt.db.session() as s:
+        loud = replace(mail, issues_quiet_first_sync=False)
+        assert issues._quiet(loud, findings.get(s, later["id"])) is None
 
 
 def test_other_sources_findings_of_the_same_type_stay(client, connector) -> None:
@@ -200,3 +278,27 @@ def test_only_configured_and_turned_on_platforms_sync(client, connector) -> None
     assert status["google-cloud"]["configured"] is False
     assert "AGENTGOV_GOOGLE_CLOUD_PROJECTS" in status["google-cloud"]["needs"]
     assert status["databricks"]["configured"] is False
+
+
+def test_platforms_are_read_on_a_schedule(settings: Settings, connector, monkeypatch) -> None:
+    from agentgov import runtime
+    from agentgov.registry import features
+
+    started: list[str] = []
+    monkeypatch.setattr(runtime._Worker, "start", lambda worker: started.append(worker.name))
+    rt = runtime.Runtime(settings.with_overrides(platform_sync_interval_seconds=3600))
+    # Connectors may come after the runtime is built, as in these tests.
+    rt.platforms["aws"] = connector
+    rt.start()
+    try:
+        assert "platform-sync" in started
+        # Each time it runs: every platform that is configured and turned on.
+        assert rt._platforms_worker is not None
+        rt._platforms_worker.fn()
+        assert connector.calls == 1
+        with rt.db.session() as s:
+            features.set_mode(s, rt.settings, "aws", "off", actor="admin:ada")
+        rt._platforms_worker.fn()
+        assert connector.calls == 1
+    finally:
+        rt.stop()

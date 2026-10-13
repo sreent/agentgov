@@ -13,7 +13,8 @@
 #               "delegation", "exchange" or "sign-in"
 #   chain:      who handed the work down to the agent, when another agent did
 #               (see agentgov.a2a): [{"type": "person" | "agent", "id", "name"}]
-#   resource:   {"server", "name"}
+#   resource:   {"server", "name"}: name is the tool, prompt or resource, and null for a
+#               call about the server as a whole (listing its prompts or resources, say)
 #   arguments:  tool arguments (request phase)
 #   detections: {"categories": ["pii","secret"], "entities": [...],
 #                "prompt_injection": bool, "injection_score": number}
@@ -39,6 +40,10 @@ detections := object.get(input, "detections", {})
 categories contains c if some c in object.get(detections, "categories", [])
 
 resource_id := sprintf("%s/%s", [input.resource.server, input.resource.name])
+
+# The call is about one tool, prompt or resource. A call about the server as a whole has
+# nothing to grant, approve or quarantine: only what every call is checked for applies.
+about_object if object.get(input.resource, "name", null) != null
 
 # ---------------------------------------------------------------------------
 # Always applied. Any denial wins over approvals and redaction.
@@ -74,6 +79,7 @@ deny contains msg if {
 # access package it holds.
 violation contains {"control": "least-privilege", "effect": "deny", "message": msg} if {
 	phase == "request"
+	about_object
 	ctx.agent.status == "active"
 	not ctx.granted(input.resource.server, input.resource.name)
 	msg := sprintf("%s is not granted to agent %s", [resource_id, ctx.agent.name])
@@ -82,6 +88,7 @@ violation contains {"control": "least-privilege", "effect": "deny", "message": m
 # Access packages: a tool only an expired package grants.
 violation contains {"control": "access-packages", "effect": "deny", "message": msg} if {
 	phase == "request"
+	about_object
 	ctx.agent.status == "active"
 	names := ctx.expired_tool_grants(input.resource.server, input.resource.name)
 	count(names) > 0
@@ -91,6 +98,7 @@ violation contains {"control": "access-packages", "effect": "deny", "message": m
 # MCP "rug pull": the server changed the tool after it was approved.
 violation contains {"control": "tool-integrity", "effect": "deny", "message": msg} if {
 	phase == "request"
+	about_object
 	ctx.tool.changed == true
 	msg := sprintf("%s changed its definition since it was approved; an administrator must review it", [resource_id])
 }
@@ -135,6 +143,7 @@ violation contains {
 # Human approval.
 violation contains {"control": "approvals", "effect": "require_approval", "message": msg} if {
 	phase == "request"
+	about_object
 	ctx.annotations.destructiveHint == true
 	not ctx.annotations.readOnlyHint == true
 	msg := sprintf("%s is marked destructive by its server", [resource_id])

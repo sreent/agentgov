@@ -619,6 +619,7 @@ def agentforce_agent(
         risks=risks,
         instructions=instructions or None,
         complete=not unread,
+        missing=[f"{_and(unread)} couldn't be read"] if unread else [],
     )
 
 

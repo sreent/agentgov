@@ -1,0 +1,11 @@
+# The gateway, watching (docs/deploy/kubernetes.md#profiles): every control records what
+# it would do and stops nothing, so you can see what enforcing would change before you
+# enforce it (docs/features.md#starting-points). Without Presidio's 1.5 GiB: the processor
+# checks for secrets, prompt injection and poisoned tools, but not personal data
+# (presidio.enabled=true adds it). 710m CPU and 1.6 GiB of requests, with the bundled
+# PostgreSQL and Keycloak.
+#
+#   helm install agentgov deploy/helm/agentgov -f deploy/helm/agentgov/profiles/monitor.yaml
+presidio:
+  enabled: false
+featurePreset: monitor

@@ -7,12 +7,13 @@
   parts. Egress is left open: MCP servers, Microsoft's APIs, model providers
   can be anywhere.
 */}}
+{{- $parts := splitList " " (include "agentgov.parts" .) }}
 {{- $internal := list
-  (dict "component" "opa" "ports" (list 8181) "from" (list "control-plane" "processor") "enabled" true)
-  (dict "component" "processor" "ports" (list 50051 8091) "from" (list "gateway") "enabled" true)
-  (dict "component" "presidio" "ports" (list 3000) "from" (list "processor") "enabled" .Values.presidio.enabled)
+  (dict "component" "opa" "ports" (list 8181) "from" (without $parts "opa" "gateway" "otel-collector") "enabled" .Values.opa.enabled)
+  (dict "component" "processor" "ports" (list 50051 8091) "from" (list "gateway") "enabled" .Values.gateway.enabled)
+  (dict "component" "presidio" "ports" (list 3000) "from" (list "processor") "enabled" (and .Values.presidio.enabled .Values.gateway.enabled))
   (dict "component" "postgresql" "ports" (list 5432) "from" (list "control-plane" "keycloak") "enabled" .Values.postgresql.enabled)
-  (dict "component" "control-plane" "ports" (list 8443) "from" (list "opa" "processor" "gateway" "otel-collector") "enabled" .Values.internalTLS.enabled "suffix" "-internal") }}
+  (dict "component" "control-plane" "ports" (list 8443) "from" (without $parts "control-plane") "enabled" (and .Values.internalTLS.enabled (gt (len $parts) 1)) "suffix" "-internal") }}
 {{- range $internal }}
 {{- if .enabled }}
 ---
@@ -42,7 +43,7 @@ spec:
 {{- end }}
 {{- $public := list
   (dict "component" "control-plane" "ports" (list 8000) "enabled" true)
-  (dict "component" "gateway" "ports" (list 8080) "enabled" true)
+  (dict "component" "gateway" "ports" (list 8080) "enabled" .Values.gateway.enabled)
   (dict "component" "otel-collector" "ports" (list 4317 4318 13133) "enabled" .Values.otelCollector.enabled)
   (dict "component" "keycloak" "ports" (list 8080 9000) "enabled" .Values.keycloak.enabled) }}
 {{- if and .Values.keycloak.enabled (eq .Values.keycloak.mode "production") }}
