@@ -58,7 +58,7 @@ and in their teams' chats only.
 ## Teams
 
 A team is people and chat channels that own agents, and that issues escalate to. Add them
-on **Findings** → **Teams**, with `agentgov teams create`, with `POST /v1/teams`, or as a
+on **Teams** (under *Settings*), with `agentgov teams create`, with `POST /v1/teams`, or as a
 manifest:
 
 ```yaml

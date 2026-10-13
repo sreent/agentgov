@@ -89,7 +89,7 @@ answers, and `--hide` hides it; with the API, `GET` and `PUT /v1/start`
 | `admin` | Everything below, plus agent lifecycle, blueprints, access packages, [management rules](management-rules.md), tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations (SIEMs, chats and [service desks](tickets.md)), teams and which [features](features.md) are used |
 | `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks, but not those of agents they are accountable for; attest the agents it sponsors; classify agents for the [classification register](evidence.md#a-classification-register) |
 | `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings, acknowledge issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
-| `auditor` | Read everything, including the ledger and the list of API keys; change nothing. They start on **Ledger** → *Compliance* |
+| `auditor` | Read everything, including the ledger and the list of API keys; change nothing. They start on **Compliance** |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
 | `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)), and to attest the agents they sponsor; sees nothing else |
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector; with mutual TLS between the components, only on the control plane's internal port ([production](production.md#mutual-tls-between-components)) |
@@ -101,6 +101,20 @@ someone's access away, remove their role there, then sign them out on the **Acce
 page so that their open sessions end too. The same page lists everyone who has signed
 in (or been refused) and every API key, for access reviews. API keys have one role each.
 The UI only shows the controls a role may use; the API enforces the roles either way.
+
+## The menu
+
+The admin center's menu has the overview first, then five groups:
+
+| Group | Pages | For |
+|---|---|---|
+| *Work* | **Approvals**, **Findings** | What waits for someone: calls and requests to decide, and issues to take on |
+| *Agents* | **Agents**, **Agent map**, **Platforms** | What there is: the registry, which agents call which, and the platforms agents come from |
+| *Gateway* | **Tool servers**, **Models**, **Policies**, **Developer tools** | What agents' calls through the gateway may reach, and the rules for them: unused [without the gateway](deploy/local.md#just-the-inventory) |
+| *Evidence* | **Ledger**, **Compliance**, **Register** | What happened, the reports for a framework, and how each agent is classified |
+| *Settings* | **Teams**, **Security operations**, **Access**, **Features** | Who takes the issues, the security team's tools, who signs in, and which features are on |
+
+People without an AgentGov role see only their issues and the approvals waiting for them.
 
 ## Tasks
 
@@ -158,7 +172,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | See the issues sent to you, as an owner, a sponsor or a team member | Findings → *Yours* (people without a role: *Your issues*) | `agentgov findings list --mine` | `GET /v1/me/issues` |
 | List findings, a page at a time, by type and severity | Findings: the type and severity filters, and **Show more** | `agentgov findings list --type T --severity S --limit N` | `GET /v1/findings?type=&severity=&limit=&offset=` (`X-Total-Count` says how many in all) |
 | Acknowledge an issue, or accept its risk until a date | Findings → **Acknowledge**, **Accept risk** | `agentgov findings acknowledge ID`, `agentgov findings accept ID --reason R --until DATE` | `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` |
-| Add, edit and delete teams, and choose the default team | Findings → Teams | `agentgov teams create\|update\|delete`, `agentgov teams list` | `POST /v1/teams`, `PATCH`/`DELETE /v1/teams/{name}` |
+| Add, edit and delete teams, and choose the default team | **Teams** | `agentgov teams create\|update\|delete`, `agentgov teams list` | `POST /v1/teams`, `PATCH`/`DELETE /v1/teams/{name}` |
 | Add, edit and delete access packages ([access packages](access-packages.md)) | Policies → *Access packages* | `agentgov access-packages create\|update\|delete`, `agentgov access-packages list` | `POST /v1/access-packages`, `PATCH`/`DELETE /v1/access-packages/{name}` |
 | Ask for an access package for an agent, or renew one | Agent → *Access packages* → **Request access**, **Renew** | `agentgov access-packages request AGENT PACKAGE --reason R` | `POST /v1/access-assignments` |
 | Decide, revoke or review an agent's access package | Approvals → *Access requests*; agent → *Access packages* | `agentgov access-packages approve\|deny\|revoke ID`, `agentgov access-packages review ID --keep\|--remove` | `POST /v1/access-assignments/{id}/approve\|deny\|revoke\|review` |
@@ -170,9 +184,9 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Keep a checkpoint of the ledger, and get its time-stamp | Ledger → *Checkpoints and retention* → **Make a checkpoint**, **Time-stamp** | `agentgov ledger checkpoint`, `ledger checkpoints`, `ledger proof SEQ` | `POST`/`GET /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp` |
 | See how long things are kept, and run retention now | Ledger → *Checkpoints and retention* | `agentgov ledger retention [--run]` | `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run` |
 | See whether the database lost ledger entries (a restore), and accept the restore ([backing up and restoring](backup.md)) | Ledger | `agentgov ledger witness`, `agentgov ledger accept-restore` | `GET /v1/ledger/witness`, `POST /v1/ledger/witness/accept` |
-| Read a compliance report, and download the evidence pack | Ledger → *Compliance* → **Evidence pack** | `agentgov evidence report --framework F`, `agentgov evidence pack -o FILE` | `GET /v1/evidence/report`, `GET /v1/evidence/pack` |
-| Classify agents under the EU AI Act, one or many ([classification register](evidence.md#a-classification-register)) | Agent → *Classification* → **Classify**; Ledger → *Register* → **Classify**; Agents → tick them → **Classify…** | `agentgov agents classify REF [REF ...] --category C --role R [--basis B] [--purpose P]` (`--clear` to undo) | `PUT`/`DELETE /v1/agents/{ref}/classification`; `POST /v1/agents/bulk`, `action: classify` |
-| See the classification register, and download it as a spreadsheet | Ledger → *Register* → **Download CSV** | `agentgov evidence register [--csv]` | `GET /v1/evidence/register` |
+| Read a compliance report, and download the evidence pack | **Compliance** → **Evidence pack** | `agentgov evidence report --framework F`, `agentgov evidence pack -o FILE` | `GET /v1/evidence/report`, `GET /v1/evidence/pack` |
+| Classify agents under the EU AI Act, one or many ([classification register](evidence.md#a-classification-register)) | Agent → *Classification* → **Classify**; **Register** → **Classify**; Agents → tick them → **Classify…** | `agentgov agents classify REF [REF ...] --category C --role R [--basis B] [--purpose P]` (`--clear` to undo) | `PUT`/`DELETE /v1/agents/{ref}/classification`; `POST /v1/agents/bulk`, `action: classify` |
+| See the classification register, and download it as a spreadsheet | **Register** → **Download CSV** | `agentgov evidence register [--csv]` | `GET /v1/evidence/register` |
 | See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |
 | See the calls between agents, and the chain of agents behind any call | Ledger, type `decision.a2a.*`; an entry's *Chain* | `agentgov ledger tail --type 'decision.a2a.*'` | `GET /v1/ledger?type=decision.a2a.*` (`details.chain`) |
 | Open the trace of a gateway decision | Ledger or an agent's Recent activity → **Open trace** | `agentgov ledger tail --traces` | `trace_url` on `GET /v1/ledger` entries (set `AGENTGOV_TRACE_URL`) |

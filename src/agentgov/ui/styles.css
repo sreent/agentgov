@@ -218,13 +218,17 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav {
   position: sticky; top: 0; height: 100vh; overflow-y: auto;
   background: var(--surface); border-right: 1px solid var(--line);
-  display: flex; flex-direction: column; gap: 8px; padding: 18px 12px 14px;
+  display: flex; flex-direction: column; gap: 0; padding: 18px 12px 14px;
 }
 .nav-brand { padding: 2px 8px 14px; }
-.nav-list { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.nav-list { list-style: none; display: flex; flex-direction: column; gap: 1px; }
+.nav-group-label {
+  padding: 12px 10px 4px; font-size: var(--fs-xs); font-weight: 650; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-3);
+}
 .nav-list a, .nav-action {
   display: flex; align-items: center; gap: 10px; width: 100%;
-  padding: 8px 10px; border-radius: var(--radius-sm);
+  padding: 7px 10px; border-radius: var(--radius-sm);
   color: var(--ink-2); text-decoration: none; font-weight: 520;
   background: none; border: 0; cursor: pointer; text-align: left;
 }

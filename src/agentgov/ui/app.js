@@ -134,6 +134,9 @@ const ICONS = {
   developers: 'M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14',
   secops: 'M10 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8',
   ticket: 'M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3a2 2 0 0 0 0 4v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-3a2 2 0 0 0 0-4zM10 5v2M10 11v2M10 17v2',
+  compliance: 'M7 3h7l5 5v13H7zM14 3v5h5M10 14l2 2 4-4',
+  register: 'M6 4h12v17H6zM9 8h6M9 12h6M9 16h4',
+  teams: 'M9 7a3 3 0 1 0 6 0a3 3 0 1 0-6 0M3 20c0-3.3 2.7-6 6-6h6c3.3 0 6 2.7 6 6M4 10a2 2 0 1 0 4 0a2 2 0 1 0-4 0M16 10a2 2 0 1 0 4 0a2 2 0 1 0-4 0',
 };
 
 function icon(name, { label, cls } = {}) {
@@ -938,13 +941,13 @@ const PAGES = [
   { re: /^\/approvals(?:\/(history))?$/, nav: 'approvals', title: 'Approvals', render: renderApprovals },
   { re: /^\/toolservers$/, nav: 'toolservers', title: 'Tool servers', render: renderToolservers },
   { re: /^\/findings$/, nav: 'findings', title: 'Findings', render: renderFindings },
-  { re: /^\/findings\/teams$/, nav: 'findings', title: 'Teams', render: renderTeams },
+  { re: /^\/findings\/teams$/, nav: 'teams', title: 'Teams', render: renderTeams },
   { re: /^\/findings\/types$/, nav: 'findings', title: 'Finding types', render: renderFindingTypes },
   { re: /^\/findings\/([^/]+)$/, nav: 'findings', title: 'Finding', render: renderFinding },
   { re: /^\/policies$/, nav: 'policies', title: 'Policies', render: renderPolicies },
   { re: /^\/ledger$/, nav: 'ledger', title: 'Ledger', render: renderLedger },
-  { re: /^\/ledger\/compliance$/, nav: 'ledger', title: 'Compliance', render: renderCompliance },
-  { re: /^\/ledger\/register$/, nav: 'ledger', title: 'Register', render: renderRegister },
+  { re: /^\/ledger\/compliance$/, nav: 'compliance', title: 'Compliance', render: renderCompliance },
+  { re: /^\/ledger\/register$/, nav: 'register', title: 'Register', render: renderRegister },
   { re: /^\/access$/, nav: 'access', title: 'Access', render: renderAccess },
   { re: /^\/platforms$/, nav: 'platforms', title: 'Platforms', render: renderPlatforms },
   { re: /^\/features$/, nav: 'features', title: 'Features', render: renderFeatures },
@@ -1104,6 +1107,13 @@ function enterApp() {
   // People without an AgentGov role have only their issues and approvals.
   for (const link of document.querySelectorAll('#nav [data-nav]')) {
     link.closest('li').hidden = isPerson() && !personPages().includes(link.dataset.nav);
+  }
+  // A group of the menu shows only with something in it.
+  for (const list of document.querySelectorAll('#nav .nav-list')) {
+    const empty = [...list.children].every((li) => li.hidden);
+    list.hidden = empty;
+    const label = list.getAttribute('aria-labelledby');
+    if (label) document.getElementById(label).hidden = empty;
   }
   $('#nav-findings-label').textContent = isPerson() ? 'Your issues' : 'Findings';
   if (!location.hash || location.hash === '#' || location.hash === '#/') history.replaceState(null, '', home());
@@ -4075,7 +4085,6 @@ function findingTabs(current) {
   if (isPerson()) return null;
   return h('nav', { class: 'tabs', 'aria-label': 'Finding views' },
     h('a', { class: 'tab', href: '#/findings', 'aria-current': current === 'findings' ? 'page' : null }, 'Findings'),
-    h('a', { class: 'tab', href: '#/findings/teams', 'aria-current': current === 'teams' ? 'page' : null }, 'Teams'),
     h('a', { class: 'tab', href: '#/findings/types', 'aria-current': current === 'types' ? 'page' : null }, 'Types'));
 }
 
@@ -4811,14 +4820,13 @@ async function renderTeams() {
     : emptyState('No teams', 'Add the teams that own agents, and the one that takes the issues nobody else does.');
   return h('div', { class: 'page', 'data-title': 'Teams' },
     pageHead({
-      title: 'Findings',
+      title: 'Teams',
       sub: "Teams own agents (as an agent's owner or sponsor), and take the issues about them that their owners and sponsors didn't acknowledge in time.",
       actions: [
         admin ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'add-team', onclick: guarded(() => teamForm(null, chats)) }, icon('plus'), 'Add team') : null,
         refreshButton(),
       ],
     }),
-    findingTabs('teams'),
     teams.length && !hasDefault ? callout('warning', 'alert-circle', h('span', {}, h('strong', {}, 'No default team: '),
       'issues about agents without a team of their own, and those that are about nothing else, go to nobody. Mark one team as the default.')) : null,
     card({ title: 'Teams', flush: Boolean(teams.length), body }));
