@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import http.server
 import json
+import socket
 import ssl
 import threading
 from typing import Any
 
-import httpx
+import httpcore
 import pytest
 from sqlalchemy import select
 
@@ -48,19 +49,80 @@ def _open(rt) -> dict[str, Finding]:
         return {f.type: f for f in found if f.type.startswith("agent.a2a_")}
 
 
-def _answer(status: int, body: Any = None) -> httpx.MockTransport:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["x-agentgov-check"] == "calls-around-gateway"
-        assert "x-agentgov-delegation" not in request.headers
-        assert json.loads(request.content)["method"] == "GetTask"
-        return httpx.Response(status, json=body) if body is not None else httpx.Response(status)
+class _Agent(httpcore.NetworkBackend):
+    """Stands in for an agent's A2A endpoint on the network: records the address it is
+    connected to and what it is sent, and answers ``reply``, a chunk a read, each read
+    taking ``each`` seconds on ``clock``. ``error``: what connecting raises instead."""
 
-    return httpx.MockTransport(handler)
+    def __init__(
+        self,
+        reply: Any = (),
+        *,
+        error: Exception | None = None,
+        clock: list[float] | None = None,
+        each: float = 0.0,
+        tls_error: bool = False,
+    ) -> None:
+        self.reply, self.error, self.clock, self.each = iter(reply), error, clock, each
+        self.tls_error = tls_error
+        self.connected: list[str] = []
+        self.sent = bytearray()
+        self.reads = self.read_bytes = 0
+
+    def connect_tcp(self, host: str, port: int, *args: Any, **kwargs: Any) -> Any:
+        self.connected.append(host)
+        if self.error is not None:
+            raise self.error
+        return _AgentStream(self)
 
 
-def _test(url: str, transport: httpx.BaseTransport) -> dict[str, Any]:
-    with httpx.Client(transport=transport) as client:
-        return reachability.call(url, client)
+class _AgentStream(httpcore.NetworkStream):
+    def __init__(self, agent: _Agent) -> None:
+        self.agent = agent
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        agent = self.agent
+        if agent.clock is not None:
+            agent.clock[0] += agent.each
+        chunk = next(agent.reply, b"")
+        agent.reads += 1
+        agent.read_bytes += len(chunk)
+        return chunk
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self.agent.sent += buffer
+
+    def close(self) -> None:
+        pass
+
+    def start_tls(self, *args: Any, **kwargs: Any) -> httpcore.NetworkStream:
+        if self.agent.tls_error:
+            try:
+                raise ssl.SSLCertVerificationError("certificate verify failed")
+            except ssl.SSLError as exc:
+                raise httpcore.ConnectError("certificate verify failed") from exc
+        return self
+
+    def get_extra_info(self, info: str) -> Any:
+        return None
+
+
+def _http(status: int, body: Any = None) -> list[bytes]:
+    text = json.dumps(body).encode() if body is not None else b""
+    head = f"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n"
+    return [f"{head}Content-Length: {len(text)}\r\n\r\n".encode() + text]
+
+
+def _test(url: str, agent: _Agent, **options: Any) -> dict[str, Any]:
+    """The test, against ``agent``, at an address it may call."""
+    options.setdefault("resolver", lambda host, port: ["10.0.0.5"])
+    got = reachability.call(url, backend=agent, **options)
+    if agent.sent:
+        head, _, body = bytes(agent.sent).partition(b"\r\n\r\n")
+        assert b"X-AgentGov-Check: calls-around-gateway" in head
+        assert b"x-agentgov-delegation" not in head.lower()
+        assert json.loads(body)["method"] == "GetTask"
+    return got
 
 
 # ------------------------------------------------------------------------ the test
@@ -69,14 +131,14 @@ def _test(url: str, transport: httpx.BaseTransport) -> dict[str, Any]:
 class TestTheTest:
     def test_an_agent_that_refuses_calls_without_a_delegation(self) -> None:
         body = {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Refused"}}
-        got = _test("http://billing:9600", _answer(401, body))
+        got = _test("http://billing:9600", _Agent(_http(401, body)))
         assert (got["state"], got["status"]) == ("refused", 401)
         assert got["detail"] == "it refused a call without credentials (HTTP 401): Refused"
         assert got["url"] == "http://billing:9600" and got["checked_at"]
 
     def test_an_agent_that_takes_the_call(self) -> None:
         body = {"jsonrpc": "2.0", "id": "x", "error": {"code": -32001, "message": "No task"}}
-        got = _test("http://billing:9600", _answer(200, body))
+        got = _test("http://billing:9600", _Agent(_http(200, body)))
         assert got["state"] == "accepted"
         assert got["detail"] == (
             "it took a call that didn't come through the gateway (HTTP 200, answering 'No task')"
@@ -91,41 +153,98 @@ class TestTheTest:
         ],
     )
     def test_other_answers_are_inconclusive(self, status: int, detail: str) -> None:
-        got = _test("http://billing:9600", _answer(status))
+        got = _test("http://billing:9600", _Agent(_http(status)))
         assert (got["state"], got["detail"]) == ("inconclusive", detail)
 
     def test_an_agent_that_cant_be_reached(self) -> None:
-        def refuse(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError("connection refused", request=request)
+        refused = _Agent(error=httpcore.ConnectError("connection refused"))
+        assert _test("http://billing:9600", refused)["state"] == "unreachable"
 
-        def hang(request: httpx.Request) -> httpx.Response:
-            raise httpx.ReadTimeout("timed out", request=request)
+        def nowhere(host: str, port: int) -> list[str]:
+            raise socket.gaierror(-2, "Name or service not known")
 
-        def bad_certificate(request: httpx.Request) -> httpx.Response:
-            try:
-                raise ssl.SSLCertVerificationError("certificate verify failed")
-            except ssl.SSLError as exc:
-                raise httpx.ConnectError("certificate verify failed", request=request) from exc
-
-        assert _test("http://billing:9600", httpx.MockTransport(refuse))["state"] == "unreachable"
-        hung = _test("http://billing:9600", httpx.MockTransport(hang))
+        unknown = _test("http://billing:9600", _Agent(), resolver=nowhere)
+        assert unknown["state"] == "unreachable" and "can't be resolved" in unknown["detail"]
+        hung = _test("http://billing:9600", _Agent(error=httpcore.ReadTimeout("timed out")))
         assert hung["detail"] == "it didn't answer within 5 seconds"
-        tls = _test("https://billing:9600", httpx.MockTransport(bad_certificate))
+        tls = _test("https://billing:9600", _Agent(_http(200), tls_error=True))
         assert tls["state"] == "inconclusive" and "certificate" in tls["detail"]
+        # A URL it can't call doesn't stop the others' tests.
+        odd = _test("http://\u0125ost.example:9600", _Agent())
+        assert odd["state"] == "inconclusive" and "can't be called" in odd["detail"]
 
-    def test_link_local_addresses_arent_called(self) -> None:
-        def never(request: httpx.Request) -> httpx.Response:
-            raise AssertionError("called")
+    @pytest.mark.parametrize(
+        "address",
+        ["169.254.169.254", "fe80::1", "fd00:ec2::254", "100.100.100.200",
+         "::ffff:169.254.169.254", "127.0.0.1", "::1", "0.0.0.0"],  # noqa: S104
+    )  # fmt: skip
+    def test_addresses_an_agent_isnt_at_arent_called(self, address: str) -> None:
+        agent = _Agent(_http(200))
+        # However the agent's host resolves: one such address among others is enough.
+        got = _test(
+            "http://agent.example.com:9600", agent,
+            resolver=lambda host, port: ["10.0.0.5", address],
+        )  # fmt: skip
+        assert got["state"] == "inconclusive" and "which isn't tested" in got["detail"]
+        assert agent.connected == []
 
-        got = _test("http://169.254.169.254/latest", httpx.MockTransport(never))
-        assert (got["state"], got["detail"]) == (
-            "inconclusive",
-            "a link-local address isn't tested",
+    @pytest.mark.parametrize(
+        "host", ["169.254.169.254", "2852039166", "0251.0376.0251.0376", "0xa9fea9fe", "127.1"]
+    )
+    def test_however_an_address_is_written(self, host: str) -> None:
+        agent = _Agent(_http(200))
+        got = reachability.call(f"http://{host}/", backend=agent)
+        assert got["state"] == "inconclusive" and "which isn't tested" in got["detail"]
+        assert agent.connected == []
+
+    def test_this_machine_only_where_people_reach_the_control_plane_on_it(self) -> None:
+        agent = _Agent(_http(401))
+        got = _test("http://localhost:9600", agent, resolver=lambda h, p: ["127.0.0.1"])
+        assert got["state"] == "inconclusive" and "this machine" in got["detail"]
+        got = _test(
+            "http://localhost:9600", agent, resolver=lambda h, p: ["127.0.0.1"], loopback=True
         )
+        assert got["state"] == "refused" and agent.connected == ["127.0.0.1"]
+
+    def test_it_calls_the_address_it_checked(self) -> None:
+        agent = _Agent(_http(401))
+        _test("http://billing:9600", agent, resolver=lambda host, port: ["10.0.0.5"])
+        # Not the name again, which a second lookup could resolve elsewhere.
+        assert agent.connected == ["10.0.0.5"]
+        assert b"Host: billing:9600" in agent.sent
+
+    def test_it_reads_64_kib_of_an_answer_at_most(self) -> None:
+        def endless() -> Any:
+            yield b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+            while True:
+                yield b"x" * 4096
+
+        agent = _Agent(endless())
+        got = _test("http://billing:9600", agent)
+        assert got["state"] == "accepted"
+        assert agent.read_bytes <= reachability.ANSWER_BYTES + 2 * 4096
+
+    def test_it_gives_up_after_ten_seconds_however_slowly_it_answers(self) -> None:
+        """A byte every second, never a whole answer: not even its headers."""
+        clock = [0.0]
+
+        def trickle() -> Any:
+            while True:
+                yield b"X"
+
+        head = (b"HTTP/1.1 200 OK\r\n", *(bytes([c]) for c in b"X-Slow: " * 100))
+        for reply in (trickle(), iter(head)):
+            agent = _Agent(reply, clock=clock, each=1.0)
+            got = _test("http://billing:9600", agent, clock=lambda: clock[0])
+            assert got["detail"] == "it didn't answer within 10 seconds"
+            assert agent.reads <= 11
+            clock[0] = 0.0
 
     def test_several_agents_are_tested_at_once(self) -> None:
         got = reachability.call_all(
-            {"agt_1": "http://a:1", "agt_2": "http://b:2"}, transport=_answer(401)
+            {"agt_1": "http://a:1", "agt_2": "http://b:2"},
+            backend=_Agent(_http(401) * 2),
+            resolver=lambda host, port: ["10.0.0.5"],
         )
         assert {k: v["state"] for k, v in got.items()} == {"agt_1": "refused", "agt_2": "refused"}
         assert reachability.call_all({}) == {}

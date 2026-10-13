@@ -403,8 +403,13 @@ class Runtime:
                 scanning = features.is_on(session, "posture-checks")
                 urls = reachability.targets(session) if scanning else None
             # Calls around the gateway, when the feature says "test": over the network, so
-            # outside any transaction (None: not tested this time).
-            tested = reachability.call_all(urls) if urls is not None else None
+            # outside any transaction (None: not tested this time). Agents on this machine
+            # are called only where people reach the control plane on it alone.
+            tested = (
+                reachability.call_all(urls, loopback=self.settings.only_this_machine())
+                if urls is not None
+                else None
+            )
             with self.db.session() as session:
                 scanned = posture.scan(session, self.settings, tested=tested) if scanning else None
             ruled = self.run_rules(wait=wait)
