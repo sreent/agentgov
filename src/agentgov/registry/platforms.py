@@ -38,6 +38,7 @@ from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import mark_changed
 from agentgov.models import (
+    BLOCKED,
     DELETED,
     DISCOVERED,
     Agent,
@@ -749,6 +750,8 @@ def record_inventory(
         details = {**item.details, "kind": item.kind, "part": item.part, "in_inventory": True}
         if item.maker and "@" in item.maker:  # a person, not a service principal
             details["maker"] = item.maker
+        if item.stopped is not None:
+            details["stopped"] = item.stopped
         agent, created = upsert(
             session,
             source=source,
@@ -842,8 +845,9 @@ def sync_failed(session: Session, source: str, message: str, *, actor: str | Non
 
 
 def refresh_risk(session: Session, settings: Settings) -> None:
-    """Recompute platform agents' risk now rather than at the next posture scan, and how
-    many of them are left to review."""
+    """After a sync: recompute platform agents' risk now rather than at the next posture
+    scan, how many of them are left to review, and which of those blocked in AgentGov their
+    platform still runs."""
     for agent in session.scalars(
         select(Agent)
         .where(Agent.source.like("platform:%"), Agent.status != DELETED)
@@ -851,6 +855,7 @@ def refresh_risk(session: Session, settings: Settings) -> None:
     ).unique():
         agents_svc.refresh_risk(session, settings, agent)
     review_summary(session)
+    check_stops(session, settings)
 
 
 TO_REVIEW = "platform.agents_to_review"
@@ -924,7 +929,13 @@ def target(session: Session, agent: Agent) -> dict[str, str]:
 
 
 def record_platform_block(
-    session: Session, agent: Agent, where: dict[str, str], *, blocked: bool, actor: str
+    session: Session,
+    settings: Settings,
+    agent: Agent,
+    where: dict[str, str],
+    *,
+    blocked: bool,
+    actor: str,
 ) -> None:
     """Remember that ``actor`` blocked (or unblocked) the agent in its platform."""
     record = session.get(PlatformAgent, f"{where['source']}:{where['id']}")
@@ -940,6 +951,196 @@ def record_platform_block(
         resource=f"{where['source']}/{where['id']}",
         details={"platform": SOURCES[where["source"]], **where},
     )
+    check_stop(session, settings, agent, actor=actor)
+
+
+# ----------------------------------- agents blocked in AgentGov that their platform still runs
+
+STILL_RUNNING = "platform.still_running"
+# Which platform runs an agent that several report: Copilot Studio runs the agents it
+# publishes to Microsoft 365, and an Entra agent identity is how an agent signs in.
+RUNS_ON = ("copilot-studio", "microsoft-365", *INVENTORY_SOURCES, "entra-agent-id")
+# For each platform: what it reports an agent it stopped as (None: only that it is gone),
+# and who can stop one there, and how.
+STOPPING: dict[str, tuple[str | None, str]] = {
+    "copilot-studio": (
+        "quarantined",
+        "A Power Platform administrator (or an AI or Global administrator) can quarantine it, "
+        "in the Power Platform admin center (Manage > Inventory) or through the Power "
+        "Platform API: it then works in no channel, though its makers can still open it. Its "
+        "owner can also unpublish or delete it in Copilot Studio.",
+    ),
+    "microsoft-365": (
+        "blocked",
+        "An AI administrator or Global administrator can block it for the organisation in the "
+        "Microsoft 365 admin center (Agents).",
+    ),
+    "entra-agent-id": (
+        "disabled",
+        "An administrator of its agent identity can disable it in the Microsoft Entra admin "
+        "center, so that it can't sign in.",
+    ),
+    "aws": (
+        None,
+        "Someone with rights over it in its AWS account can delete it there, or take away the "
+        "permissions that let people and applications call it.",
+    ),
+    "google-cloud": (
+        None,
+        "Someone with rights over it in its Google Cloud project can delete it there, or take "
+        "away the roles that let people and applications call it.",
+    ),
+    "salesforce": (
+        "deactivated",
+        "A Salesforce administrator can deactivate it in Agentforce Builder.",
+    ),
+    "databricks": (
+        "stopped",
+        "Someone who can manage it in its Databricks workspace can stop it, if it is an app, "
+        "or delete it.",
+    ),
+    "microsoft-foundry": (
+        "disabled",
+        "Someone with rights over its Foundry project can disable it, so that its endpoint "
+        "takes no calls, or delete it.",
+    ),
+}
+# Copilot Studio asks AgentGov before each tool call while this is enforced.
+THREAT_DETECTION = "copilot-studio-threat-detection"
+# What AgentGov does itself, as an administrator signed in through Microsoft Entra ID.
+_ADMIN_ACTION = {"copilot-studio": "Quarantine", "microsoft-365": "Block in Microsoft 365"}
+
+
+def _gone(record: PlatformAgent) -> bool:
+    data = record.data or {}
+    return any(data.get(f, True) is False for f in ("in_inventory", "in_catalog", "in_directory"))
+
+
+def _stopped(record: PlatformAgent) -> bool:
+    """Whether its platform reports the agent stopped there."""
+    data = record.data or {}
+    if record.source == "copilot-studio":
+        return data.get("quarantined") is True
+    if record.source == "microsoft-365":
+        return data.get("blocked") is True
+    if record.source == "entra-agent-id":
+        return data.get("enabled") is False or bool(data.get("disabled_by_microsoft"))
+    return data.get("stopped") is True
+
+
+def _by_source(session: Session, agent: Agent) -> dict[str, PlatformAgent]:
+    query = select(PlatformAgent).where(PlatformAgent.agent_id == agent.id)
+    return {r.source: r for r in session.scalars(query)}
+
+
+def runs_on(session: Session, agent: Agent) -> PlatformAgent | None:
+    """The record of the platform that still runs ``agent``: None once the platform that
+    runs it reports it stopped, or none that reported it has it any more."""
+    records = _by_source(session, agent)
+    for source in RUNS_ON:
+        record = records.get(source)
+        if record is not None and not _gone(record):
+            return None if _stopped(record) else record
+    return None
+
+
+def still_runs_in(session: Session, agent: Agent) -> str | None:
+    """The platform that still runs ``agent`` while it is blocked in AgentGov."""
+    record = runs_on(session, agent) if agent.status == BLOCKED else None
+    return SOURCES[record.source] if record is not None else None
+
+
+def check_stop(
+    session: Session, settings: Settings, agent: Agent, *, actor: str = SYSTEM_ACTOR
+) -> None:
+    """Blocking an agent in AgentGov doesn't stop it in its platform, and AgentGov can stop it
+    there only as an administrator who signs in (Copilot Studio, Microsoft 365), if at all.
+    So while the platform still runs it, an issue asks its people to stop it there, saying
+    who can and how. It closes once a sync shows the platform stopped it or no longer has it,
+    or once the agent isn't blocked in AgentGov any more."""
+    key = f"{STILL_RUNNING}:{agent.id}"
+    record = runs_on(session, agent) if agent.status == BLOCKED else None
+    if record is None:
+        # Over, whatever became of it (dismissed, or its risk accepted): blocked again, it
+        # is raised afresh.
+        finding = session.scalar(select(Finding).where(Finding.key == key))
+        if finding is not None and finding.status != "resolved":
+            findings.set_status(session, finding.id, "resolved", actor)
+            finding.accepted_until = None
+        return
+    name = SOURCES[record.source]
+    done, how = STOPPING[record.source]
+    data = record.data or {}
+    # Its IDs there, for whoever stops it: the email or ticket they read has no more.
+    where = f"{name} knows it as {record.external_id}" + (
+        f", in environment {data['environment_id']}" if data.get("environment_id") else ""
+    )
+    description = f"Blocking it in AgentGov doesn't stop it in {name}. {where}."
+    if (
+        record.source == "copilot-studio"
+        and features.mode_for(session, agent, THREAT_DETECTION) == features.ENFORCE
+    ):
+        description += (
+            " Copilot Studio asks AgentGov before each of its tool calls, so it makes none, "
+            "but it still answers people."
+        )
+    others = _by_source(session, agent)
+    for other in others.values():
+        if other.source != record.source and not _gone(other) and _stopped(other):
+            description += (
+                f" {SOURCES[other.source]} has it {STOPPING[other.source][0]}, but {name} "
+                "still runs it."
+            )
+    remediation = how
+    if record.source == "copilot-studio" and "microsoft-365" in others:
+        remediation += (
+            " Blocking it in the Microsoft 365 admin center stops it in Microsoft 365 Copilot "
+            "and Teams only."
+        )
+    if record.source in _ADMIN_ACTION and settings.microsoft_admin_actions:
+        remediation += (
+            f" Such an administrator can also do it from its page in AgentGov "
+            f"({_ADMIN_ACTION[record.source]}), signed in through Microsoft Entra ID."
+        )
+    told = f"reports it {done} or no longer has it" if done else "no longer has it"
+    remediation += (
+        f" AgentGov closes this issue once {name} {told}, at its next sync"
+        + (" or import of its inventory" if record.source == "copilot-studio" else "")
+        + f". If you stop it in a way {name} doesn't report, dismiss this issue saying how."
+    )
+    findings.raise_finding(
+        session,
+        type=STILL_RUNNING,
+        severity="high",
+        subject=agent.id,
+        agent_id=agent.id,
+        title=f"{agent.name} is blocked in AgentGov but still runs in {name}",
+        description=description,
+        remediation=remediation,
+        details={
+            "platform": name,
+            "source": record.source,
+            "external_id": record.external_id,
+            **({"environment_id": data["environment_id"]} if data.get("environment_id") else {}),
+            "synced_at": ids.isoformat(record.synced_at),
+        },
+    )
+
+
+def check_stops(session: Session, settings: Settings) -> None:
+    """:func:`check_stop` for the agents blocked in AgentGov that platforms report, and for
+    those with the issue open."""
+    blocked = select(PlatformAgent.agent_id).join(Agent, Agent.id == PlatformAgent.agent_id)
+    agent_ids = set(session.scalars(blocked.where(Agent.status == BLOCKED)))
+    agent_ids |= set(
+        session.scalars(
+            select(Finding.agent_id).where(Finding.type == STILL_RUNNING, Finding.status == "open")
+        )
+    )
+    for agent_id in sorted(a for a in agent_ids if a):
+        agent = session.get(Agent, agent_id)
+        if agent is not None:
+            check_stop(session, settings, agent)
 
 
 # -------------------------------------------------------------------- views

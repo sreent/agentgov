@@ -104,12 +104,19 @@ services:
       # The apps people use agents from (Keycloak clients), offered each agent's client
       # scope so that agents can act for the people signed in (docs/acting-for-people.md).
       AGENTGOV_PEOPLE_APP_CLIENTS: ${AGENTGOV_PEOPLE_APP_CLIENTS:-agentgov-demo-chat}
-      # Administrator single sign-on through Keycloak (client agentgov-admin), or through
-      # Microsoft Entra ID when AGENTGOV_OIDC_ISSUER names an Entra tenant (docs/platforms.md).
+      # Single sign-on through Keycloak (client agentgov-admin), or through your identity
+      # provider (Microsoft Entra ID, Okta, Google...) when AGENTGOV_OIDC_ISSUER names it
+      # (docs/administration.md#your-identity-provider).
       AGENTGOV_OIDC_ISSUER: ${AGENTGOV_OIDC_ISSUER:-}
       AGENTGOV_OIDC_CLIENT_ID: ${AGENTGOV_OIDC_CLIENT_ID:-}
       AGENTGOV_OIDC_CLIENT_SECRET: ${AGENTGOV_OIDC_CLIENT_SECRET:-dev-oidc-secret}
       AGENTGOV_OIDC_ROLES_CLAIM: ${AGENTGOV_OIDC_ROLES_CLAIM:-}
+      AGENTGOV_OIDC_ROLE_MAP: ${AGENTGOV_OIDC_ROLE_MAP:-}
+      AGENTGOV_OIDC_ALLOWED_DOMAINS: ${AGENTGOV_OIDC_ALLOWED_DOMAINS:-}
+      AGENTGOV_OIDC_REQUIRE_ROLE: ${AGENTGOV_OIDC_REQUIRE_ROLE:-false}
+      AGENTGOV_API_KEY_DAYS: ${AGENTGOV_API_KEY_DAYS:-90}
+      AGENTGOV_API_KEY_MAX_DAYS: ${AGENTGOV_API_KEY_MAX_DAYS:-0}
+      AGENTGOV_OIDC_SCOPES: ${AGENTGOV_OIDC_SCOPES:-openid profile email}
       AGENTGOV_MICROSOFT_ADMIN_ACTIONS: ${AGENTGOV_MICROSOFT_ADMIN_ACTIONS:-}
       AGENTGOV_GATEWAY_PUBLIC_URL: http://localhost:8080
       AGENTGOV_GATEWAY_OTLP_ENDPOINT: http://otel-collector:4317

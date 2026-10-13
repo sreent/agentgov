@@ -98,6 +98,17 @@ class Directory:
         return self.recipient(self.default.name) if self.default else None
 
 
+def _server(session: Session, subject: str | None) -> ToolServer | None:
+    """The tool server an issue is about: its subject is the server (by ID or name), or one
+    of its tools ("crm/export_customers")."""
+    ref = (subject or "").split("/", 1)[0]
+    if not ref:
+        return None
+    return session.get(ToolServer, ref) or session.scalar(
+        select(ToolServer).where(ToolServer.name == ref)
+    )
+
+
 def chain(
     session: Session, finding: Finding, directory: Directory | None = None
 ) -> list[tuple[str, list[Recipient]]]:
@@ -114,7 +125,7 @@ def chain(
             (TEAM, [d.team(agent.team, blueprint.team if blueprint else None)]),
         ]
     elif finding.type.startswith("toolserver."):
-        server = session.get(ToolServer, finding.subject)
+        server = _server(session, finding.subject)
         raw = [(OWNER, [d.recipient(server.owner) if server else None]), (TEAM, [d.team()])]
     else:
         raw = [(TEAM, [d.team()])]
@@ -524,20 +535,22 @@ def accept(
 
 
 def for_person(session: Session, name: str, *, status: str | None = None) -> list[Finding]:
-    """The issues that reached this person (by their email address or user name), or one
-    of the teams they are in."""
-    key = (name or "").lower()
-    if not key:
+    """The issues that reached this person (by any name they go by: their email address,
+    user principal name or user name), or one of the teams they are in."""
+    names = directory_people.aliases(session, name)
+    if not names:
         return []
     stmt = select(Finding).where(Finding.level.is_not(None)).order_by(Finding.last_seen.desc())
     if status and status != "all":
         stmt = stmt.where(Finding.status == status)
     directory = Directory(session)
-    return [f for f in session.scalars(stmt) if key in involved(session, f, directory)]
+    return [f for f in session.scalars(stmt) if names & involved(session, f, directory)]
 
 
 def may_act(session: Session, finding: Finding, name: str) -> bool:
-    return (name or "").lower() in involved(session, finding)
+    """Whether the issue reached the person, by any name they go by (their email address,
+    or the user principal name they sign in with)."""
+    return bool(directory_people.aliases(session, name) & involved(session, finding))
 
 
 def describe(session: Session, finding: Finding) -> list[dict[str, Any]]:

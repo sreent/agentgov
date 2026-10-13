@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from fastapi.testclient import TestClient
 
 from agentgov.config import Settings
 from agentgov.gateway import render, to_yaml, with_available_keys, write_if_changed
@@ -193,6 +194,20 @@ class TestModelRoutes:
             assert webhook["headers"]["x-agentgov-groups"] == "toJson(jwt.groups)"
             assert webhook["headers"]["x-agentgov-act"] == "toJson(jwt.act)"
 
+    def test_a_token_is_always_needed_for_a_model(self) -> None:
+        # The gateway spends the provider's key: callers without a valid token never get
+        # it, even while unknown callers are monitored (and tool servers' routes let them
+        # through to be recorded).
+        config = render(servers(), SETTINGS, {"unknown-callers": "monitor"}, providers())
+        assert routes(config)["mcp-crm"]["policies"]["jwtAuth"]["mode"] == "optional"
+        assert routes(config)["llm-openai"]["policies"]["jwtAuth"]["mode"] == "strict"
+        # Without a token issuer to check them against, no model route spends a key.
+        unchecked = routes(render([], Settings(), providers=providers()))["llm-openai"]
+        assert "backends" not in unchecked
+        answer = unchecked["policies"]["directResponse"]
+        assert answer["status"] == 503
+        assert "AGENTGOV_KEYCLOAK_ISSUER" in json.loads(answer["body"])["error"]["message"]
+
     def test_model_gateway_off_publishes_no_providers(self) -> None:
         config = render(servers(), SETTINGS, {"model-gateway": "off"}, providers())
         assert not [name for name in routes(config) if name.startswith("llm-")]
@@ -343,8 +358,18 @@ class TestServedConfig:
         assert "mcp-crm" in Path(path).read_text()
 
     def test_the_sidecar_publishes_a_provider_once_its_key_is_there(
-        self, client, tmp_path: Path
+        self, settings, tmp_path: Path
     ) -> None:
+        from agentgov.api.app import create_app
+
+        # Agents' tokens can be checked: the gateway spends a provider's key on no others.
+        checked = settings.with_overrides(
+            keycloak_issuer=SETTINGS.keycloak_issuer, keycloak_jwks_url=SETTINGS.keycloak_jwks_url
+        )
+        with TestClient(create_app(checked, background=False)) as client:
+            self._publishes_once_the_key_is_there(client, tmp_path)
+
+    def _publishes_once_the_key_is_there(self, client, tmp_path: Path) -> None:
         from agentgov.gateway import Fetched, sync_from_control_plane
         from tests.conftest import ADMIN, SERVICE
 

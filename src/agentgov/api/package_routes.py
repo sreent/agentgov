@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.api.versions import if_match
 from agentgov.models import AccessAssignment, Agent
@@ -14,7 +15,6 @@ from agentgov.registry.errors import NotFound, ValidationError
 from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1", tags=["access packages"])
-read = require(*READ_ROLES)
 admin = require("admin")
 
 
@@ -27,9 +27,13 @@ def _responsible(session: Any, principal: Principal, agent: Agent) -> bool:
     return principal.name.lower() in access_packages.responsible(session, agent)
 
 
-def _may_read(session: Any, principal: Principal, agent: Agent) -> None:
-    if not principal.roles & set(READ_ROLES) and not _responsible(session, principal, agent):
+def _may_read(session: Any, principal: Principal, agent: Agent) -> Principal:
+    """Who reads what the agent holds: everyone who reads AgentGov where it is, and its
+    owner and sponsors. Who ``principal`` is there (reach.here)."""
+    here = reach.here(session, principal, agent)
+    if not here.roles & set(READ_ROLES) and not _responsible(session, principal, agent):
         raise HTTPException(403, f"role {principal.role!r} may not do this")
+    return here
 
 
 # --------------------------------------------------------------------- packages
@@ -88,16 +92,23 @@ def list_assignments(
     status: str | None = None,
     agent: str | None = None,
     package: str | None = None,
-    _: Principal = Depends(read),
+    principal: Principal = Depends(reach.read),
 ) -> list[dict[str, Any]]:
+    """What agents hold and asked for: for someone with roles for some teams only, their
+    agents'."""
     with _rt(request).db.session() as s:
         rows = access_packages.assignments(
             s,
             status=status,
-            agent_id=agents.get(s, agent).id if agent else None,
+            agent_id=reach.agent(s, principal, agent).id if agent else None,
             package_id=access_packages.get(s, package).id if package else None,
         )
-        return [access_packages.assignment_dict(s, r) for r in rows]
+        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        return [
+            access_packages.assignment_dict(s, r)
+            for r in rows
+            if reached is None or r.agent_id in reached
+        ]
 
 
 @router.post("/access-assignments", status_code=201)
@@ -117,11 +128,12 @@ def request_package(
         if not isinstance(body.get(key), str) or not body[key]:
             raise ValidationError(f"{key} is required")
     approve = body.get("approve", False) is True
-    if approve and not principal.is_admin:
-        raise HTTPException(403, "only an administrator assigns an access package at once")
     with _rt(request).db.session() as s:
         agent = agents.get(s, body["agent"])
-        if not access_packages.may_request(s, principal.roles, principal.name, agent):
+        here = reach.here(s, principal, agent)
+        if approve and not here.is_admin:
+            raise HTTPException(403, "only an administrator assigns an access package at once")
+        if not access_packages.may_request(s, here.roles, principal.name, agent):
             raise HTTPException(
                 403,
                 f"{agent.name}'s owner and sponsors, approvers and administrators ask for its "
@@ -173,7 +185,9 @@ def assignment_action(
     with _rt(request).db.session() as s:
         row = access_packages.assignment(s, assignment_id)
         agent = _agent(s, row)
-        deciders = bool(principal.roles & access_packages.DECIDERS)
+        # Their roles where the agent is: an approver for its team decides.
+        here = reach.here(s, principal, agent)
+        deciders = bool(here.roles & access_packages.DECIDERS)
         if action in ("approve", "deny"):
             if not deciders:
                 raise HTTPException(403, "approvers and administrators decide access requests")
@@ -182,9 +196,9 @@ def assignment_action(
             )
         elif action == "revoke":
             if not deciders:
-                if "secops" not in principal.roles:
+                if "secops" not in here.roles:
                     raise HTTPException(403, "approvers and administrators revoke access")
-                handoff.check(s, principal, handoff.CONTAIN)
+                handoff.check(s, here, handoff.CONTAIN)
             access_packages.revoke(s, row, actor=principal.actor, reason=body.get("reason"))
         else:
             if not deciders and not _responsible(s, principal, agent):

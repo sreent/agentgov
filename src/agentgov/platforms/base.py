@@ -68,6 +68,9 @@ class Found:
     # Who made it, by email address, when the platform says: whom adopting it suggests as
     # its owner (registry.people).
     maker: str | None = None
+    # True when the platform has it stopped (disabled, deactivated), False when it runs, None
+    # when the platform doesn't say: blocked in AgentGov, it is stopped there or not.
+    stopped: bool | None = None
 
 
 @dataclass

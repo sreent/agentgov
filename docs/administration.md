@@ -19,6 +19,15 @@ Create API keys on the UI's **Access** page or with `agentgov apikeys create`. T
 shown once; only a hash is stored. Keep the bootstrap token (`AGENTGOV_ADMIN_TOKEN`)
 for setup and emergencies.
 
+API keys expire. A new key works for `AGENTGOV_API_KEY_DAYS` (90 days) unless its creator
+chooses another time (`--expires-in DAYS`), or none (`--no-expiry`). After that, requests
+made with it are refused, with a message saying the key expired. `AGENTGOV_API_KEY_MAX_DAYS`
+is the longest any key may work, keys made before included; with it set, every key has an
+expiry. Two weeks before a key that was used in the last month expires, an issue
+(`apikey.expiring`, medium) tells the catch-all team: create a new key for what uses it,
+switch it over, and revoke the old one, which closes the issue. The **Access** page shows
+when each key expires.
+
 `agentgov login` opens your browser at the identity provider. After you sign in, the
 browser goes back to the CLI, which listens on a loopback address (`127.0.0.1`) for this
 one sign-in. The CLI proves with PKCE that it started the sign-in and gets an AgentGov
@@ -54,6 +63,133 @@ logout tokens (Keycloak: the `agentgov-admin` client's **Backchannel logout URL*
 **Backchannel logout session required**). A provider that can't do this leaves sessions
 to end at expiry (`AGENTGOV_SESSION_HOURS`), or when you sign them out on the **Access**
 page.
+
+### Your identity provider
+
+Single sign-on is for people: administrators, approvers, the security team, auditors, and
+the owners and others who sign in to see the issues and approval requests sent to them.
+Agents never use it; they authenticate at the gateway with identities of their own
+([agents' own identities](agent-identity.md)).
+
+The Keycloak that comes with Compose and the chart signs people in, and can bring in your
+directory ([signing in](deploy/local.md#signing-in)). Any OpenID Connect provider can
+sign them in instead:
+
+1. Register AgentGov with the provider as a web application (a confidential client),
+   with the redirect URI `<AGENTGOV_PUBLIC_URL>/auth/callback` and, where it asks, the
+   sign-out redirect `<AGENTGOV_PUBLIC_URL>/ui/` and the back-channel logout URL
+   `<AGENTGOV_PUBLIC_URL>/auth/backchannel-logout`. AgentGov signs in with the
+   authorization code flow and PKCE, and keeps sessions on the server.
+2. Set `AGENTGOV_OIDC_ISSUER` to the provider's issuer, `AGENTGOV_OIDC_CLIENT_ID` and
+   `AGENTGOV_OIDC_CLIENT_SECRET` to the application's. AgentGov reads the provider's
+   endpoints from its discovery document (`<issuer>/.well-known/openid-configuration`),
+   when it first needs them and again every hour; while the provider can't be read, the
+   **Access** page says so, and sign-ins fail with a message saying the provider didn't
+   answer. It proves itself with the client secret in the way the provider takes
+   (`AGENTGOV_OIDC_CLIENT_AUTH` to choose).
+3. Say where roles come from. The ID token's `groups` claim, by default (Keycloak's
+   realm roles, and Microsoft Entra ID's app roles, are read where those put them), names
+   the person's groups; a group called `agentgov-admin` makes them an admin, and so on for
+   the other roles. To use the groups you have, map them instead:
+   `AGENTGOV_OIDC_ROLE_MAP=<group ID or name>=admin,Security Operations=secops`, and then
+   only the values mapped give roles. `AGENTGOV_OIDC_ROLES_CLAIM` names other claims. The
+   **Access** page shows how AgentGov reads the provider.
+4. Where the provider's tokens carry no groups, give roles in AgentGov
+   ([below](#roles-given-in-agentgov)); give the first administrators theirs there, too.
+
+| Provider | Issuer | Roles |
+|---|---|---|
+| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant ID>/v2.0` | App roles, assigned to people and groups ([setting it up](platforms.md#setting-it-up), which also lets AgentGov act in Microsoft 365 as the person signed in) |
+| Okta | `https://<org>.okta.com`, or a custom authorization server's (`https://<org>.okta.com/oauth2/default`) | A groups claim added to the ID token, on the application's sign-on settings or the authorization server |
+| Google Workspace | `https://accounts.google.com` | None in Google's tokens: [give roles in AgentGov](#roles-given-in-agentgov). `AGENTGOV_OIDC_ALLOWED_DOMAINS` is required, because every Google account shares this issuer |
+| Ping Identity | PingOne: `https://auth.pingone.com/<environment ID>/as` | A groups claim added to the ID token |
+| OneLogin | `https://<subdomain>.onelogin.com/oidc/2` | A groups claim added to the ID token |
+| JumpCloud | `https://oauth.id.jumpcloud.com/` | A groups claim added to the ID token |
+| Auth0 | `https://<tenant>.auth0.com/` | A claim an Action adds to the ID token, with a namespaced name such as `https://agentgov/roles`, set as `AGENTGOV_OIDC_ROLES_CLAIM` |
+| Amazon Cognito | `https://cognito-idp.<region>.amazonaws.com/<user pool ID>` | `cognito:groups`, set as `AGENTGOV_OIDC_ROLES_CLAIM` |
+| Another Keycloak | `https://<host>/realms/<realm>` | Realm roles, as with the bundled one |
+
+Write the issuer as the provider's tokens name it; a trailing slash may be left off.
+`AGENTGOV_OIDC_ALLOWED_DOMAINS` (comma-separated) lets in only people whose email address
+the provider vouches for is in one of those domains, and with Google, only accounts of
+your organisation (its hosted domain). A person's name in AgentGov is that email address,
+which issues and approvals are addressed to; Microsoft Entra ID's people are named by their
+email address or else their user principal name. Some providers, Google among them, have
+no sign-out endpoint: signing out then ends the AgentGov session, not the provider's.
+
+A provider that only speaks SAML, or a directory (Active Directory, LDAP), signs people in
+through Keycloak, which brokers it: connect it to the realm as an identity provider or
+through user federation.
+
+### Roles given in AgentGov
+
+An administrator can give a person a role in AgentGov itself, on the **Access** page or
+with `agentgov access grant alice@example.com auditor --reason "..."`: for providers
+whose tokens carry no groups, such as Google's, and for the first administrators before
+groups are set up. It applies from the person's next sign-in with that email address, the
+one the provider vouches for, beside the roles the provider gives them. Taking it away
+(`agentgov access revoke`) ends their sessions at once. Both are in the ledger
+(`access.role_granted`, `access.role_revoked`), and each sign-in's `admin.login` entry
+lists the roles given here. With `--team`, the role is for that team's agents only
+([roles for one team](#roles-for-one-team)).
+
+### Who can sign in
+
+Two places decide who uses AgentGov. The identity provider decides who can sign in at all,
+and AgentGov decides what each person may do, from the roles the provider sends and the
+[roles given in AgentGov](#roles-given-in-agentgov).
+
+By default, anyone the provider signs in gets in. Someone with no AgentGov role signs in
+as `person` while issues or approval requests go to people
+([roles](#roles)): they see only what is sent to them, so that agents' owners and
+sponsors can answer it. To keep everyone else out:
+
+* **At the identity provider**, let only the people who should use AgentGov sign in to its
+  application. This stops the others before they reach AgentGov.
+* **In AgentGov**, set `AGENTGOV_OIDC_REQUIRE_ROLE=true`: only people with a role may sign
+  in, and the sessions of people without one end. To let owners and sponsors in to see
+  what is sent to them, give them the `person` role: the provider's `agentgov-person` (or
+  a group mapped to `person` in `AGENTGOV_OIDC_ROLE_MAP`), or `agentgov access grant
+  EMAIL person`. People you don't let in still get their issues by email and in chat, and
+  an issue nobody acknowledges goes on to the next step, up to the team
+  ([issues](issues.md)).
+* `AGENTGOV_OIDC_ALLOWED_DOMAINS` lets in only your organisation's email domains, which
+  keeps out guests from other organisations.
+
+The **Access** page says how AgentGov treats people without a role, and lists everyone who
+signed in or was refused (`admin.login_denied` in the ledger), for access reviews.
+
+#### With Microsoft Entra ID
+
+1. **Only assigned people sign in.** In the Microsoft Entra admin center, **Enterprise
+   applications** > the AgentGov application > **Properties**: set **Assignment
+   required?** to **Yes**. Under **Users and groups**, assign the groups that use
+   AgentGov. Everyone else is stopped at Microsoft's sign-in page (`AADSTS50105`), in the
+   UI, the CLI and the API alike. Assigning groups needs Entra ID P1 or P2, and only a
+   group's direct members count, not those of the groups in it.
+2. **Roles come from app roles.** Create the app roles `agentgov-admin`,
+   `agentgov-approver`, `agentgov-secops`, `agentgov-auditor`, `agentgov-registrar` and
+   `agentgov-person`, and assign them to groups
+   ([setting it up](platforms.md#setting-it-up)). An assignment needs a role, so give
+   agents' owners and sponsors `agentgov-person`.
+3. **How they sign in.** Conditional Access policies for the application (Entra ID P1) can
+   require multifactor authentication or a compliant device, limit where people sign in
+   from, and set how often they sign in again.
+4. **Keep it right.** Access reviews (Entra ID P2, or Entra ID Governance) review the
+   assigned groups. With Privileged Identity Management for Groups, administrators hold
+   `agentgov-admin` only for the hours they ask for: AgentGov reads roles as people sign
+   in, so keep `AGENTGOV_SESSION_HOURS` as short as those hours.
+5. **Taking access away.** Microsoft Entra ID doesn't send back-channel logout, so taking
+   someone's assignment away stops their next sign-in, not the session they have: sign
+   them out on the **Access** page too ([signing out everywhere](#signing-out-everywhere)).
+
+#### What doesn't go through the identity provider
+
+API keys and the bootstrap token don't sign in at the provider. Only administrators
+create API keys, each with one role and an expiry ([above](#signing-in)), and the
+**Access** page lists them. Keep the
+bootstrap token (`AGENTGOV_ADMIN_TOKEN`) in a vault, for setup and emergencies. To limit
+who can reach AgentGov at all, publish it on your internal network only.
 
 ## Start here
 
@@ -91,16 +227,53 @@ answers, and `--hide` hides it; with the API, `GET` and `PUT /v1/start`
 | `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, acknowledge, resolve, dismiss and reopen issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
 | `auditor` | Read everything, including the ledger and the list of API keys; change nothing. They start on **Compliance** |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
-| `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)), and to attest the agents they sponsor; sees nothing else |
+| `person` | Someone without another AgentGov role (given `agentgov-person`, or anyone the provider signs in unless [only people with a role may](#who-can-sign-in)), signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)), and to attest the agents they sponsor; sees nothing else |
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector; with mutual TLS between the components, only on the control plane's internal port ([production](production.md#mutual-tls-between-components)) |
 
 People who sign in with single sign-on get their roles from the identity provider each time
-they sign in (see [single sign-on](configuration.md#administrator-single-sign-on-oidc), and the
-demo realm's users in [signing in](deploy/local.md#signing-in)). To take
-someone's access away, remove their role there, then sign them out on the **Access**
-page so that their open sessions end too. The same page lists everyone who has signed
+they sign in ([your identity provider](#your-identity-provider), and the demo realm's users
+in [signing in](deploy/local.md#signing-in)), and from the [roles given in
+AgentGov](#roles-given-in-agentgov). To take someone's access away, remove their role
+there, then sign them out on the **Access** page so that their open sessions end too. The same page lists everyone who has signed
 in (or been refused) and every API key, for access reviews. API keys have one role each.
 The UI only shows the controls a role may use; the API enforces the roles either way.
+
+### Roles for one team
+
+Each role but `person` and `service` can be held for one team's agents only, as projects
+are in n8n and teams in OpenMetadata: `approver@sales` is the approver role for team
+sales' agents. An agent is with a team the way its [issues](issues.md) reach one: its own
+team, else its blueprint's, else the default team.
+
+Someone with a role for one team:
+
+- sees that team's agents, and what hangs off them: their issues, approval requests,
+  access packages, ledger entries and model usage. Their menu has **Agents**, **Issues**,
+  **Approvals** and **Ledger**. An agent of another team isn't there for them: it is not
+  found, and in an action on many agents it is left out as one there is no such agent.
+- does to those agents what the role does: an approver for sales decides their approval
+  requests and access packages and triages their issues; secops for sales blocks and
+  unblocks them as far as the [hand-off](secops.md) allows; an admin for sales registers,
+  edits, approves, blocks, deletes and restores them, and is each of the other roles for
+  them. A registrar or an admin for one team registers agents into it (theirs, when they
+  have one team).
+- keeps what they change within their teams: a change that would take an agent to another
+  team, its own or its blueprint's, is refused.
+- reads the blueprints and their own teams, and does nothing organisation-wide: features,
+  policies, blueprints, teams, tool servers, model providers, identity issuers,
+  destinations, platforms, API keys and access, the whole ledger's verification and export,
+  compliance reports and the register stay with roles for every team. So do deleting an
+  agent for good and the `agentgov/` labels that exempt agents from rules and controls.
+
+| Where it comes from | How |
+|---|---|
+| The identity provider | A group or role named with the prefix, the role, `@` and the team (`agentgov-approver@sales`), or a group mapped to it: `AGENTGOV_OIDC_ROLE_MAP="<group ID>=approver@sales"`. With Microsoft Entra ID, map a group's object ID |
+| Given in AgentGov | On the **Access** page (*For*: the team), or `agentgov access grant bo@example.com approver --team sales`; `agentgov access revoke bo@example.com approver --team sales` takes it away |
+| An API key | `agentgov apikeys create sales-ci --role auditor --team sales`, or *For* when creating one on the **Access** page. The ledger records what it does as `auditor@sales:sales-ci` |
+
+Roles for every team and for one team add up: an auditor who is also an approver for sales
+reads everything and decides for sales. `agentgov whoami` (or `GET /v1/me`) says which
+roles someone holds for which teams (`teams`).
 
 ## The menu
 
@@ -114,7 +287,9 @@ The admin center's menu has the overview first, then five groups:
 | *Evidence* | **Ledger**, **Compliance**, **Register** | What happened, the reports for a framework, and how each agent is classified |
 | *Settings* | **Teams**, **Security operations**, **Access**, **Features** | Who takes the issues, the security team's tools, who signs in, and which features are on |
 
-People without an AgentGov role see only their issues and the approvals waiting for them.
+People without an AgentGov role see only their issues and the approvals waiting for them;
+people with [roles for one team](#roles-for-one-team) only, **Agents**, **Issues**,
+**Approvals** and **Ledger**, for their teams' agents.
 
 ## Approvals
 
@@ -197,7 +372,7 @@ The same list is `agentgov inbox`, with the command that decides each kind, and
 | See the management rules an agent matches, and what each will do | Agent → *Management rules* | `agentgov rules agent AGENT` | `GET /v1/agents/{ref}/rules` |
 | Name the team issues about an agent escalate to | Blueprint or agent → **Edit** → *Team* | `agentgov blueprints update B --team T` (agents: the same option) | `team` in `PATCH /v1/blueprints/{name}` or `PATCH /v1/agents/{ref}` |
 | Browse, verify and export the ledger | Ledger → filters, **Verify chain**, **Export JSONL** | `agentgov ledger tail --agent A`, `ledger verify`, `ledger export` | `GET /v1/ledger`, `/v1/ledger/verify`, `/v1/ledger/export` |
-| Check an export or the ledger's archives offline ([evidence](evidence.md)) | — | `agentgov ledger verify --file F [--file F ...]` | — |
+| Check an export, the ledger's archives or an evidence pack offline, against the time-stamped checkpoints ([evidence](evidence.md)) | — | `agentgov ledger verify --file F [--file F ...] --checkpoints DIR`, `agentgov ledger verify --pack P` | — |
 | Keep a checkpoint of the ledger, and get its time-stamp | Ledger → *Checkpoints and retention* → **Make a checkpoint**, **Time-stamp** | `agentgov ledger checkpoint`, `ledger checkpoints`, `ledger proof SEQ` | `POST`/`GET /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp` |
 | See how long things are kept, and run retention now | Ledger → *Checkpoints and retention* | `agentgov ledger retention [--run]` | `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run` |
 | See whether the database lost ledger entries (a restore), and accept the restore ([backing up and restoring](backup.md)) | Ledger | `agentgov ledger witness`, `agentgov ledger accept-restore` | `GET /v1/ledger/witness`, `POST /v1/ledger/witness/accept` |
@@ -207,7 +382,7 @@ The same list is `agentgov inbox`, with the command that decides each kind, and
 | See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |
 | See the calls between agents, and the chain of agents behind any call | Ledger, type `decision.a2a.*`; an entry's *Chain* | `agentgov ledger tail --type 'decision.a2a.*'` | `GET /v1/ledger?type=decision.a2a.*` (`details.chain`) |
 | Open the trace of a gateway decision | Ledger or an agent's Recent activity → **Open trace** | `agentgov ledger tail --traces` | `trace_url` on `GET /v1/ledger` entries (set `AGENTGOV_TRACE_URL`) |
-| Create, review and revoke API keys | Access → **Create API key**, **Revoke** | `agentgov apikeys create\|list\|revoke` | `POST`/`GET /v1/apikeys`, `DELETE /v1/apikeys/{id}` |
+| Create, review and revoke API keys | Access → **Create API key** (with when it expires), **Revoke** | `agentgov apikeys create NAME --role ROLE [--expires-in DAYS\|--no-expiry]`, `list`, `revoke` | `POST /v1/apikeys` (`expires_in_days`), `GET /v1/apikeys`, `DELETE /v1/apikeys/{id}` |
 | See who has signed in, with which roles | Access → People | `agentgov access list`, `agentgov access sessions` | `GET /v1/access` |
 | Sign someone out | Access → People → **Sign out** | `agentgov access sign-out PERSON`, `agentgov access end-session ID` | `POST /v1/access/people/{subject}/sign-out`, `DELETE /v1/access/sessions/{id}` |
 | See each Microsoft connection and how it is doing | Platforms → Microsoft connections | `agentgov platforms status` | `connections` in `GET /v1/platforms` |

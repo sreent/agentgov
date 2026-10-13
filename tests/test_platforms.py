@@ -506,6 +506,31 @@ class TestCopilotStudio:
         factors = {f["factor"] for f in agent_named(client, "sales-helper")["risk"]["factors"]}
         assert "Uses connectors that are not approved" in factors  # shared_sql
 
+    def test_an_open_high_issue_keeps_it_at_high_risk(self, client) -> None:
+        # Adopted, with an owner, a sponsor and a tier, its points add up to less than high;
+        # an open issue of high severity about how it is exposed keeps it there all the same.
+        # Published without authentication, and nothing else.
+        exposed = inventory(
+            sales={
+                "sharedWithViewers": {"entireTenant": False},
+                "powerPlatformConnectors": [connector("shared_office365", "SendEmailV2")],
+            }
+        )
+        import_inventory(client, exposed)
+        sales = agent_named(client, "sales-helper")
+        assert open_findings(client, sales["id"]) == {"platform.no_authentication"}
+        client.post(
+            f"/v1/agents/{sales['id']}/adopt",
+            json={"owner": "sales-team@example.com", "sponsors": ["dana@example.com"]},
+            headers=ADMIN,
+        ).raise_for_status()
+        adopted = agent_named(client, "sales-helper")["risk"]
+        assert adopted["score"] < 50
+        assert adopted["level"] == "high"
+        floor = adopted["factors"][-1]
+        assert floor["factor"] == "Open issue of high severity: at least high risk"
+        assert floor["points"] == 0 and floor["detail"]
+
     def test_fixing_the_agent_resolves_its_findings(self, client) -> None:
         import_inventory(client)
         fixed = inventory(

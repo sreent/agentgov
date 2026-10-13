@@ -19,6 +19,7 @@ something differently, the last column says so.
 | Owner | The person or team accountable for an agent; its issues go to them first | |
 | Sponsor | A person or team who vouches that the agent is still needed and its access is still right, and attests it; its issues go to them next | |
 | Team | People and chat channels that own agents, and that issues reach after an agent's owner and sponsors. The default team takes what has nobody else | |
+| Role for one team | A role held for one team's agents only: they, and their issues, approval requests and ledger entries, and nothing organisation-wide ([administration](administration.md#roles-for-one-team)) | `approver@sales` |
 | Blueprint | What a kind of agent may use: tools, models, other agents, its risk tier, and how often its sponsors attest it | |
 | Attest | A sponsor confirms that an agent is still needed and its access is still right | |
 

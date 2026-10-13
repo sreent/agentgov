@@ -247,12 +247,47 @@ const READ_ROLES = ['admin', 'approver', 'secops', 'auditor'];
 
 // What the signed-in person may change. The control plane enforces roles; this
 // only hides controls it would refuse. The security team's secops role may triage,
-// contain and decide as far as the hand-off to security operations has reached.
-function can(kind) {
-  const roles = me?.roles || [];
+// contain and decide as far as the hand-off to security operations has reached. About an
+// agent (or its issue, request or access), by the roles they hold where it is: its
+// your_roles, when some of their roles are for some teams only (approver@sales).
+function can(kind, where) {
+  const roles = where?.your_roles || me?.roles || [];
   if (roles.includes('admin')) return true;
   if (kind === 'approve' && roles.includes('approver')) return true;
   return roles.includes('secops') && (me?.handoff?.reached || []).includes(kind);
+}
+
+// The roles held for some teams only, and those teams: {approver: ['sales']}.
+function teamRoles() {
+  return me?.teams || {};
+}
+
+// Whether they may do this anywhere: for every team, or for one of theirs.
+function canSome(kind) {
+  return can(kind) || can(kind, { your_roles: Object.keys(teamRoles()) });
+}
+
+// Someone whose roles are all for some teams only: they have those teams' agents, and their
+// issues, approvals and ledger entries (docs/administration.md#roles-for-one-team).
+function isScoped() {
+  return Boolean(me) && !me.roles.some((r) => READ_ROLES.includes(r))
+    && Object.keys(teamRoles()).some((r) => READ_ROLES.includes(r));
+}
+const TEAM_PAGES = ['agents', 'findings', 'approvals', 'ledger'];
+
+// A role as people read it: "Approver", or "Approver for sales" for one team's agents.
+const ROLE_NAMES = { secops: 'Security operations' };
+function roleName(value) {
+  const [role, team] = String(value || '').split('@');
+  const name = ROLE_NAMES[role] || humanize(role);
+  return team ? `${name} for ${team}` : name;
+}
+
+// Who may open the admin center: a role that reads, for every team or for some, or the
+// person role.
+function mayOpen(who) {
+  return who.roles.some((r) => READ_ROLES.includes(r) || r === 'person')
+    || Object.keys(who.teams || {}).some((r) => READ_ROLES.includes(r));
 }
 
 // Someone without an AgentGov role, signed in to see the issues sent to them (the issues
@@ -282,12 +317,14 @@ function isAuditor() {
 // The page someone starts on, by what they do here.
 function home() {
   if (isPerson()) return personHome();
+  if (isScoped()) return '#/agents';
   return isAuditor() ? '#/ledger/compliance' : '#/overview';
 }
 
 // Reasons /auth/callback sends back (?sso_error=...). Only these fixed texts are shown.
 const SSO_ERRORS = {
-  no_role: 'You signed in, but your account has no AgentGov role. Ask an administrator for agentgov-admin, agentgov-approver, agentgov-secops or agentgov-auditor.',
+  no_role: 'You signed in, but your account has no AgentGov role. Ask an administrator to give you one.',
+  domain: "Your account isn't from an organisation allowed to sign in to AgentGov. Sign in with your work account.",
   state: 'That sign-in could not be completed in this browser. Start again.',
   expired: 'That sign-in expired or was already used. Start again.',
   provider: 'The identity provider could not complete the sign-in. Try again, or use an API token.',
@@ -467,6 +504,7 @@ const STATUS = {
   },
   apikey: {
     active: ['good', 'check-circle', 'Active'],
+    expired: ['warning', 'clock', 'Expired'],
     revoked: ['neutral', 'ban', 'Revoked'],
   },
   person: {
@@ -992,6 +1030,7 @@ async function route({ soft = false } = {}) {
   }
   if (!page) { location.replace(home()); return; }
   if (isPerson() && !personPages().includes(page.nav)) { location.replace(personHome()); return; }
+  if (isScoped() && (!TEAM_PAGES.includes(page.nav) || page.render === renderFindingTypes)) { location.replace(home()); return; }
   const seq = ++renderSeq;
   setActiveNav(page.nav);
   closeNav(false);
@@ -1094,7 +1133,10 @@ function showSignin(message) {
   getInfo().then((info) => {
     const sso = Boolean(info?.sso?.enabled);
     $('#sso').hidden = !sso;
-    $('#sso-link').href = new URL('auth/login', API_ROOT).href;
+    // Back to the page the link was for (an issue, from an email) once signed in.
+    const login = new URL('auth/login', API_ROOT);
+    if (/^#\/[\w\-/?=&.%]*$/.test(location.hash) && location.hash.length <= 500) login.searchParams.set('next', location.hash);
+    $('#sso-link').href = login.href;
     $('#signin-submit').className = `btn btn--block${sso ? '' : ' btn--primary'}`;
   });
 }
@@ -1104,9 +1146,11 @@ function enterApp() {
   $('.skip-link').hidden = false;
   $('#shell').hidden = false;
   firstRender = true;
-  // People without an AgentGov role have only their issues and approvals.
+  // People without an AgentGov role have only their issues and approvals; those with roles
+  // for some teams only, those teams' agents and what hangs off them.
   for (const link of document.querySelectorAll('#nav [data-nav]')) {
-    link.closest('li').hidden = isPerson() && !personPages().includes(link.dataset.nav);
+    link.closest('li').hidden = (isPerson() && !personPages().includes(link.dataset.nav))
+      || (isScoped() && !TEAM_PAGES.includes(link.dataset.nav));
   }
   // A group of the menu shows only with something in it.
   for (const list of document.querySelectorAll('#nav .nav-list')) {
@@ -1123,10 +1167,10 @@ function enterApp() {
     if (!info) return;
     const who = me ? ` · signed in as ${me.actor}${me.via === 'session' ? ' (single sign-on)' : ''}` : '';
     // Whether the control plane reaches OPA now, not only whether it is set up.
-    const components = await api('v1/components').catch(() => null);
+    const components = isScoped() ? null : await api('v1/components').catch(() => null);
     const opa = components?.control_plane?.opa;
     const opaWords = !info.opa ? 'not configured' : opa ? (opa.ok ? 'reachable' : 'unreachable') : 'set up';
-    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'Keycloak identities' : 'no identity provider'} · OPA ${opaWords}${who}`;
+    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'agents in Keycloak' : 'no Keycloak for agents'} · OPA ${opaWords}${who}`;
   });
 }
 
@@ -1177,7 +1221,7 @@ async function onSignin(event) {
   try {
     token = value;
     const who = await api('v1/me', { signingIn: true });
-    if (!who.roles.some((r) => READ_ROLES.includes(r) || r === 'person')) throw new ApiError(403, '', `its role is ${who.role}`);
+    if (!mayOpen(who)) throw new ApiError(403, '', `its role is ${roleName(who.role)}`);
     me = who;
     session = false;
     writeStore('sessionStorage', TOKEN_KEY, value);
@@ -1237,9 +1281,9 @@ async function start() {
       showSignin(ssoError ? SSO_ERRORS[ssoError] || SSO_ERRORS.provider : undefined);
       return;
     }
-    if (!who.roles.some((r) => READ_ROLES.includes(r) || r === 'person')) {
+    if (!mayOpen(who)) {
       if (!token) await api('auth/logout', { method: 'POST', signingIn: true }).catch(() => null);
-      resetToSignin(`Your role (${who.role}) can't open the admin center. Use an admin, approver, secops or auditor account.`);
+      resetToSignin(`Your role (${roleName(who.role)}) can't open the admin center. Use an admin, approver, secops or auditor account.`);
       return;
     }
     me = who;
@@ -1854,7 +1898,7 @@ async function renderAgents({ params }) {
   let agents = await load(state.q);
   // Those chosen for an action on many at once, by ID: only ever among those shown.
   const selected = new Set();
-  const selecting = can('admin') || can('contain') || can('approve');
+  const selecting = canSome('admin') || canSome('contain') || canSome('approve');
   let shown = [];
 
   const tableHost = h('div', {});
@@ -1923,7 +1967,7 @@ async function renderAgents({ params }) {
     countEl.textContent = plural(rows.length, 'agent');
     csvButton.disabled = !rows.length;
     const adoptable = rows.filter((a) => a.status === 'discovered');
-    adoptHost.replaceChildren(can('admin') && adoptable.length > 1 && !selected.size
+    adoptHost.replaceChildren(canSome('admin') && adoptable.length > 1 && !selected.size
       ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'adopt-many', onclick: guarded(() => adoptMany(adoptable)) },
         icon('user-check'), `Adopt ${plural(adoptable.length, 'agent')}…`)
       : '');
@@ -1982,7 +2026,7 @@ async function renderAgents({ params }) {
       title: 'Agents',
       sub: 'Every agent the control plane knows about: active, pending approval, blocked, and unmanaged ones nobody has adopted yet, found on your platforms or seen at runtime.',
       actions: [
-        can('admin') ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'register-agent', onclick: guarded(registerAgent) }, icon('plus'), 'Register agent') : null,
+        canSome('admin') ? h('button', { type: 'button', class: 'btn btn--primary', 'data-focus-key': 'register-agent', onclick: guarded(registerAgent) }, icon('plus'), 'Register agent') : null,
         refreshButton(),
       ],
     }),
@@ -2050,32 +2094,31 @@ function agentBulkBar(rows, selected, onSelect, clear) {
         type: 'checkbox', 'data-focus-key': 'choose-all-narrow', onchange: (e) => onSelect(rows.map((a) => a.id), e.target.checked),
       }), `Choose all ${plural(rows.length, 'agent')} shown`));
   }
-  const admin = can('admin');
-  const contain = admin || can('contain');
-  const fits = (action) => chosen.filter((a) => (ACTIONS_BY_STATUS[a.status] || []).includes(action));
+  // Each one by the roles held where it is.
+  const fits = (action, kind) => chosen.filter((a) => (ACTIONS_BY_STATUS[a.status] || []).includes(action) && can(kind, a));
   const buttons = [];
-  const offer = (action, label, iconName, cls = '') => {
-    const n = fits(action).length;
+  const offer = (action, label, iconName, cls = '', kind = 'admin') => {
+    const n = fits(action, kind).length;
     if (!n) return;
     buttons.push(h('button', {
       type: 'button', class: `btn btn--sm ${cls}`, 'data-focus-key': `many-${action}`,
       onclick: guarded(() => agentsAtOnce(chosen, action)),
     }, icon(iconName), n === chosen.length ? label : `${label} ${fmt(n)}`));
   };
-  if (admin) offer('approve', 'Approve', 'check', 'btn--primary');
-  if (admin) offer('adopt', 'Adopt', 'user-check');
-  if (admin && chosen.some((a) => a.status !== 'deleted')) {
+  offer('approve', 'Approve', 'check', 'btn--primary');
+  offer('adopt', 'Adopt', 'user-check');
+  if (chosen.some((a) => a.status !== 'deleted' && can('admin', a))) {
     buttons.push(h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'many-edit', onclick: guarded(() => agentsAtOnce(chosen, 'edit')) },
       icon('edit'), 'Edit…'));
   }
-  if (can('approve') && chosen.some((a) => a.status !== 'deleted')) {
+  if (chosen.some((a) => a.status !== 'deleted' && can('approve', a))) {
     buttons.push(h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'many-classify', onclick: guarded(() => agentsAtOnce(chosen, 'classify')) },
       icon('shield-check'), 'Classify…'));
   }
-  if (contain) offer('block', 'Block', 'power', 'btn--danger');
-  if (contain) offer('unblock', 'Unblock', 'undo');
-  if (admin) offer('delete', 'Delete', 'trash', 'btn--danger-quiet');
-  if (admin) offer('restore', 'Restore', 'undo');
+  offer('block', 'Block', 'power', 'btn--danger', 'contain');
+  offer('unblock', 'Unblock', 'undo', '', 'contain');
+  offer('delete', 'Delete', 'trash', 'btn--danger-quiet');
+  offer('restore', 'Restore', 'undo');
   return h('div', { class: 'bulk-bar', role: 'region', 'aria-label': 'Chosen agents' },
     h('strong', { class: 'bulk-count', 'aria-live': 'polite' }, `${plural(chosen.length, 'agent')} chosen`),
     h('div', { class: 'btn-row' }, buttons),
@@ -2102,7 +2145,7 @@ async function agentsAtOnce(chosen, action) {
   const onPlatforms = fits.filter(platformOf).length;
   if (onPlatforms && ['block', 'unblock', 'delete'].includes(action)) {
     text += ` ${onPlatforms === fits.length ? 'They run' : `${fmt(onPlatforms)} of them run`} on ${elsewhere.join(', ')}: this changes AgentGov's registry, not ${elsewhere.length > 1 ? 'those platforms' : elsewhere[0]}.`;
-    if (action === 'block') text += ` Block them there too.`;
+    if (action === 'block') text += ' For each one its platform still runs, an issue asks its people to stop it there.';
   }
   if (fits.length < chosen.length) {
     text += ` ${plural(chosen.length - fits.length, 'other agent')} chosen ${chosen.length - fits.length === 1 ? 'isn\'t' : 'aren\'t'} in a state for it, and ${chosen.length - fits.length === 1 ? 'stays as it is' : 'stay as they are'}.`;
@@ -2295,10 +2338,10 @@ const PLATFORM_LIFECYCLE = {
   approve: (p) => ({ text: `The agent becomes active in AgentGov's registry, with an owner, sponsors and periodic review. It runs in ${p} either way. Activation needs at least one sponsor.` }),
   block: (p) => ({
     label: 'Block', confirm: 'Block in AgentGov',
-    text: `This marks the agent as blocked in AgentGov's registry and ledger. It does not stop the agent in ${p}: block it in ${p}'s admin center too.`,
-    done: (n) => `Blocked ${n} in AgentGov. Block it in ${p} too.`,
+    text: `This marks the agent as blocked in AgentGov's registry and ledger. It doesn't stop the agent in ${p}: while ${p} still runs it, an issue asks its people to stop it there, and closes once ${p} reports it stopped.`,
+    done: (n, runsIn) => (runsIn ? `Blocked ${n} in AgentGov. It still runs in ${runsIn}: an issue asks its people to stop it there.` : `Blocked ${n} in AgentGov.`),
   }),
-  unblock: (p) => ({ text: `The agent is no longer marked as blocked in AgentGov. This doesn't change ${p}.` }),
+  unblock: (p) => ({ text: `The agent is no longer marked as blocked in AgentGov, and no issue asks to stop it in ${p} any more. This doesn't change ${p}.` }),
   delete: (p) => ({ text: `The agent leaves AgentGov's inventory but stays in ${p}. Deleted agents can be restored.` }),
   adopt: (p) => ({ text: `Adopting brings this ${p} agent under governance as a pending registration. Give it an owner and at least one sponsor, then approve it.` }),
 };
@@ -2328,7 +2371,8 @@ async function renderAgent({ match }) {
     api(`v1/agents/${encodeURIComponent(agent.id)}/a2a`).catch((e) => e),
     api(`v1/agents/${encodeURIComponent(agent.id)}/access-packages`).catch((e) => e),
     api('v1/access-packages').catch(() => []),
-    featureModes().catch(() => ({})),
+    // Organisation-wide: not for those with roles for some teams only.
+    isScoped() ? {} : featureModes().catch(() => ({})),
     api(`v1/agents/${encodeURIComponent(agent.id)}/rules`).catch(() => []),
   ]);
   // What Microsoft Entra ID Governance assigns its Entra identity, when it has one.
@@ -2362,6 +2406,9 @@ function agentHeader(a) {
     h('div', { class: 'title-row' }, h('h1', { tabindex: '-1' }, a.name), chip('agent', a.status), riskChip(a.risk)),
     a.description ? h('p', { style: 'color:var(--ink-2); max-width:72ch' }, a.description) : null,
     showReason ? callout(toneOf('agent', a.status), 'info', h('span', {}, h('strong', {}, `${statusLabel}: `), a.status_reason)) : null,
+    a.status === 'blocked' && a.still_runs_in ? callout('warning', 'triangle', h('span', {},
+      h('strong', {}, `Blocked in AgentGov only: ${a.still_runs_in} still runs it. `),
+      `An issue asks its people to stop it there, and closes once ${a.still_runs_in} reports it stopped.`)) : null,
     agentToolbar(a));
 }
 
@@ -2370,12 +2417,12 @@ function agentHeader(a) {
 function mayAttest(a) {
   if (!ATTESTABLE.has(a.status)) return false;
   const sponsor = (a.sponsors || []).some((s) => String(s).toLowerCase() === String(me?.name || '').toLowerCase());
-  return can('admin') || (sponsor && (me?.via === 'session' || can('approve')));
+  return can('admin', a) || (sponsor && (me?.via === 'session' || can('approve', a)));
 }
 
 function agentToolbar(a) {
-  const allowed = can('admin') ? ACTIONS_BY_STATUS[a.status] || []
-    : can('contain') ? (ACTIONS_BY_STATUS[a.status] || []).filter((x) => x === 'block' || x === 'unblock') : [];
+  const allowed = can('admin', a) ? ACTIONS_BY_STATUS[a.status] || []
+    : can('contain', a) ? (ACTIONS_BY_STATUS[a.status] || []).filter((x) => x === 'block' || x === 'unblock') : [];
   const buttons = allowed.map((action) => {
     const spec = lifecycleSpec(a, action);
     return h('button', {
@@ -2386,9 +2433,10 @@ function agentToolbar(a) {
   if (mayAttest(a)) {
     buttons.push(h('button', { type: 'button', class: 'btn', 'data-focus-key': 'attest', onclick: () => runAttest(a) }, icon('shield-check'), 'Attest'));
   }
-  if (can('admin') && a.status !== 'deleted') {
+  if (can('admin', a) && a.status !== 'deleted') {
     buttons.unshift(h('button', { type: 'button', class: 'btn', 'data-focus-key': 'edit-agent', onclick: guarded(() => editAgent(a)) }, icon('edit'), 'Edit'));
   }
+  // Gone for good: administrators for every team.
   if (can('admin') && a.status === 'deleted') {
     buttons.push(h('button', { type: 'button', class: 'btn btn--danger-quiet', 'data-focus-key': 'purge-agent', onclick: () => purgeAgent(a) }, icon('trash'), 'Delete permanently'));
   }
@@ -2445,22 +2493,25 @@ async function runLifecycle(a, action) {
       }
       // AgentGov first: if it refuses (an unblock needs a sponsor), the platform is left
       // alone. If the platform then refuses, the agent is still blocked where it runs.
-      await api(`v1/agents/${encodeURIComponent(a.id)}/${action}`, { method: 'POST', body });
-      if (!values.in_platform) return { inPlatform: false };
+      const changed = await api(`v1/agents/${encodeURIComponent(a.id)}/${action}`, { method: 'POST', body });
+      // Blocked here, the platform that still runs it, where an issue asks to stop it.
+      const runsIn = changed?.still_runs_in || null;
+      if (!values.in_platform) return { inPlatform: false, runsIn };
       try {
         await api(`v1/agents/${encodeURIComponent(a.id)}/platform/${action}`, { method: 'POST' });
         return { inPlatform: true };
       } catch (err) {
-        return { inPlatform: false, platformError: err };
+        return { inPlatform: false, platformError: err, runsIn };
       }
     },
   });
   if (!done) return;
   if (done.platformError) {
     const verb = action === 'block' ? 'Blocked' : 'Unblocked';
-    toast(`${verb} ${a.name} in AgentGov. ${done.platformError.message}`, { tone: 'critical' });
+    const handedOff = done.runsIn ? ` An issue asks its people to stop it in ${done.runsIn}.` : '';
+    toast(`${verb} ${a.name} in AgentGov. ${done.platformError.message}${handedOff}`, { tone: 'critical' });
   } else {
-    toast(done.inPlatform ? (action === 'block' ? where.blocked(a.name) : where.unblocked(a.name)) : spec.done(a.name));
+    toast(done.inPlatform ? (action === 'block' ? where.blocked(a.name) : where.unblocked(a.name)) : spec.done(a.name, done.runsIn));
   }
   refreshBadges();
   await refresh();
@@ -2541,7 +2592,7 @@ const NAME_HINT = 'Lowercase letters, digits and hyphens, starting and ending wi
 /** Register an agent (no `a`) or edit one. Resolves to the saved agent, or null. */
 async function agentForm(a) {
   const [blueprints, issuers, teams] = await Promise.all([
-    api('v1/blueprints'), api('v1/identity-issuers').catch(() => []), api('v1/teams').catch(() => []),
+    api('v1/blueprints'), isScoped() ? [] : api('v1/identity-issuers').catch(() => []), api('v1/teams').catch(() => []),
   ]);
   const editing = Boolean(a);
   const identity = a?.workload_identity;
@@ -2879,7 +2930,7 @@ function riskCard(a, enforced = false) {
   return card({
     title: 'Risk',
     sub: platform ? `Posture, instructions, and how ${platform} has it set up` : 'Posture, instructions, and runtime signals from the last 24 hours',
-    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'recalc', onclick: () => recalcRisk(a) }, icon('refresh'), 'Recalculate')] : null,
+    actions: can('admin', a) ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'recalc', onclick: () => recalcRisk(a) }, icon('refresh'), 'Recalculate')] : null,
     body: [
       h('div', { class: 'risk-head' },
         h('span', { class: 'hero-figure' }, fmt(risk.score ?? 0)), h('span', { class: 'of' }, 'of 100'), chip('risk', risk.level || 'low')),
@@ -3001,7 +3052,7 @@ function identityCard(a) {
   const external = Object.entries(a.external_ids || {});
   const workload = a.workload_identity;
   // Keycloak only issues secrets to active agents; one with a workload identity has none.
-  let credentialActions = can('admin') && a.status === 'active' && id.client_id ? [
+  let credentialActions = can('admin', a) && a.status === 'active' && id.client_id ? [
     h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'show-credentials', onclick: guarded(() => agentCredentials(a, false)) }, icon('key'), 'Show secret'),
     h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': 'rotate-credentials', onclick: guarded(() => agentCredentials(a, true)) }, icon('refresh'), 'Rotate'),
   ] : null;
@@ -3098,7 +3149,7 @@ function agentA2ACard(a, view) {
     title: 'Agent to agent',
     sub: 'Calls between agents through the gateway (A2A) are checked by policy, one by one; the agent called gets who handed the work down, with the person at its head. Calls straight to an agent skip the gateway.',
     body: idle
-      ? emptyState("It doesn't serve or call other agents", can('admin') ? 'Give it an A2A endpoint, or agents it may call, with Edit.' : null)
+      ? emptyState("It doesn't serve or call other agents", can('admin', a) ? 'Give it an A2A endpoint, or agents it may call, with Edit.' : null)
       : facts(rows),
   });
 }
@@ -3172,7 +3223,7 @@ function instructionsCard(a, view) {
     return card({ title: 'Instructions', body: callout('critical', 'alert-circle', `The instructions couldn't be loaded. ${view.message}`) });
   }
   const sources = view.sources || [];
-  const admin = can('admin') && a.status !== 'deleted';
+  const admin = can('admin', a) && a.status !== 'deleted';
   const actions = admin ? [
     sources.length ? h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'rescan-instructions', onclick: guarded(() => rescanInstructions(a)) }, icon('refresh'), 'Rescan') : null,
     sources.some((x) => x.source === 'registered') ? null
@@ -3692,7 +3743,7 @@ async function renderApprovals({ match }) {
   const more = (inbox?.kinds || []).filter((k) => k.count && !['calls', 'access'].includes(k.kind));
   const waiting = pending.length + asked.length + more.reduce((n, k) => n + k.count, 0);
   updateBadges({ pendingApprovals: inbox ? inbox.total : pending.length });
-  const approvalsMode = person ? 'enforce' : (await featureModes().catch(() => ({}))).approvals;
+  const approvalsMode = person ? 'enforce' : isScoped() ? null : (await featureModes().catch(() => ({}))).approvals;
   const approval = (r) => approvalCard(r, agentsById.get(r.agent_id), mineIds.has(r.id));
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'Approval views' },
     h('a', { class: 'tab', href: '#/approvals', 'aria-current': tab === 'pending' ? 'page' : null },
@@ -3722,7 +3773,7 @@ async function renderApprovals({ match }) {
           h('div', { class: 'access-main' },
             h('div', { class: 'cell-title' }, r.package, ' for ', agentLink(r.agent_id, r.agent_name)),
             h('div', { class: 'cell-sub break' }, `${r.requested_by}, for ${plural(r.days, 'day')}: ${r.reason} · `, timeEl(r.requested_at))),
-          h('div', { class: 'btn-row' }, assignmentButtons(r, packages, { id: r.agent_id, name: r.agent_name }))))),
+          h('div', { class: 'btn-row' }, assignmentButtons(r, packages, agentsById.get(r.agent_id) || { id: r.agent_id, name: r.agent_name }))))),
       }));
     }
     sections.push(...more.map(inboxCard));
@@ -3847,7 +3898,7 @@ function approvalCard(r, agent, mine = false) {
   const headingId = nextId('approval');
   // The person it was sent to decides it, or approvers; administrators can always decide.
   const forPerson = r.deciders === 'person';
-  const mayDecide = can('admin') || (forPerson ? mine : can('approve') || can('decide'));
+  const mayDecide = can('admin', agent) || (forPerson ? mine : can('approve', agent) || can('decide', agent));
   const deciders = forPerson ? (mine ? 'You decide this request.' : `${r.on_behalf_of} decides this request.`) : 'An approver or admin decides this request.';
   return h('section', { class: 'card approval', 'aria-labelledby': headingId, 'data-focus-key': `approval-${r.id}`, tabindex: '-1' },
     h('div', { class: 'card-head' },
@@ -4172,12 +4223,17 @@ const FINDING_DONE = { resolve: 'Resolved', dismiss: 'Dismissed', reopen: 'Reope
 
 // What the signed-in person may do to findings: approvers, administrators and (from triage)
 // the secops role act on all of them; the people an issue reached acknowledge it.
-function mayTriage() {
-  return can('approve') || can('triage');
+function mayTriage(f) {
+  return can('approve', f) || can('triage', f);
+}
+
+// Whether they triage some issues: for every team, or their teams'.
+function mayTriageSome() {
+  return canSome('approve') || canSome('triage');
 }
 
 function findingTabs(current) {
-  if (isPerson()) return null;
+  if (isPerson() || isScoped()) return null;
   return h('nav', { class: 'tabs', 'aria-label': 'Issue views' },
     h('a', { class: 'tab', href: '#/findings', 'aria-current': current === 'findings' ? 'page' : null }, 'Issues'),
     h('a', { class: 'tab', href: '#/findings/types', 'aria-current': current === 'types' ? 'page' : null }, 'Types'));
@@ -4196,7 +4252,7 @@ async function renderFindings({ params }) {
   // Those chosen for an action on many at once, by ID: only ever among those shown. Those
   // who triage do anything to them; the people an issue reached acknowledge theirs.
   const selected = new Set();
-  const selecting = () => mayTriage() || person || state.status === 'mine';
+  const selecting = () => mayTriageSome() || person || state.status === 'mine';
   let shown = [];
   // People without a role see the issues sent to them; everyone else, every finding, or
   // theirs. Findings come a page at a time, newest first; the control plane says how many
@@ -4215,7 +4271,7 @@ async function renderFindings({ params }) {
   const [initial, agents, types] = await Promise.all([
     fetchPage(state.status),
     person ? [] : api('v1/agents?include_deleted=true').catch(() => []),
-    person ? [] : api('v1/finding-types').catch(() => []),
+    person || isScoped() ? [] : api('v1/finding-types').catch(() => []),
   ]);
   let list = initial.rows;
   let total = initial.total;
@@ -4459,7 +4515,7 @@ function findingBulkBar(rows, choose, { clear, run }) {
   box.indeterminate = !all && chosen.length > 0;
   const buttons = [];
   if (chosen.length) {
-    const triage = mayTriage();
+    const triage = mayTriageSome();
     for (const [action, spec] of Object.entries(FINDINGS_AT_ONCE)) {
       if (spec.triage && !triage) continue;
       const n = chosen.filter(spec.fits).length;
@@ -4544,7 +4600,7 @@ function issueLine(f) {
 }
 
 function findingActions(f, act, { yours = false, detail = false } = {}) {
-  const triage = mayTriage();
+  const triage = mayTriage(f);
   const buttons = [];
   if (!detail) {
     buttons.push(h('a', { class: 'btn btn--sm btn--ghost', href: `#/findings/${encodeURIComponent(f.id)}` }, 'Details', icon('arrow')));
@@ -4669,7 +4725,7 @@ function exceptionAsked(f, act) {
   if (!asked || f.status !== 'open') return null;
   return callout('warning', 'shield-check', h('div', { class: 'stack', style: 'gap:8px' },
     h('span', {}, h('strong', {}, `${asked.by} asks for its risk to be accepted until ${String(asked.until).slice(0, 10)}: `), asked.reason),
-    mayTriage() ? h('div', { class: 'btn-row' },
+    mayTriage(f) ? h('div', { class: 'btn-row' },
       h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: () => act('accept') }, icon('shield-check'), 'Accept risk'),
       h('button', { type: 'button', class: 'btn btn--sm', onclick: () => act('decline-exception') }, icon('x'), 'Decline')) : null));
 }
@@ -4760,7 +4816,7 @@ async function renderFinding({ match }) {
 // role (the people the issue reached see this page, not the agent's).
 function findingAttestCard(f) {
   if (!f.type.startsWith('agent.attestation') || !f.agent_id || f.status !== 'open') return null;
-  if (!f.yours && !can('admin')) return null;
+  if (!f.yours && !can('admin', f)) return null;
   const attest = guarded(async () => {
     const values = await ask({
       title: 'Attest this agent?',
@@ -4794,7 +4850,7 @@ async function findingAccessCard(f) {
     pk && f.type !== 'access.review_due' ? h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: async () => after(await requestPackage(agent, packages, pk)) }, icon('refresh'), 'Renew') : null,
     f.type === 'access.review_due' ? h('button', { type: 'button', class: 'btn btn--sm btn--primary', onclick: async () => after(await reviewAssignment(row, true)) }, icon('check'), 'Keep it') : null,
     f.type === 'access.review_due' ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: async () => after(await reviewAssignment(row, false)) }, icon('ban'), 'Remove it') : null,
-    can('approve') || can('contain') ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: async () => after(await assignmentAction(row, 'revoke')) }, icon('ban'), 'Revoke') : null,
+    can('approve', f) || can('contain', f) ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: async () => after(await assignmentAction(row, 'revoke')) }, icon('ban'), 'Revoke') : null,
   ].filter(Boolean) : [];
   return card({
     title: 'Access package',
@@ -5755,7 +5811,7 @@ async function reviewAssignment(row, keep) {
 
 function assignmentButtons(row, packages, agent) {
   const buttons = [];
-  const decider = can('approve');
+  const decider = can('approve', agent);
   if (row.status === 'requested' && decider && row.requested_by === me?.actor) {
     buttons.push(h('span', { class: 'muted small' }, 'You asked for it: another approver decides.'));
   }
@@ -5769,7 +5825,7 @@ function assignmentButtons(row, packages, agent) {
     if (pk && decider) {
       buttons.push(h('button', { type: 'button', class: 'btn btn--sm', onclick: guarded(async () => { if (await requestPackage(agent, packages, pk)) await refresh(); }) }, icon('refresh'), 'Renew'));
     }
-    if (decider || can('contain')) {
+    if (decider || can('contain', agent)) {
       buttons.push(h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', onclick: guarded(async () => { if (await assignmentAction(row, 'revoke')) await refresh(); }) }, icon('ban'), 'Revoke'));
     }
   }
@@ -5836,7 +5892,7 @@ function agentAccessCard(agent, rows, packages, mode) {
   return card({
     title: 'Access packages',
     sub: 'Extra tools, models and agents it holds for a while once approved.',
-    actions: can('approve') && packages.length ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'request-access', onclick: guarded(async () => { if (await requestPackage(agent, packages, null)) await refresh(); }) }, icon('plus'), 'Request access')] : null,
+    actions: can('approve', agent) && packages.length ? [h('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'request-access', onclick: guarded(async () => { if (await requestPackage(agent, packages, null)) await refresh(); }) }, icon('plus'), 'Request access')] : null,
     body: [
       expiredNote,
       current.length ? h('ul', { class: 'access-list', role: 'list' }, current.map(line))
@@ -6342,7 +6398,10 @@ async function renderLedger({ params }) {
     if (err.status === 401) throw err;
     renderEntries([], err);
   }
-  const [kept, points, witness] = await Promise.all([
+  // The whole chain is the organisation's: those with roles for some teams only read their
+  // agents' entries.
+  const scoped = isScoped();
+  const [kept, points, witness] = scoped ? [null, null, null] : await Promise.all([
     api('v1/ledger/retention').catch(() => null), api('v1/ledger/checkpoints?limit=10').catch(() => null),
     api('v1/ledger/witness').catch(() => null),
   ]);
@@ -6350,10 +6409,12 @@ async function renderLedger({ params }) {
   return h('div', { class: 'page' },
     pageHead({
       title: 'Ledger',
-      sub: "Tamper-evident record of lifecycle changes, admin actions and policy decisions. Each entry's SHA-256 hash covers the previous entry's hash, so any edit breaks the chain.",
-      actions: [verifyBtn, exportBtn],
+      sub: scoped
+        ? "Tamper-evident record of lifecycle changes, admin actions and policy decisions: here, your teams' agents' entries."
+        : "Tamper-evident record of lifecycle changes, admin actions and policy decisions. Each entry's SHA-256 hash covers the previous entry's hash, so any edit breaks the chain.",
+      actions: scoped ? [] : [verifyBtn, exportBtn],
     }),
-    ledgerTabs('entries'),
+    scoped ? null : ledgerTabs('entries'),
     rewoundCallout(witness),
     banner,
     h('div', { class: 'filters' },
@@ -6446,7 +6507,7 @@ async function classifyAgents(list) {
 
 function classificationCard(a) {
   const c = a.classification;
-  const change = can('approve') && a.status !== 'deleted'
+  const change = can('approve', a) && a.status !== 'deleted'
     ? h('button', {
       type: 'button', class: 'btn btn--sm', 'data-focus-key': 'classify',
       onclick: guarded(async () => { if (await classifyAgents([a])) await refresh(); }),
@@ -6717,8 +6778,10 @@ async function renderAccess() {
     }),
     view.bootstrap_token ? callout('neutral', 'key', h('span', {}, h('strong', {}, 'The bootstrap admin token is set. '),
       'Anyone who has it is an admin. Keep it for setup and emergencies, and give people and automation their own roles.')) : null,
+    view.provider?.problem ? callout('critical', 'octagon', h('span', {}, h('strong', {}, "People can't sign in now: "), view.provider.problem)) : null,
     signInsCard(view),
-    apiKeysCard(keys),
+    roleGrantsCard(view),
+    apiKeysCard(keys, view.api_keys || {}),
     features['workload-identity'] === 'off' ? callout('warning', 'power', h('span', {},
       h('strong', {}, "Agents' own identities are off: "), 'no issuer is trusted, so agents with a workload identity can\'t authenticate. ',
       h('a', { href: '#/features' }, 'Features'), '.')) : null,
@@ -6885,7 +6948,7 @@ function signInsCard(view) {
         h('td', { 'data-label': 'Person', class: 'break' }, h('span', { class: 'cell-title' }, person.name),
           h('div', { class: 'cell-sub', title: 'Subject at the identity provider' }, person.subject)),
         h('td', { 'data-label': 'Roles' }, person.roles.length
-          ? h('div', { class: 'chip-row' }, person.roles.map((r) => plainChip(humanize(r))))
+          ? h('div', { class: 'chip-row' }, person.roles.map((r) => plainChip(roleName(r))))
           : h('span', { class: 'muted' }, 'None')),
         h('td', { 'data-label': 'Status' }, chip('person', person.status, { title: person.status === 'refused' ? 'Refused at the last attempt: no AgentGov role' : null }),
           person.status === 'signed_in'
@@ -6899,10 +6962,103 @@ function signInsCard(view) {
   }
   return card({
     title: 'People',
-    sub: `${plural(signedIn, 'person', 'people')} signed in now. Roles come from the identity provider at each sign-in: to take someone's access away, remove their role there, then sign them out here.`,
+    sub: [`${plural(signedIn, 'person', 'people')} signed in now. Roles come from the identity provider at each sign-in, and from those given below: to take someone's access away, remove their role there, then sign them out here.`,
+      view.provider ? h('span', { style: 'display:block;margin-top:4px' }, providerSummary(view.provider)) : null],
     flush: people.length > 0,
     body,
   });
+}
+
+// What people sign in with, as AgentGov reads it.
+const PROVIDER_NAMES = { keycloak: 'Keycloak', entra: 'Microsoft Entra ID', google: 'Google', oidc: 'OpenID Connect' };
+
+function providerSummary(p) {
+  const roles = p.role_map?.length
+    ? ` Roles from ${p.roles_claims.join(', ')}: ${p.role_map.map((m) => `${m.value} → ${roleName(m.role)}`).join('; ')}.`
+    : ` Roles from ${p.roles_claims.join(', ')}, named ${p.role_prefix}admin, ${p.role_prefix}approver and so on, or ${p.role_prefix}approver@sales for one team's agents.`;
+  const domains = p.allowed_domains?.length ? ` Only ${p.allowed_domains.join(', ')} may sign in.` : '';
+  // Someone it signs in with no role given to them.
+  const others = p.without_role === 'person'
+    ? ' Anyone else it signs in sees only the issues and requests sent to them.'
+    : p.require_role
+      ? ' Only people with a role may sign in: give the person role to those who should see only what is sent to them.'
+      : ' People without a role are refused.';
+  return `Signing in with ${PROVIDER_NAMES[p.kind] || p.kind}: ${p.issuer}.${roles}${domains}${others}`;
+}
+
+function roleGrantsCard(view) {
+  if (!view.sso_enabled) return null;
+  const grants = view.grants || [];
+  return card({
+    title: 'Roles given in AgentGov',
+    sub: "Roles usually come from the identity provider. Give one here when its tokens carry no groups (Google's do not), or to the first administrators: it applies from the person's next sign-in with this email address, beside the provider's.",
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'give-role', onclick: guarded(giveRole) }, icon('plus'), 'Give a role')] : null,
+    flush: grants.length > 0,
+    body: grants.length
+      ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+        h('caption', { class: 'sr-only' }, 'Roles given in AgentGov'),
+        h('thead', {}, h('tr', {}, ['Person', 'Role', 'Given by', 'When', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+        h('tbody', {}, grants.map((g) => h('tr', { 'data-grant': `${g.email}/${g.role}` },
+          h('td', { 'data-label': 'Person', class: 'break' }, h('span', { class: 'cell-title' }, g.email),
+            g.reason ? h('div', { class: 'cell-sub' }, g.reason) : null),
+          h('td', { 'data-label': 'Role' }, plainChip(roleName(g.role))),
+          h('td', { 'data-label': 'Given by', class: 'break' }, g.granted_by),
+          h('td', { 'data-label': 'When', class: 'nowrap' }, timeEl(g.granted_at)),
+          h('td', { 'data-label': '' }, can('admin')
+            ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `take-role-${g.email}-${g.role}`, onclick: () => takeRole(g) }, icon('trash'), 'Take away')
+            : null))))))
+      : emptyState('No roles given here', "Everyone's roles come from the identity provider."),
+  });
+}
+
+// Whom a role is for: every team, or one team's agents only (approver@sales).
+function teamField(teams) {
+  if (!teams.length) return null;
+  return {
+    id: 'team', label: 'For', type: 'select', value: '',
+    options: [{ value: '', label: 'Every team' }, ...teams.map((t) => ({ value: t.name, label: `Only the agents of team ${t.name}` }))],
+    hint: "For one team: its agents, and their issues, approvals and ledger entries; nothing organisation-wide. An agent's team is its own, else its blueprint's, else the default team.",
+  };
+}
+
+async function giveRole() {
+  const teams = await api('v1/teams').catch(() => []);
+  const saved = await ask({
+    title: 'Give a role',
+    text: 'The person gets it the next time they sign in, with this email address, which the identity provider vouches for. It is recorded in the evidence ledger.',
+    iconName: 'key', confirm: 'Give role',
+    fields: [
+      { id: 'email', label: 'Email address', required: true, placeholder: 'alice@example.com' },
+      {
+        id: 'role', label: 'Role', type: 'select', value: 'auditor', required: true, options: [
+          { value: 'admin', label: 'Admin: everything' },
+          { value: 'approver', label: 'Approver: decide approvals and issues' },
+          { value: 'secops', label: 'Security operations: triage and contain' },
+          { value: 'auditor', label: 'Auditor: read everything, change nothing' },
+          { value: 'registrar', label: 'Registrar: register agents and tool servers' },
+          { value: 'person', label: 'Person: only the issues and requests sent to them' },
+        ],
+      },
+      teamField(teams),
+      { id: 'reason', label: 'Why', type: 'textarea', hint: 'For the evidence ledger.' },
+    ].filter(Boolean),
+    submit: (v) => api('v1/access/grants', { method: 'POST', body: { email: v.email, role: v.role, team: orNull(v.team), reason: orNull(v.reason) } }),
+  });
+  if (!saved) return;
+  toast(`Gave ${saved.email} the role ${roleName(saved.role)}, from their next sign-in.`);
+  await refresh();
+}
+
+async function takeRole(g) {
+  const done = await ask({
+    title: `Take ${roleName(g.role)} away from ${g.email}?`,
+    text: 'Their sessions end now. When they sign in again, they have only the roles the identity provider gives them.',
+    tone: 'danger', iconName: 'trash', confirm: 'Take away', busy: 'Taking away…',
+    submit: () => api(`v1/access/grants/${encodeURIComponent(g.email)}/${encodeURIComponent(g.role)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Took ${roleName(g.role)} away from ${g.email} (${plural(done.ended, 'session')} ended).`);
+  await refresh();
 }
 
 async function signPersonOut(person) {
@@ -6918,32 +7074,45 @@ async function signPersonOut(person) {
   await refresh();
 }
 
-function apiKeysCard(keys) {
-  const active = keys.filter((k) => !k.revoked_at).length;
+// How long a key works, as its creator chooses: days, or never (where keys may).
+const KEY_DAYS = [30, 90, 180, 365];
+
+function apiKeysCard(keys, policy) {
+  const active = keys.filter((k) => k.status === 'active').length;
+  const expired = keys.filter((k) => k.status === 'expired').length;
+  const revoked = keys.filter((k) => k.status === 'revoked').length;
+  const counts = [plural(active, 'active key'), expired ? `${fmt(expired)} expired` : null, revoked ? `${fmt(revoked)} revoked` : null].filter(Boolean).join(', ');
+  const lasting = policy.max_days ? ` Keys work for ${plural(policy.max_days, 'day')} at most.` : '';
   return card({
     title: 'API keys',
-    sub: `${plural(active, 'active key')}${keys.length > active ? `, ${fmt(keys.length - active)} revoked` : ''}. Requests made with a key are recorded in the ledger as <role>:<name>.`,
-    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'create-key', onclick: guarded(createApiKey) }, icon('plus'), 'Create API key')] : null,
+    sub: `${counts}. Requests made with a key are recorded in the ledger as <role>:<name>.${lasting} A key in use warns its users two weeks before it expires.`,
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'create-key', onclick: guarded(() => createApiKey(policy)) }, icon('plus'), 'Create API key')] : null,
     flush: keys.length > 0,
     body: keys.length
       ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
         h('caption', { class: 'sr-only' }, 'API keys'),
-        h('thead', {}, h('tr', {}, ['Name', 'Role', 'Key', 'Created', 'Last used', 'Status', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+        h('thead', {}, h('tr', {}, ['Name', 'Role', 'Key', 'Created', 'Last used', 'Expires', 'Status', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
         h('tbody', {}, keys.map((k) => h('tr', {},
           h('td', { 'data-label': 'Name', class: 'break' }, h('span', { class: 'cell-title' }, k.name)),
-          h('td', { 'data-label': 'Role' }, humanize(k.role)),
+          h('td', { 'data-label': 'Role' }, roleName(k.role)),
           h('td', { 'data-label': 'Key' }, h('code', { title: 'The first characters of the key' }, `${k.prefix}…`)),
           h('td', { 'data-label': 'Created', class: 'nowrap' }, timeEl(k.created_at)),
           h('td', { 'data-label': 'Last used', class: 'nowrap' }, timeEl(k.last_used_at, { empty: 'Never' })),
-          h('td', { 'data-label': 'Status' }, chip('apikey', k.revoked_at ? 'revoked' : 'active', { title: k.revoked_at ? `Revoked ${fullFmt.format(new Date(k.revoked_at))}` : null })),
-          h('td', { 'data-label': '' }, !k.revoked_at && can('admin')
+          h('td', { 'data-label': 'Expires', class: 'nowrap' }, k.status === 'revoked' ? h('span', { class: 'muted' }, '—') : timeEl(k.expires_at, { empty: 'Never' })),
+          h('td', { 'data-label': 'Status' }, chip('apikey', k.status, { title: k.revoked_at ? `Revoked ${fullFmt.format(new Date(k.revoked_at))}` : k.status === 'expired' ? `Expired ${fullFmt.format(new Date(k.expires_at))}` : null })),
+          h('td', { 'data-label': '' }, k.status !== 'revoked' && can('admin')
             ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `revoke-${k.id}`, onclick: () => revokeApiKey(k) }, icon('ban'), 'Revoke')
             : null))))))
       : emptyState('No API keys', 'Until you create role-scoped keys, the CLI and automation need the bootstrap admin token.'),
   });
 }
 
-async function createApiKey() {
+async function createApiKey(policy) {
+  const max = policy.max_days || 0;
+  const choices = [...new Set([...KEY_DAYS, policy.default_days || 90])].filter((d) => !max || d <= max).sort((a, b) => a - b);
+  const expiries = [...choices.map((d) => ({ value: String(d), label: d % 365 === 0 ? plural(d / 365, 'year') : plural(d, 'day') })),
+    ...(max ? [] : [{ value: 'never', label: 'Never (until it is revoked)' }])];
+  const teams = await api('v1/teams').catch(() => []);
   const created = await ask({
     title: 'Create an API key',
     text: 'The key is shown once, right after it is created. The control plane keeps only a hash of it.',
@@ -6951,8 +7120,10 @@ async function createApiKey() {
     fields: [
       { id: 'name', label: 'Name', required: true, placeholder: 'ci-pipeline', hint: 'Who or what uses the key. Approver keys named after a sponsor can attest that sponsor\'s agents.' },
       { id: 'role', label: 'Role', type: 'select', value: 'auditor', options: KEY_ROLES.map(([value, label]) => ({ value, label })) },
-    ],
-    submit: (v) => api('v1/apikeys', { method: 'POST', body: { name: v.name, role: v.role } }),
+      teamField(teams),
+      { id: 'expires', label: 'Expires after', type: 'select', value: String(policy.default_days || 90), options: expiries, hint: 'Requests made with it are refused after that. Two weeks before, if it is in use, an issue says so.' },
+    ].filter(Boolean),
+    submit: (v) => api('v1/apikeys', { method: 'POST', body: { name: v.name, role: v.role, team: orNull(v.team), expires_in_days: v.expires === 'never' ? null : Number(v.expires) } }),
   });
   if (!created) return;
   const base = API_ROOT.href.replace(/\/$/, '');
@@ -6961,7 +7132,8 @@ async function createApiKey() {
     text: "Copy the key now: it can't be shown again. If it is lost, revoke it and create another.",
     iconName: 'key', confirm: 'Done', cancel: null, wide: true,
     extra: h('div', { class: 'stack', style: 'gap:12px' },
-      facts([['Key', copyable(created.token, 'API key')], ['Role', humanize(created.role)]]),
+      facts([['Key', copyable(created.token, 'API key')], ['Role', roleName(created.role)],
+        ['Expires', created.expires_at ? timeEl(created.expires_at, { absolute: true }) : 'Never']]),
       h('div', { class: 'stack', style: 'gap:6px' }, h('span', { class: 'field-label' }, 'Use it with the CLI'),
         h('pre', { class: 'kv-pre' }, `export AGENTGOV_URL=${base}\nexport AGENTGOV_TOKEN=${created.token}\nagentgov whoami`))),
   });
@@ -7088,15 +7260,16 @@ function otherPlatformsCard(view) {
 
 function platformsCallout(view) {
   const enforcing = view.threat_detection?.mode === 'enforce';
+  // Blocked here, an agent its platform still runs gets an issue asking its people to stop it there.
+  const handOff = 'An agent blocked here that its platform still runs gets an issue asking its people to stop it there, which closes once a sync shows it stopped.';
   if (!view.admin_actions && !enforcing) {
-    return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov reads these platforms; on its own it does not change them. '),
-      "Blocking one of their agents here marks it in AgentGov only. To stop it, block it in the Microsoft 365 admin center or the Power Platform admin center, or connect the services below."));
+    return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov reads these platforms; on its own it does not change them. '), handOff));
   }
   const can = [
     view.admin_actions ? 'admins signed in through Microsoft Entra ID can quarantine and block these agents from here' : null,
     enforcing ? "AgentGov's policies decide about each tool call Copilot Studio agents make, so blocking one here stops its tool calls" : null,
   ].filter(Boolean);
-  return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov works alongside these platforms: '), `${can.join(', and ')}.`));
+  return callout('neutral', 'info', h('span', {}, h('strong', {}, 'AgentGov works alongside these platforms: '), `${can.join(', and ')}. ${handOff}`));
 }
 
 const CONNECTION_COUNTS = {
@@ -7500,7 +7673,7 @@ function usageRows(v) {
 function inventoryCard(v) {
   const notes = v.in_inventory === false
     ? [callout('warning', 'triangle', `${v.source_name} no longer reports this agent. Delete it here when you no longer need its record.`)]
-    : [];
+    : v.stopped ? [callout('neutral', 'ban', `Stopped in ${v.source_name}: it takes no calls there.`)] : [];
   const value = (f) => {
     if (f.tone) return plainChip(f.value, { tone: f.tone, iconName: f.tone === 'serious' ? 'triangle' : 'alert-circle' });
     return f.code ? h('code', {}, f.value) : f.value;

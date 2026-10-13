@@ -6,13 +6,14 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Request
 
+from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.registry import agents, instructions
 from agentgov.registry.errors import ValidationError
 
 router = APIRouter(prefix="/v1", tags=["instructions"])
-read = require(*READ_ROLES)
-admin = require("admin")
+# Administrators, for every team or for their teams' agents.
+team_admin = reach.require("admin")
 
 
 def _classifier(rt: Any) -> dict[str, Any]:
@@ -25,11 +26,13 @@ def _classifier(rt: Any) -> dict[str, Any]:
 
 
 @router.get("/agents/{ref}/instructions")
-def get_instructions(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
+def get_instructions(
+    request: Request, ref: str, principal: Principal = Depends(reach.read)
+) -> dict[str, Any]:
     """The agent's instructions from each source, and what the rules and classifier found."""
     rt = request.app.state.rt
     with rt.db.session() as s:
-        agent = agents.get(s, ref)
+        agent = reach.agent(s, principal, ref)
         return {"classifier": _classifier(rt), "sources": instructions.for_agent(s, agent.id)}
 
 
@@ -38,12 +41,12 @@ def set_instructions(
     request: Request,
     ref: str,
     body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
+    principal: Principal = Depends(team_admin),
 ) -> dict[str, Any]:
     """Set the agent's registered instructions. They are checked straight away."""
     rt = request.app.state.rt
     with rt.db.session() as s:
-        agent = agents.get(s, ref)
+        agent = reach.agent(s, principal, ref, "admin")
         row = instructions.report(
             s,
             agent,
@@ -58,12 +61,15 @@ def set_instructions(
 
 @router.delete("/agents/{ref}/instructions")
 def clear_instructions(
-    request: Request, ref: str, source: str = "registered", principal: Principal = Depends(admin)
+    request: Request,
+    ref: str,
+    source: str = "registered",
+    principal: Principal = Depends(team_admin),
 ) -> dict[str, Any]:
     """Forget the agent's instructions from one source (``registered`` by default)."""
     rt = request.app.state.rt
     with rt.db.session() as s:
-        agent = agents.get(s, ref)
+        agent = reach.agent(s, principal, ref, "admin")
         instructions.clear(s, agent, source=source, actor=principal.actor)
         agents.refresh_risk(s, rt.settings, agent)
         return {"agent": agent.name, "source": source, "cleared": True}
@@ -71,12 +77,12 @@ def clear_instructions(
 
 @router.post("/agents/{ref}/instructions/rescan")
 def rescan_instructions(
-    request: Request, ref: str, principal: Principal = Depends(admin)
+    request: Request, ref: str, principal: Principal = Depends(team_admin)
 ) -> dict[str, Any]:
     """Check the stored instructions again with the current rules and classifier."""
     rt = request.app.state.rt
     with rt.db.session() as s:
-        agent = agents.get(s, ref)
+        agent = reach.agent(s, principal, ref, "admin")
         count = instructions.rescan(
             s, agent, actor=principal.actor, classify=rt.guardian is not None
         )

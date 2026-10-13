@@ -8,8 +8,8 @@ code and its verifier at ``/auth/cli/token`` for a session token of its own.
 
 from __future__ import annotations
 
-import dataclasses
 import logging
+import re
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
@@ -32,6 +32,10 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["sign-in"])
 
 LOGIN_COOKIE = "agentgov_login"
+# Where in the UI to go once signed in: a page of the UI (its hash), such as an issue an
+# email links to, and nothing else, so that it can't send anyone off the control plane.
+NEXT_COOKIE = "agentgov_next"
+NEXT_PAGE = r"^#/[A-Za-z0-9_\-/?=&.%]*$"
 UI_PATH = "/ui/"
 # An S256 PKCE challenge: the unpadded base64url encoding of a SHA-256 digest.
 PKCE_CHALLENGE = r"^[A-Za-z0-9_-]{43}$"
@@ -51,6 +55,7 @@ def _secure(request: Request) -> bool:
 def _redirect(url: str) -> RedirectResponse:
     resp = RedirectResponse(url, status_code=302)
     resp.delete_cookie(LOGIN_COOKIE, path="/auth")
+    resp.delete_cookie(NEXT_COOKIE, path="/auth")
     return resp
 
 
@@ -69,6 +74,7 @@ def login(
     request: Request,
     cli_port: int | None = Query(None, ge=1024, le=65535),
     cli_challenge: str | None = Query(None, pattern=PKCE_CHALLENGE),
+    next: str | None = Query(None, pattern=NEXT_PAGE, max_length=500),
 ) -> RedirectResponse:
     """Send the browser to the identity provider.
 
@@ -78,6 +84,11 @@ def login(
     client = _client(request)
     if (cli_port is None) != (cli_challenge is None):
         raise HTTPException(400, "cli_port and cli_challenge go together")
+    try:
+        client.prepare()  # the provider's endpoints, read before the transaction
+    except sso.SSOError as exc:
+        log.warning("cannot sign in: %s", exc)
+        return _back_to_cli(cli_port, error=exc.code) if cli_port else _back_to_ui(exc.code)
     with request.app.state.rt.db.session() as s:
         state, url = sso.begin_login(s, client, cli_port=cli_port, cli_challenge=cli_challenge)
     resp = RedirectResponse(url, status_code=302)
@@ -91,6 +102,16 @@ def login(
         secure=_secure(request),
         path="/auth",
     )
+    if next and cli_port is None:
+        resp.set_cookie(
+            NEXT_COOKIE,
+            next,
+            max_age=int(sso.LOGIN_TTL.total_seconds()),
+            httponly=True,
+            samesite="lax",
+            secure=_secure(request),
+            path="/auth",
+        )
     return resp
 
 
@@ -130,12 +151,13 @@ def callback(
         return failed(exc.code)
     refresh_token = tokens.get("refresh_token") if rt.delegations is not None else None
     with rt.db.session() as s:
-        if not who.roles:
-            if not sso.people_may_sign_in(s):
-                sso.record_denied(s, who)
-                return failed("no_role")
-            # They see the approval requests and the issues sent to them, and nothing else.
-            who = dataclasses.replace(who, roles=[sso.PERSON])
+        admitted = sso.admit(s, rt.settings, sso.with_given_roles(s, who))
+        if admitted is None:
+            sso.record_denied(s, who)
+            return failed("no_role")
+        # Without an AgentGov role, they see the approval requests and the issues sent to
+        # them, and nothing else.
+        who = admitted
         if port:
             try:
                 one_time = sso.cli_signed_in(s, state, who)
@@ -152,7 +174,8 @@ def callback(
         return _back_to_cli(port, code=one_time)
     if refresh_token:
         rt.delegations.remember(session_id, refresh_token, expires_at)
-    resp = _redirect(UI_PATH)
+    page = request.cookies.get(NEXT_COOKIE) or ""
+    resp = _redirect(UI_PATH + (page if re.match(NEXT_PAGE, page) else ""))
     resp.set_cookie(
         SESSION_COOKIE,
         token,

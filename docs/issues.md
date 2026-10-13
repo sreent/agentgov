@@ -27,7 +27,8 @@ flowchart LR
 Raising issues works where enforcing can't. Agents on other platforms only change when their
 makers change them, or when an administrator with permissions in that platform does, and
 AgentGov often has neither. The issue reaches the people who can fix it, and goes further
-until someone takes it on. Where AgentGov can enforce, at its gateway, it still does: issues
+until someone takes it on. Blocking such an agent is one: while its platform still runs it,
+an issue asks its people to stop it there ([platforms](platforms.md#blocked-in-agentgov-still-running)). Where AgentGov can enforce, at its gateway, it still does: issues
 add the people to the picture, they don't replace the controls in [features](features.md).
 [Management rules](management-rules.md) use issues too: a rule that will block, delete or
 change an agent tells its people first, with the date, and again once it has.
@@ -173,9 +174,10 @@ and see only **Your issues**, and their approval requests when
 
 AgentGov knows them by the name they sign in with: their email address when the identity
 provider has verified it, else their user name. Name owners and sponsors the same way, or
-list the people as members of their teams. To keep people without a role out, restrict who
-may sign in to AgentGov at the identity provider (in Microsoft Entra ID, require assignment
-to its enterprise application), or turn issues off.
+list the people as members of their teams. To keep other people out, restrict who may sign
+in to AgentGov at the identity provider (in Microsoft Entra ID, require assignment to its
+enterprise application), or set `AGENTGOV_OIDC_REQUIRE_ROLE` and give owners and sponsors
+the `person` role ([who can sign in](administration.md#who-can-sign-in)).
 
 ## Messages
 

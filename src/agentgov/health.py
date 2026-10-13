@@ -179,6 +179,8 @@ class Situation:
     # The other platforms: whether each is configured, and its last sync.
     platforms: dict[str, dict[str, Any]] = field(default_factory=dict)
     destinations: int = 0
+    # Destinations that reach people: chats and service desks.
+    people_channels: int = 0
     # Connectors on the allowlist (Platforms, Connectors).
     approved_connectors: int = 0
     # Whether a team takes the issues nobody else does (docs/issues.md).
@@ -192,7 +194,7 @@ class Situation:
 def situation(session: Session, settings: Settings, rt: Any) -> Situation:
     """What the runtime ``rt`` knows now."""
     from agentgov.platforms import connections
-    from agentgov.registry import platforms
+    from agentgov.registry import destinations, platforms
 
     connected = set(getattr(rt, "platforms", {}) or {})
     rows = {
@@ -212,6 +214,15 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
         connections={row["key"]: row for row in connections.state(session, settings)},
         platforms=rows,
         destinations=len(list(session.scalars(select(Destination.id)))),
+        people_channels=len(
+            list(
+                session.scalars(
+                    select(Destination.id).where(
+                        Destination.kind.in_((*destinations.CHAT, *destinations.DESK))
+                    )
+                )
+            )
+        ),
         approved_connectors=len(list(session.scalars(select(ApprovedConnector.connector_id)))),
         default_team=session.scalar(select(Team.name).where(Team.is_default.is_(True))) is not None,
     )
@@ -478,14 +489,30 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
                     f"{_with(keycloak['detail'])}.",
                 )
             )
-    elif key == "issues" and not s.default_team:
-        out.append(
-            (
-                LIMITED,
-                "No catch-all team: issues that no agent's owner, sponsor or team takes, and "
-                "issues about AgentGov itself, reach nobody. Name one on the Teams page.",
+    elif key == "issues":
+        if not s.default_team:
+            out.append(
+                (
+                    LIMITED,
+                    "No catch-all team: issues that no agent's owner, sponsor or team takes, "
+                    "and issues about AgentGov itself, reach nobody. Name one on the Teams page.",
+                )
             )
-        )
+        if not (s.settings.smtp_url and s.settings.smtp_from) and not s.people_channels:
+            seen = (
+                "only when they sign in to AgentGov"
+                if s.settings.sso_enabled
+                else "only in AgentGov, where people without an AgentGov role can't sign in "
+                "without single sign-on"
+            )
+            out.append(
+                (
+                    LIMITED,
+                    f"Issues reach the people responsible {seen}: no mail server "
+                    "(AGENTGOV_SMTP_URL), chat channel or service desk (Security operations) "
+                    "is set up to tell them.",
+                )
+            )
     elif key == "security-operations" and not s.destinations:
         out.append(
             (

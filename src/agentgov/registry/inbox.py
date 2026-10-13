@@ -8,6 +8,10 @@ each kind only for those who may decide it.
   from triage on.
 * Agents and tool servers registered for review, tool definitions that changed since they
   were approved, and agents found on platforms that nobody has reviewed: administrators.
+
+A role held for some teams only (approver@sales) counts for those teams' agents: their
+calls, access packages, risks and, for an administrator of a team, agents waiting for
+approval (docs/administration.md#roles-for-one-team).
 """
 
 from __future__ import annotations
@@ -25,35 +29,41 @@ from agentgov.secops import handoff
 
 # Listed with each kind, at most; its count says how many there are.
 SHOWN = 50
+# Who decides access packages and risks.
+DECIDERS = frozenset({"admin", "approver"})
 DRIFT = "toolserver.tool_drift"
 
 
-def gather(session: Session, principal: Any) -> dict[str, Any]:
-    """The kinds of decision waiting for ``principal``, with how many of each."""
-    roles = principal.roles
-    admin = principal.is_admin
-    approver = admin or "approver" in roles
-    secops = "secops" in roles
+def gather(
+    session: Session,
+    principal: Any,
+    roles_at: Callable[[str | None], frozenset[str]] | None = None,
+) -> dict[str, Any]:
+    """The kinds of decision waiting for ``principal``, with how many of each. ``roles_at``:
+    its roles where each agent is, by the agent's ID, for roles held for some teams only."""
+    at = roles_at or (lambda _agent_id: principal.roles)
+    # Each role it holds, for every team or for some.
+    held = set(principal.roles) | set(getattr(principal, "teams", {}))
     kinds: list[dict[str, Any]] = []
 
     def kind(name: str, title: str, rows: list[Any], view: Callable[[Any], Any]) -> None:
         items = [view(r) for r in rows[:SHOWN]]
         kinds.append({"kind": name, "title": title, "count": len(rows), "items": items})
 
-    deciding = secops and handoff.at_least(session, handoff.DECIDE)
-    held = [
+    deciding = handoff.at_least(session, handoff.DECIDE)
+    calls = [
         r
         for r in approvals.list_requests(session, status=approvals.PENDING, limit=1000)
-        if approvals.may_decide(r, roles, principal.subject, secops=deciding)
+        if approvals.may_decide(r, at(r.agent_id), principal.subject, secops=deciding)
     ]
-    kind("calls", "Calls held for a decision", held, approvals.to_dict)
+    kind("calls", "Calls held for a decision", calls, approvals.to_dict)
 
-    if approver:
+    if held & DECIDERS:
         mine = {principal.actor, principal.name}
         asked = [
             r
             for r in access_packages.assignments(session, status=access_packages.REQUESTED)
-            if r.requested_by not in mine
+            if r.requested_by not in mine and at(r.agent_id) & DECIDERS
         ]
         kind(
             "access",
@@ -62,24 +72,36 @@ def gather(session: Session, principal: Any) -> dict[str, Any]:
             lambda r: access_packages.assignment_dict(session, r),
         )
 
-    if approver or (secops and handoff.at_least(session, handoff.TRIAGE)):
+    triage = handoff.at_least(session, handoff.TRIAGE)
+
+    def triages(roles: frozenset[str]) -> bool:
+        return bool(roles & DECIDERS) or (triage and "secops" in roles)
+
+    if triages(frozenset(held)):
         # The key as text: SQLite's JSON values come quoted, and a missing key would read
         # as the text null rather than NULL.
         asking = Finding.details[issues.ASKED].as_string().is_not(None)
-        risks = list(
-            session.scalars(
+        risks = [
+            f
+            for f in session.scalars(
                 select(Finding)
                 .where(Finding.status == "open", asking)
                 .order_by(Finding.last_seen.desc())
             )
-        )
+            if triages(at(f.agent_id))
+        ]
         kind("risks", "Risks asked to be accepted", risks, lambda f: _risk(session, f))
 
-    if admin:
-        waiting = list(
-            session.scalars(select(Agent).where(Agent.status == PENDING).order_by(Agent.created_at))
-        )
+    if "admin" in held:
+        waiting = [
+            a
+            for a in session.scalars(
+                select(Agent).where(Agent.status == PENDING).order_by(Agent.created_at)
+            )
+            if "admin" in at(a.id)
+        ]
         kind("agents", "Agents waiting for approval", waiting, _agent)
+    if principal.is_admin:
         servers = list(
             session.scalars(
                 select(ToolServer).where(ToolServer.status == PENDING).order_by(ToolServer.name)

@@ -87,6 +87,26 @@ class TestChains:
                 "sponsors",
             ]
 
+    def test_a_tool_servers_threats_go_to_its_owner(self, client, agent) -> None:
+        # Threats name the tool ("crm/export_customers"), not the server's ID.
+        client.patch(
+            "/v1/toolservers/crm", json={"owner": "dana@example.com"}, headers=ADMIN
+        ).raise_for_status()
+        with _rt(client).db.session() as s:
+            finding, _ = findings.raise_finding(
+                s,
+                type="toolserver.prompt_injection",
+                severity="high",
+                subject="crm/export_customers",
+                category=findings.THREAT,
+                title="Prompt-injection payload returned by crm/export_customers",
+            )
+            steps = issues.chain(s, finding)
+            assert [(level, [p.name for p in people]) for level, people in steps] == [
+                ("owner", ["dana@example.com"]),
+                ("team", ["ai-governance"]),
+            ]
+
     def test_findings_about_agentgov_itself_go_to_the_default_team(self, client, agent) -> None:
         with _rt(client).db.session() as s:
             finding, _ = findings.raise_finding(
@@ -452,6 +472,30 @@ class TestWhoSeesWhat:
             # The owner still sees it after it went further.
             assert [f.id for f in issues.for_person(s, "cx-team@example.com")] == [fid]
             assert issues.for_person(s, "mallory@example.com") == []
+
+    def test_people_by_any_name_they_go_by(self, client, agent) -> None:
+        # Sponsors are named by email address; a sponsor may sign in by their user principal
+        # name, which the directory knows them by too.
+        from agentgov.models import Person
+
+        fid = _raise(client, agent["id"])
+        with _rt(client).db.session() as s:
+            s.add(
+                Person(
+                    id="oid-alice",
+                    email="Alice@example.com",
+                    upn="alice.smith@contoso.onmicrosoft.com",
+                    source="upload",
+                )
+            )
+        with _rt(client).db.session() as s:
+            finding = findings.get(s, fid)
+            finding.level = "sponsors"
+            assert issues.may_act(s, finding, "alice.smith@contoso.onmicrosoft.com")
+            assert issues.may_act(s, finding, "ALICE@example.com")
+            assert not issues.may_act(s, finding, "mallory@contoso.onmicrosoft.com")
+            mine = issues.for_person(s, "alice.smith@contoso.onmicrosoft.com")
+            assert [f.id for f in mine] == [fid]
 
     def test_issues_route_only_while_the_feature_is_on(self, client, agent) -> None:
         rt = _rt(client)

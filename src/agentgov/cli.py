@@ -67,7 +67,8 @@ app.add_typer(findings_app, name="findings", hidden=True)
 app.add_typer(ledger_app, name="ledger")
 app.add_typer(apikeys_app, name="apikeys")
 access_app = typer.Typer(
-    help="Who has access: people signed in with single sign-on, and their sessions.",
+    help="Who has access: people signed in with single sign-on, their sessions, and the "
+    "roles given to people in AgentGov.",
     no_args_is_help=True,
 )
 app.add_typer(access_app, name="access")
@@ -376,7 +377,9 @@ LOGIN_WAIT_SECONDS = 600
 # Reasons /auth/callback sends back (?error=...), as the admin UI words them.
 LOGIN_ERRORS = {
     "no_role": "you signed in, but your account has no AgentGov role. Ask an administrator "
-    "for agentgov-admin, agentgov-approver, agentgov-secops or agentgov-auditor.",
+    "to give you one.",
+    "domain": "your account isn't from an organisation allowed to sign in to AgentGov. Sign "
+    "in with your work account.",
     "state": "that sign-in could not be completed in this browser. Start again.",
     "expired": "that sign-in expired or was already used. Start again.",
     "provider": "the identity provider could not complete the sign-in. Try again.",
@@ -1451,15 +1454,24 @@ def _lifecycle(refs: str | list[str], action: str, reason: str | None) -> None:
             "POST", f"/v1/agents/{names[0]}/{action}", json={"reason": reason} if reason else {}
         )
         _done("agent", agent["name"], agent["status"])
+        if agent.get("still_runs_in"):
+            typer.echo(
+                f"It still runs in {agent['still_runs_in']}: an issue asks its people to stop "
+                "it there, and closes once that platform reports it stopped."
+            )
         return
     out = _at_once("agent", _given(action=action, agents=names, reason=reason))
     elsewhere = sorted({row["platform"] for row in out["done"] if row.get("platform")})
-    note = (
-        f"Those on {', '.join(elsewhere)} still run there: this changed AgentGov, not "
-        f"{'it' if len(elsewhere) == 1 else 'them'}."
-        if elsewhere and action in ("block", "delete")
-        else None
-    )
+    note = None
+    if elsewhere and action in ("block", "delete"):
+        from agentgov.registry.platforms import SOURCES
+
+        note = (
+            f"Those on {', '.join(SOURCES.get(p, p) for p in elsewhere)} still run there: "
+            f"this changed AgentGov, not {'it' if len(elsewhere) == 1 else 'them'}."
+        )
+        if action == "block":
+            note += " For each one still running there, an issue asks its people to stop it."
     _many("agent", out, note=note)
 
 
@@ -1487,9 +1499,22 @@ def agents_block(
     if in_platform and len(refs) > 1:
         _fail("--in-platform blocks one agent at a time")
     # AgentGov first, then the platform: if the platform refuses, AgentGov has still blocked it.
-    _lifecycle(refs, "block", reason)
-    if in_platform:
+    if not in_platform:
+        _lifecycle(refs, "block", reason)
+        return
+    agent = _call("POST", f"/v1/agents/{refs[0]}/block", json={"reason": reason} if reason else {})
+    _done("agent", agent["name"], agent["status"])
+    try:
         _platform_block(refs[0], blocked=True)
+    except typer.Exit:
+        typer.secho(
+            f"{refs[0]} is blocked in AgentGov, but still runs in its platform: an issue asks "
+            "its people to stop it there, or an administrator who can do it there can run "
+            "`agentgov agents platform-block`.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        raise
 
 
 @agents_app.command("unblock")
@@ -2748,9 +2773,22 @@ def ledger_verify(
     follows: str | None = typer.Option(
         None, "--follows", help="Offline: the hash the first entry must follow (a checkpoint's)."
     ),
+    checkpoints: Path | None = typer.Option(
+        None,
+        "--checkpoints",
+        help="Offline: a folder of checkpoints (N.txt, and N.tsr time-stamps) the entries "
+        "must match.",
+    ),
+    pack: Path | None = typer.Option(
+        None,
+        "--pack",
+        help="Check an evidence pack offline (its folder or zip file): its ledger, against "
+        "its time-stamped checkpoints.",
+    ),
 ) -> None:
-    """Recompute the hash chain and report tampering; offline, check exports and archives."""
-    if not file:
+    """Recompute the hash chain and report tampering; offline, check exports, archives and
+    evidence packs, against the time-stamped checkpoints that vouch for them."""
+    if not file and pack is None:
         result = _call("GET", "/v1/ledger/verify")
         _print(result)
         if not result.get("valid"):
@@ -2758,17 +2796,34 @@ def ledger_verify(
         return
     from agentgov import ledger, retention
 
+    if pack is not None:
+        contents = _pack_files(pack)
+        if "ledger.jsonl" not in contents:
+            _fail(f"{pack} is not an evidence pack: it has no ledger.jsonl")
+        runs = [(f"{pack}: ledger.jsonl", _jsonl(contents["ledger.jsonl"]))]
+        points = _checkpoint_points(contents, prefix="checkpoints/")
+    else:
+        runs = [(str(path), retention.read_archive(path)) for path in file or []]
+        points = _checkpoint_points(_folder_files(checkpoints)) if checkpoints else []
+    wanted = {seq for seq, _, _ in points}
+    hashes: dict[int, str] = {}
     start: tuple[int, str] | None = None
-    for path in file:
-        records = list(retention.read_archive(path))
+    first: int | None = None
+    for name, lines in runs:
+        records = list(lines)
         if start is None and follows and records:
             start = (records[0]["seq"] - 1, follows)
+        if records and first is None:
+            first = records[0]["seq"]
+            if first - 1 in wanted:
+                hashes[first - 1] = records[0]["prev_hash"]
+        hashes.update({r["seq"]: r["hash"] for r in records if r["seq"] in wanted})
         result = ledger.verify_records(records, start=start)
         state = (
             "valid" if result["valid"] else f"BROKEN at {result['broken_at']}: {result['problem']}"
         )
         typer.echo(
-            f"{path}: {state}, entries {result.get('first')} to {result.get('last')} "
+            f"{name}: {state}, entries {result.get('first')} to {result.get('last')} "
             f"({result['checked']} checked)"
         )
         if not result["valid"]:
@@ -2778,6 +2833,85 @@ def ledger_verify(
             start = (result["last"], result["head"])
     if start is not None:
         typer.echo(f"last entry {start[0]}, hash {start[1]}")
+    if pack is None and checkpoints is None:
+        typer.echo(
+            "note: only the chain was checked; one rewritten with its hashes worked out again "
+            "holds together. Check it against the time-stamped checkpoints (--checkpoints)."
+        )
+        return
+    found = ledger.check_checkpoints(hashes, points)
+    for problem in found["problems"]:
+        typer.secho(f"BROKEN: {problem}", fg=typer.colors.RED)
+    if found["problems"]:
+        raise typer.Exit(2)
+    if not found["vouched"]:
+        typer.echo(
+            "warning: no checkpoint vouches for these entries, so a rewrite with its hashes "
+            "worked out again wouldn't show"
+        )
+        return
+    last = max(found["vouched"])
+    stamped = [seq for seq, _, answer in points if answer is not None and seq in found["vouched"]]
+    count = len(found["vouched"])
+    typer.echo(
+        f"{count} checkpoint{' vouches' if count == 1 else 's vouch'} for these entries, up to "
+        f"entry {last}{f', {len(stamped)} of them time-stamped' if stamped else ''}"
+    )
+    if start is not None and start[0] > last:
+        typer.echo(
+            f"entries {last + 1} to {start[0]} come after the last checkpoint: nothing outside "
+            "AgentGov vouches for them yet"
+        )
+    if stamped:
+        typer.echo(
+            "check each time-stamp's signature, against the authority's certificate, with: "
+            "openssl ts -verify -data checkpoints/N.txt -in checkpoints/N.tsr -CAfile <its CA>"
+        )
+
+
+def _jsonl(data: bytes) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in data.decode().splitlines() if line.strip()]
+
+
+def _pack_files(path: Path) -> dict[str, bytes]:
+    """An evidence pack's files, from its folder or its zip file."""
+    import zipfile
+
+    if path.is_dir():
+        return {
+            str(f.relative_to(path)).replace(os.sep, "/"): f.read_bytes()
+            for f in path.rglob("*")
+            if f.is_file()
+        }
+    try:
+        with zipfile.ZipFile(path) as z:
+            return {name: z.read(name) for name in z.namelist() if not name.endswith("/")}
+    except (OSError, zipfile.BadZipFile) as exc:
+        _fail(f"cannot read the evidence pack {path}: {exc}")
+
+
+def _folder_files(path: Path) -> dict[str, bytes]:
+    if not path.is_dir():
+        _fail(f"{path} is not a folder of checkpoints")
+    return {f.name: f.read_bytes() for f in path.iterdir() if f.is_file()}
+
+
+def _checkpoint_points(
+    files: dict[str, bytes], *, prefix: str = ""
+) -> list[tuple[int, str, bytes | None]]:
+    """The checkpoints in a set of files: each N.txt statement, with its N.tsr time-stamp."""
+    from agentgov import ledger
+
+    points = []
+    for name, data in files.items():
+        if not name.startswith(prefix) or not name.endswith(".txt"):
+            continue
+        try:
+            seq, hash_ = ledger.read_statement(data)
+        except ValueError:
+            continue
+        points.append((seq, hash_, files.get(name.removesuffix(".txt") + ".tsr")))
+    return points
 
 
 @ledger_app.command("checkpoints")
@@ -2987,18 +3121,39 @@ def apikeys_list() -> None:
     """List API keys (never the keys themselves)."""
     rows = _call("GET", "/v1/apikeys")
     for r in rows:
-        r["status"] = "revoked" if r["revoked_at"] else "active"
-    _table(rows, ["id", "name", "role", "prefix", "status", "created_at", "last_used_at"])
+        r["expires_at"] = r.get("expires_at") or "never"
+    _table(
+        rows, ["id", "name", "role", "prefix", "status", "created_at", "last_used_at", "expires_at"]
+    )
 
 
 @apikeys_app.command("create")
 def apikeys_create(
     name: str,
     role: str = typer.Option(..., help="admin, approver, secops, auditor, registrar or service."),
+    expires_in: int | None = typer.Option(
+        None, "--expires-in", help="Days it works (AGENTGOV_API_KEY_DAYS by default)."
+    ),
+    no_expiry: bool = typer.Option(
+        False, "--no-expiry", help="It works until it is revoked, where keys may."
+    ),
+    team: str | None = typer.Option(
+        None, "--team", help="Its role for this team's agents only (not for service)."
+    ),
 ) -> None:
     """Create a key. It is printed once, on standard output, and only its hash is kept."""
-    key = _call("POST", "/v1/apikeys", json={"name": name, "role": role})
-    typer.echo(f"apikey/{key['id']} ({key['role']}) created for {key['name']}.", err=True)
+    if expires_in is not None and no_expiry:
+        _fail("give --expires-in or --no-expiry, not both")
+    body: dict[str, Any] = {"name": name, "role": role}
+    if team:
+        body["team"] = team
+    if no_expiry:
+        body["expires_in_days"] = None
+    elif expires_in is not None:
+        body["expires_in_days"] = expires_in
+    key = _call("POST", "/v1/apikeys", json=body)
+    until = f"until {key['expires_at'][:10]}" if key.get("expires_at") else "with no expiry"
+    typer.echo(f"apikey/{key['id']} ({key['role']}) created for {key['name']}, {until}.", err=True)
     typer.echo("Copy the key now; it cannot be shown again:", err=True)
     typer.echo(key["token"])
 
@@ -3024,6 +3179,9 @@ def access_list() -> None:
         )
     if not view["sso_enabled"]:
         typer.echo("note: single sign-on is not set up; people use API keys", err=True)
+    provider = view.get("provider")
+    if provider and provider.get("problem"):
+        typer.echo(f"note: people can't sign in: {provider['problem']}", err=True)
     rows = [
         {**p, "roles": ",".join(p["roles"]) or "-", "sessions": p["active_sessions"]}
         for p in view["people"]
@@ -3059,6 +3217,51 @@ def access_end_session(session_id: str) -> None:
     """End one session (see `agentgov access sessions`)."""
     _call("DELETE", f"/v1/access/sessions/{session_id}")
     _done("session", session_id, "ended")
+
+
+@access_app.command("grants")
+def access_grants() -> None:
+    """The roles given to people in AgentGov, beside those their identity provider gives."""
+    _table(_call("GET", "/v1/access")["grants"], ["email", "role", "granted_by", "granted_at"])
+
+
+@access_app.command("grant")
+def access_grant(
+    email: str = typer.Argument(..., help="The email address they sign in with."),
+    role: str = typer.Argument(
+        ..., help="admin, approver, secops, auditor, registrar, or person (what is sent to them)."
+    ),
+    reason: str | None = typer.Option(None, "--reason", help="Why, for the ledger."),
+    team: str | None = typer.Option(
+        None,
+        "--team",
+        help="For this team's agents only: their issues, approvals and ledger entries "
+        "(not for person).",
+    ),
+) -> None:
+    """Give a person an AgentGov role, from their next sign-in: for identity providers whose
+    tokens carry no groups (Google's), and the first administrators. With --team, for one
+    team's agents only (docs/administration.md#roles-for-one-team)."""
+    body: dict[str, Any] = {"email": email, "role": role}
+    if reason:
+        body["reason"] = reason
+    if team:
+        body["team"] = team
+    out = _call("POST", "/v1/access/grants", json=body)
+    _done("role", f"{out['role']} for {out['email']}", "given")
+
+
+@access_app.command("revoke")
+def access_revoke(
+    email: str = typer.Argument(..., help="The email address the role was given to."),
+    role: str = typer.Argument(..., help="The role to take away."),
+    team: str | None = typer.Option(None, "--team", help="The team it was given for."),
+) -> None:
+    """Take away a role given in AgentGov. The person's sessions end with it."""
+    if team:
+        role = f"{role}@{team}"
+    out = _call("DELETE", f"/v1/access/grants/{quote(email, safe='')}/{quote(role, safe='')}")
+    _done("role", f"{role} for {email}", f"taken away ({out['ended']} sessions ended)")
 
 
 # ----------------------------------------------------------------- platforms

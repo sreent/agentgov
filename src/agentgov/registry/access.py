@@ -1,25 +1,35 @@
-"""Who has access: the people who sign in through single sign-on, and their sessions.
+"""Who has access: the people who sign in through single sign-on, their sessions, and
+the roles given to people in AgentGov.
 
 People are derived from the evidence ledger's ``admin.login`` and
 ``admin.login_denied`` entries, so the list needs no state of its own and
 always matches the record. Sessions are the live server-side sessions; ending
 one forces a fresh sign-in, which reads the person's roles from the identity
 provider again.
+
+Roles usually come from the identity provider. Some providers' tokens carry no groups
+(Google's), and a new deployment needs its first administrators: an administrator can
+give a person a role in AgentGov, by the email address the provider vouches for, which
+applies from their next sign-in, beside the provider's.
 """
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
-from agentgov.models import AdminSession, LedgerEntry
-from agentgov.registry.errors import NotFound
+from agentgov.identity.sso import GIVABLE, TEAM_ROLES, for_team
+from agentgov.models import AdminSession, LedgerEntry, RoleGrant
+from agentgov.registry import teams
+from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
 SIGN_IN_EVENTS = ("admin.login", "admin.login_denied")
+EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def live_sessions(session: Session) -> list[AdminSession]:
@@ -128,3 +138,107 @@ def sign_out(session: Session, subject: str, *, actor: str) -> int:
     """End every session of one person; returns how many were ended."""
     records = list(session.scalars(select(AdminSession).where(AdminSession.subject == subject)))
     return _end(session, records, actor=actor)
+
+
+# ------------------------------------------------------------- roles given here
+
+
+def _email(value: str) -> str:
+    email = (value or "").strip().lower()
+    if not EMAIL.match(email):
+        raise ValidationError(f"{value!r} is not an email address")
+    return email
+
+
+def grant_to_dict(grant: RoleGrant) -> dict[str, Any]:
+    return {
+        "id": grant.id,
+        "email": grant.email,
+        "role": grant.role,
+        "granted_by": grant.granted_by,
+        "reason": grant.reason,
+        "granted_at": ids.isoformat(grant.created_at),
+    }
+
+
+def grants(session: Session) -> list[RoleGrant]:
+    return list(session.scalars(select(RoleGrant).order_by(RoleGrant.email, RoleGrant.role)))
+
+
+def team_role(session: Session, role: Any, team: Any, allowed: tuple[str, ...]) -> str:
+    """``role``, held for team ``team`` when one is given (``approver@sales``): one of
+    ``allowed``, and for a team, one of the roles that can be held for a team, and a team
+    there is."""
+    if not isinstance(role, str) or role not in allowed:
+        raise ValidationError(f"role must be one of {', '.join(allowed)}")
+    if team in (None, ""):
+        return role
+    if role not in TEAM_ROLES:
+        raise ValidationError(
+            f"the {role} role is for every team: one team takes {', '.join(TEAM_ROLES)}"
+        )
+    name = teams.reference(session, team)
+    return for_team(role, str(name))
+
+
+def grant(
+    session: Session,
+    email: str,
+    role: str,
+    *,
+    actor: str,
+    reason: str | None = None,
+    team: str | None = None,
+) -> RoleGrant:
+    """Give a person an AgentGov role, from their next sign-in: for every team, or for
+    ``team``'s agents only."""
+    email = _email(email)
+    role = team_role(session, role, team, GIVABLE)
+    existing = session.scalar(
+        select(RoleGrant).where(RoleGrant.email == email, RoleGrant.role == role)
+    )
+    if existing is not None:
+        raise Conflict(f"{email} already has the {role} role in AgentGov")
+    record = RoleGrant(
+        id=ids.new_id(ids.ROLE_GRANT),
+        email=email,
+        role=role,
+        granted_by=actor,
+        reason=(reason or "").strip() or None,
+    )
+    session.add(record)
+    session.flush()
+    ledger.append(
+        session,
+        type="access.role_granted",
+        actor=actor,
+        resource=email,
+        reason=record.reason,
+        details={"email": email, "role": role},
+    )
+    return record
+
+
+def revoke(session: Session, email: str, role: str, *, actor: str) -> list[str]:
+    """Take a role given in AgentGov away, and end the person's sessions, so that it no
+    longer applies; returns the IDs of the sessions ended."""
+    email = _email(email)
+    record = session.scalar(
+        select(RoleGrant).where(RoleGrant.email == email, RoleGrant.role == role)
+    )
+    if record is None:
+        raise NotFound(f"{email} has no {role} role given in AgentGov")
+    session.delete(record)
+    ledger.append(
+        session,
+        type="access.role_revoked",
+        actor=actor,
+        resource=email,
+        severity="warning",
+        details={"email": email, "role": role},
+    )
+    theirs = list(
+        session.scalars(select(AdminSession).where(func.lower(AdminSession.name) == email))
+    )
+    _end(session, theirs, actor=actor)
+    return [r.id for r in theirs]

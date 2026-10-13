@@ -6,6 +6,7 @@ import fnmatch
 import json
 from collections import Counter, defaultdict
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -16,6 +17,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import func, select
 
 from agentgov import ids, ledger, witness
+from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.models import (
     DELETED,
@@ -62,10 +64,14 @@ def _rt(request: Request) -> Any:
 
 @router.get("/approvals", tags=["approvals"])
 def list_approvals(
-    request: Request, status: str | None = None, _: Principal = Depends(read)
+    request: Request, status: str | None = None, principal: Principal = Depends(reach.read)
 ) -> list[dict[str, Any]]:
+    """The newest approval requests: for someone with roles for some teams only, their
+    agents'."""
     with _rt(request).db.session() as s:
-        return [approvals.to_dict(r) for r in approvals.list_requests(s, status=status)]
+        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        rows = approvals.list_requests(s, status=status, agent_ids=reached)
+        return reach.mark([approvals.to_dict(r) for r in rows], s, principal, "agent_id")
 
 
 @router.get("/inbox", tags=["approvals"])
@@ -75,7 +81,13 @@ def get_inbox(request: Request, principal: Principal = Depends(signed_in)) -> di
     accepted, and, for administrators, agents and tool servers waiting for approval,
     changed tool definitions, and agents found on platforms that nobody has reviewed."""
     with _rt(request).db.session() as s:
-        return inbox.gather(s, principal)
+        waiting = inbox.gather(s, principal, roles_at=reach.by_agent(s, principal))
+        # Who they are where each one's agent is, for the admin UI's buttons.
+        about = {"calls": "agent_id", "access": "agent_id", "risks": "agent_id", "agents": "id"}
+        for kind in waiting["kinds"]:
+            if kind["kind"] in about:
+                reach.mark(kind["items"], s, principal, about[kind["kind"]])
+        return waiting
 
 
 @router.get("/me/approvals", tags=["approvals"])
@@ -95,12 +107,11 @@ def get_approval(
 ) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         req = approvals.get(s, approval_id)
-        # Everyone who reads AgentGov, and the person it was sent to.
-        if not principal.roles & set(READ_ROLES) and not approvals.may_decide(
-            req, principal.roles, principal.subject
-        ):
+        # Everyone who reads AgentGov (where its agent is), and the person it was sent to.
+        roles = reach.roles_at(s, principal, s.get(Agent, req.agent_id))
+        if not roles & set(READ_ROLES) and not approvals.may_decide(req, roles, principal.subject):
             raise HTTPException(403, f"role {principal.role!r} may not do this")
-        return approvals.to_dict(req)
+        return reach.mark([approvals.to_dict(req)], s, principal, "agent_id")[0]
 
 
 @router.post("/approvals/{approval_id}/{verdict}", tags=["approvals"])
@@ -115,10 +126,12 @@ def decide_approval(
         raise HTTPException(404, "verdict must be approve or deny")
     with _rt(request).db.session() as s:
         req = approvals.get(s, approval_id)
+        # Their roles where its agent is: an approver for its team decides it.
+        here = reach.here(s, principal, s.get(Agent, req.agent_id))
         secops = handoff.at_least(s, handoff.DECIDE)
-        if not approvals.may_decide(req, principal.roles, principal.subject, secops=secops):
+        if not approvals.may_decide(req, here.roles, principal.subject, secops=secops):
             if req.deciders != approvals.PERSON:
-                handoff.check(s, principal, handoff.DECIDE, also=("approver",))
+                handoff.check(s, here, handoff.DECIDE, also=("approver",))
             who = (
                 f"{req.on_behalf_of}, whom the agent acted for,"
                 if req.deciders == approvals.PERSON
@@ -169,11 +182,12 @@ def list_findings(
     asked: bool = False,
     limit: int = 500,
     offset: int = 0,
-    _: Principal = Depends(read),
+    principal: Principal = Depends(reach.read),
 ) -> list[dict[str, Any]]:
     """The findings, newest first, a page at a time (``limit``, at most 2000, from
     ``offset``); ``X-Total-Count`` says how many there are in all. ``asked``: only those
-    whose people ask for their risk to be accepted."""
+    whose people ask for their risk to be accepted. For someone with roles for some teams
+    only, those about their agents."""
     if not 1 <= limit <= MAX_FINDINGS_PAGE or offset < 0:
         raise ValidationError(f"limit is 1 to {MAX_FINDINGS_PAGE}, and offset 0 or more")
     with _rt(request).db.session() as s:
@@ -185,7 +199,10 @@ def list_findings(
         if type:
             conditions.append(Finding.type == type)
         if agent:
-            conditions.append(Finding.agent_id == agents.get(s, agent).id)
+            conditions.append(Finding.agent_id == reach.agent(s, principal, agent).id)
+        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        if reached is not None:
+            conditions.append(Finding.agent_id.in_(reached))
         if asked:
             conditions.append(Finding.details[issues.ASKED].as_string().is_not(None))
         total = s.scalar(select(func.count()).select_from(Finding).where(*conditions))
@@ -197,7 +214,7 @@ def list_findings(
             .limit(limit)
             .offset(offset)
         )
-        return [findings.to_dict(f) for f in s.scalars(stmt)]
+        return reach.mark([findings.to_dict(f) for f in s.scalars(stmt)], s, principal, "agent_id")
 
 
 def _triages(session: Any, principal: Principal) -> bool:
@@ -205,6 +222,23 @@ def _triages(session: Any, principal: Principal) -> bool:
     return bool(principal.roles & {"admin", "approver"}) or (
         "secops" in principal.roles and handoff.at_least(session, handoff.TRIAGE)
     )
+
+
+def _where(session: Any, principal: Principal, finding: Any) -> Principal:
+    """``principal`` as it is where the finding's agent is (reach.here)."""
+    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
+    return reach.here(session, principal, agent)
+
+
+def _triage(session: Any, principal: Principal, finding: Any) -> Principal:
+    """Refuse whoever doesn't triage ``finding``: approvers and administrators, and the
+    secops role as far as the hand-off lets it, for every team or the finding's agent's.
+    Who they are there."""
+    here = _where(session, principal, finding)
+    if not here.roles & {"admin", "approver", "secops"}:
+        raise HTTPException(403, f"role {principal.role!r} may not do this")
+    handoff.check(session, here, handoff.TRIAGE, also=("approver",))
+    return here
 
 
 @router.get("/me/issues", tags=["findings"])
@@ -228,10 +262,10 @@ def get_finding(
     with _rt(request).db.session() as s:
         finding = findings.get(s, finding_id)
         mine = issues.may_act(s, finding, principal.name)
-        if not principal.roles & set(READ_ROLES) and not mine:
+        if not _where(s, principal, finding).roles & set(READ_ROLES) and not mine:
             raise HTTPException(403, f"role {principal.role!r} may not do this")
         agent = s.get(Agent, finding.agent_id) if finding.agent_id else None
-        return {
+        row = {
             **findings.to_dict(finding),
             "agent_name": agent.name if agent else None,
             "chain": issues.describe(s, finding),
@@ -240,6 +274,7 @@ def get_finding(
             "history": [ledger.to_dict(e) for e in issues.history(s, finding)],
             "yours": mine,
         }
+        return reach.mark([row], s, principal, "agent_id")[0]
 
 
 @router.post("/findings/{finding_id}/acknowledge", tags=["findings"])
@@ -250,7 +285,8 @@ def acknowledge_finding(
     approvers and administrators (and the secops role from triage on)."""
     with _rt(request).db.session() as s:
         finding = findings.get(s, finding_id)
-        if not _triages(s, principal) and not issues.may_act(s, finding, principal.name):
+        here = _where(s, principal, finding)
+        if not _triages(s, here) and not issues.may_act(s, finding, principal.name):
             raise HTTPException(
                 403, "the people it went to, approvers and administrators acknowledge it"
             )
@@ -262,7 +298,7 @@ def accept_finding(
     request: Request,
     finding_id: str,
     body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(require("approver", "secops")),
+    principal: Principal = Depends(reach.require("approver", "secops")),
 ) -> dict[str, Any]:
     """Accept the risk until a date (``until``: a date, a time or a number of days), saying
     why (``reason``): it goes to nobody until then, and opens again then if it still
@@ -271,8 +307,8 @@ def accept_finding(
     if unknown:
         raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
     with _rt(request).db.session() as s:
-        handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
         finding = findings.get(s, finding_id)
+        _triage(s, principal, finding)
         accepted = issues.accept(
             s,
             finding,
@@ -347,13 +383,13 @@ def decline_exception(
     request: Request,
     finding_id: str,
     body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(require("approver", "secops")),
+    principal: Principal = Depends(reach.require("approver", "secops")),
 ) -> dict[str, Any]:
     """Turn down a request to accept an issue's risk, saying why (``reason``): it stays
     with whoever asked, to fix."""
     with _rt(request).db.session() as s:
-        handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
         finding = findings.get(s, finding_id)
+        _triage(s, principal, finding)
         declined = issues.decline_exception(
             s, finding, actor=principal.actor, reason=body.get("reason")
         )
@@ -370,7 +406,7 @@ def recheck_finding(
     rt = _rt(request)
     with rt.db.session() as s:
         finding = findings.get(s, finding_id)
-        if not _triages(s, principal):
+        if not _triages(s, _where(s, principal, finding)):
             _theirs(s, finding, principal, "ask for it to be checked again")
     try:
         return rt.recheck(finding_id, actor=principal.actor)
@@ -395,10 +431,20 @@ def bulk_findings(
     action = str(body.get("action") or "")
     with _rt(request).db.session() as s:
         triages = _triages(s, principal)
-        if action in bulk.FINDING_ACTIONS and action != "acknowledge":
+        # Roles for some teams only triage those teams' issues.
+        some = set(principal.teams) & {"admin", "approver", "secops"}
+        if action in bulk.FINDING_ACTIONS and action != "acknowledge" and not some:
             if not principal.roles & {"admin", "approver", "secops"}:
                 raise HTTPException(403, f"role {principal.role!r} may not do this")
             handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
+        at = reach.by_agent(s, principal)
+
+        def may(f: Finding) -> bool:
+            here = principal if not some else replace(principal, roles=at(f.agent_id))
+            if _triages(s, here):
+                return True
+            return action == "acknowledge" and issues.may_act(s, f, principal.name)
+
         return bulk.findings(
             s,
             body.get("findings"),
@@ -407,7 +453,7 @@ def bulk_findings(
             by=principal.name,
             reason=body.get("reason"),
             until=body.get("until"),
-            may=None if triages else (lambda f: issues.may_act(s, f, principal.name)),
+            may=None if triages else may,
         )
 
 
@@ -416,7 +462,7 @@ def dismiss_finding(
     request: Request,
     finding_id: str,
     body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(require("approver", "secops")),
+    principal: Principal = Depends(reach.require("approver", "secops")),
 ) -> dict[str, Any]:
     """Dismiss a finding that is wrong, saying why (``reason``); with ``until`` (a date, a
     time or a number of days), it opens again then if it still holds."""
@@ -424,8 +470,8 @@ def dismiss_finding(
     if unknown:
         raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
     with _rt(request).db.session() as s:
-        handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
         finding = findings.get(s, finding_id)
+        _triage(s, principal, finding)
         until = body.get("until")
         dismissed = findings.dismiss(
             s,
@@ -442,7 +488,7 @@ def finding_action(
     request: Request,
     finding_id: str,
     action: str,
-    principal: Principal = Depends(require("approver", "secops")),
+    principal: Principal = Depends(reach.require("approver", "secops")),
 ) -> dict[str, Any]:
     status = {"resolve": "resolved", "reopen": "open"}.get(action)
     if status is None:
@@ -453,7 +499,7 @@ def finding_action(
         )
     with _rt(request).db.session() as s:
         # The security team's tools, as far as the hand-off lets them.
-        handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
+        _triage(s, principal, findings.get(s, finding_id))
         return findings.to_dict(findings.set_status(s, finding_id, status, principal.actor))
 
 
@@ -477,14 +523,19 @@ def list_ledger(
     decision: str | None = None,
     before_seq: int | None = None,
     limit: int = 100,
-    _: Principal = Depends(read),
+    principal: Principal = Depends(reach.read),
 ) -> list[dict[str, Any]]:
+    """The newest entries first: for someone with roles for some teams only, those about
+    their agents."""
     with _rt(request).db.session() as s:
         stmt = select(LedgerEntry).order_by(LedgerEntry.seq.desc()).limit(min(max(limit, 1), 500))
+        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        if reached is not None:
+            stmt = stmt.where(LedgerEntry.agent_id.in_(reached))
         if type:
             stmt = stmt.where(LedgerEntry.type.like(type.replace("*", "%")))
         if agent:
-            stmt = stmt.where(LedgerEntry.agent_id == agents.get(s, agent).id)
+            stmt = stmt.where(LedgerEntry.agent_id == reach.agent(s, principal, agent).id)
         if user:
             # The person an agent acted for.
             stmt = stmt.where(LedgerEntry.on_behalf_of == user)

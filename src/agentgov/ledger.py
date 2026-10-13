@@ -12,8 +12,10 @@ database goes on from it, and :func:`verify_records` checks the archives offline
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -23,7 +25,7 @@ from typing import Any
 from sqlalchemy import event, select, update
 from sqlalchemy.orm import Session, SessionTransaction
 
-from agentgov import db, ids
+from agentgov import db, ids, timestamping
 from agentgov.db import mark_changed
 from agentgov.models import Agent, LedgerCheckpoint, LedgerEntry, LedgerHead
 
@@ -249,7 +251,42 @@ def verify(session: Session, *, start: tuple[int, str] | None = None) -> dict[st
             "broken_at": checked + 1,
             "problem": "chain head does not match the last entry (entries removed?)",
         }
-    return {"valid": True, "checked": checked, "broken_at": None, "head": prev, "from": floor[0]}
+    # A chain rewritten with its hashes worked out again holds together: the checkpoints
+    # made before, time-stamped by an authority, don't.
+    since = start[0] if start is not None and start[0] >= floor[0] else floor[0]
+    points = list(
+        session.scalars(
+            select(LedgerCheckpoint).where(
+                LedgerCheckpoint.seq > since, LedgerCheckpoint.seq <= checked
+            )
+        )
+    )
+    hashes = dict(
+        session.execute(
+            select(LedgerEntry.seq, LedgerEntry.hash).where(
+                LedgerEntry.seq.in_([p.seq for p in points])
+            )
+        ).all()
+    )
+    found = check_checkpoints(
+        hashes,
+        [(p.seq, p.hash, base64.b64decode(p.timestamp) if p.timestamp else None) for p in points],
+    )
+    if found["problems"]:
+        return {
+            "valid": False,
+            "checked": checked,
+            "broken_at": None,
+            "problem": found["problems"][0],
+        }
+    return {
+        "valid": True,
+        "checked": checked,
+        "broken_at": None,
+        "head": prev,
+        "from": floor[0],
+        "checkpoints": len(found["vouched"]),
+    }
 
 
 def verify_records(records: Any, *, start: tuple[int, str] | None = None) -> dict[str, Any]:
@@ -288,6 +325,48 @@ def verify_records(records: Any, *, start: tuple[int, str] | None = None) -> dic
 def statement(seq: int, hash_: str) -> bytes:
     """What a time-stamping authority signs for a checkpoint: the head it vouches for."""
     return f"agentgov ledger checkpoint seq={seq} hash={hash_}\n".encode()
+
+
+STATEMENT = re.compile(r"^agentgov ledger checkpoint seq=(\d+) hash=([0-9a-f]{64})\n?$")
+
+
+def read_statement(data: bytes) -> tuple[int, str]:
+    """A checkpoint's statement: ``(seq, hash)``."""
+    found = STATEMENT.match(data.decode("utf-8", "replace"))
+    if found is None:
+        raise ValueError("not a checkpoint statement")
+    return int(found[1]), found[2]
+
+
+def check_checkpoints(
+    hashes: dict[int, str], points: list[tuple[int, str, bytes | None]]
+) -> dict[str, Any]:
+    """Entries (their hashes, by seq) against checkpoints ``(seq, hash, time-stamp)``.
+
+    A chain that holds together can still have been rewritten, with every hash after the
+    change worked out again. The checkpoints were made before: each one the entries reach
+    must name its entry's hash, and its time-stamp, if it has one, must cover its statement
+    (the authority's signature is checked with ``openssl ts -verify``). Returns the
+    checkpoints that vouch for the entries, and the problems found."""
+    vouched, problems = [], []
+    for seq, hash_, answer in sorted(points):
+        if answer is not None:
+            digest = hashlib.sha256(statement(seq, hash_)).digest()
+            try:
+                timestamping.read_response(answer, digest, None)
+            except timestamping.TimestampError as exc:
+                problems.append(f"checkpoint {seq}'s time-stamp doesn't cover it: {exc}")
+                continue
+        if seq not in hashes:
+            continue
+        if hashes[seq] != hash_:
+            problems.append(
+                f"entry {seq} doesn't match checkpoint {seq}: the ledger was changed after the "
+                "checkpoint was made"
+            )
+        else:
+            vouched.append(seq)
+    return {"vouched": vouched, "problems": problems}
 
 
 def checkpoint(session: Session) -> LedgerCheckpoint | None:

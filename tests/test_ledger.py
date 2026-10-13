@@ -184,3 +184,34 @@ def test_the_person_an_agent_acted_for_is_hashed_when_there_is_one(rt) -> None:
         s.execute(update(LedgerEntry).where(LedgerEntry.seq == 1).values(on_behalf_of="mallory"))
     with rt.db.session() as s:
         assert ledger.verify(s)["broken_at"] == 1
+
+
+def _rewrite(s, seq: int, reason: str) -> None:
+    """Edit one entry and work out its hash and every later one's again, head and all:
+    the chain still holds together."""
+    s.execute(update(LedgerEntry).where(LedgerEntry.seq == seq).values(reason=reason))
+    s.expire_all()
+    prev = s.get(LedgerEntry, seq).prev_hash
+    for entry in ledger.iter_entries(s, after=seq - 1):
+        entry.prev_hash = prev
+        entry.hash = prev = ledger.compute_hash(prev, entry)
+    s.execute(update(LedgerHead).where(LedgerHead.id == 1).values(last_hash=prev))
+
+
+def test_a_rewrite_with_its_hashes_worked_out_again_is_caught_by_a_checkpoint(rt) -> None:
+    _append(rt, 4)
+    with rt.db.session() as s:
+        ledger.checkpoint(s)  # entry 4's hash, kept apart
+    _append(rt, 2)
+    with rt.db.session() as s:
+        _rewrite(s, 2, "a denial, now an allow")
+    with rt.db.session() as s:
+        result = ledger.verify(s)
+    assert result["valid"] is False
+    assert result["problem"].startswith("entry 4 doesn't match checkpoint 4")
+    # After the last checkpoint, nothing outside the ledger vouches for the entries yet.
+    _append(rt, 1)
+    with rt.db.session() as s:
+        _rewrite(s, 6, "edited after the checkpoint")
+    with rt.db.session() as s:
+        assert ledger.verify(s, start=(4, s.get(LedgerEntry, 4).hash))["valid"] is True

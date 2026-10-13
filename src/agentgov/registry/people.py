@@ -24,7 +24,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
@@ -115,6 +115,24 @@ def owners_and_sponsors(session: Session) -> set[str]:
 
 def _names(person: Person) -> set[str]:
     return {n.lower() for n in (person.email, person.upn) if n}
+
+
+def aliases(session: Session, name: str | None) -> set[str]:
+    """The names a person goes by, lower case: the one given, and, where the directory knows
+    them by it, their email address and user principal name too. Owners are named by their
+    email address; a person may sign in by their user principal name."""
+    key = (name or "").strip().lower()
+    if not key:
+        return set()
+    found = {key}
+    if "@" in key:
+        for person in session.scalars(
+            select(Person).where(
+                (func.lower(Person.email) == key) | (func.lower(Person.upn) == key)
+            )
+        ):
+            found |= _names(person)
+    return found
 
 
 def wanted(session: Session, now: datetime | None = None, *, limit: int = MAX_LOOKUP) -> list[str]:
@@ -421,12 +439,13 @@ def adopt(
     makers: bool,
     actor: str,
     reason: str | None = None,
+    reached: set[str] | None = None,
 ) -> dict[str, Any]:
     """Adopt agents found on platforms at once, each pending review: with ``makers``, its
     maker on its platform as owner and sponsor, where AgentGov knows them; ``owner`` and
     ``sponsors`` for the others (all of them, without ``makers``). An agent that can't be
     adopted (not waiting to be, or with nobody to own it) is left as it is, and the answer
-    says why."""
+    says why. ``reached``: the agents (by ID) of an administrator for some teams only."""
     if not refs or len(refs) > MAX_ADOPT:
         raise ValidationError(f"name the agents to adopt: one at least, {MAX_ADOPT} at most")
     if not owner and not makers:
@@ -437,6 +456,8 @@ def adopt(
         try:
             agent = agents_svc.get(session, ref)
         except NotFound:
+            agent = None
+        if agent is None or (reached is not None and agent.id not in reached):
             left.append({"agent": ref, "why": "there is no such agent"})
             continue
         if agent.status != DISCOVERED:

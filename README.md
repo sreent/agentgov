@@ -47,7 +47,7 @@ Whether AgentGov replaces Agent 365 depends on where your agents run:
 |---|---|
 | Built and run by you, with any framework or cloud, calling tools over MCP | The whole job: registry, an identity per agent, policy on every tool call and model call, data protection, approvals, a kill switch and an audit trail. For these agents it is an alternative to Agent 365, and the option for organisations that don't use Microsoft 365 |
 | Built in Microsoft 365 Copilot, Copilot Studio or Agent Builder | Works alongside Microsoft's admin centers. These agents don't pass through AgentGov's gateway, so Microsoft carries out the decisions about them. AgentGov lists them, checks their connectors and instructions, and keeps them in the same registry and audit trail as your other agents. With the Microsoft services you have, it also reads their Entra identities, who uses them and Defender's alerts about them; has Power Platform enforce its connector allowlist; decides Copilot Studio agents' tool calls with its own policies; and quarantines or blocks agents as the admin who signed in ([connections](docs/microsoft-connections.md)) |
-| Built on AWS (Amazon Bedrock agents, AgentCore, Amazon Quick, Agent Registry), Google Cloud (Agent Runtime, Agent Registry), Salesforce (Agentforce), Databricks (Model Serving, Agent Bricks, Genie, Unity Catalog's MCP services) or Microsoft Foundry (prompt, hosted and workflow agents) | Reads them into the same registry: each agent's model and tools where its platform reports them, how it checks callers and what it runs as, with risky settings (no guardrail, secrets in its environment, open to anyone, a broad identity) as issues and its instructions checked. AgentGov doesn't change them: stop an agent in its platform ([other platforms](docs/other-platforms.md)) |
+| Built on AWS (Amazon Bedrock agents, AgentCore, Amazon Quick, Agent Registry), Google Cloud (Agent Runtime, Agent Registry), Salesforce (Agentforce), Databricks (Model Serving, Agent Bricks, Genie, Unity Catalog's MCP services) or Microsoft Foundry (prompt, hosted and workflow agents) | Reads them into the same registry: each agent's model and tools where its platform reports them, how it checks callers and what it runs as, with risky settings (no guardrail, secrets in its environment, open to anyone, a broad identity) as issues and its instructions checked. AgentGov doesn't change them: blocked in AgentGov, an agent its platform still runs gets an issue asking its people to stop it there ([other platforms](docs/other-platforms.md)) |
 
 Each Microsoft connection is optional: AgentGov uses the ones it can reach and works
 without the others. Agent 365 matters in three of them, because Microsoft offers them
@@ -55,9 +55,13 @@ only to tenants with an Agent 365 licence: syncing the Microsoft 365 agent catal
 blocking Microsoft 365 agents from AgentGov, and Defender's threat detections for agents.
 Without one, leave them off. Everything else works, including Copilot Studio agents:
 importing or syncing them needs only a Microsoft Entra role that can read the Power
-Platform inventory, such as Power Platform administrator or AI reader, and quarantining
-them needs the AI administrator or Power Platform administrator role
-([details](docs/platforms.md)).
+Platform inventory, such as Power Platform administrator or AI reader. Quarantining them
+from AgentGov also needs an app registration in Entra ID that an administrator who may
+consent for the tenant consents to once, and the AI administrator or Power Platform
+administrator role for the person who quarantines; until then, AgentGov's block is
+recorded in AgentGov only, and an issue asks the agent's people to quarantine it in the
+Power Platform admin center, closing once the inventory shows it quarantined
+([details](docs/platforms.md#blocked-in-agentgov-still-running)).
 
 ## Capabilities
 
@@ -116,9 +120,10 @@ flowchart LR
    control plane uses them to record activity and to discover agents that were never
    registered. The gateway's access logs give each model call's tokens, which the
    control plane counts against the agent's daily budget.
-6. People sign in to the admin UI with single sign-on through the same Keycloak, and
-   their roles decide whether they administer agents, approve requests, work in security
-   operations or only audit.
+6. People sign in to the admin UI with single sign-on, through the same Keycloak or
+   your own identity provider (Microsoft Entra ID, Okta, Google or any OpenID Connect
+   provider), and their roles decide whether they administer agents, approve requests,
+   work in security operations or only audit: for every team, or for one team's agents.
 
 [Architecture](docs/architecture.md) covers the design in detail: sequence diagrams,
 trust boundaries, failure modes and scaling.

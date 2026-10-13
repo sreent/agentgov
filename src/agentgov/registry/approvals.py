@@ -167,12 +167,18 @@ def get(session: Session, approval_id: str) -> ApprovalRequest:
 
 
 def list_requests(
-    session: Session, status: str | None = None, limit: int = 200
+    session: Session,
+    status: str | None = None,
+    limit: int = 200,
+    agent_ids: set[str] | None = None,
 ) -> list[ApprovalRequest]:
+    """The newest requests; with ``agent_ids``, those agents' only."""
     _expire_stale(session)
     stmt = select(ApprovalRequest).order_by(ApprovalRequest.requested_at.desc()).limit(limit)
     if status:
         stmt = stmt.where(ApprovalRequest.status == status)
+    if agent_ids is not None:
+        stmt = stmt.where(ApprovalRequest.agent_id.in_(agent_ids))
     return list(session.scalars(stmt))
 
 

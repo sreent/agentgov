@@ -214,6 +214,10 @@
       {
         "name": "agentgov-registrar",
         "description": "AgentGov: submit agents and tool servers for review"
+      },
+      {
+        "name": "agentgov-person",
+        "description": "AgentGov: sign in to see only the issues and approval requests sent to you (agents' owners and sponsors)"
       }
     ]
   }

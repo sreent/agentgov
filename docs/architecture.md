@@ -197,7 +197,9 @@ take turns rather than deadlock. Each edit's entry says what it changed, from wh
 (`details.changes`; text longer than a thousand characters by its length and SHA-256), and
 a policy's holds the policy as it then became, so the ledger keeps every version that was in
 force. `GET /v1/ledger/verify` recomputes the chain and reports the first broken entry
-(edited, deleted or truncated). The overview's integrity badge checks new entries as they
+(edited, deleted or truncated). A chain rewritten with every hash worked out again would
+still link up, so it also checks the entries against the checkpoints made before, and each
+checkpoint's time-stamp against its statement. The overview's integrity badge checks new entries as they
 arrive and re-verifies the whole chain every five minutes. `GET /v1/ledger/export`
 streams the ledger as JSON Lines for offline verification
 (`agentgov ledger verify --file`). Every day the chain's head is kept as a checkpoint,
@@ -230,7 +232,7 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | Components → control plane | Mutual TLS on the control plane's internal port, where a component's certificate is its proof (with SPIRE, only the components it names, by their SPIFFE IDs); the service role is no use on the public port, by the service token or an API key. Admin API keys are scoped by role |
 | Copilot Studio → control plane (threat detection) | The only endpoint meant for the internet: a token that Microsoft Entra ID signed (RS256, keys from the tenant's JWKS) for the configured tenant and AgentGov's API, issued to an allowed caller app; anything else gets 401 |
 | Control plane → Microsoft | AgentGov's app registration (client credentials, read-only Graph permissions) on a schedule; Power Platform and Graph admin actions only as a signed-in admin, with their delegated token |
-| Admins → control plane | Single sign-on: OIDC authorization code flow with PKCE, run by the control plane as a confidential client; the session stays server-side and the browser holds only an HttpOnly, `SameSite=Strict` cookie; writes also need an `X-AgentGov-CSRF` header. Provider roles map to `admin`, `approver`, `secops`, `auditor` and `registrar` (people without one sign in as `person` while `approvals-by-person` is on). A session ends when the provider's does: its signed logout token, posted to `/auth/backchannel-logout`, ends the sessions from it ([administration](administration.md#signing-out-everywhere)). Automation uses role-scoped API keys; the bootstrap admin token is for break-glass access |
+| Admins → control plane | Single sign-on: OIDC authorization code flow with PKCE, run by the control plane as a confidential client; the session stays server-side and the browser holds only an HttpOnly, `SameSite=Strict` cookie; writes also need an `X-AgentGov-CSRF` header. Provider roles map to `admin`, `approver`, `secops`, `auditor`, `registrar` and `person` (people without a role sign in as `person` while issues or `approvals-by-person` go to people, unless only people with a role may sign in). A session ends when the provider's does: its signed logout token, posted to `/auth/backchannel-logout`, ends the sessions from it ([administration](administration.md#signing-out-everywhere)). Automation uses role-scoped API keys; the bootstrap admin token is for break-glass access |
 
 | Failure | Behaviour |
 |---|---|

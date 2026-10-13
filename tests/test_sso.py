@@ -250,6 +250,22 @@ class TestSignIn:
         events = [e["type"] for e in sso.get("/v1/ledger", headers=ADMIN).json()]
         assert events[:2] == ["admin.logout", "admin.login"]
 
+    def test_back_to_the_page_the_link_was_for(self, sso, provider) -> None:
+        # An email links to an issue: once signed in, the person is there, not on a list.
+        start = sso.get(
+            "/auth/login", params={"next": "#/findings/fnd_123"}, follow_redirects=False
+        )
+        state, code = provider.authorize(start.headers["location"], roles=["agentgov-admin"])
+        back = sso.get(
+            "/auth/callback", params={"state": state, "code": code}, follow_redirects=False
+        )
+        assert back.headers["location"] == "/ui/#/findings/fnd_123"
+        # Only a page of the UI: anywhere else is refused before the sign-in starts.
+        for elsewhere in ("https://evil.test/", "//evil.test", "#//evil.test\\x"):
+            refused = sso.get("/auth/login", params={"next": elsewhere}, follow_redirects=False)
+            assert refused.status_code == 422, elsewhere
+        assert sign_in(sso, provider, roles=["agentgov-admin"]).headers["location"] == "/ui/"
+
     def test_the_session_probe_always_answers(self, sso, provider) -> None:
         assert sso.get("/auth/session").json() == {"signed_in": False}
         sign_in(sso, provider, roles=["agentgov-auditor"])
@@ -458,7 +474,15 @@ class TestAccess:
 
     def test_available_without_single_sign_on(self, client) -> None:
         view = client.get("/v1/access", headers=ADMIN).json()
-        assert view == {"sso_enabled": False, "bootstrap_token": True, "people": [], "sessions": []}
+        assert view == {
+            "sso_enabled": False,
+            "bootstrap_token": True,
+            "provider": None,
+            "people": [],
+            "sessions": [],
+            "grants": [],
+            "api_keys": {"default_days": 90, "max_days": 0},
+        }
 
 
 def _check(client: TestClient, sub: str, username: str) -> dict[str, Any]:
@@ -931,3 +955,81 @@ class TestBackChannelLogout:
     def test_without_single_sign_on_there_is_nothing_to_end(self, client) -> None:
         resp = client.post("/auth/backchannel-logout", data={"logout_token": "x"})
         assert resp.status_code == 404
+
+
+class TestOnlyPeopleWithARole:
+    """AGENTGOV_OIDC_REQUIRE_ROLE: people the provider signs in with no role are refused,
+    unless they are given the person role (by the provider or in AgentGov)."""
+
+    @staticmethod
+    def client(settings: Settings, provider: FakeProvider, **overrides: Any) -> TestClient:
+        settings = settings.with_overrides(**overrides)
+        transport = httpx.MockTransport(provider.handle)
+        runtime = Runtime(settings, oidc_http=httpx.Client(transport=transport))
+        return TestClient(create_app(settings, runtime=runtime, background=False))
+
+    def test_people_without_a_role_are_refused(self, sso_settings, provider) -> None:
+        with self.client(sso_settings, provider, oidc_require_role=True) as client:
+            assert error_code(sign_in(client, provider, roles=[])) == "no_role"
+            assert client.get("/v1/me").status_code == 401
+            signing_in = client.get("/v1/access", headers=ADMIN).json()["provider"]
+            assert (signing_in["require_role"], signing_in["without_role"]) == (True, None)
+            # With a role, as ever.
+            assert sign_in(client, provider, roles=["agentgov-auditor"]).headers["location"] == (
+                "/ui/"
+            )
+            assert client.get("/v1/me").json()["roles"] == ["auditor"]
+
+    def test_the_person_role_lets_owners_and_sponsors_in(self, sso_settings, provider) -> None:
+        with self.client(sso_settings, provider, oidc_require_role=True) as client:
+            assert sign_in(client, provider, roles=["agentgov-person"]).headers["location"] == (
+                "/ui/"
+            )
+            assert client.get("/v1/me").json()["roles"] == ["person"]
+            # The person role adds nothing to a role they have.
+            client.cookies.clear()
+            sign_in(client, provider, roles=["agentgov-person", "agentgov-approver"])
+            assert client.get("/v1/me").json()["roles"] == ["approver"]
+
+    def test_given_in_agentgov(self, sso_settings, provider) -> None:
+        with self.client(sso_settings, provider, oidc_require_role=True) as client:
+            body = {"email": "alice@example.com", "role": "person", "reason": "owns agents"}
+            resp = client.post("/v1/access/grants", json=body, headers=ADMIN)
+            assert resp.status_code == 201, resp.text
+            assert sign_in(client, provider, roles=[]).headers["location"] == "/ui/"
+            assert client.get("/v1/me").json()["roles"] == ["person"]
+            login = client.get("/v1/ledger", params={"type": "admin.login"}, headers=ADMIN)
+            assert login.json()[0]["details"]["given_in_agentgov"] == ["person"]
+
+    def test_mapped_from_a_group(self, sso_settings, provider) -> None:
+        with self.client(
+            sso_settings,
+            provider,
+            oidc_require_role=True,
+            oidc_role_map="Agent owners=person,Platform team=admin",
+        ) as client:
+            sign_in(client, provider, roles=["Agent owners"])
+            assert client.get("/v1/me").json()["roles"] == ["person"]
+        with pytest.raises(ValueError, match="person"):
+            Settings(oidc_role_map="Agent owners=owner").oidc_role_pairs()
+
+    def test_sessions_without_a_role_end_once_one_is_required(self, sso_settings, provider) -> None:
+        # While anyone may sign in, someone without a role does: their session has none.
+        with self.client(sso_settings, provider) as anyone:
+            sign_in(anyone, provider, sub="user-1", roles=[])
+            assert anyone.get("/v1/me").json()["roles"] == ["person"]
+            signing_in = anyone.get("/v1/access", headers=ADMIN).json()["provider"]
+            assert (signing_in["require_role"], signing_in["without_role"]) == (False, "person")
+            sign_in(
+                anyone, provider, sub="user-2", email="bob@example.com", roles=["agentgov-person"]
+            )
+            bob = anyone.cookies.get("agentgov_session")
+            anyone.cookies.clear()
+            sign_in(anyone, provider, sub="user-1", roles=[])
+            alice = anyone.cookies.get("agentgov_session")
+        # Then only people with a role may: alice's session ends; bob was given his.
+        with self.client(sso_settings, provider, oidc_require_role=True) as strict:
+            strict.cookies.set("agentgov_session", alice)
+            assert strict.get("/v1/me").status_code == 401
+            strict.cookies.set("agentgov_session", bob)
+            assert strict.get("/v1/me").json()["roles"] == ["person"]

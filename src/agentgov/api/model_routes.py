@@ -7,11 +7,13 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy import select
 
+from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.api.versions import if_match
 from agentgov.models import Agent
-from agentgov.registry import agents, model_providers, model_usage
+from agentgov.registry import model_providers, model_usage
 from agentgov.registry.errors import NotFound
+from agentgov.registry.validation import known_fields
 from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1/models", tags=["models"])
@@ -31,6 +33,7 @@ def create_provider(
 ) -> dict[str, Any]:
     """Approve a model provider; agents call it at ``/llm/<name>`` once the gateway can
     read its API key (``key_file``)."""
+    known_fields(body, {"name", *model_providers.FIELDS}, "a model provider")
     with request.app.state.rt.db.session() as s:
         return model_providers.to_dict(model_providers.create(s, body, actor=principal.actor))
 
@@ -48,6 +51,7 @@ def update_provider(
     body: dict[str, Any] = Body(...),
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
+    known_fields(body, model_providers.FIELDS, "a model provider's edit")
     with request.app.state.rt.db.session() as s:
         provider = model_providers.get(s, ref)
         model_providers.update(s, provider, body, actor=principal.actor, version=if_match(request))
@@ -80,19 +84,23 @@ def get_usage(
     days: int = 7,
     agent: str | None = None,
     provider: str | None = None,
-    _: Principal = Depends(read),
+    principal: Principal = Depends(reach.read),
 ) -> dict[str, Any]:
     """Calls, tokens and cost per agent, day, provider and model for the last ``days`` days;
     the same added up per owner and per sponsor of the agents; and each agent's tokens
-    today against its budget."""
+    today against its budget. For someone with roles for some teams only, their agents'."""
     with request.app.state.rt.db.session() as s:
-        agent_id = agents.get(s, agent).id if agent else None
+        agent_id = reach.agent(s, principal, agent).id if agent else None
         rows = model_usage.usage(
             s, days=min(max(days, 1), 90), agent_id=agent_id, provider=provider
         )
+        used = model_usage.tokens_used(s)
+        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        if reached is not None:
+            rows = [r for r in rows if r.agent_id in reached]
+            used = {k: v for k, v in used.items() if k in reached}
         ids = {r.agent_id for r in rows}
         names = {a.id: a.name for a in s.scalars(select(Agent).where(Agent.id.in_(ids))).unique()}
-        used = model_usage.tokens_used(s)
         budgets = []
         wanted = set(used) | ({agent_id} if agent_id else set())
         for a in s.scalars(select(Agent).where(Agent.id.in_(wanted))).unique():
