@@ -109,7 +109,7 @@ token = httpx.post(
 **Requiring it.** A blueprint with `require_workload_identity` (admin UI: *Require a
 workload identity*; CLI: `--require-workload-identity`) has agents that can't be
 activated without a workload identity, nor have it taken away while active. Active agents
-that predate the requirement show up as findings (*authenticates with a client secret*)
+that predate the requirement show up as issues (*authenticates with a client secret*)
 until they get one.
 
 ## Kubernetes
@@ -235,8 +235,8 @@ until it is on again; agents with a client secret aren't affected.
   version needs them added by hand ([Compose](deploy/local.md#upgrading),
   [Kubernetes](deploy/kubernetes.md#upgrading)).
 * SPIFFE issuers need Keycloak's `spiffe` preview feature.
-* An issuer that can't be put in Keycloak shows why on the Access page, and as a finding.
-  A blocked issuer that Keycloak hasn't been told about is a high-severity finding: until
+* An issuer that can't be put in Keycloak shows why on the Access page, and as an issue.
+  A blocked issuer that Keycloak hasn't been told about is a high-severity issue: until
   then, its agents can still authenticate.
 
 ## Trying it

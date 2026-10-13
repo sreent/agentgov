@@ -594,6 +594,36 @@ class TestIssuesForPeople:
         assert (
             sso.post(f"/v1/findings/{mine_id}/accept", json=body, headers=CSRF).status_code == 403
         )
+        # Not even when they are approvers.
+        sign_in(sso, provider, sub="user-1", roles=["agentgov-approver"])
+        refused = sso.post(f"/v1/findings/{mine_id}/accept", json=body, headers=CSRF)
+        assert refused.status_code == 403
+        assert refused.json()["detail"].startswith("You own support-bot")
+
+
+class TestSponsorsAttest:
+    def test_sponsors_attest_their_agents_whatever_their_role(self, sso, provider) -> None:
+        """Attesting is a sponsor's job: the issue that a review is due goes to them, and
+        they attest without an AgentGov role. Nobody else does, but administrators."""
+        seed(sso, sponsors=["Alice@Example.com"])
+        sign_in(sso, provider, sub="user-1", roles=[])
+        attested = sso.post("/v1/agents/support-bot/attest", json={}, headers=CSRF)
+        assert attested.status_code == 200, attested.text
+        assert attested.json()["attestation"]["attested_by"] == "person:alice@example.com"
+        # Not someone else's agent, nor one that doesn't exist: either way, refused alike.
+        sign_in(sso, provider, sub="user-2", roles=[], email="bob@example.com")
+        assert sso.post("/v1/agents/support-bot/attest", json={}, headers=CSRF).status_code == 403
+        assert sso.post("/v1/agents/nobody/attest", json={}, headers=CSRF).status_code == 403
+        # A key that isn't an approver's attests nothing, whatever its name.
+        auditor = sso.post(
+            "/v1/apikeys", json={"name": "alice@example.com", "role": "auditor"}, headers=ADMIN
+        ).json()["token"]
+        refused = sso.post(
+            "/v1/agents/support-bot/attest",
+            json={},
+            headers={"Authorization": f"Bearer {auditor}"},
+        )
+        assert refused.status_code == 403
 
 
 class TestAccessPackagesForPeople:

@@ -11,6 +11,7 @@ from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.identity import people
 from agentgov.models import Agent
+from agentgov.opa import WHAT_IF
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings, risk
 
@@ -468,10 +469,40 @@ def _model_signals(
         )
 
 
-def record_opa_decisions(session: Session, events: list[dict[str, Any]]) -> int:
-    """Store OPA decision-log events (in-process enforcement via the toolkit)."""
-    stored = 0
+def record_dropped(session: Session, count: int) -> None:
+    """A governance processor lost decision records: its queue overflowed while the control
+    plane couldn't take them. The calls were decided; the ledger misses their records, and
+    says so."""
+    ledger.append(
+        session,
+        type="decisions.dropped",
+        actor="service:processor",
+        severity="warning",
+        reason=f"{count} decision record(s) lost: the processor's queue overflowed while the "
+        "control plane couldn't take them",
+        details={"count": count},
+    )
+
+
+def in_process(event: Any) -> bool:
+    """Whether an OPA decision-log event is an agent's own decision: one the Agent
+    Governance Toolkit asked for (agentos). The processor and the control plane record the
+    decisions they ask OPA for themselves, and OPA can still send theirs (a bundle from
+    before it dropped them); what-if questions from the policies page aren't decisions."""
+    if not isinstance(event, dict) or not str(event.get("path") or "").startswith("agentos"):
+        return False
+    inp = event.get("input")
+    return not (isinstance(inp, dict) and inp.get(WHAT_IF) is True)
+
+
+def record_opa_decisions(session: Session, events: list[dict[str, Any]]) -> dict[str, int]:
+    """Store OPA decision-log events of in-process enforcement (the toolkit's); skip the
+    rest."""
+    stored = skipped = 0
     for event in events:
+        if not in_process(event):
+            skipped += 1
+            continue
         inp = event.get("input") or {}
         result = event.get("result")
         agent = discovery.find(session, name=inp.get("agent_id")) if inp.get("agent_id") else None
@@ -499,4 +530,4 @@ def record_opa_decisions(session: Session, events: list[dict[str, Any]]) -> int:
             if not allowed:
                 risk.add_signal(session, agent.id, "policy_denied", inp.get("tool_name"))
         stored += 1
-    return stored
+    return {"stored": stored, "skipped": skipped}

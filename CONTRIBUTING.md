@@ -13,6 +13,31 @@ reimplementing it. Policy logic belongs in Rego (`src/agentgov/policies`), not i
 
 Significant decisions get a short ADR in `docs/adr/`.
 
+## Check it against an imperfect organisation
+
+Organisations don't have everything a feature might want: an administrator with every
+role, every licence, a clean directory, owners who stay, a Kubernetes team, the ticketing
+system AgentGov talks to. Before a change is done, answer these for it, in the code and in
+the docs:
+
+* **Who gets it, and can they act on it?** Every message and issue says what the
+  person it reaches can do about it, with the role they have, which is often none.
+* **What if they don't have what it needs?** A missing permission, licence, component or
+  connection makes it say so and do less, not fail or pretend: it says what it needs, and
+  who can give it.
+* **What does it look like at scale?** With 300 agents and 1,000 issues: paging,
+  filters, bulk actions, and one message rather than hundreds.
+* **What if it's wrong?** People can undo what it did and see who did what, and why; an
+  issue dismissed or a risk accepted keeps a reason and a date.
+* **Does it use the same words?** One word for each thing, the one in the
+  [glossary](docs/glossary.md), in the admin center, the CLI, messages and the docs. The API
+  keeps its names; the glossary says what they are.
+* **What does it claim?** Statuses, scores and reports say what AgentGov saw and how much
+  of the estate that covers, not how a setting is configured.
+* **What if it fails, or is restored from a backup?** It fails as its feature's failure
+  behaviour says, and nothing it holds is lost without a trace.
+* **Is the default safe?** No default that is fine on a laptop and dangerous on a network.
+
 ## Development setup
 
 You need Python 3.11 or later; Docker for the image and end-to-end checks. The first

@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
+import anyio
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.coordination import JobBusy
 from agentgov.identity.delegation import GRAPH, POWER_PLATFORM, DelegationError
 from agentgov.platforms import connections, threat_detection
 from agentgov.platforms.microsoft import PlatformError
-from agentgov.registry import agents, connector_policy, entra_access, features, platforms
+from agentgov.registry import (
+    agents,
+    connector_policy,
+    entra_access,
+    features,
+    people,
+    platforms,
+)
 from agentgov.runtime import JOB_WAIT_SECONDS
 
 router = APIRouter(prefix="/v1/platforms", tags=["platforms"])
@@ -50,8 +60,11 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
         )
         detection = threat_detection.summary(s, features.mode(s, threat_detection.FEATURE))
         links = connections.state(s, rt.settings, threat_detection=detection)
+        known = people.summary(s)
     return {
         **view,
+        # The people platforms name as agents' makers and owners: how many AgentGov knows.
+        "people": known,
         # Whether signed-in administrators can act in Microsoft through AgentGov.
         "admin_actions": rt.delegations is not None,
         "threat_detection": detection,
@@ -104,20 +117,62 @@ def sync_microsoft_365(request: Request, principal: Principal = Depends(admin)) 
     return _app_sync(request.app.state.rt, "microsoft-365", principal.actor)
 
 
+# People looked up with a Copilot Studio import or sync, at most: the scheduled lookup
+# takes the rest.
+PEOPLE_NOW = 200
+
+
+def _people(rt: Any, principal: Principal) -> dict[str, Any] | None:
+    """Look up the people a Copilot Studio import or sync named (docs/platforms.md#who-made-
+    each-agent): with AgentGov's app when it may read users, else as the signed-in
+    administrator. None when neither can; what went wrong, when it did."""
+    with rt.db.session() as s:
+        nobody = not people.wanted(s, limit=1) and not people.wanted_emails(s, limit=1)
+        if not features.is_on(s, "entra-users") or nobody:
+            return None  # off, or nobody to look up
+        roles = connections.granted(s)
+    ways = []
+    if rt.m365 is not None and connections.runnable(connections.BY_KEY["entra-users"], roles):
+        ways.append("app")
+    if rt.delegations is not None and rt.delegations.has(principal.session_id):
+        ways.append("admin")
+    error = None
+    for way in ways:  # the app first; if it may not, the administrator
+        try:
+            if way == "app":
+                return rt.sync_people(actor=principal.actor, limit=PEOPLE_NOW)
+            token = rt.delegations.access_token(principal.session_id, GRAPH)
+            return rt.sync_people(actor=principal.actor, token=token, limit=PEOPLE_NOW)
+        except (PlatformError, DelegationError, JobBusy) as exc:
+            error = str(exc)
+    return {"error": error} if error else None
+
+
+def _with_people(counts: dict[str, Any], looked_up: dict[str, Any] | None) -> dict[str, Any]:
+    return {**counts, "people": looked_up} if looked_up is not None else counts
+
+
 @router.post("/copilot-studio/import")
 def import_copilot_studio(
-    request: Request, payload: Any = Body(...), principal: Principal = Depends(admin)
-) -> dict[str, int]:
-    """Import Copilot Studio agents from a Power Platform inventory export (JSON)."""
+    request: Request,
+    payload: Any = Body(...),
+    complete: bool = False,
+    principal: Principal = Depends(admin),
+) -> dict[str, Any]:
+    """Import Copilot Studio agents from a Power Platform inventory export (JSON). With
+    ``complete``, the export is the whole inventory: agents missing from it are marked gone,
+    and their findings close."""
     rt = request.app.state.rt
     with rt.db.session() as s, platforms.first_sync(s, "copilot-studio"):
-        counts = platforms.import_copilot_studio(s, payload, actor=principal.actor)
+        counts = platforms.import_copilot_studio(
+            s, payload, actor=principal.actor, complete=complete
+        )
         platforms.refresh_risk(s, rt.settings)
-        return counts
+    return _with_people(counts, _people(rt, principal))
 
 
 @router.post("/copilot-studio/sync")
-def sync_copilot_studio(request: Request, principal: Principal = Depends(admin)) -> dict[str, int]:
+def sync_copilot_studio(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
     """Read the Copilot Studio inventory now, as the signed-in administrator."""
     rt = request.app.state.rt
     token = _as_signed_in_admin(rt, principal, POWER_PLATFORM)
@@ -130,9 +185,32 @@ def sync_copilot_studio(request: Request, principal: Principal = Depends(admin))
             )
         raise HTTPException(502, str(exc)) from exc
     with rt.db.session() as s, platforms.first_sync(s, "copilot-studio"):
-        counts = platforms.import_copilot_studio(s, rows, actor=principal.actor)
+        # Every page of the inventory, as the administrator's role sees the tenant.
+        counts = platforms.import_copilot_studio(s, rows, actor=principal.actor, complete=True)
         platforms.refresh_risk(s, rt.settings)
-        return counts
+    return _with_people(counts, _people(rt, principal))
+
+
+@router.post("/entra-users/import")
+async def import_people(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
+    """Keep the people in a list of users from Microsoft Entra ID: CSV (the Entra admin
+    center's Download users) or JSON. Then the makers of Copilot Studio agents are known
+    by name without Microsoft Graph."""
+    rt = request.app.state.rt
+    raw = (await request.body()).decode("utf-8-sig", errors="replace")
+    payload: Any = raw
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            payload = json.loads(raw or "null")
+        except ValueError as exc:
+            raise HTTPException(422, f"invalid JSON: {exc}") from exc
+
+    def run() -> dict[str, Any]:
+        with rt.db.session() as s:
+            counts = people.import_list(s, payload, actor=principal.actor)
+            return {**counts, "makers": people.summary(s)}
+
+    return await anyio.to_thread.run_sync(run)
 
 
 @router.post("/{source}/sync")

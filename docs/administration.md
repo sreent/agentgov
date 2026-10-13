@@ -55,16 +55,43 @@ logout tokens (Keycloak: the `agentgov-admin` client's **Backchannel logout URL*
 to end at expiry (`AGENTGOV_SESSION_HOURS`), or when you sign them out on the **Access**
 page.
 
+## Start here
+
+A new AgentGov starts with a question on its **Overview**: where are your agents? Copilot
+Studio, Microsoft 365 Copilot agents, Microsoft Entra Agent ID, AWS, Google Cloud,
+Salesforce, Databricks, Microsoft Foundry, or your own agents, through AgentGov's gateway.
+AgentGov turns on what reads the places chosen and turns off what reads the others (but
+what the deployment pins), and starts from the [inventory starting
+point](features.md#starting-points), or from the monitor one when agents will call through
+its gateway. Choosing again later changes them again.
+
+A checklist then leads to a first useful day, each step worked out from the registry:
+
+1. **Say where your agents are**, as above.
+2. **Find your agents**: how, for each place chosen, such as importing Copilot Studio's
+   inventory ([platforms](platforms.md#copilot-studio-inventory)).
+3. **Name a catch-all team**, for the issues no agent's owner, sponsor or team takes
+   ([issues](issues.md)). Until there is one, the `issues` feature says it is limited.
+4. **Review the agents found**: adopt the ones you keep, and block or delete the others
+   where they run.
+5. **Give every agent an owner**.
+
+It stays on the Overview until every step is done, or an administrator hides it. With the
+CLI, `agentgov start` shows it, `agentgov start --place copilot-studio --place aws`
+answers, and `--hide` hides it; with the API, `GET` and `PUT /v1/start`
+(`{"places": [...]}` or `{"hidden": true}`). The answer is in the ledger
+(`start.answered`), with the starting point and the features it changed.
+
 ## Roles
 
 | Role | Can |
 |---|---|
-| `admin` | Everything below, plus agent lifecycle, blueprints, access packages, [management rules](management-rules.md), tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations, teams and which [features](features.md) are used |
-| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks; attest the agents it sponsors |
-| `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, resolve, dismiss and reopen findings, acknowledge issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
-| `auditor` | Read everything, including the ledger and the list of API keys; change nothing |
+| `admin` | Everything below, plus agent lifecycle, blueprints, access packages, [management rules](management-rules.md), tool servers, model providers, identity issuers, policies, credentials, API keys, platform syncs, the connector allowlist, destinations (SIEMs, chats and [service desks](tickets.md)), teams and which [features](features.md) are used |
+| `approver` | Read everything; decide approval requests and requests for [access packages](access-packages.md); acknowledge, resolve, dismiss and reopen [issues](issues.md) and accept their risks, but not those of agents they are accountable for; attest the agents it sponsors; classify agents for the [classification register](evidence.md#a-classification-register) |
+| `secops` | The security team's tools and analysts: read everything, and, as far as the hand-off to [security operations](secops.md) allows, acknowledge, resolve, dismiss and reopen issues and accept their risks (triage), block and unblock agents, tool servers, model providers and identity issuers (contain), and decide the approval requests sent to approvers (decide) |
+| `auditor` | Read everything, including the ledger and the list of API keys; change nothing. They start on **Compliance** |
 | `registrar` | Register agents and tool servers, which wait for an admin's review (for CI pipelines and developers), ask for [access packages](access-packages.md) for agents, and report the MCP servers set up on developers' machines; it cannot read the registry |
-| `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)); sees nothing else |
+| `person` | Someone without an AgentGov role, signed in to see and acknowledge the [issues](issues.md) sent to them while the `issues` feature is on, to ask for and review the access packages of the agents they own or sponsor, and to decide the approval requests that agents acting for them sent them while `approvals-by-person` is on ([acting for people](acting-for-people.md)), and to attest the agents they sponsor; sees nothing else |
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector; with mutual TLS between the components, only on the control plane's internal port ([production](production.md#mutual-tls-between-components)) |
 
 People who sign in with single sign-on get their roles from the identity provider each time
@@ -75,6 +102,37 @@ page so that their open sessions end too. The same page lists everyone who has s
 in (or been refused) and every API key, for access reviews. API keys have one role each.
 The UI only shows the controls a role may use; the API enforces the roles either way.
 
+## The menu
+
+The admin center's menu has the overview first, then five groups:
+
+| Group | Pages | For |
+|---|---|---|
+| *Work* | **Approvals**, **Issues** | What waits for someone: decisions ([below](#approvals)), and issues to take on |
+| *Agents* | **Agents**, **Agent map**, **Platforms** | What there is: the registry, which agents call which, and the platforms agents come from |
+| *Gateway* | **Tool servers**, **Models**, **Policies**, **Developer tools** | What agents' calls through the gateway may reach, and the rules for them: unused [without the gateway](deploy/local.md#just-the-inventory) |
+| *Evidence* | **Ledger**, **Compliance**, **Register** | What happened, the reports for a framework, and how each agent is classified |
+| *Settings* | **Teams**, **Security operations**, **Access**, **Features** | Who takes the issues, the security team's tools, who signs in, and which features are on |
+
+People without an AgentGov role see only their issues and the approvals waiting for them.
+
+## Approvals
+
+**Approvals** gathers everything waiting for a decision, each kind for those who may make
+it, and its badge counts them:
+
+| Kind | Who decides | Where |
+|---|---|---|
+| Calls policy held for a person, such as a tool its server marks destructive | Approvers and administrators, the security team from the hand-off's *decide* level, or the person they were sent to ([acting for people](acting-for-people.md#approvals-sent-to-the-person)) | On the page: **Approve**, **Deny** |
+| Access packages asked for agents | Approvers and administrators, but not whoever asked ([access packages](access-packages.md)) | On the page |
+| Risks the people an issue reached ask to be accepted | Approvers and administrators, and the security team from *triage* on; nobody accountable for the agent | On the issue: **Accept the risk**, **Decline** ([issues](issues.md)) |
+| Agents and tool servers registered for review | Administrators | On the page: **Approve**, **Block** |
+| Tool definitions that changed since they were approved | Administrators | In the tool server's catalog: **Approve new definition** |
+| Agents found on platforms that nobody has reviewed | Administrators | **Agents**, not reviewed yet: **Adopt** |
+
+The same list is `agentgov inbox`, with the command that decides each kind, and
+`GET /v1/inbox`.
+
 ## Tasks
 
 | Task | Admin UI | CLI | API |
@@ -84,9 +142,13 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Edit only if nobody changed it since you looked ([production](production.md#people-working-at-once)) | Every **Edit** form does | `agentgov <kind> update ... --if-version N` | `If-Match: "N"` on `PATCH` (`PUT` for policies); 412 if it changed |
 | See the control plane's replicas and which one leads | Overview → *Control plane* | `agentgov replicas` | `GET /v1/replicas` |
 | Approve, block, unblock, delete, restore | Agent toolbar | `agentgov agents approve\|block\|unblock\|delete\|restore REF` | `POST /v1/agents/{ref}/{action}` |
-| Adopt a discovered agent | Agent → **Adopt** | `agentgov agents lifecycle REF adopt` | `POST /v1/agents/{ref}/adopt` |
+| Sort and filter the agents, and download those shown as a spreadsheet | Agents → a column's header; *Where*, *Risk*, *Owner*; **Download CSV** | `agentgov agents list --source S --risk R --csv` (`-q`: only their names) | `GET /v1/agents?source=&risk_level=` |
+| Approve, block, unblock, delete or restore many agents at once ([many agents at once](#many-agents-at-once)) | Agents → tick them → **Approve**, **Block**, … | `agentgov agents approve\|block\|unblock\|delete\|restore REF REF ...` | `POST /v1/agents/bulk` |
+| Change the owner, team, sponsors or blueprint of many agents at once | Agents → tick them → **Edit…** | `agentgov agents update REF REF ... --owner T --add-sponsor P --remove-sponsor P` | `POST /v1/agents/bulk`, `action: update` |
+| Adopt an unmanaged agent | Agent → **Adopt** | `agentgov agents lifecycle REF adopt` | `POST /v1/agents/{ref}/adopt` |
+| Adopt agents at once, with their makers as owners | Agents → **Adopt n agents** | `agentgov agents adopt --platform copilot-studio --makers` | `POST /v1/agents/adopt` |
 | Delete a deleted agent permanently (otherwise it is purged after `AGENTGOV_SOFT_DELETE_RETENTION_DAYS`, 30 by default) | Agent → **Delete permanently** | `agentgov agents purge REF` | `DELETE /v1/agents/{ref}` |
-| Attest an agent | Agent → **Attest** | `agentgov agents attest REF` | `POST /v1/agents/{ref}/attest` |
+| Attest an agent: its sponsors, whatever their role, and administrators | Agent → **Attest**, or **Attest** on the issue that its review is due | `agentgov agents attest REF` | `POST /v1/agents/{ref}/attest` |
 | Show or rotate an agent's client secret | Agent → Identity → **Show secret** / **Rotate** | `agentgov agents credentials REF [--rotate]` | `POST /v1/agents/{ref}/credentials` |
 | Approve, edit, block, delete identity issuers ([agents' own identities](agent-identity.md)) | Access → *Agent identity issuers* → **Add issuer**, **Edit**, **Block**/**Unblock**, **Delete** | `agentgov issuers create\|update\|block\|unblock\|delete` | `POST /v1/identity-issuers`, `PATCH`/`DELETE /v1/identity-issuers/{name}`, `POST /v1/identity-issuers/{name}/block\|unblock` |
 | Give an agent its own identity instead of a client secret | Agent → **Edit** → *Authentication* | `agentgov agents update REF --workload-identity ISSUER:SUBJECT` (`--no-workload-identity` to go back) | `workload_identity` in `PATCH /v1/agents/{ref}` |
@@ -120,11 +182,14 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Export manifests | Policies → **Export manifests** | `agentgov export` | `GET /v1/export` |
 | Decide an approval request | Approvals → **Approve** / **Deny** | `agentgov approvals approve\|deny ID` | `POST /v1/approvals/{id}/approve\|deny` |
 | See the approval requests sent to you, as the person an agent acted for | Approvals → *Waiting for you* | `agentgov approvals list --mine` | `GET /v1/me/approvals` |
-| Resolve, dismiss, reopen findings | Findings | `agentgov findings resolve\|dismiss\|reopen ID` | `POST /v1/findings/{id}/{action}` |
-| See who an issue is with, its messages and its history ([issues](issues.md)) | Findings → **Details** | `agentgov findings get ID` | `GET /v1/findings/{id}` |
-| See the issues sent to you, as an owner, a sponsor or a team member | Findings → *Yours* (people without a role: *Your issues*) | `agentgov findings list --mine` | `GET /v1/me/issues` |
-| Acknowledge an issue, or accept its risk until a date | Findings → **Acknowledge**, **Accept risk** | `agentgov findings acknowledge ID`, `agentgov findings accept ID --reason R --until DATE` | `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` |
-| Add, edit and delete teams, and choose the default team | Findings → Teams | `agentgov teams create\|update\|delete`, `agentgov teams list` | `POST /v1/teams`, `PATCH`/`DELETE /v1/teams/{name}` |
+| Resolve, dismiss, reopen issues | Issues | `agentgov issues resolve\|reopen ID`, `agentgov issues dismiss ID --reason R [--until DATE]` | `POST /v1/findings/{id}/resolve\|dismiss\|reopen` |
+| Do one of those to many issues at once, or acknowledge them or accept their risk ([issues](issues.md#many-at-once)) | Issues → tick them, or *Group by agent* and tick an agent | `agentgov issues acknowledge\|resolve\|dismiss\|accept\|reopen ID ID ...` | `POST /v1/findings/bulk` |
+| Download the issues shown as a spreadsheet | Issues → **Download CSV** | `agentgov issues list --csv` (`-q`: only their IDs) | `GET /v1/findings` |
+| See who an issue is with, its messages and its history ([issues](issues.md)) | Issues → **Details** | `agentgov issues get ID` | `GET /v1/findings/{id}` |
+| See the issues sent to you, as an owner, a sponsor or a team member | Issues → *Yours* (people without a role: *Your issues*) | `agentgov issues list --mine` | `GET /v1/me/issues` |
+| List issues, a page at a time, by type and severity | Issues: the type and severity filters, and **Show more** | `agentgov issues list --type T --severity S --limit N` | `GET /v1/findings?type=&severity=&limit=&offset=` (`X-Total-Count` says how many in all) |
+| Acknowledge an issue, or accept its risk until a date | Issues → **Acknowledge**, **Accept risk** | `agentgov issues acknowledge ID`, `agentgov issues accept ID --reason R --until DATE` | `POST /v1/findings/{id}/acknowledge`, `POST /v1/findings/{id}/accept` |
+| Add, edit and delete teams, and choose the default team | **Teams** | `agentgov teams create\|update\|delete`, `agentgov teams list` | `POST /v1/teams`, `PATCH`/`DELETE /v1/teams/{name}` |
 | Add, edit and delete access packages ([access packages](access-packages.md)) | Policies → *Access packages* | `agentgov access-packages create\|update\|delete`, `agentgov access-packages list` | `POST /v1/access-packages`, `PATCH`/`DELETE /v1/access-packages/{name}` |
 | Ask for an access package for an agent, or renew one | Agent → *Access packages* → **Request access**, **Renew** | `agentgov access-packages request AGENT PACKAGE --reason R` | `POST /v1/access-assignments` |
 | Decide, revoke or review an agent's access package | Approvals → *Access requests*; agent → *Access packages* | `agentgov access-packages approve\|deny\|revoke ID`, `agentgov access-packages review ID --keep\|--remove` | `POST /v1/access-assignments/{id}/approve\|deny\|revoke\|review` |
@@ -135,7 +200,10 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Check an export or the ledger's archives offline ([evidence](evidence.md)) | — | `agentgov ledger verify --file F [--file F ...]` | — |
 | Keep a checkpoint of the ledger, and get its time-stamp | Ledger → *Checkpoints and retention* → **Make a checkpoint**, **Time-stamp** | `agentgov ledger checkpoint`, `ledger checkpoints`, `ledger proof SEQ` | `POST`/`GET /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp` |
 | See how long things are kept, and run retention now | Ledger → *Checkpoints and retention* | `agentgov ledger retention [--run]` | `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run` |
-| Read a compliance report, and download the evidence pack | Ledger → *Compliance* → **Evidence pack** | `agentgov evidence report --framework F`, `agentgov evidence pack -o FILE` | `GET /v1/evidence/report`, `GET /v1/evidence/pack` |
+| See whether the database lost ledger entries (a restore), and accept the restore ([backing up and restoring](backup.md)) | Ledger | `agentgov ledger witness`, `agentgov ledger accept-restore` | `GET /v1/ledger/witness`, `POST /v1/ledger/witness/accept` |
+| Read a compliance report, and download the evidence pack | **Compliance** → **Evidence pack** | `agentgov evidence report --framework F`, `agentgov evidence pack -o FILE` | `GET /v1/evidence/report`, `GET /v1/evidence/pack` |
+| Classify agents under the EU AI Act, one or many ([classification register](evidence.md#a-classification-register)) | Agent → *Classification* → **Classify**; **Register** → **Classify**; Agents → tick them → **Classify…** | `agentgov agents classify REF [REF ...] --category C --role R [--basis B] [--purpose P]` (`--clear` to undo) | `PUT`/`DELETE /v1/agents/{ref}/classification`; `POST /v1/agents/bulk`, `action: classify` |
+| See the classification register, and download it as a spreadsheet | **Register** → **Download CSV** | `agentgov evidence register [--csv]` | `GET /v1/evidence/register` |
 | See what agents did for a person | Ledger → *On behalf of* | `agentgov ledger tail --user sam` | `GET /v1/ledger?user=sam` |
 | See the calls between agents, and the chain of agents behind any call | Ledger, type `decision.a2a.*`; an entry's *Chain* | `agentgov ledger tail --type 'decision.a2a.*'` | `GET /v1/ledger?type=decision.a2a.*` (`details.chain`) |
 | Open the trace of a gateway decision | Ledger or an agent's Recent activity → **Open trace** | `agentgov ledger tail --traces` | `trace_url` on `GET /v1/ledger` entries (set `AGENTGOV_TRACE_URL`) |
@@ -160,6 +228,7 @@ The UI only shows the controls a role may use; the API enforces the roles either
 | Choose how much is handed to the security team ([security operations](secops.md)) | Security operations → *Hand-off* | `agentgov secops level LEVEL`, `agentgov secops status` | `PUT /v1/features/security-operations`, `GET /v1/secops` |
 | Add, edit, test, pause, resume, replay and delete destinations (SIEMs, Teams, Slack) | Security operations → **Add destination**, **Test**, **Edit**, **Pause**/**Resume**, **Replay**, **Delete** | `agentgov destinations create\|update\|test\|pause\|resume\|replay\|delete` | `POST /v1/destinations`, `PATCH`/`DELETE /v1/destinations/{name}`, `POST /v1/destinations/{name}/{action}` |
 | Read the ledger as OCSF events | Security operations → *Events API* | `agentgov secops events [--after N] [--follow]` | `GET /v1/secops/events?after=N` |
+| Open issues as tickets in ServiceNow, Jira Service Management or Freshservice, kept in step ([tickets](tickets.md)) | Security operations → **Add destination** → a service desk; an issue's page → *Tickets* | `agentgov destinations create NAME --kind servicenow --url URL --group G`, `agentgov tickets list` | `POST /v1/destinations` with `kind` and `tickets`; `GET /v1/tickets` |
 | See what monitored controls would have stopped | Ledger → decision **Monitored** | `agentgov ledger tail --decision monitored` | `GET /v1/ledger?decision=monitored` |
 
 Two commands run where the control plane runs, against its database
@@ -173,6 +242,44 @@ blueprints, tool servers, model providers, identity issuers, destinations and po
 `apikeys revoke`, `agents clear-instructions`), `destinations replay`,
 `platforms push-connector-policy`, and `features set` (or `secops level`) when it lowers a
 feature, ask for confirmation unless you pass `--yes`.
+
+## Many agents at once
+
+With a few hundred agents, reviews come in batches: the agents someone who left owned, those
+found on a platform, the riskiest. On the **Agents** page, a column's header sorts by it (the
+riskiest or the most recently seen first, then the other way round), and the filters narrow
+the list by where the agents run, their risk and their owner. **Download CSV** gives the
+agents shown as a spreadsheet, for a review or an auditor.
+
+Tick the agents to act on, or all of those shown (the box in the table's header; on a phone,
+**Choose all**), and the bar above the table offers what fits them:
+
+- **Approve**, **Block**, **Unblock**, **Delete** and **Restore**, each agent on its own: one
+  that can't be (approved without a sponsor, say) is left as it was, and AgentGov lists those
+  left, with why. The reason you give is recorded for each of them in the ledger.
+- **Edit…**: an owner, a team, sponsors to add or to take off (someone who left, say), a
+  blueprint. Only what you fill in changes.
+- **Adopt**, for those found on platforms: each with its maker as owner and sponsor where
+  AgentGov knows them.
+- **Classify…**: their classification under the EU AI Act, for the
+  [classification register](evidence.md#a-classification-register).
+
+Blocking or deleting an agent found on a platform changes AgentGov's registry, not the
+platform: the dialog says which of them run where, to block them there too. Administrators
+do all of these; the security team's role blocks and unblocks once the
+[hand-off](secops.md) has reached *contain*; approvers classify.
+
+In the CLI, name the agents: `agentgov agents block bot-a bot-b --reason "Incident 42"`, or
+`agentgov agents update bot-a bot-b --remove-sponsor alice@example.com --add-sponsor
+dana@example.com`. `agentgov agents list -q` prints only names, for other commands:
+`agentgov agents approve $(agentgov agents list --status pending -q)`. A command that left
+agents as they were says which, and why, and exits with 1.
+
+The API takes up to 500 agents a call: `POST /v1/agents/bulk` with `action`, `agents` (names
+or IDs), `reason` and, for `update`, `fields`: `owner`, `team`, `sponsors` (instead of each
+one's own), `add_sponsors`, `remove_sponsors`, `blueprint`, `environment` and `risk_tier`;
+for `classify`, `fields`: `category`, `role`, `basis` and `purpose`. It answers with the
+agents `done`, and those `left`, each with `why`.
 
 ## Registry as code
 

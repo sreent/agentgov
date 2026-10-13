@@ -21,7 +21,7 @@ A ``Feature`` sets how strictly one of AgentGov's features applies
 control ``spec.scopes`` its exceptions, its mode for the agents in a scope
 (docs/features.md#exceptions).
 
-A ``FindingType`` says how one type of finding is handled (docs/issues.md#kinds-of-findings):
+A ``FindingType`` says how one type of finding is handled (docs/issues.md#kinds-of-issues):
 ``metadata.name`` is the type, such as ``agent.no_owner``; ``spec.mode`` on or off, and
 ``spec.severity`` its severity here.
 
@@ -29,11 +29,15 @@ Applying is idempotent: unchanged resources are reported as ``unchanged``.
 Resources are applied in dependency order (features first, then destinations, the teams
 that post to them, identity issuers, blueprints, tool servers, model providers and the access
 packages that name blueprints, policies, and the management rules that name teams, before
-the agents that reference them).
+the agents that reference them); features' exceptions, which may name teams and blueprints,
+last.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import yaml
@@ -45,6 +49,7 @@ from agentgov.registry import (
     access_packages,
     agents,
     blueprints,
+    classification,
     destinations,
     features,
     finding_types,
@@ -56,7 +61,7 @@ from agentgov.registry import (
     teams,
     toolservers,
 )
-from agentgov.registry.errors import NotFound, ValidationError
+from agentgov.registry.errors import NotFound, RegistryError, ValidationError
 
 API_VERSION = "agentgov/v1alpha1"
 ORDER = [
@@ -111,28 +116,52 @@ def apply(
     session: Session, settings: Settings, docs: list[dict[str, Any]], *, actor: str
 ) -> list[dict[str, str]]:
     results = []
+    # Features' exceptions, set last: they may name teams and blueprints applied here.
+    later: list[tuple[dict[str, str], dict[str, Any]]] = []
     for doc in sorted(docs, key=lambda d: ORDER.index(d["kind"])):
         kind, spec = doc["kind"], _spec(doc)
         name = spec["name"]
-        action = {
-            "Feature": _feature,
-            "FindingType": _finding_type,
-            "Destination": _destination,
-            "Team": _team,
-            "IdentityIssuer": _identity_issuer,
-            "Blueprint": _blueprint,
-            "ToolServer": _toolserver,
-            "ModelProvider": _model_provider,
-            "AccessPackage": _access_package,
-            "Policy": _policy,
-            "ManagementRule": _rule,
-            "Agent": _agent,
-        }[kind](session, settings, spec, actor)
+        with _about(kind, name):
+            action = {
+                "Feature": _feature,
+                "FindingType": _finding_type,
+                "Destination": _destination,
+                "Team": _team,
+                "IdentityIssuer": _identity_issuer,
+                "Blueprint": _blueprint,
+                "ToolServer": _toolserver,
+                "ModelProvider": _model_provider,
+                "AccessPackage": _access_package,
+                "Policy": _policy,
+                "ManagementRule": _rule,
+                "Agent": _agent,
+            }[kind](session, settings, spec, actor)
         results.append({"kind": kind, "name": name, "action": action})
+        if kind == "Feature" and "scopes" in spec:
+            later.append((results[-1], spec))
+    for result, spec in later:
+        with _about("Feature", spec["name"]):
+            if _feature_scopes(session, settings, spec, actor):
+                result["action"] = "configured"
     return results
 
 
+@contextmanager
+def _about(kind: str, name: str) -> Iterator[None]:
+    """What goes wrong applying a document names it: in a long manifest, "there is no team
+    x" alone doesn't say where."""
+    try:
+        yield
+    except RegistryError as exc:
+        what = f"{re.sub(r'(?<!^)(?=[A-Z])', ' ', kind).lower()} {name}"
+        if str(exc).startswith(what):
+            raise
+        raise type(exc)(f"{what}: {exc}") from None
+
+
 def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+    """A feature's mode. Its exceptions are set after the other documents
+    (``_feature_scopes``), once the teams and blueprints they name are there."""
     if set(spec) - {"name", "mode", "scopes", "labels"}:
         raise ValidationError(f"feature {spec['name']}: spec takes only mode and scopes")
     if "mode" not in spec and "scopes" not in spec:
@@ -141,14 +170,16 @@ def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: 
     try:
         if "mode" in spec:
             changed = features.set_mode(session, settings, spec["name"], spec["mode"], actor=actor)
-        if "scopes" in spec:
-            changed = (
-                features.set_scopes(session, settings, spec["name"], spec["scopes"], actor=actor)
-                or changed
-            )
     except NotFound as exc:
         raise ValidationError(str(exc)) from None
     return "configured" if changed else "unchanged"
+
+
+def _feature_scopes(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> bool:
+    try:
+        return features.set_scopes(session, settings, spec["name"], spec["scopes"], actor=actor)
+    except NotFound as exc:
+        raise ValidationError(str(exc)) from None
 
 
 def _finding_type(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
@@ -174,6 +205,9 @@ def _destination(session: Session, settings: Settings, spec: dict[str, Any], act
         destinations.create(session, {**spec, "status": desired}, actor=actor)
         return "created"
     spec.pop("backfill", None)  # where a new destination starts in the ledger
+    if "tickets" in spec and isinstance(spec["tickets"], dict):
+        # The manifest says all of a desk's ticket settings: what it leaves out goes.
+        spec["tickets"] = {**{k: None for k in destination.tickets or {}}, **spec["tickets"]}
     changed = destinations.update(session, destination, spec, actor=actor)
     action = "configured" if changed else "unchanged"
     if destination.status != desired:
@@ -306,18 +340,26 @@ def _instructions(
 def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", ACTIVE)
     text = spec.pop("instructions", None)
+    # Its classification, when the manifest gives one (none: it is left as it is).
+    classified = spec.pop("classification", None)
     if desired not in (ACTIVE, PENDING, BLOCKED):
         raise ValidationError(f"agent {spec['name']}: status must be active, pending or blocked")
+    if classified is not None:
+        classification.normalize(classified)  # before anything is changed
     try:
         agent = agents.get(session, spec["name"])
     except NotFound:
         agent = agents.register(session, settings, spec, actor=actor, approve=desired == ACTIVE)
         _instructions(session, settings, agent, text, actor)
+        if classified is not None:
+            classification.classify(session, agent, classified, actor=actor)
         if desired == BLOCKED:
             agents.transition(session, settings, agent, "block", actor=actor, reason="manifest")
         return "created"
     action = "configured" if agents.update(session, agent, spec, actor=actor) else "unchanged"
     if _instructions(session, settings, agent, text, actor):
+        action = "configured"
+    if classified is not None and classification.classify(session, agent, classified, actor=actor):
         action = "configured"
     if desired == ACTIVE and agent.status in (PENDING, BLOCKED):
         verb = "approve" if agent.status == PENDING else "unblock"
@@ -353,6 +395,7 @@ def export(session: Session) -> list[dict[str, Any]]:
             "events": destinations.default_events(destination.kind),
             "min_severity": destinations.default_severity(destination.kind),
             "labels": {},
+            "tickets": {},
         }
         for key, default in defaults.items():
             value = getattr(destination, key)
@@ -427,6 +470,10 @@ def export(session: Session) -> list[dict[str, Any]]:
         if d["workload_identity"]:
             spec["workload_identity"] = d["workload_identity"]
         spec["status"] = agent.status
+        if agent.classification:
+            spec["classification"] = {
+                k: agent.classification.get(k, "") for k in classification.FIELDS
+            }
         registered = session.get(AgentInstructions, f"{agent.id}:registered")
         if registered is not None and not registered.truncated:
             spec["instructions"] = registered.text

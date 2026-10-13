@@ -561,6 +561,16 @@ class TestAgentsTakeOnlyCallsThroughTheGateway:
             assert other.get("/v1/delegations/jwks").json() == {"keys": []}
             assert other.get("/v1/info").json()["delegation_jwks"] is None
 
+    def test_the_keys_derive_from_a_signing_secret_of_their_own(self, settings) -> None:
+        """OPA and the OTel Collector hold the service token: with a signing secret, which
+        only the control plane and the processor hold, the keys derive from that."""
+        own = dataclasses.replace(settings, signing_secret="held-by-two")
+        assert (own.key_secret, settings.key_secret) == ("held-by-two", settings.service_token)
+        with TestClient(create_app(own, background=False)) as client:
+            published = client.get("/v1/delegations/jwks").json()
+        assert published == chains.jwks(chains.keys("held-by-two"))
+        assert published != chains.jwks(chains.keys(settings.service_token))
+
 
 class TestChainsOnToolsAndModels:
     def test_a_tool_call_handed_down_has_its_chain_in_policy_and_the_record(self) -> None:

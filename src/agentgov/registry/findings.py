@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.db import lock
 from agentgov.models import SEVERITIES, Agent, Finding
-from agentgov.registry.errors import NotFound, ValidationError
+from agentgov.registry.errors import InvalidTransition, NotFound, ValidationError
 
 POSTURE = "posture"
 THREAT = "threat"
@@ -27,6 +27,10 @@ UNVERIFIED = "unverified"
 # In a finding's details: found by a platform's first sync, there before AgentGov looked
 # (agentgov.registry.platforms.first_sync; agentgov.registry.issues sends it to no inbox).
 BASELINE = "baseline"
+# Why someone dismissed it, and until when (docs/issues.md#dismissing-an-issue).
+DISMISSAL = "dismissal"
+# The severity its people were last told it had, when it was raised since at another.
+TOLD = "told_severity"
 
 
 def checked(finding: Finding) -> None:
@@ -102,11 +106,13 @@ def raise_finding(
 ) -> tuple[Finding, bool]:
     """Create or refresh the finding keyed by ``type:subject``.
 
-    Returns ``(finding, is_new)``. Dismissed findings stay dismissed, and accepted ones
-    accepted until their date; resolved ones are reopened because the condition has come
-    back. Its type's settings apply (agentgov.registry.finding_types): its severity, and,
-    while the type is off, it is kept dismissed instead; found again once its type is on,
-    it is reopened.
+    Returns ``(finding, is_new)``. Dismissed findings stay dismissed (until the date a
+    dismissal was given for), and accepted ones accepted until their date; resolved ones
+    are reopened because the condition has come back, and so are dismissed threats that
+    happen again: each one is news. Its type's settings apply
+    (agentgov.registry.finding_types): its severity, and, while the type is off, it is kept
+    dismissed instead; found again once its type is on, it is reopened. Open, and more
+    severe than its people were told it was, its chain starts over: they are told again.
     """
     from agentgov.registry import finding_types
 
@@ -145,6 +151,7 @@ def raise_finding(
     # The check ran and found it: it holds, as far as anyone can tell.
     finding.clean_checks = 0
     checked(finding)
+    told = (finding.details or {}).get(TOLD, finding.severity)
     finding.severity = severity
     finding.title = title
     finding.description = description or finding.description
@@ -161,8 +168,11 @@ def raise_finding(
     suppressed = finding.status == "dismissed" and finding_types.SUPPRESSED in (
         finding.details or {}
     )
-    reopened = finding.status == "resolved" or (suppressed and not off)
+    # A threat someone dismissed happens again: a new event, for someone to look at.
+    again = finding.status == "dismissed" and category == THREAT and not suppressed and not off
+    reopened = finding.status == "resolved" or (suppressed and not off) or again
     if reopened:
+        dismissal = (finding.details or {}).get(DISMISSAL) or {}
         finding.status = "open"
         finding.resolved_at = None
         finding.resolved_by = None
@@ -170,10 +180,21 @@ def raise_finding(
         finding.details = {
             k: v
             for k, v in (finding.details or {}).items()
-            if k not in (finding_types.SUPPRESSED, BASELINE)
+            if k not in (finding_types.SUPPRESSED, BASELINE, DISMISSAL, TOLD)
         }
         restart_chain(finding)
-        _record(session, finding, "reopened", SYSTEM)
+        why = (
+            f"it happened again after {dismissal.get('by', 'someone')} dismissed it"
+            + (f": {dismissal['reason']}" if dismissal.get("reason") else "")
+            if again
+            else None
+        )
+        _record(session, finding, "reopened", SYSTEM, **({"why": why} if why else {}))
+    elif finding.status == "open" and SEVERITIES.index(severity) > SEVERITIES.index(told):
+        # Worse than its people were told: they are told again, from its first step.
+        finding.details = {**(finding.details or {}), TOLD: severity}
+        restart_chain(finding)
+        _record(session, finding, "severity_raised", SYSTEM, previous=told)
     return finding, reopened
 
 
@@ -280,6 +301,51 @@ def get(session: Session, finding_id: str) -> Finding:
     return finding
 
 
+def dismiss(
+    session: Session,
+    finding: Finding,
+    *,
+    reason: Any,
+    actor: str,
+    until: datetime | None = None,
+) -> Finding:
+    """Dismiss a finding that is wrong, saying why: it goes to nobody. With ``until``, it
+    opens again then if it still holds (a threat opens again as soon as it happens again)."""
+    lock(session, finding)
+    if finding.status == "dismissed":
+        raise InvalidTransition("finding is dismissed already")
+    why = str(reason or "").strip()
+    if not why:
+        raise ValidationError(
+            "say why it is wrong (reason): to live with a real one, accept its risk"
+        )
+    if len(why) > 1000:
+        raise ValidationError("reason is 1000 characters at most")
+    now = ids.utcnow()
+    finding.details = {
+        **(finding.details or {}),
+        DISMISSAL: {
+            "reason": why,
+            "by": actor,
+            "at": ids.isoformat(now),
+            "until": ids.isoformat(until) if until else None,
+        },
+    }
+    finding.status = "dismissed"
+    finding.resolved_at = now
+    finding.resolved_by = actor
+    finding.escalate_at = None
+    _record(
+        session,
+        finding,
+        "dismissed",
+        actor,
+        why=why,
+        **({"until": ids.isoformat(until)} if until else {}),
+    )
+    return finding
+
+
 def set_status(session: Session, finding_id: str, status: str, actor: str) -> Finding:
     if status not in ("open", "resolved", "dismissed"):
         raise ValidationError("status must be open, resolved or dismissed")
@@ -292,6 +358,7 @@ def set_status(session: Session, finding_id: str, status: str, actor: str) -> Fi
         finding.resolved_at = None
         finding.resolved_by = None
         finding.accepted_until = None
+        finding.details = {k: v for k, v in (finding.details or {}).items() if k != DISMISSAL}
         if previous != "open":
             restart_chain(finding)
     else:

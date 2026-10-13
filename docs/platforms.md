@@ -15,8 +15,8 @@ front of these agents, but AgentGov can govern what Microsoft reports about them
   ([details](microsoft-connections.md#microsoft-entra-agent-id)).
 
 Each agent becomes a registry agent with the source `platform:microsoft-365`,
-`platform:copilot-studio` or `platform:entra-agent-id`. It starts as `discovered`, with an
-"agent to review" finding. Adopt it to give it an owner, sponsors and periodic
+`platform:copilot-studio` or `platform:entra-agent-id`. It starts unmanaged (`discovered`), with an
+"agent to review" issue. Adopt it to give it an owner, sponsors and periodic
 attestation, like any other agent. AgentGov issues these agents no gateway credentials
 and doesn't apply blueprints to them, because they never call the gateway. When more than
 one source reports the same agent (a Copilot Studio agent published to Microsoft 365, and
@@ -117,8 +117,9 @@ Or use **Import inventory** on the Platforms page. Some notes on the export:
   administrator or Global administrator.
 * **Azure CLI extension.** `az graph query` needs the Azure CLI's `resource-graph`
   extension (`az extension add --name resource-graph`).
-* **More than 1,000 agents.** Export them in pages with `--skip-token` and import each
-  file. Importing is idempotent: agents already in the registry are updated.
+* **More than 1,000 agents.** Export them in pages with `--skip-token` and import the
+  files together (`agentgov platforms import page1.json page2.json ...`). Importing is
+  idempotent: agents already in the registry are updated.
 * **Other ways to export.** The same rows come from the [Power Platform inventory
   API][inventory-api] (`POST https://api.powerplatform.com/resourcequery/resources/query`)
   and from `pac resource-query query-resources`. AgentGov accepts either a JSON list of
@@ -126,26 +127,71 @@ Or use **Import inventory** on the Platforms page. Some notes on the export:
 
 Sync or import again whenever you want AgentGov to catch up, for example after each
 review. AgentGov can't do it on a schedule, because Microsoft needs a signed-in person.
-Agents missing from an import are left as they were, because an export may cover only
-some environments.
+A sync reads the whole inventory, so agents missing from it are gone from Copilot Studio:
+they stay in the registry, marked gone, their Copilot Studio issues close, and they are
+no longer counted among the agents to review. An import does the same only when you say
+the export is the whole inventory, every environment (**This is the whole inventory** on
+the **Platforms** page, or `agentgov platforms import --complete`, with every page of a
+larger export at once); otherwise agents missing from it are left as they were, because an
+export may cover only some environments. An export with no agents in it marks none gone.
+An agent seen again is back. Delete the record of a gone agent once you no longer need it.
+
+## Who made each agent
+
+The inventory names each agent's owner in Copilot Studio and its maker, by their
+Microsoft Entra object IDs; Databricks names who created its agents by email address.
+AgentGov shows them on the agent's page (**Owner and sponsors**) and in the agents list,
+and adopting an agent suggests its owner on the platform, or its maker when the owner
+can't take it, as its owner and sponsor. To show people rather than IDs, AgentGov looks
+them up in Microsoft Entra ID, in whichever way it can:
+
+* **With its app registration** (the `entra-users` connection on the Platforms page):
+  the Graph application permission `User.Read.All`, with admin consent. `User.ReadBasic.All`
+  is enough to know who people are, but not whose account is disabled.
+* **As the admin who syncs the inventory**: an admin signed in through Microsoft Entra ID
+  looks up the people the sync names, with the delegated permission `User.ReadBasic.All`
+  (see [Setting it up](#setting-it-up)). That doesn't say whose account is disabled.
+* **From a list of users.** In the Microsoft Entra admin center, **Users** > **Download
+  users** gives a CSV of every user's object ID, name and email address; any user may
+  download it. Upload it with **Upload users** on the Platforms page, or
+  `agentgov platforms import-users users.csv`. A PowerShell export (`Get-MgUser -All |
+  Export-Csv`) or Graph's JSON works too, as long as it has the `id` and `mail` (or
+  `userPrincipalName`) of each user. A user missing from a list isn't taken to have left:
+  the list may be filtered.
+
+Without any of them, makers are shown by their Entra IDs, and whoever adopts an agent
+names its owner. AgentGov looks up the owners and sponsors it names by email address the
+same way. It looks up each person once, then again after a week: someone the directory
+had and no longer has has left (a `person.left` entry in the ledger), isn't suggested any
+more, and gets no more issues ([people who leave](issues.md#people-who-leave)). Turning
+the `entra-users` feature off stops the lookups.
+
+To adopt many agents at once, filter the Agents page (for example to one platform's
+agents waiting to be adopted) and use **Adopt n agents**. Each becomes pending approval with
+its maker as owner and sponsor where AgentGov knows them, or with the owner you give, such
+as a team, for the others; those it can't adopt are listed with why. From the CLI:
+`agentgov agents adopt --platform copilot-studio --makers --owner ai-governance`.
 
 ## Checks
 
-AgentGov checks every imported Copilot Studio agent and raises a finding for each
-problem it finds. A finding resolves itself when a later import shows the problem fixed.
-Open findings also count towards the agent's risk score, so a risky agent also gets a
-high-risk alert. Dismissing a finding (an accepted risk) takes it out of the score.
+AgentGov checks every imported Copilot Studio agent and raises an issue for each
+problem it finds. An issue resolves itself when a later import shows the problem fixed.
+Open issues count towards the agent's risk score: an agent's risk is what its settings
+expose, and 10 points each for a missing owner and sponsor. Accepting an issue's risk, or
+dismissing one that is wrong, takes it out of the score.
 
-| Finding | Severity | Raised when the agent | Risk points |
+| Issue | Severity | Raised when the agent | Risk points |
 |---|---|---|---|
 | `platform.unapproved_connector` | High | uses a connector that isn't on the allowlist (only once the allowlist has a connector) | 20 |
 | `platform.no_authentication` | High | is published with authentication set to *None*, so anyone who can reach a channel can use it | 25 |
 | `platform.maker_credentials` | Medium | has tools that use its maker's connection, so every user reaches data with the maker's access | 10 |
 | `platform.shared_with_everyone` | Medium | is shared with the whole organisation | 10 |
 
-An agent that is simply waiting for review scores 15 points for it. That is less than a
-shadow agent seen calling tools (30 points), because the platform already knows about
-it.
+An agent waiting for review isn't riskier for it: that is its status, and nobody has
+declared its risk tier yet. A shadow agent seen calling tools outside governance scores 30
+points. How many of a platform's agents are left to review is one issue,
+`platform.agents_to_review`, for the catch-all team, not one per agent: it says how many
+and names a few, keeps count as they are adopted, and resolves when none is left.
 
 ## Connector allowlist
 
@@ -159,7 +205,7 @@ that Copilot Studio agents use. For each connector it shows:
 
 Approve the connectors your organisation allows, with a note on why. Until the first
 connector is approved, nothing is flagged. After that, every agent that uses a connector
-not on the list gets a `platform.unapproved_connector` finding. Approving or removing a
+not on the list gets a `platform.unapproved_connector` issue. Approving or removing a
 connector is recorded in the ledger and takes effect at once.
 
 ### When an agent uses a connector that isn't approved
@@ -168,9 +214,9 @@ What AgentGov does is yours to choose, from telling the agent's people to stoppi
 
 | What happens | When | How to choose |
 |---|---|---|
-| **It is flagged.** A `platform.unapproved_connector` finding, high severity, goes to the agent's owner, then its sponsors, then its team, by email and in their chats | At each inventory sync, once the allowlist lists a connector | On unless you turn the finding type off or change its severity ([kinds of findings](issues.md#kinds-of-findings)); who gets a message is up to the [issues](issues.md#fewer-messages) settings |
+| **It is flagged.** A `platform.unapproved_connector` issue, high severity, goes to the agent's owner, then its sponsors, then its team, by email and in their chats | At each inventory sync, once the allowlist lists a connector | On unless you turn the issue type off or change its severity ([kinds of issues](issues.md#kinds-of-issues)); who gets a message is up to the [issues](issues.md#fewer-messages) settings |
 | **Its calls through that connector are refused** as they happen | Each tool call, while [Copilot Studio threat detection](microsoft-connections.md#copilot-studio-threat-detection) is enforced | The `connector-allowlist` control: enforce (the default) refuses them, monitor lets them through and records them, off doesn't check. It can differ for some agents ([exceptions](features.md#exceptions)), such as monitored in a pilot environment and enforced elsewhere |
-| **It is blocked**, so it makes no tool calls at all | A management rule's days of notice after the rule told the agent's people | A rule on the finding, such as the example `unapproved-connectors` ([management rules](management-rules.md#examples)). It blocks Copilot Studio agents while threat detection is enforced, since Copilot Studio then asks AgentGov before each call; otherwise its issue says to quarantine the agent |
+| **It is blocked**, so it makes no tool calls at all | A management rule's days of notice after the rule told the agent's people | A rule on the issue, such as the example `unapproved-connectors` ([management rules](management-rules.md#examples)). It blocks Copilot Studio agents while threat detection is enforced, since Copilot Studio then asks AgentGov before each call; otherwise its issue says to quarantine the agent |
 | **It is quarantined**: it stops working in every channel, though its makers can still test it | When an administrator does it | By hand: **Quarantine** on the agent's page, for an administrator signed in through Microsoft Entra ID ([below](#acting-as-the-signed-in-admin)), or in the Power Platform admin center. Microsoft's quarantine API takes a signed-in administrator only, so AgentGov can't quarantine an agent on its own |
 | **Makers can't use the connector** in the first place | Once pushed | **Push to Power Platform** (`agentgov platforms push-connector-policy`): Power Platform blocks every other connector, as an [advanced connector policy](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform), on the environments an admin picks. It applies to apps and flows as well as agents, so AgentGov shows what it would do first |
 
@@ -229,6 +275,7 @@ action under their name, and so does the ledger (`platform.agent_blocked`,
    | Power Platform API | `ResourceQuery.Resources.Read` | Sync the Copilot Studio inventory |
    | Power Platform API | `EnvironmentManagement.Groups.Read` | [Push the connector allowlist](microsoft-connections.md#pushing-the-connector-allowlist-into-power-platform) to environment groups (optional) |
    | Microsoft Graph | `CopilotPackages.ReadWrite.All` | Block Microsoft 365 agents (optional; needs Agent 365) |
+   | Microsoft Graph | `User.ReadBasic.All` | [Show who made each agent](#who-made-each-agent) by name (optional) |
 
    If **Power Platform API** isn't listed under **APIs my organization uses**, add it to
    the tenant first ([Microsoft's steps][pp-auth]):
@@ -292,6 +339,10 @@ See [Signing in](administration.md#signing-in) for how the CLI keeps its session
 | Sync every connection AgentGov's app may use | Platforms > Microsoft connections > **Sync all** | `agentgov platforms sync` | `POST /v1/platforms/sync` |
 | Sync the Copilot Studio inventory, as you | Platforms > Copilot Studio > **Sync now** | `agentgov platforms sync copilot-studio` | `POST /v1/platforms/copilot-studio/sync` |
 | Import the Copilot Studio inventory | Platforms > **Import inventory** | `agentgov platforms import FILE` | `POST /v1/platforms/copilot-studio/import` |
+| Look up the people agents' platforms name | Platforms > Microsoft connections > Microsoft Entra users | `agentgov platforms sync entra-users` | `POST /v1/platforms/entra-users/sync` |
+| Upload a list of users from Entra ID | Platforms > Copilot Studio > **Upload users** | `agentgov platforms import-users FILE` | `POST /v1/platforms/entra-users/import` (CSV or JSON) |
+| Who made an agent, and whom adopting it suggests | Agent page > Owner and sponsors | `agentgov agents get REF` | `makers` and `suggested_owner` in `GET /v1/agents/{ref}` |
+| Adopt agents at once | Agents > **Adopt n agents** | `agentgov agents adopt REF... \| --platform P --makers --owner TEAM` | `POST /v1/agents/adopt` |
 | Quarantine or block an agent in its platform, as you | Agent > Copilot Studio or Microsoft 365 card, or **Block** / **Unblock** | `agentgov agents platform-block\|platform-unblock REF`, or `agentgov agents block\|unblock REF --in-platform` | `POST /v1/agents/{ref}/platform/block\|unblock` |
 | List the agents from one platform | Platforms > *n agents* | `agentgov agents list --source platform:copilot-studio` | `GET /v1/agents?source=platform:copilot-studio` |
 | See the connectors in use | Platforms > Connectors | `agentgov platforms connectors` | `GET /v1/platforms/connectors` |

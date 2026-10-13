@@ -16,6 +16,7 @@ from agentgov import cli, ids
 from agentgov.models import Finding, LedgerEntry, Notification
 from agentgov.notify import MAX_ATTEMPTS, Notifier
 from agentgov.registry import destinations, features, findings, issues, teams
+from agentgov.registry.errors import Forbidden
 from agentgov.secops.delivery import Delivery
 from tests.conftest import ADMIN, seed
 from tests.test_cli import _Shared, runner
@@ -142,6 +143,34 @@ class TestRouting:
         # Without a mail server, nobody is emailed; the issue is in AgentGov.
         with rt.db.session() as s:
             assert s.scalars(select(Notification)).all() == []
+
+    def test_who_is_accountable_for_the_agent_doesnt_accept_its_risks(self, client, agent) -> None:
+        """The people responsible for an agent acknowledge its issues; someone who isn't
+        accountable for it accepts its risks (docs/issues.md)."""
+        rt = _rt(client)
+        with rt.db.session() as s:
+            teams.create(
+                s, {"name": "cx-devs", "members": ["tara@example.com"]}, actor="admin:test"
+            )
+        client.patch(
+            "/v1/agents/support-bot", json={"team": "cx-devs"}, headers=ADMIN
+        ).raise_for_status()
+        fid = _raise(client, agent["id"])
+        with rt.db.session() as s:
+            f = findings.get(s, fid)
+            for person, why in (
+                ("cx-team@example.com", "You are in the team that owns support-bot"),
+                ("ALICE@example.com", "You sponsor support-bot"),
+                ("bob", "You sponsor support-bot"),
+                ("tara@example.com", "You are in the team of support-bot"),
+            ):
+                with pytest.raises(Forbidden, match=why):
+                    issues.accept(s, f, reason="ok", until=30, actor="t", by=person)
+            # The default team only gets what nobody else does: its people may.
+            issues.accept(
+                s, f, reason="Pilot", until=30, actor="approver:gov", by="gov@example.com"
+            )
+            assert f.status == "accepted"
 
     def test_an_accepted_risk_opens_again_when_its_time_runs_out(self, client, agent) -> None:
         rt = _rt(client)
@@ -393,7 +422,7 @@ class TestSending:
         assert notifier.run() == {"sent": 1, "failed": 0}
         (request,) = posted
         assert str(request.url) == "https://hooks.slack.example/T/B/x"
-        assert b"Acknowledge in AgentGov" in request.content
+        assert b"Answer in AgentGov" in request.content
 
     def test_nothing_is_sent_while_issues_are_off(self, client, agent) -> None:
         rt = _rt(client)

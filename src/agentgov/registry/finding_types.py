@@ -1,5 +1,5 @@
 """Finding types: which kinds of findings an organisation wants raised, and how severe each
-is for it (docs/issues.md#kinds-of-findings).
+is for it (docs/issues.md#kinds-of-issues).
 
 Every check raises findings of its own types (``agent.no_owner``, ``platform.no_guardrail``,
 ...) at the severity it judges. A type turned off here is still checked, but what it finds

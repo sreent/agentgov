@@ -49,8 +49,15 @@ class ControlPlaneClient:
     async def observe(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/v1/internal/observe", payload)
 
-    async def record_decisions(self, records: list[dict[str, Any]]) -> dict[str, Any]:
-        return await self._post("/v1/internal/decisions", {"records": records})
+    async def record_decisions(
+        self, records: list[dict[str, Any]], *, dropped: int = 0
+    ) -> dict[str, Any]:
+        """Send decision records; ``dropped`` says how many were lost since the last batch,
+        for the ledger to record the gap."""
+        payload: dict[str, Any] = {"records": records}
+        if dropped:
+            payload["dropped"] = dropped
+        return await self._post("/v1/internal/decisions", payload)
 
     async def report_component(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/v1/internal/components", payload)
@@ -61,7 +68,8 @@ class DecisionRecorder:
 
     Records wait in a bounded queue and are retried with backoff while the
     control plane is unavailable; if the queue overflows, the oldest records
-    are dropped and the loss is logged.
+    are dropped, and the next batch tells the control plane how many, which the
+    ledger records (``decisions.dropped``): the gap is in the evidence.
     """
 
     def __init__(
@@ -72,6 +80,8 @@ class DecisionRecorder:
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=max_queue)
         self._task: asyncio.Task[None] | None = None
         self.dropped = 0
+        # Of those, how many the control plane was told of.
+        self.reported = 0
 
     def record(self, record: dict[str, Any]) -> None:
         while True:
@@ -95,8 +105,13 @@ class DecisionRecorder:
     async def _send(self, items: list[dict[str, Any]]) -> None:
         delay = 0.5
         while True:
+            lost = self.dropped - self.reported
             try:
-                await self.client.record_decisions(items)
+                if lost:
+                    await self.client.record_decisions(items, dropped=lost)
+                    self.reported += lost
+                else:
+                    await self.client.record_decisions(items)
                 return
             except ControlPlaneError as exc:
                 log.warning("recording %d decision(s) failed, retrying: %s", len(items), exc)

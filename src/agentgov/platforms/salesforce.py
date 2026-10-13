@@ -515,7 +515,7 @@ def agentforce_agent(
                 f"{access.people} of the org's {access.everyone} people have it, through "
                 f"{_and(access.grants)}.",
                 "Give it through a permission set assigned to the people who need it, or "
-                "confirm everyone should have it and dismiss this finding.",
+                "confirm everyone should have it and ask an approver to accept its risk.",
                 {"people": access.people, "of": access.everyone, "through": access.grants},
             )
         )

@@ -66,9 +66,9 @@ A rule's name can't change: the ledger names it.
 | `inactive_days: N` | Nothing was seen of it for N days: no call through the gateway, and no use on another platform AgentGov reads |
 | `missing: [...]` | It has no `owner`, no `sponsors`, no `team` (its own or its blueprint's), no `blueprint`, or no `workload_identity`: any of those listed |
 | `attestation_overdue_days: N` | Its attestation expired N days ago or more |
-| `findings: [...]` | It has an open finding of one of these types, `*` wildcards allowed (such as `agent.stale` or `defender.*`); with `finding_severity`, one at least that severe |
+| `findings: [...]` | It has an open issue of one of these types, `*` wildcards allowed (such as `agent.stale` or `defender.*`); with `finding_severity`, one at least that severe |
 | `risk_level` | Its risk is at least `low`, `medium`, `high` or `critical` |
-| `status: [...]` | It is `pending`, `active`, `blocked` or `discovered` |
+| `status: [...]` | It is `pending`, `active`, `blocked` or `discovered` (unmanaged) |
 
 A rule doesn't guess. Agents on Microsoft 365 and Copilot Studio are inactive only by what
 AgentGov reads of their use from the [Purview audit log](microsoft-connections.md), and
@@ -76,7 +76,7 @@ only since it started reading it: while it doesn't, or its last read is more tha
 old, a rule can't tell, and the agent doesn't match. Previews list those agents apart. A
 blueprint and a workload identity are never missing for them: their platform governs that.
 
-Findings count while they are open: one whose risk was accepted, one dismissed, and one a
+Issues count while they are open: one whose risk was accepted, one dismissed, and one a
 failed sync can't vouch for (unverified) don't. Rules' own issues never count.
 
 ## Which agents
@@ -88,13 +88,17 @@ failed sync can't vouch for (unverified) don't. Rules' own issues never count.
 | `blueprints` | On one of these blueprints |
 | `teams` | Of one of these teams (the agent's own, or its blueprint's) |
 | `environments` | In one of these environments |
-| `platforms` | Where they run: `gateway`, `microsoft-365` or `copilot-studio` |
+| `platforms` | Where they run: `gateway`, or a platform AgentGov reads (`microsoft-365`, `copilot-studio`, `entra-agent-id`, `aws`, `google-cloud`, `salesforce`, `databricks`, `microsoft-foundry`) |
 | `labels` | With all these labels |
+
+A scope names teams and blueprints that are there: a misspelt one, which would match no
+agent, is refused. A team or blueprint a rule names, in its scope or as the owner it gives
+agents, can't be deleted while the rule does.
 
 An agent labelled `agentgov/exempt-rules` is left out of the rules it names (`inactive-agents,
 stale-registrations`), or of all of them (`*`); only administrators set labels under
 `agentgov/`. Each action also looks only at the agents
-it can do something to: a rule that blocks, at pending, active and discovered agents; one
+it can do something to: a rule that blocks, at pending, active and unmanaged agents; one
 that deletes, at any agent not deleted yet; one that revokes access, at agents that hold
 access packages; and one that gives an owner, at agents without one.
 
@@ -193,7 +197,8 @@ monitored:
 In step 19 of the demo, `python examples/agents/demo_agent.py`, an administrator previews
 a rule that deletes agents blocked for 30 days, which matches the demo agent (blocked in
 step 13). Enforced, it raises its issue at once, for the agent's owner, cx-platform, and
-its sponsor, alice. alice accepts the risk until a date, and the rule leaves the agent be.
+its sponsor, alice. alice can't accept its risk, being accountable for the agent; an
+administrator accepts it until a date, and the rule leaves the agent be.
 
 ## In the ledger
 

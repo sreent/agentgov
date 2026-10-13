@@ -3,7 +3,7 @@
 Agents built on a cloud's or a SaaS vendor's agent platform don't call tools through
 AgentGov's gateway, so AgentGov can't sit in front of them. It can read what their platform
 reports about them, as it does for [Microsoft 365 and Copilot Studio](platforms.md): each
-agent becomes a registry agent, its risky settings become findings, and both stay in the
+agent becomes a registry agent, its risky settings become issues, and both stay in the
 same registry, risk scores and evidence ledger as every other agent.
 
 **AgentGov reads these platforms; it doesn't change them.** Blocking or deleting one of
@@ -29,8 +29,8 @@ has a switch on the
 
 Each agent the platform reports becomes a registry agent with the source `platform:<platform>`
 (`platform:aws`), its platform's name for what it is (an Amazon Bedrock agent), and a card on
-its page with what the platform reports: its settings and its tools. It starts as
-`discovered`, with an "agent to review" finding: adopt it to give it an owner, sponsors and
+its page with what the platform reports: its settings and its tools. It starts
+unmanaged (`discovered`), with an "agent to review" issue: adopt it to give it an owner, sponsors and
 periodic attestation, like any other agent. AgentGov issues these agents no gateway
 credentials and doesn't apply blueprints to them, because they never call the gateway.
 
@@ -38,7 +38,7 @@ AgentGov reads each platform in parts (an AWS account's region, a Google Cloud p
 region, a Salesforce org, a Databricks workspace's agents on Model Serving). Agents gone from a
 part it read in full stay in the registry, marked as gone, so their history is kept: delete
 them when you no longer need the record. A part that can't be read (its region refuses, say) is
-named on the Platforms page; its agents are left as the last sync saw them, and their findings
+named on the Platforms page; its agents are left as the last sync saw them, and their issues
 stay open, marked unverified with why, until it can be read again. So does a part with more
 than 50 pages of results, a cap that keeps one sync from running for hours: what is past the
 cap isn't read, so AgentGov can't tell which of its agents are gone.
@@ -52,12 +52,13 @@ checks](instructions.md) as every agent's.
 
 ## Checks
 
-AgentGov raises a finding for each risky setting it finds. A finding resolves itself once two
-syncs in a row find the setting fixed. Open findings count towards the agent's risk score, so
-a risky agent also gets a high-risk alert; dismissing one (an accepted risk) takes it out of
-the score.
+AgentGov raises an issue for each risky setting it finds. An issue resolves itself once two
+syncs in a row find the setting fixed. Open issues count towards the agent's risk score;
+accepting an issue's risk, or dismissing one that is wrong, takes it out of the score. How
+many agents are left to review is one issue per platform, `platform.agents_to_review`, as
+on [Copilot Studio](platforms.md#checks).
 
-| Finding | Risk points | Raised when |
+| Issue | Risk points | Raised when |
 |---|---|---|
 | `platform.no_authentication` | 25 | anyone who can reach the agent can use it |
 | `platform.plain_secret` | 20 | its settings hold what looks like a secret in plain text, rather than a reference to a secret store |
@@ -103,7 +104,7 @@ An organisation's registry with auto-detection on lists the AgentCore runtimes a
 every account in the organisation, in its region, so reading the account that holds it (the
 delegated administrator's) shows them all. Those in accounts AgentGov reads itself are read
 from AgentCore, in full; the others come from the registry, with their protocol, how they check
-callers (a gateway without inbound authorization is a finding), their workload identity and
+callers (a gateway without inbound authorization is an issue), their workload identity and
 endpoint. Each is known by its own ARN, so it stays the same agent when you add a role in its
 account and AgentGov reads it in full.
 
@@ -121,7 +122,7 @@ runtimes), `agentcore-gateways`, `quick` and `agent-registry`, all by default.
 | `platform.maker_credentials` | an Amazon Quick agent's action connectors sign in with one credential for everyone (an API key, a user name and password, an OAuth client or an IAM role), so its users act with that credential's access rather than their own |
 
 A runtime or gateway whose resource policy AgentGov may not read is shown as read in part, and
-its findings about who may call it stay as they were, unverified, rather than close.
+its issues about who may call it stay as they were, unverified, rather than close.
 
 ### Setting it up
 
@@ -206,7 +207,7 @@ either. A project that hasn't turned an API on is skipped for it.
 | `platform.broad_identity` | it runs as a default service account, Compute Engine's or App Engine's, which Google makes an editor of the project (high), or, on Agent Runtime, as the project's Agent Runtime service agent, which every agent without an identity of its own shares (medium) |
 | `platform.plain_secret` | an Agent Runtime agent's environment variable whose name says it holds a secret has a plain value rather than one from Secret Manager, or `GOOGLE_APPLICATION_CREDENTIALS` is set (a service account key shipped with the agent) |
 
-An agent whose IAM policy AgentGov may not read is shown as such, and its findings about who
+An agent whose IAM policy AgentGov may not read is shown as such, and its issues about who
 may use it are left as they were.
 
 ### Setting it up
@@ -318,7 +319,7 @@ AgentGov reads, in each workspace you name:
 
 Genie agents', Knowledge Assistants' and Supervisor Agents' instructions go through the
 instruction checks. An agent whose permissions
-AgentGov may not read is shown as such, and its findings about who may use it are left as
+AgentGov may not read is shown as such, and its issues about who may use it are left as
 they were.
 
 ### Setting it up
@@ -416,7 +417,7 @@ Prompt agents' instructions go through the instruction checks.
    The agents action reads agents' conversations too, which AgentGov doesn't. The connections
    action lists a project's connections without their credentials, which take an action of
    their own that AgentGov doesn't need. Without it, agents are still read, and the Platforms
-   page names the projects whose connections couldn't be read; their agents' findings about
+   page names the projects whose connections couldn't be read; their agents' issues about
    connections stay as they were. **Foundry User** works as well, but may change agents.
 2. Name the projects, by their endpoints, or the subscriptions to find them in; finding them
    needs **Reader** on the subscription, to list its Foundry resources and their projects:

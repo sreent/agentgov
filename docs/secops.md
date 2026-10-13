@@ -1,14 +1,14 @@
 # Security operations
 
 AgentGov records everything it decides in the [evidence ledger](architecture.md) and raises
-findings about agents. The security team works elsewhere: in a SIEM, a SOAR and a chat
+issues about agents. The security team works elsewhere: in a SIEM, a SOAR and a chat
 channel. The **security-operations** feature hands AgentGov's evidence and alerts to their
 tools, at the level you choose:
 
 * their **SIEMs** get the ledger as [OCSF](https://schema.ocsf.io) events (version 1.9.0),
   the open schema SIEMs and security data lakes read, through OpenTelemetry, an HTTP input or
   Splunk's HTTP Event Collector;
-* their **Teams and Slack** channels get alerts: findings from a severity up, approval
+* their **Teams and Slack** channels get alerts: issues from a severity up, approval
   requests and kill switches;
 * their **tools and analysts**, with the `secops` role, may do as much in AgentGov as the
   level allows, and no more.
@@ -33,7 +33,7 @@ The feature's mode is the level. Each level includes the ones before it.
 |---|---|---|
 | **off** (default) | Nothing | Read everything, like `auditor` |
 | `inform` | SIEMs and chats get what their destinations take; the [events API](#the-events-api) answers | Read |
-| `triage` | The same | Also resolve, dismiss and reopen findings, acknowledge [issues](issues.md) and accept their risks |
+| `triage` | The same | Also acknowledge, resolve, dismiss and reopen [issues](issues.md) and accept their risks |
 | `contain` | The same | Also block and unblock agents, tool servers, model providers and identity issuers |
 | `decide` | The same | Also approve and deny the approval requests sent to approvers |
 
@@ -61,7 +61,9 @@ level above. `GET /v1/me` tells a client its level (`handoff.level`), and the UI
 ## Destinations
 
 A destination is where AgentGov sends: a SIEM, which gets OCSF events, or a chat, which
-gets alerts.
+gets alerts. A service desk (`servicenow`, `jira` or `freshservice`) is a destination too,
+which gets [issues](issues.md) as tickets it keeps in step with them, whatever the hand-off
+level: [tickets in service desks](tickets.md).
 
 | Kind | Gets | `url` | Its secret file holds |
 |---|---|---|---|
@@ -81,12 +83,12 @@ many SIEMs map it.
 |---|---|
 | `decisions` | Tool calls, model calls and calls between agents the gateway decided, Copilot Studio's tool calls, and tools agents used without the gateway (telemetry) |
 | `approvals` | Approval requests, decisions, use and cancellations |
-| `findings` | Findings raised, reopened, resolved and dismissed |
+| `findings` | Issues raised, reopened, resolved and dismissed |
 | `access` | Sign-ins, sign-outs and API keys |
 | `changes` | Everything else: what AgentGov governs, who changed it, and what was detected about agents and tool servers |
 
 `min_severity` (`info`, `low`, `medium`, `high`, `critical`) leaves out events below it:
-`medium` keeps the denials, the warnings and the findings that matter.
+`medium` keeps the denials, the warnings and the issues that matter.
 
 **What a chat gets** (`events`): `findings` (raised or reopened, from `min_severity` up,
 which is `high` for chats by default), `approvals` (requests, whatever their severity) and
@@ -132,7 +134,7 @@ hasn't got yet stay in the database until it has ([evidence](evidence.md#retenti
   ledger from its start.
 * A destination that fails is tried again after 5 seconds, then 10, 20 and so on up to 10
   minutes, and keeps its place. After three failures in a row the
-  [posture check](features.md) raises a `destination.failing` finding (high), which the
+  [posture check](features.md) raises a `destination.failing` issue (high), which the
   other destinations hear about; it resolves once sending works again.
 * **Pause** stops sending; **Resume** sends what it missed. **Replay** sends a SIEM the
   ledger again from after an entry you choose (`0`: from its start).
@@ -190,7 +192,7 @@ Each ledger entry is one event:
   its hash, so a SIEM can match events to `agentgov ledger export` by `metadata.uid` and
   hash; `agentgov ledger verify` checks that chain.
 
-Severity follows the entry: warnings are Medium; findings keep their own severity;
+Severity follows the entry: warnings are Medium; issues keep their own severity;
 denied calls are Medium and approval requests Low.
 
 A blocked tool call, for example:
@@ -225,5 +227,5 @@ refused at `inform`, done at `contain`. See what arrived at
 
 `AGENTGOV_ALERT_WEBHOOK_URL` is refused now: add a `slack` or `teams` destination with the
 webhook URL in its secret file, and set the level to `inform`. Destinations send more
-(findings as well as approval requests and kill switches), retry, and never keep the URL
+(issues as well as approval requests and kill switches), retry, and never keep the URL
 in a setting.

@@ -31,6 +31,7 @@ from agentgov.registry import destinations
 from agentgov.registry.destinations import (
     ACTIVE,
     CHAT,
+    DESK,
     OTLP,
     SEVERITIES,
     SLACK,
@@ -94,10 +95,11 @@ class Delivery:
             if not handoff.at_least(s, handoff.INFORM):
                 return {}
             now = ids.utcnow()
+            # Service desks get issues as tickets instead (agentgov.ticketing).
             due = [
                 d.id
                 for d in s.scalars(select(Destination).where(Destination.status == ACTIVE))
-                if d.retry_at is None or d.retry_at <= now
+                if d.kind not in DESK and (d.retry_at is None or d.retry_at <= now)
             ]
         return {name: outcome for name, outcome in map(self.deliver, due) if name}
 
@@ -130,7 +132,7 @@ class Delivery:
         with self.db.session() as s:
             now = ids.utcnow()
             row = s.get(Destination, destination_id)
-            if row is None or row.status != ACTIVE:
+            if row is None or row.status != ACTIVE or row.kind in DESK:
                 return None
             if row.retry_at is not None and row.retry_at > now:
                 return None

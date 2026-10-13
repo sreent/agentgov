@@ -148,7 +148,7 @@ secret() {   # secret NAME VALUE: store it, and let the operator read it
   gcloud secrets add-iam-policy-binding "agentgov-$1" \
     --role=roles/secretmanager.secretAccessor --member="$ESO" >/dev/null
 }
-for key in admin-token service-token keycloak-client-secret oidc-client-secret keycloak-admin-password; do
+for key in admin-token service-token signing-secret keycloak-client-secret oidc-client-secret keycloak-admin-password; do
   secret $key "$(openssl rand -hex 32)"
 done
 secret database-url \

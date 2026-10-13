@@ -49,6 +49,12 @@ def agent(client: TestClient, name: str, **fields: Any) -> dict[str, Any]:
     return resp.json()
 
 
+def team(client: TestClient, *names: str) -> None:
+    for name in names:
+        resp = client.post("/v1/teams", json={"name": name}, headers=ADMIN)
+        assert resp.status_code == 201, resp.text
+
+
 def snapshot(client: TestClient) -> dict[str, Any]:
     with client.app.state.rt.db.session() as s:
         return registry_snapshot(s)
@@ -111,6 +117,98 @@ class TestChoosing:
             resp = put(client, "least-privilege", {"scopes": DEV})
             assert resp.status_code == 409 and "AGENTGOV_FEATURES" in resp.text
             assert put(client, "least-privilege", {}).status_code == 422
+
+
+class TestNames:
+    """A scope names teams, blueprints and platforms there are: a misspelt one would match
+    no agent, and nobody would know."""
+
+    def test_a_name_there_isnt_is_refused(self, client) -> None:
+        for scope, says in (
+            ({"teams": ["cx-platfrom"]}, "there is no team cx-platfrom"),
+            ({"blueprints": ["suport"]}, "there is no blueprint suport"),
+            ({"platforms": ["copilot"]}, "the platforms are gateway, microsoft-365"),
+        ):
+            resp = put(client, "least-privilege", {"scopes": [{"mode": "monitor", "scope": scope}]})
+            assert resp.status_code == 422 and says in resp.json()["detail"], resp.text
+        team(client, "cx-platform")
+        scope = {"teams": ["cx-platform"], "platforms": ["entra-agent-id"]}
+        assert put(
+            client, "least-privilege", {"scopes": [{"mode": "monitor", "scope": scope}]}
+        ).status_code == 200  # fmt: skip
+
+    def test_each_says_how_many_agents_it_applies_to(self, client) -> None:
+        seed(client)
+        agent(client, "dev-bot", environment="dev")
+        agent(client, "pay-bot", environment="dev", labels={"tier": "payments"})
+        scopes = [
+            {"mode": "enforce", "scope": {"labels": {"tier": "payments"}}},
+            # pay-bot is in dev too, but the first exception takes it.
+            {"mode": "monitor", "scope": {"environments": ["dev"]}},
+            {"mode": "monitor", "scope": {"environments": ["prod"]}},
+        ]
+        put(client, "least-privilege", {"mode": "enforce", "scopes": scopes})
+        listed = client.get("/v1/features/least-privilege", headers=ADMIN).json()["scopes"]
+        assert [(e["agents"], e["missing"]) for e in listed] == [(1, []), (1, []), (0, [])]
+        # What the listing gives can be sent back as it is.
+        again = put(client, "least-privilege", {"scopes": listed})
+        assert again.status_code == 200, again.text
+        assert [e["scope"] for e in again.json()["scopes"]] == [e["scope"] for e in scopes]
+
+    def test_a_name_from_before_doesnt_stop_editing_the_others(self, client) -> None:
+        from agentgov.models import FeatureSetting
+
+        with client.app.state.rt.db.session() as s:
+            s.add(
+                FeatureSetting(
+                    key="least-privilege",
+                    mode="enforce",
+                    changed_by="admin:test",
+                    scopes=[{"mode": "monitor", "scope": {"teams": ["gone"]}}],
+                )
+            )
+        listed = client.get("/v1/features/least-privilege", headers=ADMIN).json()["scopes"]
+        assert listed[0]["missing"] == ["team gone"] and listed[0]["agents"] == 0
+        resp = put(client, "least-privilege", {"scopes": [*listed, *DEV]})
+        assert resp.status_code == 200, resp.text
+
+    def test_a_team_or_blueprint_they_name_stays(self, client) -> None:
+        seed(client)
+        team(client, "pay")
+        scopes = [
+            {"mode": "monitor", "scope": {"teams": ["pay"]}},
+            {"mode": "monitor", "scope": {"blueprints": ["unused"]}},
+        ]
+        client.post("/v1/blueprints", json={"name": "unused"}, headers=ADMIN).raise_for_status()
+        put(client, "least-privilege", {"scopes": scopes}).raise_for_status()
+        refused = client.delete("/v1/teams/pay", headers=ADMIN)
+        assert refused.status_code == 409, refused.text
+        assert "the exceptions to least-privilege name team 'pay'" in refused.json()["detail"]
+        named = client.get("/v1/teams/pay", headers=ADMIN).json()["named_by"]
+        assert named == ["the exceptions to least-privilege"]
+        refused = client.delete("/v1/blueprints/unused", headers=ADMIN)
+        assert refused.status_code == 409 and "least-privilege" in refused.json()["detail"]
+        put(client, "least-privilege", {"scopes": []}).raise_for_status()
+        assert client.delete("/v1/teams/pay", headers=ADMIN).status_code == 200
+        assert client.delete("/v1/blueprints/unused", headers=ADMIN).status_code == 200
+
+    def test_a_manifest_says_which_document_names_what_there_isnt(self, client) -> None:
+        doc = (
+            "apiVersion: agentgov/v1alpha1\nkind: Feature\nmetadata:\n  name: tool-integrity\n"
+            "spec:\n  scopes:\n  - mode: monitor\n    scope:\n      teams: [reserach]\n"
+        )
+        resp = client.post(
+            "/v1/apply", content=doc, headers={**ADMIN, "content-type": "application/yaml"}
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"].startswith(
+            "feature tool-integrity: scopes[0].scope: there is no team reserach"
+        )
+
+    def test_the_platforms_are_those_agentgov_reads(self) -> None:
+        from agentgov.registry import platforms, scopes
+
+        assert set(scopes.PLATFORMS) == {"gateway", *platforms.SOURCES}
 
 
 # ------------------------------------------------------------------- which agents
@@ -197,6 +295,7 @@ def test_the_gateway_is_ready_for_the_strictest_mode(client) -> None:
     with client.app.state.rt.db.session() as s:
         assert features.fails_open("modes", features.strictest_modes(s))
     # Enforced for some agents: what the gateway can't check is refused.
+    team(client, "pay", "a")
     put(client, "least-privilege", {"scopes": [{"mode": "enforce", "scope": {"teams": ["pay"]}}]})
     with client.app.state.rt.db.session() as s:
         strictest = features.strictest_modes(s)
@@ -305,6 +404,7 @@ def test_the_cli(client, monkeypatch) -> None:
         )
     )
     assert "monitor for environment dev, label tier=pilot" in out
+    team(client, "pay")
     ok(runner.invoke(cli.app, ["features", "scope", "least-privilege", "enforce", "--team", "pay"]))
     out = ok(runner.invoke(cli.app, ["features", "list"]))
     assert "EXCEPTIONS" in out
@@ -319,16 +419,19 @@ def test_the_cli(client, monkeypatch) -> None:
 
 
 def test_manifests_apply_and_export_them(client) -> None:
+    # The team the exception names is in the same manifest: exceptions are set last.
     doc = (
         "apiVersion: agentgov/v1alpha1\nkind: Feature\nmetadata:\n  name: tool-integrity\n"
-        "spec:\n  mode: enforce\n  scopes:\n  - mode: monitor\n    scope:\n"
+        "spec:\n  scopes:\n  - mode: monitor\n    scope:\n"
         "      teams: [research]\n"
+        "---\napiVersion: agentgov/v1alpha1\nkind: Team\nmetadata:\n  name: research\n"
+        "spec:\n  emails: [research@example.com]\n"
     )
     resp = client.post(
         "/v1/apply", content=doc, headers={**ADMIN, "content-type": "application/yaml"}
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["results"][0]["action"] == "configured"
+    assert [r["action"] for r in resp.json()["results"]] == ["configured", "created"]
     exported = client.get("/v1/export", headers=ADMIN).text
     assert "teams:\n      - research" in exported or "- research" in exported
     found = client.get("/v1/features/tool-integrity", headers=ADMIN).json()
@@ -336,6 +439,7 @@ def test_manifests_apply_and_export_them(client) -> None:
 
 
 def test_the_monitor_starting_point_monitors_exceptions_too(client) -> None:
+    team(client, "a")
     put(client, "jailbreak-detection", {"scopes": [{"mode": "enforce", "scope": {"teams": ["a"]}}]})
     view = client.get("/v1/feature-presets", headers=ADMIN).json()
     monitor = next(p for p in view["presets"] if p["preset"] == "monitor")

@@ -278,6 +278,7 @@ class TestWhatAgentGovHas:
         assert {k: c["status"] for k, c in state.items() if c["via"] == "app"} == {
             "microsoft-365": "off",
             "entra-agent-id": "off",
+            "entra-users": "off",
             "purview-audit": "off",
             "defender": "off",
             "entra-access-packages": "off",

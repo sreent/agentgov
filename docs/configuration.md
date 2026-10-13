@@ -101,7 +101,7 @@ database or settings:
 | What | Read by | Compose | Helm |
 |---|---|---|---|
 | Model providers' API keys, one file per provider named after it ([model calls](models.md)) | The gateway and its configuration sidecar, at `/model-keys` | `deploy/compose/model-keys/` | `modelKeys.existingSecret` |
-| Destinations' credentials, one file per destination named after it ([security operations](secops.md)) | The control plane, at `AGENTGOV_DESTINATION_SECRETS_DIR` (`/destination-secrets`) | `deploy/compose/destination-secrets/` | `destinationSecrets.existingSecret` |
+| Destinations' credentials, one file per destination named after it: SIEMs, chats and service desks ([security operations](secops.md), [tickets](tickets.md)) | The control plane, at `AGENTGOV_DESTINATION_SECRETS_DIR` (`/destination-secrets`) | `deploy/compose/destination-secrets/` | `destinationSecrets.existingSecret` |
 | The Keycloak realm: the control plane's client, the sign-in client, roles and demo users | Keycloak, on its first start only | `deploy/compose/keycloak/agentgov-realm.json` | the same file, in the chart |
 
 With Compose, `AGENTGOV_MODEL_KEYS_DIR` and `AGENTGOV_DESTINATION_SECRETS_DIR` in `.env` move
@@ -161,13 +161,14 @@ never in a values file you share.
 | `AGENTGOV_ADMIN_TOKEN` (secret) | — | Bootstrap administrator bearer token for the admin API and UI. |
 | `AGENTGOV_DEV_MODE` | `false` | Development only: without an admin token, the control plane makes one up and logs it. |
 | `AGENTGOV_SERVICE_TOKEN` (secret) | — | Shared token for internal components (OPA, governance processor, OTel collector) calling the control plane. |
+| `AGENTGOV_SIGNING_SECRET` (secret) | — | The secret the keys AgentGov signs delegations and ID-JAGs with derive from. Only the control plane and the processor hold it; without it, the keys derive from the service token, which OPA and the OTel Collector hold too. |
 | `AGENTGOV_FEATURES` | empty | Features pinned by the deployment, e.g. `least-privilege=monitor,discovery=off` ([features](features.md)). Administrators choose the others in the app. |
 | `AGENTGOV_FEATURE_PRESET` | empty | A starting point for the features' modes, applied once, when the control plane starts with one it hasn't applied yet: `monitor` (every control records what it would do and stops nothing) or `inventory` (no gateway: AgentGov finds agents and checks them). Administrators change the modes from there; pinned features keep their pins. |
 | `AGENTGOV_APPROVAL_TTL_SECONDS` | `86400` | How long an approval request waits for a decision before it expires. |
 | `AGENTGOV_SOFT_DELETE_RETENTION_DAYS` | `30` | Deleted agents can be restored for this many days, then they are purged (Agent 365 parity). 0 keeps them. |
 | `AGENTGOV_AUTO_BLOCK_RISK_SCORE` | `0` | When &gt; 0, agents whose risk score reaches this value are blocked. |
 | `AGENTGOV_RISK_WINDOW_HOURS` | `24` | How long risk signals (denied calls, credentials, prompt injections) count towards an agent's risk score. |
-| `AGENTGOV_STALE_AGENT_DAYS` | `30` | Agents not seen for this many days raise a stale-agent finding. |
+| `AGENTGOV_STALE_AGENT_DAYS` | `30` | Agents not seen for this many days raise a stale-agent issue. |
 | `AGENTGOV_POSTURE_INTERVAL_SECONDS` | `300` | Seconds between posture scans (owners, sponsors, attestations, stale agents); 0 turns the scheduled scan off. |
 
 ### Security operations
@@ -183,9 +184,12 @@ never in a values file you share.
 |---|---|---|
 | `AGENTGOV_ISSUE_ESCALATION_HOURS` | `critical:4,high:24,medium:72,low:168,info:168` | Hours an issue waits at each step of its chain (owner, sponsors, team) for someone to acknowledge it, before it goes to the next, by severity. |
 | `AGENTGOV_ISSUES_INTERVAL_SECONDS` | `60` | Seconds between rounds of routing issues, escalating them and sending what is due. |
-| `AGENTGOV_ISSUES_NOTIFY_SEVERITY` | `info` | Issues below this severity reach people in AgentGov only, without an email or a chat message. info: every issue is sent. |
+| `AGENTGOV_ISSUES_NOTIFY_SEVERITY` | `medium` | Issues below this severity reach people in AgentGov only, without an email or a chat message: by default, low and info ones wait there. info: every issue is sent. |
 | `AGENTGOV_ISSUES_QUIET_FIRST_SYNC` | `true` | What a platform's first sync finds reaches people in AgentGov only, without an email or a chat message: what was there before AgentGov looked doesn't flood inboxes. Found again after it is resolved, it is sent as any other. |
-| `AGENTGOV_THREAT_FINDING_DAYS` | `30` | Days a threat finding stays open without happening again before it is resolved (it opens again if it happens again). 0 keeps threats open until someone closes them. |
+| `AGENTGOV_THREAT_FINDING_DAYS` | `30` | Days a threat issue stays open without happening again before it is resolved (it opens again if it happens again). 0 keeps threats open until someone closes them. |
+| `AGENTGOV_ISSUES_DIGEST_AT` | — | The time of day, HH:MM, a digest of their open issues goes to each address and team chat that has some: one message a day, those issues below `AGENTGOV_ISSUES_NOTIFY_SEVERITY` included ([issues](issues.md#a-daily-digest)). Empty: none. |
+| `AGENTGOV_ISSUES_DIGEST_TIMEZONE` | `UTC` | The time zone of `AGENTGOV_ISSUES_DIGEST_AT`, such as Europe/London. |
+| `AGENTGOV_ISSUES_DIGEST_DAYS` | `mon,tue,wed,thu,fri` | The days the digest goes out: mon to sun, separated by commas. |
 | `AGENTGOV_SMTP_URL` | — | The mail server for issues' emails: smtp://host:587 (STARTTLS) or smtps://host:465 (TLS). Without it, issues reach people in AgentGov and in their teams' chats only. |
 | `AGENTGOV_SMTP_FROM` | — | The sender of issues' emails, such as agentgov@example.com. |
 | `AGENTGOV_SMTP_USERNAME`<br>`AGENTGOV_SMTP_PASSWORD` (secret) | —<br>— | The mail server's user and password, if it needs them. |
@@ -196,13 +200,14 @@ never in a values file you share.
 |---|---|---|
 | `AGENTGOV_LEDGER_RETENTION_DAYS` | `0` | Days the ledger keeps its entries in the database: older ones are archived to `AGENTGOV_LEDGER_ARCHIVE_DIR`, then removed, and the chain goes on from the checkpoint at their end. 0 keeps every entry; otherwise at least 183 (six months). |
 | `AGENTGOV_LEDGER_ARCHIVE_DIR` | — | Where the ledger's archives go, as gzipped JSON Lines files (a mounted volume, or a bucket mounted as one). Needed with `AGENTGOV_LEDGER_RETENTION_DAYS`. |
+| `AGENTGOV_LEDGER_WITNESS_FILE` | — | A file where the control plane keeps the ledger's head outside the database, to notice a database restored from an older backup or rolled back ([backup](backup.md)): on storage that restoring the database doesn't touch. By default ledger-head.json in `AGENTGOV_LEDGER_ARCHIVE_DIR`, when that is set; `off` keeps none. |
 | `AGENTGOV_LEDGER_CHECKPOINT_HOURS` | `24` | Hours between ledger checkpoints: the chain's head, kept, and time-stamped when a time-stamping authority is set. 0 makes them only on demand. |
 | `AGENTGOV_LEDGER_TSA_URL` | — | An RFC 3161 time-stamping authority, such as `https://freetsa.org/tsr`. It signs each checkpoint with its own time, which proves the chain existed then, unchanged since. |
 | `AGENTGOV_LEDGER_REKOR_URL` | — | A transparency log, Sigstore's Rekor v2: its public shard (such as `https://log2025-1.rekor.sigstore.dev`) or a rekor-tiles of your own. Each checkpoint is signed with `AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE` and added to it, where anyone can see that it was published: AgentGov can't later show another checkpoint for the same entry without the log holding both. What the log publishes, for good, is the statement's SHA-256, the signature and AgentGov's public key. |
 | `AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE` | — | AgentGov's key for the log: an ECDSA P-256 private key (PEM). `agentgov transparency-key DIR` makes one. |
 | `AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE` | — | The log's public key (PEM, Ed25519), to check each answer's proof that the log holds the entry. Unset, entries are kept unchecked. |
 | `AGENTGOV_LEDGER_REKOR_ORIGIN` | — | The log's name in its checkpoints (its origin). Unset: the URL's host name. |
-| `AGENTGOV_DATA_RETENTION_DAYS` | `0` | Days AgentGov keeps the operational records whose history the ledger has: daily activity and model usage, risk signals, notifications sent, decided approvals, resolved findings, ended access assignments, and developers' MCP servers not reported since. 0 keeps them; otherwise at least 30. |
+| `AGENTGOV_DATA_RETENTION_DAYS` | `0` | Days AgentGov keeps the operational records whose history the ledger has: daily activity and model usage, risk signals, notifications sent, decided approvals, resolved issues, ended access assignments, and developers' MCP servers not reported since. 0 keeps them; otherwise at least 30. |
 
 ### Keycloak (agent identity)
 
@@ -217,7 +222,7 @@ never in a values file you share.
 | `AGENTGOV_IDENTITY_FULL_SYNC_SECONDS` | `900` | Seconds between passes that sync every agent with Keycloak, which also repair what was changed in Keycloak itself. The passes between, every minute and after each change, sync only the agents whose clients should change. 0: every pass is full. |
 | `AGENTGOV_GATEWAY_AUDIENCE` | `agentgov-gateway` | Audience every agent token carries; the gateway requires it. |
 | `AGENTGOV_PEOPLE_APP_CLIENTS` | empty | Keycloak clients of the apps people sign in to and use agents from (comma-separated client IDs). Each agent that acts for people has a client scope named after its client ID, which these apps may request: the person's token is then one the agent can exchange for a token of its own, on the person's behalf. |
-| `AGENTGOV_ASSERTION_LIFETIME_SECONDS` | `300` | Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers outside the gateway last, at most 300: the agent trades one for an access token at once ([acting-for-people](acting-for-people.md)#mcp-servers-outside-the-gateway). |
+| `AGENTGOV_ASSERTION_LIFETIME_SECONDS` | `300` | Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers outside the gateway last, at most 300: the agent trades one for an access token at once ([acting-for-people](acting-for-people.md#mcp-servers-outside-the-gateway)). |
 
 ### Administrator single sign-on (OIDC)
 
@@ -300,7 +305,7 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Micro
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_OPA_URL` | — | Where the processor asks OPA for decisions, and the control plane for What if, such as `http://opa:8181`. |
-| `AGENTGOV_AUTHZEN_URL` | — | An AuthZEN decision point of your own (OpenID AuthZEN Authorization API 1.0), which the processor also asks about the calls AgentGov's policies let through, as the external-decision-point feature says: its base URL, such as `https://pdp.example.com` ([policies](policies.md)#authzen). |
+| `AGENTGOV_AUTHZEN_URL` | — | An AuthZEN decision point of your own (OpenID AuthZEN Authorization API 1.0), which the processor also asks about the calls AgentGov's policies let through, as the external-decision-point feature says: its base URL, such as `https://pdp.example.com` ([policies](policies.md#authzen)). |
 | `AGENTGOV_AUTHZEN_TOKEN` (secret) | — | The bearer token it asks for, if it asks for one. |
 | `AGENTGOV_AUTHZEN_TIMEOUT_SECONDS` | `2.0` | Seconds to wait for its answer. |
 | `AGENTGOV_AUTHZEN_FAILURE_MODE` | `closed` | When it can't be asked while the external-decision-point feature is enforced: `closed` refuses the call; `open` lets AgentGov's own decision stand. Monitored, it never stops a call. |

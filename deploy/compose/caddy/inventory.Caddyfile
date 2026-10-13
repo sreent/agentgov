@@ -1,0 +1,10 @@
+# HTTPS in front of the inventory stack's control plane (docs/deploy/server.md): Caddy gets
+# and renews a certificate for AGENTGOV_PUBLIC_URL, and passes its requests on. Started by
+# docker-compose.inventory.yml with COMPOSE_PROFILES=https.
+
+import certificates.caddy
+
+{$AGENTGOV_PUBLIC_URL} {
+	import certificates-{$AGENTGOV_CERTIFICATES:letsencrypt}
+	reverse_proxy control-plane:8000
+}

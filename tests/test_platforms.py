@@ -17,6 +17,7 @@ from agentgov import cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.platforms.microsoft import AGENTS_FILTER, PlatformError
+from agentgov.registry import findings
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
 from tests.test_cli import _Shared, ok, runner
@@ -239,6 +240,14 @@ def open_findings(client: TestClient, agent_id: str) -> set[str]:
     return {f["type"] for f in rows if f["agent_id"] == agent_id}
 
 
+def to_review(client: TestClient, source: str) -> dict[str, Any] | None:
+    """The open issue that says how many of a platform's agents are left to review."""
+    rows = client.get(
+        "/v1/findings", params={"type": "platform.agents_to_review"}, headers=ADMIN
+    ).json()
+    return next((f for f in rows if f["subject"] == f"platform:{source}"), None)
+
+
 def ledger_types(client: TestClient) -> list[str]:
     return [e["type"] for e in client.get("/v1/ledger", headers=ADMIN).json()]
 
@@ -268,7 +277,10 @@ class TestMicrosoft365:
         partner = m365.get(f"/v1/agents/{agents['partner-crm']['id']}", headers=ADMIN).json()
         assert partner["platforms"][0]["blocked"] is True
 
-        assert open_findings(m365, expenses["id"]) == {"agent.unmanaged"}
+        # Not a finding each: one issue says how many are left to review.
+        assert open_findings(m365, expenses["id"]) == set()
+        summary = to_review(m365, "microsoft-365")
+        assert summary is not None and summary["title"] == "3 Microsoft 365 agents to review"
         types = ledger_types(m365)
         assert types.count("agent.discovered") == 3 and "platform.synced" in types
 
@@ -288,7 +300,8 @@ class TestMicrosoft365:
         assert source["source"] == "microsoft-365"
         assert {i["rule"] for i in source["issues"]} >= {"data_exfiltration", "covert_action"}
         assert "agent.unsafe_instructions" in open_findings(m365, research["id"])
-        assert agent_named(m365, "expense-helper")["risk"]["level"] == "medium"
+        # Not reviewed yet is its status, not a risk: only its missing owner and sponsor.
+        assert agent_named(m365, "expense-helper")["risk"]["level"] == "low"
         assert "agent.unsafe_instructions" not in open_findings(
             m365, agent_named(m365, "expense-helper")["id"]
         )
@@ -378,16 +391,68 @@ class TestCopilotStudio:
         ]
         assert view["connectors"][0]["operations"][0]["maker_connection"] is True
         assert view["allowlist_active"] is False
+        # What its settings expose; that it is not reviewed yet is one issue for them all.
         assert open_findings(client, sales["id"]) == {
-            "agent.unmanaged",
-            "agent.high_risk",
             "platform.no_authentication",
             "platform.maker_credentials",
             "platform.shared_with_everyone",
         }
         hr = agent_named(client, "hr-faq")
-        assert open_findings(client, hr["id"]) == {"agent.unmanaged"}
+        assert open_findings(client, hr["id"]) == set()
+        summary = to_review(client, "copilot-studio")
+        assert summary is not None and summary["status"] == "open"
+        assert summary["title"] == "2 Copilot Studio agents to review"
+        assert "hr-faq, sales-helper" in summary["description"]
         assert "platform.imported" in ledger_types(client)
+
+    def test_the_whole_inventory_marks_the_missing_agents_gone(self, client) -> None:
+        import_inventory(client)
+        sales = agent_named(client, "sales-helper")
+        assert open_findings(client, sales["id"])
+        only_hr = {"data": [inventory()["data"][1]]}
+        # An export may cover only some environments: the others are left as they were.
+        assert "gone" not in import_inventory(client, only_hr)
+        assert open_findings(client, sales["id"])
+        # The whole inventory, without Sales Helper: it was deleted in Copilot Studio.
+        resp = client.post(
+            "/v1/platforms/copilot-studio/import",
+            params={"complete": "true"},
+            json=only_hr,
+            headers=ADMIN,
+        )
+        assert resp.status_code == 200 and resp.json()["gone"] == 1, resp.text
+        [view] = agent_named(client, "sales-helper")["platforms"]
+        assert view["in_inventory"] is False
+        assert open_findings(client, sales["id"]) == set()
+        summary = to_review(client, "copilot-studio")
+        assert summary is not None and summary["title"] == "1 Copilot Studio agent to review"
+        # An export with no agents in it is more likely the wrong file: none is marked gone.
+        empty = client.post(
+            "/v1/platforms/copilot-studio/import",
+            params={"complete": "true"},
+            json={"data": []},
+            headers=ADMIN,
+        )
+        assert (
+            "gone" not in empty.json()
+            and agent_named(client, "hr-faq")["platforms"][0]["in_inventory"]
+        )
+        # Seen again, it is back.
+        import_inventory(client)
+        assert agent_named(client, "sales-helper")["platforms"][0]["in_inventory"] is True
+        assert "platform.no_authentication" in open_findings(client, sales["id"])
+
+    def test_the_cli_imports_every_page_at_once(self, client, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(cli, "_client", lambda: _Shared(client, "test-admin"))
+        data = inventory()["data"]
+        first, second = tmp_path / "page1.json", tmp_path / "page2.json"
+        first.write_text(json.dumps({"data": data[:1]}))
+        second.write_text(json.dumps(data[1:]))  # a bare list, as `pac` writes it
+        out = runner.invoke(cli.app, ["platforms", "import", str(first), str(second)])
+        assert out.exit_code == 0 and "2 new" in out.output, out.output
+        out = runner.invoke(cli.app, ["platforms", "import", str(second), "--complete"])
+        assert out.exit_code == 0 and "1 gone from the platform" in out.output, out.output
+        assert agent_named(client, "sales-helper")["platforms"][0]["in_inventory"] is False
 
     def test_findings_stay_unverified_while_the_sync_fails(self, client) -> None:
         from agentgov.registry import platforms
@@ -418,26 +483,22 @@ class TestCopilotStudio:
         import_inventory(client)
         sales = agent_named(client, "sales-helper")
         factors = {f["factor"]: f["points"] for f in sales["risk"]["factors"]}
+        # What its settings expose, and its missing owner and sponsor; not that nobody has
+        # reviewed it yet, nor a tier nobody declared.
         assert factors == {
-            "Declared risk tier": 10,
-            "Not reviewed in AgentGov yet": 15,
             "No owner": 10,
             "No sponsor": 10,
             "Published without user authentication": 25,
             "Tools run with the maker's connections": 10,
             "Shared with the whole organisation": 10,
         }
-        assert (sales["risk"]["score"], sales["risk"]["level"]) == (90, "critical")
-        high = next(
-            f
-            for f in client.get("/v1/findings", headers=ADMIN).json()
-            if f["type"] == "agent.high_risk" and f["agent_id"] == sales["id"]
-        )
-        assert "admin center" in high["remediation"]
+        assert (sales["risk"]["score"], sales["risk"]["level"]) == (65, "high")
+        # Its risk is the sum of its own findings: no finding of its own that says so.
+        assert "agent.high_risk" not in open_findings(client, sales["id"])
 
-        # An agent that is merely not reviewed yet is not high risk.
+        # An agent that is merely not reviewed yet is low risk.
         hr = agent_named(client, "hr-faq")
-        assert (hr["risk"]["score"], hr["risk"]["level"]) == (45, "medium")
+        assert (hr["risk"]["score"], hr["risk"]["level"]) == (20, "low")
 
         client.put(
             "/v1/platforms/connectors/shared_office365/approval", headers=ADMIN
@@ -457,9 +518,8 @@ class TestCopilotStudio:
         counts = import_inventory(client, fixed)
         assert counts == {"created": 0, "updated": 2, "skipped": 1, "findings": 0}
         sales = agent_named(client, "sales-helper")
-        # The high-risk alert stays for the record; the risk itself is back down.
-        assert open_findings(client, sales["id"]) == {"agent.unmanaged", "agent.high_risk"}
-        assert sales["risk"]["level"] == "medium"
+        assert open_findings(client, sales["id"]) == set()
+        assert sales["risk"]["level"] == "low"
         resolved = client.get("/v1/findings", params={"status": "resolved"}, headers=ADMIN)
         assert {f["resolved_by"] for f in resolved.json()} == {"system:platforms"}
 
@@ -497,13 +557,40 @@ class TestCopilotStudio:
         agent = agent_named(m365, "expense-helper")
         assert [v["source"] for v in agent["platforms"]] == ["copilot-studio", "microsoft-365"]
 
-    def test_adopting_resolves_the_unmanaged_finding(self, client) -> None:
+    def test_adopting_counts_down_the_agents_to_review(self, client) -> None:
         import_inventory(client)
         hr = agent_named(client, "hr-faq")
-        resp = client.post(f"/v1/agents/{hr['id']}/adopt", headers=ADMIN)
+        resp = client.post(
+            f"/v1/agents/{hr['id']}/adopt",
+            json={"owner": "hr-team@example.com", "sponsors": ["dana@example.com"]},
+            headers=ADMIN,
+        )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["status"] == "pending"
+        adopted = resp.json()
+        assert adopted["status"] == "pending"
+        # Its owner and sponsor count at once, not at the next scan.
+        factors = {f["factor"] for f in adopted["risk"]["factors"]}
+        assert not factors & {"No owner", "No sponsor"}
         assert open_findings(client, hr["id"]) == set()
+        assert to_review(client, "copilot-studio")["title"] == "1 Copilot Studio agent to review"
+        sales = agent_named(client, "sales-helper")
+        client.post(f"/v1/agents/{sales['id']}/adopt", headers=ADMIN).raise_for_status()
+        assert to_review(client, "copilot-studio") is None  # none left: resolved
+
+    def test_findings_of_their_own_to_review_from_before_resolve(self, client) -> None:
+        import_inventory(client)
+        sales = agent_named(client, "sales-helper")
+        with client.app.state.rt.db.session() as s:
+            findings.raise_finding(
+                s,
+                type="agent.unmanaged",
+                severity="medium",
+                subject=sales["id"],
+                agent_id=sales["id"],
+                title="Copilot Studio agent to review: sales-helper",
+            )
+        client.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
+        assert "agent.unmanaged" not in open_findings(client, sales["id"])
 
     def test_deleted_agents_drop_out(self, client) -> None:
         import_inventory(client)
@@ -617,7 +704,7 @@ class TestCli:
         export.write_text(json.dumps(inventory()))
         out = ok(self.run(client, monkeypatch, "platforms", "import", str(export)))
         assert out.strip() == (
-            "platform/copilot-studio: imported (2 new, 0 updated, 1 skipped; 3 open findings)"
+            "platform/copilot-studio: imported (2 new, 0 updated, 1 skipped; 3 open issues)"
         )
 
         result = self.run(client, monkeypatch, "platforms", "connectors")

@@ -1,5 +1,5 @@
 """Finding types: which kinds of findings are raised here, and how severe each is
-(docs/issues.md#kinds-of-findings).
+(docs/issues.md#kinds-of-issues).
 
 Revision ID: 0023
 Revises: 0022

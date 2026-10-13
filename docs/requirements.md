@@ -1,7 +1,9 @@
 # Requirements
 
 What AgentGov needs to run: for evaluation on one machine, and on Kubernetes for others
-to rely on. [Deploying AgentGov](deploy/README.md) has the guides. Everything below is for
+to rely on, or on [one server](deploy/server.md) with Compose: Docker Compose 2.24.4 or
+later, ports 80 and 443, and about 2.5 GB of memory for all of it.
+[Deploying AgentGov](deploy/README.md) has the guides. Everything below is for
 the whole of AgentGov; an inventory of your platforms' agents without the gateway needs
 only the control plane and PostgreSQL ([on Kubernetes](deploy/kubernetes.md#profiles),
 [with Compose](deploy/local.md#just-the-inventory)).
@@ -21,7 +23,7 @@ only the control plane and PostgreSQL ([on Kubernetes](deploy/kubernetes.md#prof
 
 | | Version |
 |---|---|
-| Docker, with Compose v2 | Current releases, for the Compose stack and to build the image |
+| Docker, with Compose v2 | Current releases, for the Compose stack and to build the image; Compose 2.24.4 or later on [one server](deploy/server.md) |
 | Kubernetes | 1.30 or later. The chart uses stable APIs (`apps/v1`, `networking.k8s.io/v1`, `v1`), and the Gateway API's `gateway.networking.k8s.io/v1` for routes if you choose them over ingresses. CI checks it against Kubernetes 1.30's schemas and runs it on kind |
 | Helm | 3 (CI uses 3.19) |
 | PostgreSQL | 15 or later. Compose and the chart run 17 |
@@ -31,7 +33,8 @@ only the control plane and PostgreSQL ([on Kubernetes](deploy/kubernetes.md#prof
 | Browser | A current Chrome, Edge, Firefox or Safari, for the admin UI |
 
 The other parts are pinned and come with the stack: agentgateway 1.6.0, OPA 1.21.1,
-Presidio 2.2.364 and the OpenTelemetry Collector (contrib) 0.162.0. The
+Presidio 2.2.364 and the OpenTelemetry Collector (contrib) 0.162.0, and Caddy 2.11.7 on one
+server. The
 [README](../README.md#components) lists them with their licences.
 
 ## Resources

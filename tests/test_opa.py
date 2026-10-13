@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from agentgov.opa import WHAT_IF, rego
 from agentgov.opa import bundle as opa_bundle
-from agentgov.opa import rego
 from agentgov.registry import agents, blueprints, policies, toolservers
 from agentgov.registry.errors import ValidationError
 from tests.conftest import requires_opa
@@ -201,6 +201,40 @@ def _decide(rt, tmp_path: Path, inp: dict, path: str = "data.agentgov.mcp.decisi
         check=True,
     )  # fmt: skip
     return json.loads(proc.stdout)["result"][0]["expressions"][0]["value"]
+
+
+@requires_opa
+@pytest.mark.parametrize(
+    ("path", "what_if", "logged"),
+    [
+        ("agentos/allow", False, True),
+        ("agentos/allow", True, False),
+        ("agentgov/mcp/decision", False, False),
+        ("agentgov/authzen/evaluation", False, False),
+        ("agentgov/copilotstudio/decision", False, False),
+        ("registry/features", False, False),
+        ("agentgov/context/caller_modes", False, False),
+    ],
+)
+def test_opa_logs_only_agents_own_decisions(
+    rt, settings, tmp_path: Path, path: str, what_if: bool, logged: bool
+) -> None:
+    """OPA sends the control plane only what the Agent Governance Toolkit asked, and not a
+    what-if question: the processor and the control plane record their own decisions."""
+    _seed(rt, settings)
+    bundle_path = tmp_path / "bundle.tar.gz"
+    bundle_path.write_bytes(rt.bundles.current().body)
+    event = {"path": path, "input": {"agent_id": "bot", **({WHAT_IF: True} if what_if else {})}}
+    (tmp_path / "event.json").write_text(json.dumps(event))
+    proc = subprocess.run(
+        ["opa", "eval", "--format", "json", "--bundle", str(bundle_path),
+         "--input", str(tmp_path / "event.json"), "data.system.log.drop"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )  # fmt: skip
+    dropped = bool(json.loads(proc.stdout).get("result"))
+    assert dropped is not logged
 
 
 @requires_opa

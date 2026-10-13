@@ -1,6 +1,9 @@
 # Publishes a release when a version tag is pushed (git tag v0.1.0 && git push origin
-# v0.1.0): the AgentGov image for amd64 and arm64 to ghcr.io/<owner>/agentgov, and
-# the Helm chart to oci://ghcr.io/<owner>/charts/agentgov. The tag must match the
+# v0.1.0): the AgentGov image for amd64 and arm64 to ghcr.io/<owner>/agentgov, with an
+# SBOM and the build's provenance in its index, and the Helm chart to
+# oci://ghcr.io/<owner>/charts/agentgov. Both are signed with Sigstore's keyless signing:
+# the signature names this workflow, at the tag, as GitHub's OIDC issuer vouches for it
+# (docs/deploy/server.md#the-published-image says how to check it). The tag must match the
 # package version (src/agentgov/__init__.py) and the chart's appVersion.
 name: release
 
@@ -11,6 +14,8 @@ on:
 permissions:
   contents: read
   packages: write
+  # Keyless signing: the token that says which workflow signs.
+  id-token: write
 
 jobs:
   publish:
@@ -48,20 +53,44 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
       - uses: docker/build-push-action@v7
+        id: build
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # In the image's index, which the signature covers: what is in it, and how it
+          # was built (docker buildx imagetools inspect).
+          sbom: true
+          provenance: mode=max
+
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Sign the image, and check the signature
+        env:
+          IMAGE: ghcr.io/${{ steps.version.outputs.owner }}/agentgov@${{ steps.build.outputs.digest }}
+          IDENTITY: ^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/tags/v
+        run: |
+          cosign sign --yes "$IMAGE"
+          cosign verify "$IMAGE" --certificate-identity-regexp "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
 
       - uses: azure/setup-helm@v5
         with:
           version: v3.19.0
-      - name: Push the chart
+      - name: Push the chart, and sign it
+        env:
+          CHART: ghcr.io/${{ steps.version.outputs.owner }}/charts/agentgov
+          IDENTITY: ^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/tags/v
         run: |
+          set -o pipefail
           echo "${{ secrets.GITHUB_TOKEN }}" |
             helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
           helm package deploy/helm/agentgov --version "${{ steps.version.outputs.version }}"
           helm push "agentgov-${{ steps.version.outputs.version }}.tgz" \
-            "oci://ghcr.io/${{ steps.version.outputs.owner }}/charts"
+            "oci://ghcr.io/${{ steps.version.outputs.owner }}/charts" 2>&1 | tee pushed.txt
+          digest=$(sed -n 's/^Digest: //p' pushed.txt)
+          [ -n "$digest" ] || { echo "::error::helm push printed no digest"; exit 1; }
+          cosign sign --yes "$CHART@$digest"
+          cosign verify "$CHART@$digest" --certificate-identity-regexp "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null

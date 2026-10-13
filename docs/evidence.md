@@ -13,6 +13,9 @@ handing it to the people who assess compliance:
 * **Retention**: the ledger keeps every entry, or keeps them for a period and then
   archives them, checked link by link, before they leave the database. Operational records
   whose history is in the ledger go after a period of their own.
+* **A database restored from an older backup** shows: the ledger's head is kept outside it
+  too, and the entries it lost are recorded once someone accepts the restore
+  ([backing up and restoring](backup.md#a-rewound-ledger)).
 * **Compliance reports** say what AgentGov does towards the EU AI Act, ISO/IEC 42001 and
   the NIST AI RMF, how far that is set up, and the evidence. An **evidence pack** bundles
   them with the ledger for the period, so that an assessor can check it without AgentGov.
@@ -123,12 +126,13 @@ Exports (`agentgov ledger export`) check the same way.
 **Operational records.** With `AGENTGOV_DATA_RETENTION_DAYS`, the records whose history
 is in the ledger go once older than that: agents' daily activity and model usage, risk
 signals, notifications sent, decided approval requests (with the arguments they held),
-resolved and dismissed findings, ended access assignments, and developers' MCP servers not
+resolved and dismissed issues, ended access assignments, and developers' MCP servers not
 reported since. An entry `retention.pruned` counts what went.
 
 ## Compliance reports
 
-A report takes a framework and a period, and says, control by control, what the framework
+A report takes a framework and a period. It says first what AgentGov saw of the agents in
+the period ([below](#what-agentgov-saw)), then, control by control, what the framework
 asks, what AgentGov does towards it, how far that is set up in this deployment, and the
 evidence: counts from the registry and the ledger over the period, with where to look.
 
@@ -136,13 +140,33 @@ evidence: counts from the registry and the ledger over the period, with where to
 |---|---|
 | In place | AgentGov does this here, and the evidence is there |
 | Partly | Set up in part: say, a control monitored rather than enforced, or agents without an owner. The report says what is missing |
+| Configured, not observed | Set up, but nothing in the period shows it working: no call went through AgentGov's checks, the posture checks never ran, nothing reached the security team, no platform was read. Often a component that isn't deployed, or isn't reached |
 | Not set up | The features that would do it are off |
 | Needs attention | Something is wrong: a broken chain, a failing destination |
 | Outside AgentGov | The framework asks it of the organisation: AgentGov records what bears on it |
 
 A report doesn't say that an organisation complies. That depends on its AI systems, its
 processes and its people, and is for its assessors to judge; the report and the evidence
-pack are for them.
+pack are for them. People with the `auditor` role, and no other, start on this page when
+they sign in.
+
+### What AgentGov saw
+
+A control only works for the agents AgentGov sees, so each report starts with what it saw
+of the agents in the inventory over the period. Each agent counts once, by the most
+AgentGov saw of it:
+
+| Seen | Means |
+|---|---|
+| Calls checked | AgentGov's policies decided on its calls: at the gateway, in the agent's own process, or through Copilot Studio's threat detection |
+| Seen at work | Its activity reached AgentGov (its telemetry, its platform's usage logs), but not its calls: what it did is known, not checked |
+| Inventory only | AgentGov read its platform's inventory in the period: its settings, not what it did |
+| Not seen | Nothing at all in the period. The report names some of them |
+
+It also names the platforms not read in the period, or whose last read failed: what
+AgentGov holds about their agents may be out of date. An agent that is only in a platform's
+inventory can still have an owner, sponsors, posture issues and a classification; the
+gateway's controls just don't reach it.
 
 **EU AI Act** (Regulation (EU) 2024/1689, as amended by Regulation (EU) 2026/1744, under
 which the obligations for high-risk AI systems apply from 2 December 2027 for Annex III
@@ -151,15 +175,16 @@ systems and 2 August 2028 for Annex I systems):
 | Article | What AgentGov does |
 |---|---|
 | 4 AI literacy | Outside AgentGov; its issues, approvals and previews put the people responsible in the loop |
-| 9 Risk management | Risk tiers, risk scores, posture findings and risk-based blocking |
-| 12 Record-keeping | The ledger: every decision and action, hash-chained, checkpointed and time-stamped |
+| 5, 6, 50 Classification | The [classification register](#a-classification-register): what each agent is under the Act, your role for it, why, and what it is for |
+| 9 Risk management | Risk tiers, risk scores, posture issues and risk-based blocking |
+| 12 Record-keeping | The ledger: every decision and action, each edit with what it changed from and to, hash-chained, checkpointed and time-stamped |
 | 14 Human oversight | Approvals for destructive actions, the kill switch, monitor modes |
 | 15 Accuracy, robustness and cybersecurity | The controls at the gateway, enforced or monitored |
 | 19, 26(6) Keeping the logs | Retention of at least six months, archives that verify offline |
 | 26(2) Oversight by competent people | Owners, sponsors, teams and roles |
-| 26(5) Monitoring the operation | Posture checks, findings, issues, management rules |
+| 26(5) Monitoring the operation | Posture checks, issues, management rules |
 | 72 Post-market monitoring | Monitoring in production, including calls between agents |
-| 73 Serious incidents | Findings and the hand-off to the security team; reporting to authorities is the organisation's |
+| 73 Serious incidents | Issues and the hand-off to the security team; reporting to authorities is the organisation's |
 
 **ISO/IEC 42001:2023, Annex A**: A.3.2 AI roles and responsibilities; A.4.2 Resource
 documentation; A.4.4 Tooling resources; A.5.2 AI system impact assessment process (outside
@@ -169,10 +194,52 @@ Processes for responsible use of AI systems; A.9.4 Intended use of the AI system
 Suppliers.
 
 **NIST AI RMF 1.0**: GOVERN 1.5 (ongoing monitoring and periodic review), GOVERN 1.6
-(inventory), GOVERN 2.1 (roles and responsibilities), MAP 4.1 (third-party risks), MEASURE
-2.4 (monitored in production), MEASURE 2.7 (security and resilience), MEASURE 3.1
-(emergent risks), MANAGE 2.4 (supersede, disengage, deactivate), MANAGE 4.1
-(post-deployment monitoring), MANAGE 4.3 (incidents communicated).
+(inventory), GOVERN 2.1 (roles and responsibilities), MAP 1.1 (intended purpose and context,
+from the classification register), MAP 4.1 (third-party risks), MEASURE 2.4 (monitored in
+production), MEASURE 2.7 (security and resilience), MEASURE 3.1 (emergent risks), MANAGE 2.4
+(supersede, disengage, deactivate), MANAGE 4.1 (post-deployment monitoring), MANAGE 4.3
+(incidents communicated).
+
+## A classification register
+
+Which of the EU AI Act's obligations apply to an AI system follows from what it is and from
+the organisation's role for it. Deciding that is the organisation's: AgentGov can't tell from
+an agent's settings whether it screens job applicants. It keeps what was decided for each
+agent, why, and what the agent is for, with who decided and when, and the ledger keeps every
+change (`agent.classified`, with the classification before and after).
+
+| Field | Holds |
+|---|---|
+| Category | `prohibited` (a practice Article 5 prohibits), `high-risk` (Article 6: a product under Annex I, or an area in Annex III), `transparency` (Article 50 obligations: a chatbot, say, or generated content), `minimal`, or `not-ai-system` (outside Article 3(1)) |
+| Role | `provider`, `deployer` or `provider-and-deployer` |
+| Basis | Why: the Annex III area (4(a), recruitment, say) or the Article 5 practice. Prohibited and high-risk need one |
+| Purpose | What the agent is for, and where it is used: its intended purpose, as you would put it to an assessor |
+
+The register lists every agent in the inventory, those not classified yet too, wherever they
+run: an agent found in Copilot Studio is classified like one registered at the gateway.
+Approvers and administrators classify agents, one at a time or many at once; everyone who
+reads AgentGov sees the register and downloads it as a spreadsheet.
+
+In the EU AI Act report, *Classification* is in place once every agent is classified, partly
+while some aren't (the report says how many, and how many of those were found and not
+reviewed yet), and not set up while none is. An active agent classified as a prohibited
+practice needs attention: the report names it. NIST AI RMF's MAP 1.1 is assessed the same
+way.
+
+An agent's manifest can carry its classification; a manifest without one leaves the agent's
+as it is ([registry as code](administration.md#registry-as-code)):
+
+```yaml
+apiVersion: agentgov/v1alpha1
+kind: Agent
+metadata: {name: support-bot}
+spec:
+  # ... its blueprint, sponsors and the rest
+  classification:
+    category: transparency
+    role: deployer
+    purpose: Answers customers' questions in the help centre's chat
+```
 
 ## The evidence pack
 
@@ -180,11 +247,12 @@ A zip for the last N days:
 
 | File | What it is |
 |---|---|
-| `reports/*.json`, `report.md` | The three frameworks' reports, as data and as a document |
+| `reports/*.json`, `report.md` | The three frameworks' reports, as data and as a document, each starting with what AgentGov saw |
 | `ledger.jsonl` | The ledger's entries in the period, as AgentGov wrote them: `agentgov ledger verify --file ledger.jsonl` checks them |
 | `checkpoints.json`, `checkpoints/*.txt`, `*.tsr` | The checkpoints, their archives, and each time-stamp with its statement, for `openssl ts -verify` |
 | `checkpoints/*.sigstore.json`, `transparency-log/` | Each checkpoint's entry in the transparency log, as a Sigstore bundle, with AgentGov's key, the log's, and a trusted root with the log, for `cosign verify-blob` or `agentgov ledger verify-log-entry` |
 | `inventory.json` | The agents, with their owners, sponsors, teams, status, risk and attestations |
+| `register.csv`, `register.json` | The [classification register](#a-classification-register): each agent's classification, who classified it and when |
 | `manifests.yaml` | The registry as code: blueprints, tool servers, policies, rules, packages, features |
 | `features.json` | Which features are on, and how strictly |
 | `feature-exceptions.json` | Controls' exceptions: their mode for the agents in a scope ([features](features.md#exceptions)) |
@@ -193,13 +261,14 @@ A zip for the last N days:
 
 | Where | How |
 |---|---|
-| Admin UI | **Ledger** → *Entries*: **Verify chain**, *Checkpoints and retention* (**Make a checkpoint**, each time-stamp and log entry to download); **Ledger** → *Compliance*: a framework and a period, and **Evidence pack** |
-| CLI | `agentgov ledger checkpoints`, `checkpoint`, `proof SEQ`, `verify-log-entry`, `retention [--run]`, `verify [--file F ...]`; `agentgov transparency-key [--log] DIR`; `agentgov evidence report [--framework F] [--days N] [--json]`, `agentgov evidence pack [--days N] [-o FILE]` |
-| API | `GET`/`POST /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp`, `GET /v1/ledger/checkpoints/{seq}/log-entry`, `GET /v1/ledger/transparency-log`, `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run`; `GET /v1/evidence/frameworks`, `GET /v1/evidence/report?framework=&days=`, `GET /v1/evidence/pack?days=` |
+| Admin UI | **Ledger**: **Verify chain**, *Checkpoints and retention* (**Make a checkpoint**, each time-stamp and log entry to download); **Compliance**: a framework and a period, and **Evidence pack**; **Register**: the classification register, by category, **Classify** or **Change** on each agent, **Download CSV**; an agent's page → *Classification*; **Agents** → tick them → **Classify…** |
+| CLI | `agentgov ledger checkpoints`, `checkpoint`, `proof SEQ`, `verify-log-entry`, `retention [--run]`, `verify [--file F ...]`; `agentgov transparency-key [--log] DIR`; `agentgov evidence report [--framework F] [--days N] [--json]`, `agentgov evidence pack [--days N] [-o FILE]`; `agentgov evidence register [--csv]`, `agentgov agents classify REF [REF ...] --category C --role R [--basis B] [--purpose P]` (`--clear`: no longer classified) |
+| API | `GET`/`POST /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp`, `GET /v1/ledger/checkpoints/{seq}/log-entry`, `GET /v1/ledger/transparency-log`, `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run`; `GET /v1/evidence/frameworks`, `GET /v1/evidence/report?framework=&days=`, `GET /v1/evidence/pack?days=`; `GET /v1/evidence/register`, `PUT`/`DELETE /v1/agents/{ref}/classification`, `POST /v1/agents/bulk` with `action: classify` and `fields` |
 | Helm chart | `controlPlane.ledgerArchive` (a volume for the archives, and the retention), `controlPlane.env.AGENTGOV_LEDGER_TSA_URL`, `controlPlane.transparencyLog` (the log, a Secret with AgentGov's key, the log's key) ([Kubernetes](deploy/kubernetes.md)) |
 
 Everyone who reads AgentGov (administrators, approvers, the security team, auditors) sees
-the reports and downloads the pack; administrators make checkpoints and run retention.
+the reports and the register, and downloads the pack; administrators make checkpoints and
+run retention; approvers and administrators classify agents.
 
 ## Compared with Microsoft
 
@@ -227,3 +296,5 @@ evidence pack for the day.
 |---|---|
 | `ledger.archived` | Entries were archived, then removed: the range, the archive and its SHA-256 |
 | `retention.pruned` | Operational records past their retention were removed: how many of each |
+| `agent.classified` | An agent was classified, or its classification changed or was cleared: what it was and what it is |
+| `ledger.rewound` (critical) | An administrator accepted that the database lost ledger entries (a restore): which, and when AgentGov had written them ([backing up and restoring](backup.md#a-rewound-ledger)) |

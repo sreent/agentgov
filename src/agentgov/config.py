@@ -13,9 +13,31 @@ import functools
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 _GUID = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+# The secrets AgentGov's own stacks, .env.example and docs come with: anybody who reaches a
+# control plane that holds one is in.
+WELL_KNOWN_SECRETS = frozenset(
+    {
+        "change-me",
+        "dev",
+        "dev-admin-token",
+        "dev-service-token",
+        "dev-signing-secret",
+        "dev-keycloak-secret",
+        "dev-oidc-secret",
+    }
+)
+SECRET_SETTINGS = (
+    "admin_token",
+    "service_token",
+    "signing_secret",
+    "keycloak_client_secret",
+    "oidc_client_secret",
+)
 M365_PACKAGE_TYPES = ("custom", "shared", "external", "microsoft")
 # The least the ledger keeps its entries for, when it doesn't keep them all: six months, as
 # the EU AI Act asks of providers' and deployers' logs (Articles 19 and 26(6)).
@@ -24,6 +46,7 @@ LEDGER_MIN_DAYS = 183
 DATA_MIN_DAYS = 30
 # Starting points for the features' modes (agentgov.registry.features.PRESETS).
 FEATURE_PRESETS = ("monitor", "inventory")
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 # What the governance processor does when what it depends on fails, which it tells the
 # control plane (docs/features.md#when-something-is-down).
 FAILURE_SETTINGS = (
@@ -103,6 +126,10 @@ class Settings:
     # Shared token for internal components (OPA, governance processor, OTel
     # collector) calling the control plane.
     service_token: str | None = None
+    # The secret the keys AgentGov signs delegations and ID-JAGs with derive from. Only the
+    # control plane and the processor hold it; without it, the keys derive from the service
+    # token, which OPA and the OTel Collector hold too.
+    signing_secret: str | None = None
     # Features pinned by the deployment, e.g. "least-privilege=monitor,discovery=off"
     # (docs/features.md). Administrators choose the others in the app.
     features: str = ""
@@ -121,7 +148,7 @@ class Settings:
     # How long risk signals (denied calls, credentials, prompt injections) count towards
     # an agent's risk score.
     risk_window_hours: int = 24
-    # Agents not seen for this many days raise a stale-agent finding.
+    # Agents not seen for this many days raise a stale-agent issue.
     stale_agent_days: int = 30
     # Seconds between posture scans (owners, sponsors, attestations, stale agents); 0
     # turns the scheduled scan off.
@@ -143,15 +170,23 @@ class Settings:
     # Seconds between rounds of routing issues, escalating them and sending what is due.
     issues_interval_seconds: int = 60
     # Issues below this severity reach people in AgentGov only, without an email or a chat
-    # message. info: every issue is sent.
-    issues_notify_severity: str = "info"
+    # message: by default, low and info ones wait there. info: every issue is sent.
+    issues_notify_severity: str = "medium"
     # What a platform's first sync finds reaches people in AgentGov only, without an email
     # or a chat message: what was there before AgentGov looked doesn't flood inboxes. Found
     # again after it is resolved, it is sent as any other.
     issues_quiet_first_sync: bool = True
-    # Days a threat finding stays open without happening again before it is resolved (it
+    # Days a threat issue stays open without happening again before it is resolved (it
     # opens again if it happens again). 0 keeps threats open until someone closes them.
     threat_finding_days: int = 30
+    # The time of day, HH:MM, a digest of their open issues goes to each address and team
+    # chat that has some: one message a day, those issues below
+    # AGENTGOV_ISSUES_NOTIFY_SEVERITY included (docs/issues.md#a-daily-digest). Empty: none.
+    issues_digest_at: str | None = None
+    # The time zone of AGENTGOV_ISSUES_DIGEST_AT, such as Europe/London.
+    issues_digest_timezone: str = "UTC"
+    # The days the digest goes out: mon to sun, separated by commas.
+    issues_digest_days: str = "mon,tue,wed,thu,fri"
     # The mail server for issues' emails: smtp://host:587 (STARTTLS) or smtps://host:465
     # (TLS). Without it, issues reach people in AgentGov and in their teams' chats only.
     smtp_url: str | None = None
@@ -169,6 +204,11 @@ class Settings:
     # Where the ledger's archives go, as gzipped JSON Lines files (a mounted volume, or a
     # bucket mounted as one). Needed with AGENTGOV_LEDGER_RETENTION_DAYS.
     ledger_archive_dir: str | None = None
+    # A file where the control plane keeps the ledger's head outside the database, to notice
+    # a database restored from an older backup or rolled back (docs/backup.md): on storage
+    # that restoring the database doesn't touch. By default ledger-head.json in
+    # AGENTGOV_LEDGER_ARCHIVE_DIR, when that is set; "off" keeps none.
+    ledger_witness_file: str | None = None
     # Hours between ledger checkpoints: the chain's head, kept, and time-stamped when a
     # time-stamping authority is set. 0 makes them only on demand.
     ledger_checkpoint_hours: int = 24
@@ -192,7 +232,7 @@ class Settings:
     ledger_rekor_origin: str | None = None
     # Days AgentGov keeps the operational records whose history the ledger has: daily
     # activity and model usage, risk signals, notifications sent, decided approvals,
-    # resolved findings, ended access assignments, and developers' MCP servers not
+    # resolved issues, ended access assignments, and developers' MCP servers not
     # reported since. 0 keeps them; otherwise at least 30.
     data_retention_days: int = 0
 
@@ -566,6 +606,10 @@ class Settings:
             )
         if self.threat_finding_days < 0:
             raise ValueError("AGENTGOV_THREAT_FINDING_DAYS must be 0 (never) or more")
+        if self.issues_digest_at:
+            self.digest_time()
+            self.digest_zone()
+            self.digest_days()
         if self.component_report_seconds < 0:
             raise ValueError("AGENTGOV_COMPONENT_REPORT_SECONDS must be 0 (none) or more")
         if self.platform_sync_interval_seconds < 0:
@@ -822,6 +866,59 @@ class Settings:
                 raise ValueError(f"bad AGENTGOV_PII_ENTITIES entry {item!r}") from exc
         return thresholds
 
+    def digest_time(self) -> tuple[int, int] | None:
+        """When the daily digest of open issues goes out: (hour, minute), or None."""
+        if not self.issues_digest_at:
+            return None
+        match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", self.issues_digest_at.strip())
+        if match is None:
+            raise ValueError("AGENTGOV_ISSUES_DIGEST_AT is a time of day, HH:MM, such as 08:30")
+        return int(match[1]), int(match[2])
+
+    def digest_zone(self) -> Any:
+        """The time zone of the daily digest (a ZoneInfo)."""
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            return ZoneInfo(self.issues_digest_timezone.strip() or "UTC")
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError(
+                "AGENTGOV_ISSUES_DIGEST_TIMEZONE is a time zone's name, such as Europe/London "
+                f"(not {self.issues_digest_timezone!r})"
+            ) from None
+
+    def digest_days(self) -> set[int]:
+        """The days of the week the digest goes out, Monday 0."""
+        days = [d.strip().lower()[:3] for d in self.issues_digest_days.split(",") if d.strip()]
+        unknown = sorted(set(days) - set(WEEKDAYS))
+        if unknown or not days:
+            raise ValueError(
+                "AGENTGOV_ISSUES_DIGEST_DAYS lists days of the week: mon, tue, wed, thu, fri, "
+                "sat, sun"
+            )
+        return {WEEKDAYS.index(d) for d in days}
+
+    def well_known_secrets(self) -> list[str]:
+        """The settings holding a secret AgentGov's stacks and examples come with."""
+        return [
+            f"AGENTGOV_{name.upper()}"
+            for name in SECRET_SETTINGS
+            if getattr(self, name) in WELL_KNOWN_SECRETS
+        ]
+
+    def only_this_machine(self) -> bool:
+        """Whether people reach the control plane on this machine only (AGENTGOV_PUBLIC_URL)."""
+        host = urlsplit(self.public_url).hostname or ""
+        return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
+
+    def witness_file(self) -> str | None:
+        """Where the ledger's head is kept outside the database, if anywhere."""
+        if self.ledger_witness_file:
+            return None if self.ledger_witness_file == "off" else self.ledger_witness_file
+        if self.ledger_archive_dir:
+            return str(Path(self.ledger_archive_dir) / "ledger-head.json")
+        return None
+
     def escalation_delays(self) -> dict[str, float]:
         """Hours an issue of each severity waits at a step of its chain."""
         from agentgov.models import SEVERITIES
@@ -859,6 +956,12 @@ class Settings:
     @property
     def keycloak_enabled(self) -> bool:
         return bool(self.keycloak_url and self.keycloak_client_secret)
+
+    @property
+    def key_secret(self) -> str | None:
+        """What AgentGov's signing keys derive from: the signing secret, or else the
+        service token."""
+        return self.signing_secret or self.service_token
 
     @property
     def sso_enabled(self) -> bool:

@@ -22,6 +22,7 @@ class InvalidTransition(Conflict):
 
 
 class Forbidden(RegistryError):
-    """The caller's role may not do this (here: what the hand-off level doesn't allow)."""
+    """The caller may not do this: their role, the hand-off level, or their part in what it
+    is about (who is accountable for an agent doesn't accept its risks)."""
 
     status_code = 403

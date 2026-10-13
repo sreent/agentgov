@@ -100,7 +100,7 @@ services:
       LANGFUSE_INIT_USER_NAME: AgentGov admin
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:-agentgov-admin}
     ports:
-      - "3000:3000"
+      - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:3000:3000"
     depends_on: *langfuse-depends-on
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/public/health"]

@@ -475,8 +475,11 @@ def _keycloak_ready() -> bool:
 def wiki_keycloak() -> Iterator[str]:
     """Keycloak 26.8, which takes ID-JAGs as an experimental feature, as the wiki's
     authorization server: its base URL."""
+    # Its scratch files and development database in memory: nothing to keep, and a host
+    # short of disk space still runs it.
     started = subprocess.run(
         ["docker", "run", "-d", "--rm", "-p", "127.0.0.1::8080",
+         "--tmpfs", "/tmp", "--tmpfs", "/opt/keycloak/data:uid=1000",
          "-e", "KC_BOOTSTRAP_ADMIN_USERNAME=admin", "-e", "KC_BOOTSTRAP_ADMIN_PASSWORD=admin",
          KEYCLOAK_IMAGE, "start-dev", "--features=identity-assertion-jwt"],
         capture_output=True, text=True, check=True,

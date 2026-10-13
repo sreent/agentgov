@@ -3,6 +3,7 @@
 | Where | Guide | For |
 |---|---|---|
 | Your machine | [Local](local.md): Docker Compose, Kubernetes with kind, or the control plane alone | Evaluation and development |
+| One Linux server | [One server](server.md): Docker Compose, with HTTPS from Caddy | Production without Kubernetes: the inventory, or all of it |
 | Any Kubernetes cluster | [Kubernetes](kubernetes.md): the Helm chart | Your own clusters, on premises or in any cloud |
 | Google Cloud | [GKE](gcp.md), with Cloud SQL and Secret Manager | Production on Google Cloud |
 | Microsoft Azure | [AKS](azure.md), with Azure Database for PostgreSQL, Key Vault and Microsoft Entra ID | Production on Azure, and Microsoft 365 shops |
@@ -12,7 +13,7 @@
 [configuration](../configuration.md) every setting.
 
 You don't have to run all of it. Without the gateway, AgentGov keeps an inventory of the
-agents on your platforms, their findings and issues, with the control plane and PostgreSQL
+agents on your platforms, their issues, with the control plane and PostgreSQL
 alone; or the gateway can start out watching rather than stopping, without Presidio. The
 chart has these as [profiles](kubernetes.md#profiles), and Compose as
 [an inventory stack](local.md#just-the-inventory) and an
@@ -86,9 +87,9 @@ flowchart LR
 * **Integrity.** `agentgov ledger verify` (or the overview's integrity badge) checks the
   evidence ledger's hash chain; the security team's SIEM gets the same entries as they
   are written.
-* **Findings and statuses.** Problems AgentGov finds with itself are findings, such as an
+* **Issues and statuses.** Problems AgentGov finds with itself are issues, such as an
   identity issuer Keycloak refused or a destination that keeps failing
-  (`destination.failing`; `agentgov findings`). Each connection to Microsoft shows its own
+  (`destination.failing`; `agentgov issues`). Each connection to Microsoft shows its own
   status, such as a permission that is missing (`agentgov platforms status`).
 * **Upgrades.** Back up the database; the control plane migrates it when the new version
   starts ([Kubernetes](kubernetes.md#upgrading), [Compose](local.md#upgrading)).

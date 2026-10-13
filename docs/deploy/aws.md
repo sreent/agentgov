@@ -135,7 +135,7 @@ ones the chart reads. The External Secrets Operator copies it into the Kubernete
 ```bash
 new() { openssl rand -hex 32; }
 aws secretsmanager create-secret --name agentgov --secret-string "$(jq -n \
-  --arg admin_token "$(new)" --arg service_token "$(new)" \
+  --arg admin_token "$(new)" --arg service_token "$(new)" --arg signing_secret "$(new)" \
   --arg keycloak_client_secret "$(new)" --arg oidc_client_secret "$(new)" \
   --arg keycloak_admin_password "$(new)" \
   --arg database_url "postgresql+psycopg://agentgov:$AGENTGOV_DB_PASSWORD@$DB_HOST:5432/agentgov?sslmode=verify-full&sslrootcert=/etc/rds/global-bundle.pem" \

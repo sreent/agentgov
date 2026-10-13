@@ -58,8 +58,17 @@ APPROVALS_BY = ("approvers", "person")
 # Identity providers whose tokens agents may authenticate with instead of a secret.
 ISSUER_KINDS = ("kubernetes", "spiffe", "oidc")
 # Where events and alerts go: SIEMs (OpenTelemetry logs, an HTTP input, Splunk's HTTP Event
-# Collector) and chats.
-DESTINATION_KINDS = ("otlp", "webhook", "splunk-hec", "slack", "teams")
+# Collector) and chats; and service desks, where issues become tickets.
+DESTINATION_KINDS = (
+    "otlp",
+    "webhook",
+    "splunk-hec",
+    "slack",
+    "teams",
+    "servicenow",
+    "jira",
+    "freshservice",
+)
 
 
 def _created() -> Mapped[datetime]:
@@ -139,6 +148,9 @@ class Agent(Base):
 
     # Declared risk tier (e.g. from an AI Act style assessment) vs computed risk.
     risk_tier: Mapped[str] = mapped_column(String(16), default="medium")
+    # Its classification under the EU AI Act: category, role, basis, purpose, and who
+    # classified it, when (agentgov.registry.classification). None: not classified yet.
+    classification: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     risk_score: Mapped[int] = mapped_column(Integer, default=0)
     risk_level: Mapped[str] = mapped_column(String(16), default="low")
     risk_factors: Mapped[list[Any]] = mapped_column(JSON, default=list)
@@ -332,6 +344,8 @@ class Destination(Base):
     format: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # What it gets: categories of ledger entries for a SIEM, alerts for a chat.
     events: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # A service desk's tickets: where they go and what they hold (registry/desks).
+    tickets: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     min_severity: Mapped[str] = mapped_column(String(16), default="info")
     status: Mapped[str] = mapped_column(String(16), default="active")
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -546,6 +560,29 @@ class ComponentReport(Base):
     checks: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     # The settings that decide what a failed check does (Presidio's failure mode).
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class Person(Base):
+    """Someone in Microsoft Entra ID whom a platform names as an agent's maker or owner, by
+    object ID (registry.people): as the directory last said, or a list uploaded from it."""
+
+    __tablename__ = "people"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # the object ID
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Their email address (else their user principal name), and their user principal name:
+    # AgentGov names owners and sponsors by either.
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
+    upn: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
+    # Whether their account is enabled; None when what was read didn't say.
+    enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # False when the directory has no such user: never was one (not a person), or deleted.
+    found: Mapped[bool] = mapped_column(Boolean, default=True)
+    # When a user it had found was no longer there: they left.
+    gone_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # "graph" (read by AgentGov's app or a signed-in admin) or "upload".
+    source: Mapped[str] = mapped_column(String(16))
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class IntegrationState(Base):
@@ -821,6 +858,43 @@ class Notification(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = _created()
     sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
+class Ticket(Base):
+    """An issue's ticket in a service desk (docs/tickets.md): AgentGov opens it, keeps it in
+    step with the issue, and reads back what happens to it there."""
+
+    __tablename__ = "tickets"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    finding_id: Mapped[str] = mapped_column(String(32), index=True)
+    destination_id: Mapped[str] = mapped_column(String(32), index=True)
+    # The issue's round it was opened for, and the team whose group it went to.
+    round: Mapped[int] = mapped_column(Integer, default=0)
+    team: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # pending (to open), open, closed (AgentGov is done with it), failed (gave up opening
+    # it), or skipped (open before the desk was added).
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    # The desk's own: its number (INC0012345, OPS-12, #42), its ID, and where people open it.
+    key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    remote_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What the desk last said: its state, as it names it; new, active or done; and who has it.
+    state: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    phase: Mapped[str] = mapped_column(String(16), default="new")
+    assignee: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # What the desk was last told of the issue, so only what changed is sent.
+    told: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # The ticket it took over from: done in the desk while AgentGov still finds the problem.
+    replaces: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When AgentGov saw it done in the desk, and when it last read it there.
+    done_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _updated()
 
 
 class RiskSignal(Base):

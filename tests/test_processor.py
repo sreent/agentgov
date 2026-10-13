@@ -63,8 +63,9 @@ class FakeControlPlane:
         self.calls.append(("observe", payload))
         return {}
 
-    async def record_decisions(self, records):
+    async def record_decisions(self, records, *, dropped=0):
         self.records.extend(records)
+        self.dropped = getattr(self, "dropped", 0) + dropped
         return {}
 
 
@@ -586,3 +587,21 @@ class TestPeople:
             "Human approval required: destructive. Approval request apr_1 is pending for alice "
             "to approve at https://ag/ui/#/approvals; retry the same call once it is approved."
         )
+
+
+class TestLostRecords:
+    def test_records_lost_to_a_full_queue_are_told_with_the_next_batch(self) -> None:
+        """The calls were decided, but the ledger misses their records: it says how many."""
+        cp = FakeControlPlane()
+        recorder = DecisionRecorder(cp, max_queue=2)  # type: ignore[arg-type]
+
+        async def go() -> None:
+            for n in range(5):
+                recorder.record({"n": n})
+            await recorder.flush()
+            recorder.record({"n": 5})
+            await recorder.flush()
+
+        asyncio.run(go())
+        assert [r["n"] for r in cp.records] == [3, 4, 5]  # the oldest went
+        assert (recorder.dropped, recorder.reported, cp.dropped) == (3, 3, 3)

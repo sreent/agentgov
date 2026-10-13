@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.config import FEATURE_PRESETS, Settings
 from agentgov.db import mark_changed
-from agentgov.models import Agent, FeatureSetting, IntegrationState
+from agentgov.models import DELETED, Agent, FeatureSetting, IntegrationState
 from agentgov.registry import scopes as scope_rules
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
@@ -227,8 +227,8 @@ CATALOG: tuple[Feature, ...] = (
         CONTROL,
         ENFORCE,
         {
-            ENFORCE: "Such results are withheld, and a finding is raised.",
-            MONITOR: "They reach the agent, are recorded and raise a finding.",
+            ENFORCE: "Such results are withheld, and an issue is raised.",
+            MONITOR: "They reach the agent, are recorded and raise an issue.",
             OFF: "Results aren't checked.",
         },
     ),
@@ -242,8 +242,8 @@ CATALOG: tuple[Feature, ...] = (
         CONTROL,
         MONITOR,
         {
-            ENFORCE: "Such prompts are refused, and a finding is raised.",
-            MONITOR: "They go through, are recorded and raise a finding.",
+            ENFORCE: "Such prompts are refused, and an issue is raised.",
+            MONITOR: "They go through, are recorded and raise an issue.",
             OFF: "Prompts aren't checked.",
         },
     ),
@@ -259,9 +259,9 @@ CATALOG: tuple[Feature, ...] = (
         {
             ENFORCE: "Where the check it supports is enforced too, calls wait for its verdict "
             "(AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS at most), and what it flags is withheld or "
-            "refused, and raises a finding.",
+            "refused, and raises an issue.",
             MONITOR: "It answers in the background, after the call went on: what it flags is "
-            "recorded and raises a finding.",
+            "recorded and raises an issue.",
             OFF: "It isn't asked.",
         },
         needs="IBM Granite Guardian (AGENTGOV_GUARDIAN_URL) where the processor runs",
@@ -291,7 +291,7 @@ CATALOG: tuple[Feature, ...] = (
         {
             ENFORCE: "Critical-risk agents are refused, and the automatic block applies.",
             MONITOR: "Their calls go through and are recorded; the automatic block only "
-            "raises a finding.",
+            "raises an issue.",
             OFF: "Risk is scored and shown but doesn't change what agents may do.",
         },
     ),
@@ -319,7 +319,7 @@ CATALOG: tuple[Feature, ...] = (
         {
             ENFORCE: "They are refused.",
             MONITOR: "They are let through and recorded, and with discovery on, added to the "
-            "inventory as discovered agents.",
+            "inventory as unmanaged agents.",
         },
     ),
     Feature(
@@ -363,11 +363,11 @@ CATALOG: tuple[Feature, ...] = (
         "Shadow-agent discovery",
         "detection",
         "Agents seen in telemetry or at the gateway that aren't registered are added to the "
-        "inventory as discovered.",
+        "inventory as unmanaged agents.",
         SWITCH,
         ON,
         {
-            ON: "Unregistered agents appear as discovered.",
+            ON: "Unregistered agents appear as unmanaged.",
             OFF: "They aren't added; registered agents' activity is still recorded.",
         },
     ),
@@ -397,13 +397,13 @@ CATALOG: tuple[Feature, ...] = (
         "posture-checks",
         "Posture checks",
         "detection",
-        "A regular scan raises findings for agents without owners or sponsors, attestations "
+        "A regular scan raises issues for agents without owners or sponsors, attestations "
         "that are due, stale agents, broad grants and tool servers awaiting review.",
         SWITCH,
         ON,
         {
             ON: "The scan runs every AGENTGOV_POSTURE_INTERVAL_SECONDS, and on demand.",
-            OFF: "No scans. Findings already raised stay until they are resolved.",
+            OFF: "No scans. Issues already raised stay until they are resolved.",
         },
     ),
     Feature(
@@ -460,12 +460,12 @@ CATALOG: tuple[Feature, ...] = (
         "developers",
         "The MCP servers developers have set up on their machines, as agentgov mcp scan "
         "reports them, are compared with the approved tool servers, and those that aren't "
-        "approved raise findings.",
+        "approved raise issues.",
         SWITCH,
         ON,
         {
-            ON: "Reports are taken, and unapproved servers raise findings.",
-            OFF: "Reports are refused. Findings already raised stay until resolved.",
+            ON: "Reports are taken, and unapproved servers raise issues.",
+            OFF: "Reports are refused. Issues already raised stay until resolved.",
         },
     ),
     Feature(
@@ -538,14 +538,14 @@ CATALOG: tuple[Feature, ...] = (
         "issues",
         "Issues to the people responsible",
         "lifecycle",
-        "Findings go to the people responsible for them: an agent's owner, then its sponsors, "
+        "Issues go to the people responsible for them: an agent's owner, then its sponsors, "
         "then its team, each told by email and in their team's chat, and the issue goes up "
         "the chain when nobody acknowledges it in time.",
         SWITCH,
         ON,
         {
-            ON: "Findings are routed, escalated and sent to the people responsible.",
-            OFF: "Findings stay in AgentGov's list only, as for administrators.",
+            ON: "Issues are routed, escalated and sent to the people responsible.",
+            OFF: "Issues stay in AgentGov's list only, as for administrators.",
         },
         needs="teams with email addresses or chat channels; a mail server "
         "(AGENTGOV_SMTP_URL) for email",
@@ -597,6 +597,24 @@ CATALOG: tuple[Feature, ...] = (
         needs="AgentGov's Microsoft app registration, with AgentIdentity.Read.All",
     ),
     Feature(
+        "entra-users",
+        "Microsoft Entra users",
+        "microsoft",
+        "AgentGov looks up the people Copilot Studio names as its agents' owners and makers, "
+        "and the owners and sponsors it names itself: to show them by name, to make them "
+        "owners when adopting, and to see when one has left, so that issues go past them.",
+        SWITCH,
+        ON,
+        {
+            ON: "Looked up where AgentGov's app registration has the permission, and as the "
+            "administrator who syncs Copilot Studio when they sign in with Microsoft.",
+            OFF: "Not looked up: makers are known only from a list of users uploaded to "
+            "AgentGov, and otherwise shown by their Entra IDs.",
+        },
+        needs="AgentGov's Microsoft app registration, with User.Read.All (User.ReadBasic.All "
+        "doesn't say whose account is disabled), or administrators who sign in with Microsoft",
+    ),
+    Feature(
         "purview-audit",
         "Microsoft Purview audit log",
         "microsoft",
@@ -614,7 +632,7 @@ CATALOG: tuple[Feature, ...] = (
         "defender",
         "Microsoft Defender alerts",
         "microsoft",
-        "AgentGov turns Defender's alerts about agents into findings on those agents.",
+        "AgentGov turns Defender's alerts about agents into issues on those agents.",
         SWITCH,
         ON,
         {
@@ -681,7 +699,7 @@ CATALOG: tuple[Feature, ...] = (
         "platforms",
         "AgentGov reads the agents on AWS into the inventory (Amazon Bedrock agents, "
         "AgentCore's harnesses, agent runtimes and gateways, Amazon Quick's agents, and AWS "
-        "Agent Registry's agents and MCP servers), with their risky settings as findings, on a "
+        "Agent Registry's agents and MCP servers), with their risky settings as issues, on a "
         "schedule and on demand.",
         SWITCH,
         ON,
@@ -697,7 +715,7 @@ CATALOG: tuple[Feature, ...] = (
         "platforms",
         "AgentGov reads the agents on Google Cloud into the inventory (Agent Runtime agents, "
         "formerly Vertex AI Agent Engine, and Agent Registry's agents and MCP servers), with "
-        "their risky settings as findings, on a schedule and on demand.",
+        "their risky settings as issues, on a schedule and on demand.",
         SWITCH,
         ON,
         {
@@ -711,7 +729,7 @@ CATALOG: tuple[Feature, ...] = (
         "Salesforce agents",
         "platforms",
         "AgentGov reads the Agentforce agents in your Salesforce org into the inventory, with "
-        "their risky settings as findings and their topics' instructions checked, on a "
+        "their risky settings as issues and their topics' instructions checked, on a "
         "schedule and on demand.",
         SWITCH,
         ON,
@@ -727,7 +745,7 @@ CATALOG: tuple[Feature, ...] = (
         "platforms",
         "AgentGov reads the agents in your Databricks workspaces into the inventory (agents on "
         "Model Serving, Agent Bricks agents, Genie agents, and the MCP services in Unity "
-        "Catalog), with their risky settings as findings, on a schedule and on demand.",
+        "Catalog), with their risky settings as issues, on a schedule and on demand.",
         SWITCH,
         ON,
         {
@@ -741,7 +759,7 @@ CATALOG: tuple[Feature, ...] = (
         "Microsoft Foundry agents",
         "platforms",
         "AgentGov reads the agents in your Microsoft Foundry projects into the inventory "
-        "(prompt, hosted and workflow agents), with their risky settings as findings, linked to "
+        "(prompt, hosted and workflow agents), with their risky settings as issues, linked to "
         "their Entra agent identities, on a schedule and on demand.",
         SWITCH,
         ON,
@@ -766,7 +784,7 @@ CATALOG: tuple[Feature, ...] = (
             OFF: "Nothing is sent, and the secops role only reads.",
             "inform": "SIEMs and chats get the destinations' events and alerts, and the "
             "events API serves them; the secops role reads.",
-            "triage": "As inform, and the secops role resolves, dismisses and reopens findings.",
+            "triage": "As inform, and the secops role resolves, dismisses and reopens issues.",
             "contain": "As triage, and the secops role blocks and unblocks agents, tool "
             "servers, model providers and identity issuers.",
             "decide": "As contain, and the secops role approves and denies approval "
@@ -796,6 +814,9 @@ SCOPABLE = (
 EXEMPT_LABEL = "agentgov/exempt-controls"
 # Exceptions a control has at most.
 MAX_SCOPES = 20
+# What listing a control's exceptions adds to each: the scope in words, how many agents it
+# applies to now, and what it names that there isn't. Sent back with them, they are ignored.
+LISTED = ("describe", "agents", "missing")
 
 
 def enforced_at_gateway(modes: dict[str, str]) -> list[str]:
@@ -931,10 +952,11 @@ def unmet(key: str, mode: str, settings: Settings) -> str | None:
             "AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL"
         )
     if key == "identity-assertions" and mode != OFF:
-        if not settings.service_token:
+        if not settings.key_secret:
             return (
-                "AgentGov signs identity assertions with a key it derives from the service "
-                "token: set AGENTGOV_SERVICE_TOKEN where the control plane runs"
+                "AgentGov signs identity assertions with a key it derives from the signing "
+                "secret: set AGENTGOV_SIGNING_SECRET (or AGENTGOV_SERVICE_TOKEN) where the "
+                "control plane runs"
             )
         if not (settings.keycloak_issuer and settings.keycloak_jwks_url):
             return (
@@ -1140,7 +1162,8 @@ def check_scopes(f: Feature, value: Any, settings: Settings) -> list[dict[str, A
         where = f"scopes[{i}]"
         if not isinstance(item, dict):
             raise ValidationError(f"{where} is a mapping of mode, scope and note")
-        unknown = sorted(set(item) - {"mode", "scope", "note"})
+        # What a listing adds to each (LISTED) may come back with it.
+        unknown = sorted(set(item) - {"mode", "scope", "note", *LISTED})
         if unknown:
             raise ValidationError(f"{where}: unknown key(s) {', '.join(unknown)}")
         mode = check_mode(f, item.get("mode"))
@@ -1216,6 +1239,9 @@ def set_scopes(session: Session, settings: Settings, key: str, value: Any, *, ac
             f"{key} is set by the deployment (AGENTGOV_FEATURES), for every agent: its "
             "exceptions can't be changed in the app"
         )
+    had = [e["scope"] for e in (row.scopes or [])] if row is not None else []
+    for i, entry in enumerate(new):
+        scope_rules.check_names(session, entry["scope"], f"scopes[{i}].scope", had=had)
     return _set_scopes(session, f, new, actor=actor)
 
 
@@ -1275,12 +1301,31 @@ def strictest_modes(session: Session) -> dict[str, str]:
     return strictest(modes(session), all_scopes(session))
 
 
+def _reach(entries: list[dict[str, Any]], agents: list[Agent]) -> list[int]:
+    """How many agents each exception applies to now: the first that matches an agent."""
+    counts = [0] * len(entries)
+    for agent in agents:
+        for i, entry in enumerate(entries):
+            if scope_rules.matches(entry["scope"], agent):
+                counts[i] += 1
+                break
+    return counts
+
+
 def describe(session: Session, settings: Settings, key: str | None = None) -> list[dict[str, Any]]:
     rows = _rows(session)
+    agents: list[Agent] | None = None
+    names: dict[str, set[str]] = {}
     out = []
     for f in [feature(key)] if key else CATALOG:
         row = rows.get(f.key)
         current = row.mode if row is not None else f.default
+        entries = (row.scopes or []) if row is not None else []
+        if entries and agents is None:
+            # Read once: how many agents each exception applies to, and what it names that
+            # there isn't.
+            agents = list(session.scalars(select(Agent).where(Agent.status != DELETED)).unique())
+            names = scope_rules.known(session)
         # A default that needs what isn't there, or a mode chosen before it went away: it
         # does nothing until it is there, and says so.
         missing = unmet(f.key, current, settings)
@@ -1309,9 +1354,16 @@ def describe(session: Session, settings: Settings, key: str | None = None) -> li
                 # Its mode for some agents (docs/features.md#exceptions); while the
                 # deployment pins it, none apply.
                 "scopable": f.key in SCOPABLE,
+                # With each, in words, how many agents it applies to now, and the teams,
+                # blueprints or platforms it names that there aren't.
                 "scopes": [
-                    {**e, "describe": scope_rules.describe(e["scope"])}
-                    for e in ((row.scopes or []) if row is not None else [])
+                    {
+                        **e,
+                        "describe": scope_rules.describe(e["scope"]),
+                        "agents": n,
+                        "missing": scope_rules.missing(e["scope"], names),
+                    }
+                    for e, n in zip(entries, _reach(entries, agents or []), strict=True)
                 ],
             }
         )

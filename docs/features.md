@@ -77,17 +77,17 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 
 | Feature | Modes | What it does |
 |---|---|---|
-| `least-privilege` | off, monitor, **enforce** | Agents may call only the tools, models and other agents their blueprint, their own grants and their [access packages](access-packages.md) allow, and see only those tools when they list a server's. In monitor mode, agents see and call every tool, model and agent, and calls they weren't granted are recorded. Telemetry showing a tool used without a grant raises a finding unless this control is off |
+| `least-privilege` | off, monitor, **enforce** | Agents may call only the tools, models and other agents their blueprint, their own grants and their [access packages](access-packages.md) allow, and see only those tools when they list a server's. In monitor mode, agents see and call every tool, model and agent, and calls they weren't granted are recorded. Telemetry showing a tool used without a grant raises an issue unless this control is off |
 | `acting-for-people` | off, monitor, **enforce** | Agents act for the people their blueprints allow ([acting for people](acting-for-people.md)). A blueprint can say that its agents act only for a person, with a token they got for that person, or only on their own, and only for people in some groups. Monitor lets other calls through and records them. Off, who agents act for isn't checked; the ledger still records the person |
 | `approvals` | off, monitor, **enforce** | Calls to tools their servers mark destructive, and calls organisation policies single out (`require_approval`), wait for a person to approve them |
 | `approvals-by-person` | **off**, on | Sends the approval requests an agent makes while it acts for a person to that person, where its blueprint says so (`approvals_by: person`). People sign in to AgentGov to decide them, people without an AgentGov role too, who see only the requests sent to them. Administrators can always decide. Off, approvers decide every request, and people without an AgentGov role can't sign in unless `issues` is on. Needs AgentGov's sign-in through the Keycloak realm that issues agents' tokens ([acting for people](acting-for-people.md)) |
 | `data-protection` | off, monitor, **enforce** | Inspects tool calls, model calls and calls between agents, and their answers, for credentials and personal data. Credentials stop the call (a tool's or a model's answer that contains them is withheld, and another agent's is masked), and personal data is masked unless policy allows it. Off, nothing is inspected and Presidio isn't called. Monitor records what was found. Only an enforced control stops calls when Presidio is down (`AGENTGOV_PRESIDIO_FAILURE_MODE=closed`, [when something is down](#when-something-is-down)) |
 | `a2a-masking` | off, **monitor**, enforce | Masks personal data in the messages agents send each other through the gateway, unless the agent called may have it (its `pii-access` label, or its blueprint's). Monitored, messages go as they are and each call's decision records what would have been masked; off, the personal data in them is only recorded. Data protection finds it, so it needs `data-protection` on; credentials in messages are refused by `data-protection` whatever this says ([agent to agent](agent-to-agent.md#messages)) |
-| `prompt-injection` | off, monitor, **enforce** | Withholds tool results and other agents' answers that carry instructions aimed at the agent (indirect prompt injection) and raises a finding, and refuses model calls whose conversation holds such a result. Monitor lets them through and still raises the finding |
-| `jailbreak-detection` | off, **monitor**, enforce | Looks for jailbreaks, prompts that try to talk a model out of its instructions or its safety rules, in the latest message from a person in each [model call](models.md). Enforced, they are refused; monitored, they go through. Either way they are recorded and raise a finding. It starts in monitor mode because people's own words vary more than tool results do: see what it would refuse before you enforce it |
-| `traffic-classifier` | off, **monitor**, enforce | A second opinion from IBM Granite Guardian on what `prompt-injection` and `jailbreak-detection` let through: tool results, the answers agents send each other, and people's prompts to models ([detection](detection.md)). It follows the check it supports: where both are enforced, calls wait for its verdict (`AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` at most) and what it flags is withheld or refused, while without a verdict the rules decide alone (`AGENTGOV_GUARDIAN_FAILURE_MODE`); otherwise it answers in the background, after the call went on, and what it flags is recorded and raises a finding. Needs Granite Guardian where the processor runs (`AGENTGOV_GUARDIAN_URL`) |
+| `prompt-injection` | off, monitor, **enforce** | Withholds tool results and other agents' answers that carry instructions aimed at the agent (indirect prompt injection) and raises an issue, and refuses model calls whose conversation holds such a result. Monitor lets them through and still raises the issue |
+| `jailbreak-detection` | off, **monitor**, enforce | Looks for jailbreaks, prompts that try to talk a model out of its instructions or its safety rules, in the latest message from a person in each [model call](models.md). Enforced, they are refused; monitored, they go through. Either way they are recorded and raise an issue. It starts in monitor mode because people's own words vary more than tool results do: see what it would refuse before you enforce it |
+| `traffic-classifier` | off, **monitor**, enforce | A second opinion from IBM Granite Guardian on what `prompt-injection` and `jailbreak-detection` let through: tool results, the answers agents send each other, and people's prompts to models ([detection](detection.md)). It follows the check it supports: where both are enforced, calls wait for its verdict (`AGENTGOV_CLASSIFIER_TIMEOUT_SECONDS` at most) and what it flags is withheld or refused, while without a verdict the rules decide alone (`AGENTGOV_GUARDIAN_FAILURE_MODE`); otherwise it answers in the background, after the call went on, and what it flags is recorded and raises an issue. Needs Granite Guardian where the processor runs (`AGENTGOV_GUARDIAN_URL`) |
 | `tool-integrity` | off, monitor, **enforce** | Quarantines tools whose descriptions hide instructions. Tools that changed since approval are held until an administrator reviews them |
-| `risk-based-access` | off, monitor, **enforce** | Refuses agents at critical risk, and blocks agents whose risk score reaches `AGENTGOV_AUTO_BLOCK_RISK_SCORE`. Monitor lets them through, and the automatic block raises an `agent.would_auto_block` finding instead. Risk is always scored and shown |
+| `risk-based-access` | off, monitor, **enforce** | Refuses agents at critical risk, and blocks agents whose risk score reaches `AGENTGOV_AUTO_BLOCK_RISK_SCORE`. Monitor lets them through, and the automatic block raises an `agent.would_auto_block` issue instead. Risk is always scored and shown |
 | `token-budgets` | off, monitor, **enforce** | Refuses model calls from agents that have used their daily token budget, their own or their blueprint's, until the day ends (UTC). Off, budgets aren't checked; usage is still metered |
 | `unknown-callers` | monitor, **enforce** | Refuses callers without a registered agent's identity. Monitor lets them through and records them; with `discovery` on, they are added to the inventory |
 
@@ -95,9 +95,9 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 
 | Feature | Modes | What it does |
 |---|---|---|
-| `discovery` | off, **on** | Adds agents seen in telemetry or at the gateway that aren't registered to the inventory, as discovered (shadow AI). Off, registered agents' activity is still recorded. Imports you start yourself are not affected |
+| `discovery` | off, **on** | Adds agents seen in telemetry or at the gateway that aren't registered to the inventory, as unmanaged (shadow AI). Off, registered agents' activity is still recorded. Imports you start yourself are not affected |
 | `calls-around-gateway` | off, **watch**, test | Looks for calls to agents that go around the gateway, straight to an agent's own A2A URL, which AgentGov can't stop: the agent's network can, or the agent, by refusing calls without the delegation the gateway gives with each one ([calls around the gateway](agent-to-agent.md#calls-around-the-gateway)). Watched, telemetry that shows such a call is recorded and raises an issue for both agents' owners, and so does an agent whose owners haven't said what stops such calls (its `a2a_protection`); AgentGov calls no agent itself. Tested, each posture scan also calls each agent's A2A URL, without a delegation, as a call around the gateway would, and an agent that takes it raises an issue (a serious one if its owners said something stops it). Off, nothing is looked for. The test runs with the posture scan, so not while `posture-checks` is off |
-| `posture-checks` | off, **on** | Scans regularly and raises findings: agents without owners or sponsors, attestations that are due, stale agents, broad grants and tool servers awaiting review. Off, nothing is scanned, and findings already raised stay until resolved |
+| `posture-checks` | off, **on** | Scans regularly and raises issues: agents without owners or sponsors, attestations that are due, stale agents, broad grants and tool servers awaiting review. Off, nothing is scanned, and issues already raised stay until resolved |
 | `instruction-checks` | off, **on** | Checks agents' instructions (their system prompts) for unsafe content, with AgentGov's rules and with IBM Granite Guardian where it is configured. Off, instructions are kept but not checked; they are checked as soon as checks are on again |
 
 ### Policy
@@ -112,7 +112,7 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 | Feature | Modes | What it does |
 |---|---|---|
 | `mcp-registry` | **off**, on | Serves the tool servers listed for developers as an MCP registry at `<control plane>/registry`, which GitHub Copilot and VS Code read to offer developers only approved MCP servers ([developer tools](developer-tools.md)). Its readers have no credentials, so the registry is served without them: it is off until you turn it on |
-| `mcp-discovery` | off, **on** | Takes reports of the MCP servers set up on developers' machines (`agentgov mcp scan --report`), compares them with the approved tool servers, and raises findings for those that aren't approved, that skip the gateway or that are blocked. Off, reports are refused; findings already raised stay until resolved |
+| `mcp-discovery` | off, **on** | Takes reports of the MCP servers set up on developers' machines (`agentgov mcp scan --report`), compares them with the approved tool servers, and raises issues for those that aren't approved, that skip the gateway or that are blocked. Off, reports are refused; issues already raised stay until resolved |
 | `developer-sign-in` | **off**, on | Developers' MCP clients reach the tool servers on the gateway with the developer's own token: each tool server's route serves its OAuth protected resource metadata, which names Keycloak, and answers a call without a token with a pointer to it, so that the client signs the developer in to an agent registered as a public client ([developer tools](developer-tools.md#signing-in-at-the-gateway)). Off, the gateway takes the same tokens but doesn't say where to sign in. Needs `AGENTGOV_KEYCLOAK_ISSUER` and `AGENTGOV_KEYCLOAK_JWKS_URL` |
 
 ### Identity
@@ -128,7 +128,7 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 |---|---|---|
 | `registration-approval` | off, **on** | Agents registered by people who aren't administrators start pending, until an administrator approves them. Off, they are active at once |
 | `access-packages` | off, **monitor**, enforce | Lets agents hold extra tools, models and agents to call for a while ([access packages](access-packages.md)): requested by their owners, sponsors or approvers, approved, and reminded, renewed or reviewed before they expire. Enforced, an expired package grants nothing. Monitored, the agent keeps its access, each call that needs it is recorded, and an issue asks for the package to be renewed or revoked. Off, packages grant nothing and can't be requested. It starts in monitor mode so that no agent loses access by surprise: enforce it once owners renew in time. Packages only matter while `least-privilege` is enforced |
-| `issues` | off, **on** | Sends findings to the people responsible for them ([issues](issues.md)): an agent's owner first, then its sponsors, then its team, by email and in the team's Teams or Slack channels. An issue nobody acknowledges in time goes on to the next of them. People without an AgentGov role can sign in to see and acknowledge their own. Off, findings stay in AgentGov's list and nothing is sent; people without a role can't sign in unless `approvals-by-person` is on |
+| `issues` | off, **on** | Sends issues to the people responsible for them ([issues](issues.md)): an agent's owner first, then its sponsors, then its team, by email and in the team's Teams or Slack channels. An issue nobody acknowledges in time goes on to the next of them. People without an AgentGov role can sign in to see and acknowledge their own. Off, issues stay in AgentGov's list and nothing is sent; people without a role can't sign in unless `approvals-by-person` is on |
 | `management-rules` | off, **monitor**, enforce | Rules act on the agents that meet their conditions for long enough ([management rules](management-rules.md)): they raise an issue, give an agent an owner, block it, delete it or revoke its access packages, after telling its people, and on a few agents at once at most. Enforced, rules in enforce mode tell, then act. Monitored, rules tell nobody and change nothing; they record what they would have done. Off, no rule runs and their issues are resolved. Rules run after each posture scan, so not while `posture-checks` is off |
 
 ### Microsoft
@@ -140,8 +140,9 @@ describes. Turning one off stops it even where it is configured.
 |---|---|---|
 | `microsoft-365` | off, **on** | Reads the Microsoft 365 agent catalog into the inventory |
 | `entra-agent-id` | off, **on** | Reads agents' Entra identities and links them to their agents |
+| `entra-users` | off, **on** | Looks up the people Copilot Studio names as its agents' owners and makers, and agents' owners and sponsors, by name, and sees when one leaves ([platforms](platforms.md#who-made-each-agent), [issues](issues.md#people-who-leave)) |
 | `purview-audit` | off, **on** | Reads agent usage, attacks on agents and makers' changes from the audit log |
-| `defender` | off, **on** | Turns Defender's alerts about agents into findings |
+| `defender` | off, **on** | Turns Defender's alerts about agents into issues |
 | `entra-access-packages` | off, **inform**, manage | Reads the access packages Microsoft Entra ID Governance assigns agents' Entra identities, and raises an [issue](issues.md) before one expires. Managed, administrators also assign and remove them from AgentGov; informed, nothing is written into Entra ([Entra access packages](microsoft-connections.md#microsoft-entra-access-packages)) |
 | `copilot-studio-threat-detection` | **off**, monitor, enforce | Answers Copilot Studio before each tool call its agents make. Monitor tells Copilot Studio to go ahead and records what would have been blocked. Off, AgentGov's endpoint refuses Copilot Studio's calls. Needs `AGENTGOV_COPILOT_STUDIO_CALLER_APP_IDS` and the tenant ID, and OPA to enforce |
 | `connector-allowlist` | off, monitor, **enforce** | What Copilot Studio threat detection does with a tool call through a connector that isn't on the allowlist: refuses it, lets it through and records it, or doesn't check. Agents that use such a connector are flagged in any mode. Takes [exceptions](#exceptions) ([platforms](platforms.md#when-an-agent-uses-a-connector-that-isnt-approved)) |
@@ -153,17 +154,17 @@ Turning one off stops it even where it is configured.
 
 | Feature | Modes | What it does |
 |---|---|---|
-| `aws` | off, **on** | Reads the agents on AWS into the inventory: Amazon Bedrock agents, AgentCore's harnesses, agent runtimes and gateways, Amazon Quick's agents, and AWS Agent Registry's agents and MCP servers, with their risky settings as findings |
-| `google-cloud` | off, **on** | Reads the agents on Google Cloud into the inventory: Agent Runtime agents (formerly Vertex AI Agent Engine), and Agent Registry's agents and MCP servers (on Cloud Run and GKE, Gemini Enterprise's, registered by hand), with their risky settings as findings |
-| `salesforce` | off, **on** | Reads the Agentforce agents in your Salesforce org into the inventory, with their risky settings as findings and their topics' instructions checked |
-| `databricks` | off, **on** | Reads the agents in your Databricks workspaces into the inventory: agents on Model Serving (Knowledge Assistants and Supervisor Agents among them), Agent Bricks agents, Genie agents, and the MCP services in Unity Catalog, with their risky settings as findings |
-| `microsoft-foundry` | off, **on** | Reads the agents in your Microsoft Foundry projects into the inventory: prompt, hosted and workflow agents, with their risky settings as findings, linked to their Entra agent identities |
+| `aws` | off, **on** | Reads the agents on AWS into the inventory: Amazon Bedrock agents, AgentCore's harnesses, agent runtimes and gateways, Amazon Quick's agents, and AWS Agent Registry's agents and MCP servers, with their risky settings as issues |
+| `google-cloud` | off, **on** | Reads the agents on Google Cloud into the inventory: Agent Runtime agents (formerly Vertex AI Agent Engine), and Agent Registry's agents and MCP servers (on Cloud Run and GKE, Gemini Enterprise's, registered by hand), with their risky settings as issues |
+| `salesforce` | off, **on** | Reads the Agentforce agents in your Salesforce org into the inventory, with their risky settings as issues and their topics' instructions checked |
+| `databricks` | off, **on** | Reads the agents in your Databricks workspaces into the inventory: agents on Model Serving (Knowledge Assistants and Supervisor Agents among them), Agent Bricks agents, Genie agents, and the MCP services in Unity Catalog, with their risky settings as issues |
+| `microsoft-foundry` | off, **on** | Reads the agents in your Microsoft Foundry projects into the inventory: prompt, hosted and workflow agents, with their risky settings as issues, linked to their Entra agent identities |
 
 ### Security operations
 
 | Feature | Modes | What it does |
 |---|---|---|
-| `security-operations` | **off**, inform, triage, contain, decide | Hands AgentGov's evidence and alerts to the security team's tools ([security operations](secops.md)). From inform, SIEMs get the ledger as OCSF events and Teams and Slack channels get alerts, through the destinations an administrator adds, and the events API serves the events. Each level up also lets the `secops` role, which the security team's tools and analysts hold, do more: triage resolves, dismisses and reopens findings; contain blocks and unblocks agents, tool servers, model providers and identity issuers; decide approves and denies the approval requests sent to approvers. Off, nothing is sent and the `secops` role only reads |
+| `security-operations` | **off**, inform, triage, contain, decide | Hands AgentGov's evidence and alerts to the security team's tools ([security operations](secops.md)). From inform, SIEMs get the ledger as OCSF events and Teams and Slack channels get alerts, through the destinations an administrator adds, and the events API serves the events. Each level up also lets the `secops` role, which the security team's tools and analysts hold, do more: triage resolves, dismisses and reopens issues; contain blocks and unblocks agents, tool servers, model providers and identity issuers; decide approves and denies the approval requests sent to approvers. Off, nothing is sent and the `secops` role only reads |
 
 Some things are never switched off: an agent or tool server that is blocked stays
 blocked, callers must be registered agents unless `unknown-callers` is monitored, and
@@ -202,6 +203,7 @@ in a row, or three minutes, whichever is longer, is out of touch and doesn't cou
 | `developer-sign-in`, `identity-assertions`, `approvals-by-person` | Keycloak's keys unreachable from the control plane: limited |
 | The Microsoft connections | not set up, or the app lacks the permission: inactive; the last sync failed: limited |
 | The other platforms | not configured: inactive; the last sync didn't read everything: limited |
+| `issues` | no catch-all team: limited, since issues nobody else takes reach no one |
 | `security-operations` | no destinations: inactive |
 
 A mode a feature can't use yet, for want of a setting, makes it inactive too, and says
@@ -246,6 +248,11 @@ The processor knows the modes from OPA, and from the control plane's answer to e
 reports, so it still knows them while OPA is down; until it has heard from either, it takes
 the features' defaults, in which most controls are enforced.
 
+While the control plane is down, calls are still decided: each processor keeps their
+records, up to 10,000, and sends them once it is back. Should more pile up, the oldest are
+lost, and the ledger says how many with a warning (`decisions.dropped`) as soon as the
+control plane is back: the gap is in the evidence, not hidden.
+
 The Features page shows what each processor does when something is down, beside what it
 can reach.
 
@@ -271,12 +278,18 @@ AgentGov's gateway serves) and labels; every key a scope has must match. An agen
 the mode of the first exception whose scope it is in, and the control's mode otherwise.
 `unknown-callers` has none: its callers aren't agents.
 
+A scope names teams and blueprints that are there, and platforms AgentGov knows: a
+misspelt name, which would match no agent, is refused. Each exception says how many agents
+it applies to now (`agents` in the API), so one that applies to none stands out, and any
+name in it there isn't any more (`missing`), from before AgentGov checked. A team or
+blueprint an exception names can't be deleted until the exception changes.
+
 | | How |
 |---|---|
 | Admin UI | **Features**: **Add an exception** under a control's mode; the agent's page lists the controls whose mode differs for it, and why |
 | CLI | `agentgov features scope least-privilege monitor --environment dev`, `agentgov features unscope least-privilege 1`, `agentgov features get least-privilege` |
-| API | `PUT /v1/features/{feature}` with `{"scopes": [{"mode": "monitor", "scope": {"environments": ["dev"]}, "note": "..."}]}` (the whole list); `control_modes` in `GET /v1/agents/{agent}` |
-| Manifests | `kind: Feature` with `spec.scopes`, as the API takes them |
+| API | `PUT /v1/features/{feature}` with `{"scopes": [{"mode": "monitor", "scope": {"environments": ["dev"]}, "note": "..."}]}` (the whole list; what `GET` adds to each, `describe`, `agents` and `missing`, may come back with it); `control_modes` in `GET /v1/agents/{agent}` |
+| Manifests | `kind: Feature` with `spec.scopes`, as the API takes them; they are set after the manifest's other documents, so they can name teams and blueprints it adds |
 
 An administrator can also exempt one agent: its label `agentgov/exempt-controls` names the
 controls (`least-privilege,tool-integrity`), or all of them (`*`), that are monitored for

@@ -3,11 +3,15 @@
 #
 #   docker compose up -d --build
 #
+# For others to rely on, on one server, add docker-compose.server.yml (docs/deploy/server.md).
+#
 # Host ports: control plane + UI :8000, MCP gateway :8080, Keycloak :8180,
 # OPA :8181, OTLP :4317/:4318, the demo's stand-ins for a workload issuer :9200 and
-# for the security team's tools :9300. The demo MCP server is only reachable through
-# the gateway. The defaults below are for local evaluation only - set real
-# secrets in a .env file (see .env.example) for anything else.
+# for the security team's tools :9300, on this machine only (AGENTGOV_LISTEN_ADDRESS,
+# 127.0.0.1): the defaults below, its tokens and the demo users' password, are known to
+# everyone, so they are for local evaluation only. Set real secrets in a .env file (see
+# .env.example) before taking connections from other machines. The demo MCP server is
+# only reachable through the gateway.
 
 x-agentgov-env: &agentgov-env
   AGENTGOV_SERVICE_TOKEN: ${AGENTGOV_SERVICE_TOKEN:-dev-service-token}
@@ -63,7 +67,7 @@ services:
     volumes:
       - ./keycloak/agentgov-realm.json:/opt/keycloak/data/import/agentgov-realm.json:ro
     ports:
-      - "8180:8080"
+      - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:8180:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,18 +82,21 @@ services:
       timeout: 5s
       retries: 60
 
-  # Registry, lifecycle, reconcilers, evidence ledger, admin UI (ours).
+  # Registry, lifecycle, reconcilers, evidence ledger, admin UI (ours): built from this
+  # checkout, or the published image in AGENTGOV_IMAGE (docs/deploy/server.md).
   control-plane:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: agentgov:local
+    image: ${AGENTGOV_IMAGE:-agentgov:local}
     command: ["server"]
     environment:
       <<: *agentgov-env
       AGENTGOV_DATABASE_URL: postgresql+psycopg://agentgov:${POSTGRES_PASSWORD:-agentgov}@postgres:5432/agentgov
       AGENTGOV_PUBLIC_URL: ${AGENTGOV_PUBLIC_URL:-http://localhost:8000}
       AGENTGOV_ADMIN_TOKEN: ${AGENTGOV_ADMIN_TOKEN:-dev-admin-token}
+      # The keys it and the processor sign delegations and ID-JAGs with derive from it.
+      AGENTGOV_SIGNING_SECRET: ${AGENTGOV_SIGNING_SECRET:-dev-signing-secret}
       AGENTGOV_KEYCLOAK_URL: http://keycloak:8080
       AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:-dev-keycloak-secret}
       AGENTGOV_KEYCLOAK_ISSUER: http://localhost:8180/realms/agentgov
@@ -116,6 +123,9 @@ services:
       AGENTGOV_LEDGER_REKOR_URL: ${AGENTGOV_LEDGER_REKOR_URL:-http://rekor:3000}
       AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE: /tls/transparency/key.pem
       AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE: ${AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE:-/tls/transparency/log.pub}
+      # The ledger's head, kept outside PostgreSQL: a database restored from an older backup
+      # shows (docs/backup.md). Its volume isn't PostgreSQL's: don't restore it with that.
+      AGENTGOV_LEDGER_WITNESS_FILE: ${AGENTGOV_LEDGER_WITNESS_FILE:-/var/lib/agentgov/witness/ledger-head.json}
       # Features the deployment pins, e.g. "least-privilege=monitor" (docs/features.md).
       # Administrators choose the others on the Features page.
       AGENTGOV_FEATURES: ${AGENTGOV_FEATURES:-}
@@ -148,8 +158,9 @@ services:
     volumes:
       - ${AGENTGOV_DESTINATION_SECRETS_DIR:-./destination-secrets}:/destination-secrets:ro
       - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: control-plane}}
+      - ledger-witness:/var/lib/agentgov/witness
     ports:
-      - "8000:8000"
+      - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -169,7 +180,7 @@ services:
   # TLS between them, and the key the control plane signs OPA's bundles with: made on the
   # first start, on a volume of their own, and kept. Each component mounts its own only.
   certs:
-    image: agentgov:local
+    image: ${AGENTGOV_IMAGE:-agentgov:local}
     user: root
     entrypoint: ["sh", "-c"]
     command:
@@ -214,7 +225,7 @@ services:
       - ./opa/config.yaml:/config/opa.yaml:ro
       - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: opa}}
     ports:
-      - "8181:8181"
+      - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:8181:8181"
     depends_on:
       control-plane:
         condition: service_healthy
@@ -229,10 +240,11 @@ services:
 
   # agentgateway's ExtMcp policy server: content inspection, OPA decisions, approvals (ours).
   processor:
-    image: agentgov:local
+    image: ${AGENTGOV_IMAGE:-agentgov:local}
     command: ["processor"]
     environment:
       <<: *agentgov-env
+      AGENTGOV_SIGNING_SECRET: ${AGENTGOV_SIGNING_SECRET:-dev-signing-secret}
       AGENTGOV_CONTROL_PLANE_URL: https://control-plane:8443
       AGENTGOV_PRESIDIO_URL: http://presidio-analyzer:3000
       # IBM Granite Guardian's second opinion on traffic (docs/detection.md).
@@ -253,7 +265,7 @@ services:
   # Keeps agentgateway's configuration current from the control plane, after checking
   # that the gateway can read each model provider's key (as the Helm chart's sidecar).
   gateway-config:
-    image: agentgov:local
+    image: ${AGENTGOV_IMAGE:-agentgov:local}
     command: ["gateway-config", "--output", "/gateway/config.yaml", "--interval", "2"]
     environment:
       <<: *agentgov-env
@@ -280,7 +292,7 @@ services:
       - ${AGENTGOV_MODEL_KEYS_DIR:-./model-keys}:/model-keys:ro
       - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: gateway}}
     ports:
-      - "8080:8080"
+      - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:8080:8080"
     depends_on:
       gateway-config:
         condition: service_healthy
@@ -304,8 +316,8 @@ services:
       - ./otel/collector.yaml:/etc/otelcol/collector.yaml:ro
       - {type: volume, source: certs, target: /tls, read_only: true, volume: {subpath: otel-collector}}
     ports:
-      - "4317:4317"
-      - "4318:4318"
+      - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:4317:4317"
+      - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:4318:4318"
     depends_on:
       control-plane:
         condition: service_healthy
@@ -335,7 +347,7 @@ services:
     environment:
       ISSUER: http://workload-issuer:9200
     ports:
-      - "9200:9200"
+      - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:9200:9200"
 
   # Demo agent that other agents call over A2A, only through the gateway (at
   # /a2a/billing-agent). It has no secret: it authenticates with its service account
@@ -362,10 +374,11 @@ services:
     environment:
       HEC_TOKEN: demo-hec-token
     ports:
-      - "9300:9300"
+      - "${AGENTGOV_LISTEN_ADDRESS:-127.0.0.1}:9300:9300"
 
 volumes:
   postgres-data:
+  ledger-witness:
   gateway-config:
   certs:
   rekor-data:

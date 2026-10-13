@@ -478,7 +478,7 @@ def serving_agent(
                 "in a sandbox without internet access, reading the tables and volumes it is given "
                 "as tools, so a prompt injection can run code too.",
                 "Give it only the tables and volumes it needs, or confirm it needs to run code and "
-                "dismiss this finding.",
+                "ask an approver to accept its risk.",
                 {"tools": ["code execution"]},
             )
         )
@@ -537,6 +537,7 @@ def serving_agent(
         risks=risks,
         instructions=record.get("instructions") or None,
         complete=acl is not None,
+        maker=endpoint.get("creator") or record.get("creator"),
     )
 
 
@@ -625,6 +626,7 @@ def app_agent(app: dict[str, Any], acl: list[dict[str, Any]] | None, host: str) 
         external_ids={"databricks_app": str(app.get("id") or name)},
         risks=risks,
         complete=acl is not None,
+        maker=app.get("creator"),
     )
 
 
@@ -727,7 +729,7 @@ def mcp_service(
                 f"Its connection signs in to {server or 'the MCP server'} {how}, so everyone who "
                 "may call it acts there with that credential's access rather than their own.",
                 "Use a connection that signs each caller in (OAuth, per user), or confirm the "
-                "shared access is intended and dismiss this finding.",
+                "shared access is intended and ask an approver to accept its risk.",
                 {"connection": source.get("name"), "credential": credential},
             )
         )
@@ -769,4 +771,5 @@ def mcp_service(
         external_ids={"databricks_mcp_service": full},
         risks=risks,
         complete=grants is not None,
+        maker=service.get("created_by"),
     )

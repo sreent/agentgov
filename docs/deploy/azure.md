@@ -156,7 +156,7 @@ KEYVAULT_ID=$(az keyvault show -n $KEYVAULT --query id -o tsv)
 az role assignment create --assignee "$(az ad signed-in-user show --query id -o tsv)" \
   --role "Key Vault Administrator" --scope $KEYVAULT_ID
 
-for key in admin-token service-token keycloak-client-secret oidc-client-secret keycloak-admin-password; do
+for key in admin-token service-token signing-secret keycloak-client-secret oidc-client-secret keycloak-admin-password; do
   az keyvault secret set --vault-name $KEYVAULT -n agentgov-$key --value "$(openssl rand -hex 32)" -o none
 done
 az keyvault secret set --vault-name $KEYVAULT -n agentgov-database-url -o none --value \

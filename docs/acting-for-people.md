@@ -185,7 +185,7 @@ details hold everything policy saw. The ledger's hash covers it.
 | CLI | `agentgov ledger tail --user sam` |
 | API | `GET /v1/ledger?user=sam` |
 
-A jailbreak finding names the person the prompt came for.
+A jailbreak issue names the person the prompt came for.
 
 ## Approvals sent to the person
 

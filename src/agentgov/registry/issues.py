@@ -35,11 +35,15 @@ from agentgov.models import (
     ToolServer,
 )
 from agentgov.registry import finding_types, findings, teams
-from agentgov.registry.errors import InvalidTransition, ValidationError
+from agentgov.registry import people as directory_people
+from agentgov.registry.errors import Forbidden, InvalidTransition, ValidationError
 
 OWNER, SPONSORS, TEAM = "owner", "sponsors", "team"
 LEVELS = (OWNER, SPONSORS, TEAM)
 SYSTEM = "system:issues"
+# Someone it reached asks for its risk to be accepted (docs/issues.md#answering-an-issue):
+# who, why and until when, in the finding's details until an approver decides.
+ASKED = "exception_request"
 # The longest a risk can be accepted for: then someone decides again.
 MAX_ACCEPT = timedelta(days=365)
 EMAIL = "email"
@@ -65,6 +69,8 @@ class Directory:
     def __init__(self, session: Session) -> None:
         self.teams = {t.name: t for t in teams.list_all(session)}
         self.default = next((t for t in self.teams.values() if t.is_default), None)
+        # People who left: an issue goes past them (docs/issues.md#people-who-leave).
+        self.left = set(directory_people.gone(session))
 
     def recipient(self, name: str | None) -> Recipient | None:
         """Who a name stands for: a team of that name, or else a person."""
@@ -77,6 +83,8 @@ class Directory:
             # Its own addresses, or else its members'.
             emails = tuple(team.emails or []) or tuple(m for m in members if teams.is_email(m))
             return Recipient("team", team.name, emails, tuple(team.destinations or []), members)
+        if name.lower() in self.left:
+            return None  # gone: the next step takes it
         if teams.is_email(name):
             return Recipient("person", name.lower(), (name.lower(),))
         # Reached in AgentGov only, when they sign in.
@@ -190,11 +198,11 @@ def _quiet(settings: Settings, finding: Finding) -> str | None:
     return None
 
 
-def _queue(
-    session: Session, settings: Settings, finding: Finding, level: str, people: list[Recipient]
-) -> int:
-    """Queue the messages for the people at this step: email to their addresses (with a
-    mail server), and their teams' chats."""
+def addresses(
+    session: Session, settings: Settings, people: list[Recipient]
+) -> list[tuple[str, str]]:
+    """Where messages for these people and teams go, as (channel, recipient): email to
+    their addresses (with a mail server), and their teams' chats."""
     wanted: list[tuple[str, str]] = []
     for person in people:
         if settings.smtp_url:
@@ -203,8 +211,15 @@ def _queue(
             destination = session.scalar(select(Destination).where(Destination.name == name))
             if destination is not None:
                 wanted.append((destination.kind, name))
+    return list(dict.fromkeys(wanted))
+
+
+def _queue(
+    session: Session, settings: Settings, finding: Finding, level: str, people: list[Recipient]
+) -> int:
+    """Queue the messages for the people at this step."""
     count = 0
-    for channel, to in dict.fromkeys(wanted):
+    for channel, to in addresses(session, settings, people):
         exists = session.scalar(
             select(Notification.id).where(
                 Notification.finding_id == finding.id,
@@ -268,11 +283,29 @@ def route(session: Session, settings: Settings, now: datetime | None = None) -> 
 
 
 def reopen_accepted(session: Session, now: datetime | None = None) -> int:
-    """Accepted risks whose date has come open again, for someone to decide anew. If the
-    condition is gone, the next check resolves them."""
+    """Accepted risks, and dismissals given until a date, whose date has come open again,
+    for someone to decide anew. If the condition is gone, the next check resolves them."""
     now = now or ids.utcnow()
     count = 0
     off = finding_types.off_types(session)
+    # The key as text: SQLite's JSON values come quoted (a missing key reads as "null").
+    dismissed_until = Finding.details[findings.DISMISSAL].as_string().is_not(None)
+    for finding in session.scalars(
+        select(Finding).where(Finding.status == "dismissed", dismissed_until)
+    ):
+        until = ((finding.details or {}).get(findings.DISMISSAL) or {}).get("until")
+        if not until or datetime.fromisoformat(until) > now or finding.type in off:
+            continue
+        finding.status = "open"
+        finding.resolved_at = finding.resolved_by = None
+        finding.details = {
+            k: v for k, v in (finding.details or {}).items() if k != findings.DISMISSAL
+        }
+        findings.restart_chain(finding)
+        findings.record(
+            session, finding, "reopened", SYSTEM, why="the time it was dismissed for ran out"
+        )
+        count += 1
     for finding in session.scalars(
         select(Finding).where(Finding.status == "accepted", Finding.accepted_until <= now)
     ):
@@ -305,6 +338,96 @@ def acknowledge(session: Session, finding: Finding, *, actor: str) -> Finding:
     return finding
 
 
+def _why(value: Any, what: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValidationError(f"say {what} (reason)")
+    if len(text) > 1000:
+        raise ValidationError("reason is 1000 characters at most")
+    return text
+
+
+def at_current_step(session: Session, finding: Finding, name: str) -> bool:
+    """Whether the person ``name`` is among the people and teams the issue is with now."""
+    key = (name or "").lower()
+    for level, people in chain(session, finding):
+        if level != finding.level:
+            continue
+        for person in people:
+            if person.kind == "person" and person.name.lower() == key:
+                return True
+            if key in {e.lower() for e in (*person.emails, *person.members)}:
+                return True
+    return False
+
+
+def decline(
+    session: Session,
+    settings: Settings,
+    finding: Finding,
+    *,
+    actor: str,
+    name: str,
+    reason: Any,
+) -> list[str]:
+    """Someone it is with says it isn't theirs, and why: it goes on to the next step of its
+    chain at once, which hears why. At the last step, it stays there. Returns whom it went
+    to (none when it stayed)."""
+    lock(session, finding)
+    if finding.status != "open":
+        raise InvalidTransition(f"finding is {finding.status}: only open findings are declined")
+    why = _why(reason, "why it isn't yours")
+    here = at_current_step(session, finding, name)
+    findings.record(session, finding, "declined", actor, severity="info", why=why, by=name)
+    steps = chain(session, finding)
+    step = _next(steps, finding.level) if here else None
+    if step is None:
+        return []
+    finding.acknowledged_at = None
+    finding.acknowledged_by = None
+    _give(session, settings, finding, step, steps, ids.utcnow(), escalated=True)
+    return list(finding.assignees or [])
+
+
+def ask_exception(
+    session: Session, finding: Finding, *, actor: str, name: str, reason: Any, until: Any
+) -> Finding:
+    """Someone it reached asks for its risk to be accepted until a date, and why: an approver
+    decides (accept, or decline_exception). Meanwhile it stays with them, acknowledged."""
+    lock(session, finding)
+    if finding.status != "open":
+        raise InvalidTransition(f"finding is {finding.status}: only open findings take this")
+    why = _why(reason, "why its risk is acceptable")
+    end = parse_until(until)
+    now = ids.utcnow()
+    finding.details = {
+        **(finding.details or {}),
+        ASKED: {"by": name, "reason": why, "until": ids.isoformat(end), "at": ids.isoformat(now)},
+    }
+    if finding.acknowledged_at is None:
+        finding.acknowledged_at, finding.acknowledged_by = now, actor
+        finding.escalate_at = None
+    findings.record(
+        session, finding, "exception_requested", actor, why=why, until=ids.isoformat(end)
+    )
+    return finding
+
+
+def decline_exception(session: Session, finding: Finding, *, actor: str, reason: Any) -> Finding:
+    """An approver turns down a request to accept its risk, saying why: it stays with
+    whoever asked, to fix."""
+    lock(session, finding)
+    asked = (finding.details or {}).get(ASKED)
+    if not asked:
+        raise InvalidTransition("nobody asked for its risk to be accepted")
+    why = _why(reason, "why not")
+    finding.details = {k: v for k, v in (finding.details or {}).items() if k != ASKED}
+    findings.record(
+        session, finding, "exception_declined", actor, why=why, asked_by=asked.get("by")
+    )
+    return finding
+
+
 def parse_until(value: Any, now: datetime | None = None) -> datetime:
     """An accepted risk's end: an ISO 8601 date or time, or a number of days from now."""
     now = now or ids.utcnow()
@@ -326,12 +449,54 @@ def parse_until(value: Any, now: datetime | None = None) -> datetime:
     return until
 
 
-def accept(session: Session, finding: Finding, *, reason: Any, until: Any, actor: str) -> Finding:
+def accountable(session: Session, agent: Agent, name: str | None) -> str | None:
+    """How the person ``name`` (an email address or user name) is accountable for
+    ``agent``, in words, or None: they own it, sponsor it, or are in its team (its own or
+    its blueprint's; not the default team, which only gets what nobody else does)."""
+    key = (name or "").strip().lower()
+    if not key:
+        return None
+    d = Directory(session)
+    blueprint = agent.blueprint
+    team = agent.team or (blueprint.team if blueprint else None)
+    for names, as_person, as_team in (
+        ([agent.owner], "own", "are in the team that owns"),
+        ([str(s) for s in agent.sponsors or []], "sponsor", "are in a team that sponsors"),
+        ([team], "", "are in the team of"),
+    ):
+        for found in (d.recipient(n) for n in names):
+            if found is None:
+                continue
+            people = {p.lower() for p in (*found.emails, *found.members)}
+            if found.kind == "person":
+                people.add(found.name.lower())
+            if key in people:
+                return f"you {as_person if found.kind == 'person' else as_team} {agent.name}"
+    return None
+
+
+def accept(
+    session: Session,
+    finding: Finding,
+    *,
+    reason: Any,
+    until: Any,
+    actor: str,
+    by: str | None = None,
+) -> Finding:
     """Accept the risk until a date, for a reason: the finding stops going to anyone until
-    then, and opens again at that date if it still holds."""
+    then, and opens again at that date if it still holds. ``by``, the person accepting it,
+    mustn't be accountable for the agent it is about: someone else signs that off."""
     lock(session, finding)
     if finding.status not in ("open", "accepted"):
         raise InvalidTransition(f"finding is {finding.status}: only open findings are accepted")
+    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
+    why = accountable(session, agent, by) if agent is not None else None
+    if why:
+        raise Forbidden(
+            f"{why[0].upper()}{why[1:]}: someone who isn't accountable for it accepts its "
+            "risks (another approver, an administrator or the security team)"
+        )
     reason = str(reason or "").strip()
     if not reason:
         raise ValidationError("say why the risk is acceptable (reason)")
@@ -341,6 +506,8 @@ def accept(session: Session, finding: Finding, *, reason: Any, until: Any, actor
     finding.accepted_reason = reason
     finding.status = "accepted"
     finding.escalate_at = None
+    # Whoever asked for it has their answer.
+    finding.details = {k: v for k, v in (finding.details or {}).items() if k != ASKED}
     findings.record(
         session,
         finding,

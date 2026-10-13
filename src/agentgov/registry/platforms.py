@@ -166,19 +166,8 @@ def upsert(
             agent=agent,
             details={"platform": SOURCES[source], "external_id": external_id, "name": name},
         )
-        findings.raise_finding(
-            session,
-            type="agent.unmanaged",
-            severity="medium",
-            subject=agent.id,
-            agent_id=agent.id,
-            title=f"{SOURCES[source]} agent to review: {name}",
-            description=f"This agent exists in {SOURCES[source]} but has no owner, sponsors or "
-            "periodic review in AgentGov.",
-            remediation="Adopt it to give it an owner, sponsors and attestation, or dismiss this "
-            f"finding. To stop it from being used, block it in {SOURCES[source]}'s admin center.",
-            details={"platform": SOURCES[source]},
-        )
+        # Not a finding of its own: one per platform says how many are left to review
+        # (review_summary), so that an import of 300 agents raises one issue, not 300.
         mark_changed(session, "agents")
     else:
         agent.external_ids = {**(agent.external_ids or {}), **external_ids}
@@ -344,10 +333,16 @@ def _connectors(props: dict[str, Any]) -> list[dict[str, Any]]:
     return connectors
 
 
-def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict[str, int]:
-    """Store a Power Platform inventory export of Copilot Studio agents."""
+def import_copilot_studio(
+    session: Session, payload: Any, *, actor: str, complete: bool = False
+) -> dict[str, int]:
+    """Store a Power Platform inventory export of Copilot Studio agents. ``complete``: it is
+    the whole inventory (as a sync reads it), so the agents missing from it are gone from
+    Copilot Studio: they stay in the registry, marked gone, and their findings close. An
+    export may cover only some environments, so without it they are left as they were."""
     counts = {"created": 0, "updated": 0, "skipped": 0}
     index = _entra_index(session)
+    seen: set[str] = set()
     for row in _rows(payload):
         if str(row.get("type", INVENTORY_TYPE)).lower() != INVENTORY_TYPE:
             counts["skipped"] += 1  # apps, flows and environments share the table
@@ -366,6 +361,7 @@ def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict
             counts["skipped"] += 1
             continue
         agent_id = str(agent_id)
+        seen.add(f"copilot-studio:{agent_id}")
         viewers = props.get("sharedWithViewers") or {}
         editors = props.get("sharedWithEditors") or {}
         details = {
@@ -391,6 +387,7 @@ def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict
             "entra_app_id": props.get("entraAppId"),
             "schema_name": props.get("schemaName"),
             "connectors": _connectors(props),
+            "in_inventory": True,
         }
         external_ids = {"copilot_studio_agent_id": agent_id}
         if props.get("environmentId"):
@@ -408,10 +405,32 @@ def import_copilot_studio(session: Session, payload: Any, *, actor: str) -> dict
             entra_index=index,
         )
         counts["created" if created else "updated"] += 1
+    # An export with no agents at all is more likely the wrong file than an empty tenant.
+    if complete and seen:
+        gone = 0
+        for record in session.scalars(
+            select(PlatformAgent).where(PlatformAgent.source == "copilot-studio")
+        ):
+            if record.id not in seen and (record.data or {}).get("in_inventory", True):
+                record.data = {**(record.data or {}), "in_inventory": False}
+                gone += 1
+        if gone:
+            counts["gone"] = gone
     session.flush()
     counts["findings"] = evaluate(session)
     set_sync(session, "copilot-studio", ok=True, counts=counts, actor=actor)
     return counts
+
+
+def gone_agents(session: Session) -> set[str]:
+    """The agents that no platform reporting them reports any more."""
+    there: set[str] = set()
+    gone: set[str] = set()
+    for agent_id, data in session.execute(select(PlatformAgent.agent_id, PlatformAgent.data)):
+        data = data or {}
+        missing = data.get("in_inventory", True) is False or data.get("in_catalog", True) is False
+        (gone if missing else there).add(agent_id)
+    return gone - there
 
 
 # ------------------------------------------------------------------ allowlist
@@ -589,6 +608,8 @@ def evaluate(session: Session) -> int:
 
     for record in _records(session, "copilot-studio"):
         data = record.data or {}
+        if data.get("in_inventory", True) is False:
+            continue  # gone from Copilot Studio: its findings close
         connectors = data.get("connectors") or []
         used = sorted({c["connector_id"] for c in connectors})
         unapproved = [c for c in used if c not in approved]
@@ -631,7 +652,7 @@ def evaluate(session: Session) -> int:
                 description="These tools run with the maker's credentials for every user, so "
                 "users reach data with the maker's access: " + ", ".join(maker) + ".",
                 remediation="Switch the tools to user-provided connections in Copilot Studio, or "
-                "confirm the shared access is intended and dismiss this finding.",
+                "confirm the shared access is intended and ask an approver to accept its risk.",
                 details={"operations": maker},
             )
         if data.get("shared_with_everyone"):
@@ -641,7 +662,7 @@ def evaluate(session: Session) -> int:
                 "medium",
                 f"{record.name} is shared with the whole organisation",
                 remediation="Share it with the groups that need it, or confirm that everyone "
-                "should have it and dismiss this finding.",
+                "should have it and ask an approver to accept its risk.",
             )
     findings.resolve_absent(
         session,
@@ -707,10 +728,12 @@ def record_inventory(
     *,
     actor: str | None = None,
     classify: bool = False,
+    clean: int = 2,
 ) -> dict[str, int]:
     """Store what a connector read from ``source``: each agent, with its risky settings
     as findings. Agents gone from a part read in full are marked gone; a part that
-    couldn't be read leaves its agents and their findings as they were, unverified."""
+    couldn't be read leaves its agents and their findings as they were, unverified.
+    ``clean``: syncs in a row that must find a finding gone before it resolves."""
     counts = {"created": 0, "updated": 0, "skipped": 0}
     seen: set[str] = set()
     present: set[str] = set()
@@ -724,6 +747,8 @@ def record_inventory(
             continue
         seen.add(key)
         details = {**item.details, "kind": item.kind, "part": item.part, "in_inventory": True}
+        if item.maker and "@" in item.maker:  # a person, not a service principal
+            details["maker"] = item.maker
         agent, created = upsert(
             session,
             source=source,
@@ -787,7 +812,7 @@ def record_inventory(
         present_keys=present,
         actor=SYSTEM_ACTOR,
         subjects=checked,
-        clean=2,  # one odd answer from the platform doesn't close and reopen them
+        clean=clean,  # by default, one odd answer from the platform doesn't close and reopen them
     )
     by_reason: dict[str, set[str]] = {}
     for agent_id, why in unread.items():
@@ -817,13 +842,61 @@ def sync_failed(session: Session, source: str, message: str, *, actor: str | Non
 
 
 def refresh_risk(session: Session, settings: Settings) -> None:
-    """Recompute platform agents' risk now rather than at the next posture scan."""
+    """Recompute platform agents' risk now rather than at the next posture scan, and how
+    many of them are left to review."""
     for agent in session.scalars(
         select(Agent)
         .where(Agent.source.like("platform:%"), Agent.status != DELETED)
         .order_by(Agent.id)  # in the posture scan's order (registry/posture)
     ).unique():
         agents_svc.refresh_risk(session, settings, agent)
+    review_summary(session)
+
+
+TO_REVIEW = "platform.agents_to_review"
+# Agents named in the summary's description, at most.
+NAMED = 5
+
+
+def review_summary(session: Session) -> None:
+    """One issue per platform with agents found there and not reviewed yet: how many, and
+    a few of their names. It goes to the catch-all team, and resolves once none is left.
+    (Agents found on platforms each had a finding of their own before: those resolve.)"""
+    left: dict[str, list[str]] = defaultdict(list)
+    platform_agents = []
+    # Gone from their platforms: there is nothing left to adopt.
+    gone = gone_agents(session)
+    for agent in session.scalars(
+        select(Agent).where(Agent.source.like("platform:%"), Agent.status != DELETED)
+    ).unique():
+        platform_agents.append(agent.id)
+        source = (agent.source or "").removeprefix("platform:")
+        if agent.status == DISCOVERED and source in SOURCES and agent.id not in gone:
+            left[source].append(agent.name)
+    for agent_id in platform_agents:
+        findings.resolve_key(session, f"agent.unmanaged:{agent_id}", actor="system:platforms")
+    for source, label in SOURCES.items():
+        names = sorted(left.get(source, []), key=str.lower)
+        key = f"{TO_REVIEW}:platform:{source}"
+        if not names:
+            findings.resolve_key(session, key, actor="system:platforms")
+            continue
+        shown = ", ".join(names[:NAMED])
+        if len(names) > NAMED:
+            shown += f" and {len(names) - NAMED} more"
+        findings.raise_finding(
+            session,
+            type=TO_REVIEW,
+            severity="medium",
+            subject=f"platform:{source}",
+            title=f"{len(names)} {label} agent{'' if len(names) == 1 else 's'} to review",
+            description=f"Found in {label}, with no owner, sponsors or review in AgentGov yet: "
+            f"{shown}.",
+            remediation="Adopt the agents you keep, giving each an owner and sponsors: on the "
+            "Agents page, those not reviewed yet, Adopt them at once, each with its maker as "
+            f"owner where AgentGov knows them. Block or delete the others in {label}.",
+            details={"platform": label, "count": len(names)},
+        )
 
 
 # ------------------------------------------------- acting in Microsoft's platforms

@@ -166,6 +166,9 @@ class FakeMicrosoftApis:
             bot("bot-hr", "HR FAQ"),
             bot("bot-it", "IT Helpdesk"),
         ]
+        # Graph's users, by object ID, for looking up the people the inventory names.
+        self.users: dict[str, dict[str, Any]] = {}
+        self.batches: list[dict[str, Any]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -195,6 +198,19 @@ class FakeMicrosoftApis:
             return httpx.Response(200, json={"totalRecords": len(self.rows), **page})
         if "/botQuarantine/" in url or "/catalog/packages/" in url:
             return httpx.Response(204)
+        if path == "/v1.0/$batch":
+            body = json.loads(request.content)
+            self.batches.append(body)
+            answers = []
+            for item in body["requests"]:
+                oid = item["url"].split("/users/")[1].split("?")[0]
+                user = self.users.get(oid)
+                answers.append(
+                    {"id": item["id"], "status": 200, "body": user}
+                    if user
+                    else {"id": item["id"], "status": 404, "body": {"error": {"code": "x"}}}
+                )
+            return httpx.Response(200, json={"responses": answers})
         return httpx.Response(404)
 
 
@@ -444,6 +460,30 @@ class TestInventorySync:
         ]
         assert entry["type"] == "platform.imported"
         assert entry["actor"] == "admin:alice@example.com"
+
+    def test_a_sync_looks_up_its_makers_as_the_admin(self, entra_client, entra, apis) -> None:
+        owner, gone = "11111111-aaaa-bbbb-cccc-000000000001", "11111111-aaaa-bbbb-cccc-000000000002"
+        for row in apis.rows:
+            row["properties"].update(ownerId=owner, createdBy=gone)
+        apis.users = {owner: {"id": owner, "displayName": "Dana", "mail": "dana@contoso.com"}}
+        admin_signs_in(entra_client, entra)
+        resp = entra_client.post("/v1/platforms/copilot-studio/sync", headers=CSRF)
+        assert resp.json()["people"] == {"found": 1, "not_found": 1, "left": 0}
+        # As a person, with User.ReadBasic.All: who they are, not whether they are enabled.
+        [batch] = apis.batches
+        assert not any("accountEnabled" in r["url"] for r in batch["requests"])
+        made = entra_client.get("/v1/agents/sales-helper", headers=ADMIN).json()
+        assert made["suggested_owner"] == "dana@contoso.com"
+
+    def test_a_sync_marks_deleted_agents_gone(self, entra_client, entra, apis) -> None:
+        admin_signs_in(entra_client, entra)
+        entra_client.post("/v1/platforms/copilot-studio/sync", headers=CSRF).raise_for_status()
+        # IT Helpdesk is deleted in Copilot Studio: a sync reads the whole inventory.
+        apis.rows = apis.rows[:2]
+        resp = entra_client.post("/v1/platforms/copilot-studio/sync", headers=CSRF)
+        assert resp.status_code == 200 and resp.json()["gone"] == 1, resp.text
+        it = entra_client.get("/v1/agents/it-helpdesk", headers=ADMIN).json()
+        assert it["platforms"][0]["in_inventory"] is False
 
     def test_a_refused_sync_is_reported(self, entra_client, entra, apis) -> None:
         admin_signs_in(entra_client, entra)

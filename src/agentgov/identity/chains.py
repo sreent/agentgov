@@ -10,13 +10,13 @@ its head, and the ledger records them, with each delegation's ID and its parent'
 OCSF's delegation object has them.
 
 The token is a JWT that AgentGov's processors sign (ES256) with a key derived from the
-service token (AGENTGOV_SERVICE_TOKEN), which agents never see; the control plane publishes
-the key's public half (GET /v1/delegations/jwks). Agents carry it without reading it, like
-an OAuth transaction token. An agent may check it, too: a call with a delegation AgentGov
-gave it came through the gateway, and one without came around it, so an agent that refuses
-those takes only calls AgentGov checked (docs/agent-to-agent.md#calls-around-the-gateway).
-Delegations signed before (HS256, with a key derived the same way) are accepted until they
-expire.
+signing secret (AGENTGOV_SIGNING_SECRET, or else the service token), which agents never
+see; the control plane publishes the key's public half (GET /v1/delegations/jwks). Agents
+carry it without reading it, like an OAuth transaction token. An agent may check it, too:
+a call with a delegation AgentGov gave it came through the gateway, and one without came
+around it, so an agent that refuses those takes only calls AgentGov checked
+(docs/agent-to-agent.md#calls-around-the-gateway). Delegations signed before (HS256, with
+a key derived the same way) are accepted until they expire.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ class Chain:
 
 
 def signing_key(secret: str | None) -> bytes | None:
-    """The key delegations were signed with before (HS256), derived from the service token."""
+    """The key delegations were signed with before (HS256), derived from ``secret``."""
     if not secret:
         return None
     return hmac.new(secret.encode(), b"agentgov-delegation-v1", hashlib.sha256).digest()
@@ -81,9 +81,10 @@ def _b64(data: bytes) -> str:
 
 @dataclass(frozen=True)
 class Keys:
-    """What AgentGov signs delegations with: a P-256 key, derived from the service token so
-    that every processor holds the same one, whose public half the control plane publishes;
-    and the key it signed them with before, to check those until they expire."""
+    """What AgentGov signs delegations with: a P-256 key, derived from the signing secret
+    (or the service token) so that every processor holds the same one, whose public half the
+    control plane publishes; and the key it signed them with before, to check those until
+    they expire."""
 
     private: ec.EllipticCurvePrivateKey
     legacy: bytes
@@ -116,16 +117,16 @@ def public_jwk(public: ec.EllipticCurvePublicKey) -> dict[str, str]:
 
 
 def derive_key(secret: str, purpose: bytes) -> ec.EllipticCurvePrivateKey:
-    """A P-256 key derived from the service token, one for each purpose, so that every
-    component that holds the token holds the same key."""
+    """A P-256 key derived from a secret, one for each purpose, so that every component
+    that holds the secret holds the same key."""
     seed = hmac.new(secret.encode(), purpose, hashlib.sha256).digest()
     scalar = int.from_bytes(seed, "big") % (_P256_ORDER - 1) + 1
     return ec.derive_private_key(scalar, ec.SECP256R1())
 
 
 def keys(secret: str | None) -> Keys | None:
-    """The keys delegations are signed and checked with, derived from the service token
-    (None without one)."""
+    """The keys delegations are signed and checked with, derived from ``secret``: the
+    signing secret, or else the service token (None without either)."""
     legacy = signing_key(secret)
     if not secret or legacy is None:
         return None

@@ -10,7 +10,16 @@ from typing import Any
 
 import httpx
 
-from agentgov import health, ids, ledger, migrations, retention, timestamping, transparency
+from agentgov import (
+    health,
+    ids,
+    ledger,
+    migrations,
+    retention,
+    timestamping,
+    transparency,
+    witness,
+)
 from agentgov.config import Settings
 from agentgov.coordination import Coordinator
 from agentgov.db import Database
@@ -18,7 +27,7 @@ from agentgov.gateway import GatewayConfigWriter
 from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
-from agentgov.models import LedgerCheckpoint
+from agentgov.models import Agent, LedgerCheckpoint
 from agentgov.notify import Notifier
 from agentgov.opa.bundle import BundleServer
 from agentgov.opa.signing import Signer
@@ -40,14 +49,17 @@ from agentgov.registry import (
     issues,
     mcp_sightings,
     microsoft_signals,
+    people,
     platforms,
     posture,
     reachability,
     rules,
 )
 from agentgov.registry import agents as agents_svc
+from agentgov.registry.errors import Conflict, InvalidTransition
 from agentgov.scanners.guardian import Guardian, GuardianError, GuardianUnavailable
 from agentgov.secops.delivery import Delivery
+from agentgov.ticketing import Ticketing
 
 log = logging.getLogger(__name__)
 # Package details (for declarative agents' instructions) read per Microsoft 365 sync.
@@ -148,6 +160,8 @@ class Runtime:
         self.delivery = Delivery(self.db, settings, http=destinations_http)
         # Issues to the people responsible for them, by email and in their teams' chats.
         self.notifier = Notifier(self.db, settings, self.delivery)
+        # And as tickets in service desks, kept in step with them (docs/tickets.md).
+        self.ticketing = Ticketing(self.db, settings, self.delivery)
         self.ledger_integrity = ledger.IntegrityMonitor()
         # Administrator single sign-on (OIDC), when a client secret is configured.
         self.sso = OIDCClient(settings, http=oidc_http) if settings.sso_enabled else None
@@ -239,6 +253,11 @@ class Runtime:
             if settings.issues_interval_seconds > 0
             else None
         )
+        self._tickets_worker = (
+            _Worker("tickets", self.run_tickets, settings.issues_interval_seconds, leading=leading)
+            if settings.issues_interval_seconds > 0
+            else None
+        )
         # Whatever connectors there are when it runs: one may be added after this.
         self._platforms_worker = (
             _Worker(
@@ -261,6 +280,7 @@ class Runtime:
             self._retention_worker,
             self._m365_worker,
             self._issues_worker,
+            self._tickets_worker,
             self._platforms_worker,
         ]
         return [w for w in workers if w is not None]
@@ -278,6 +298,8 @@ class Runtime:
             with self.db.session() as session:
                 features.apply_deployment_preset(session, self.settings)
                 features.apply_pins(session, self.settings)
+        # A database restored from an older backup shows before anything is written to it.
+        self.check_witness()
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self.init_db()
@@ -373,6 +395,83 @@ class Runtime:
             ruled = self.run_rules(wait=wait)
         return None if scanned is None else {**scanned, "rules": ruled}
 
+    # -- someone says they fixed what an issue is about ---------------------------------
+
+    def _how_checked(self, type_: str, source: str | None) -> tuple[str | None, str | None]:
+        """How AgentGov checks a finding of ``type_`` again on demand, about an agent on
+        ``source`` (None: AgentGov's own): the check, or None and why it can't."""
+        if source == "copilot-studio" and type_ in platforms.FINDING_TYPES:
+            return "posture", (
+                "AgentGov checks what the last Copilot Studio import or sync says: import or "
+                "sync again to see a fix made in Copilot Studio."
+            )
+        if type_ in posture.POSTURE_TYPES or type_ == platforms.TO_REVIEW:
+            return "posture", None
+        if type_ == "agent.high_risk":
+            return "risk", None
+        if type_ == instructions.FINDING:
+            return "instructions", None
+        if type_ in platforms.INVENTORY_FINDINGS and source in self.platforms:
+            return "platform", None
+        for key, types in platforms.SYNCED_FINDINGS.items():
+            if type_ in types and key != "copilot-studio" and self.m365 is not None:
+                return f"microsoft:{key}", None
+        return None, (
+            "AgentGov can't check this kind of finding again on demand: it resolves itself "
+            "when what raised it is gone, or an approver resolves it."
+        )
+
+    def recheck(self, finding_id: str, *, actor: str) -> dict[str, Any]:
+        """Check an open finding again now, as far as AgentGov can, because someone says
+        they fixed it: whether it is gone, how it was checked, and what else to know."""
+        with self.db.session() as session:
+            finding = findings.get(session, finding_id)
+            if finding.status != "open":
+                raise InvalidTransition(
+                    f"finding is {finding.status}: only open findings are checked again"
+                )
+            agent_id = finding.agent_id
+            agent = session.get(Agent, agent_id) if agent_id else None
+            source = (agent.source or "").removeprefix("platform:") if agent else None
+            source = source if agent is not None and agent.on_platform else None
+            how, note = self._how_checked(finding.type, source)
+        if how is None:
+            raise Conflict(note or "")
+        if how == "posture":
+            if self.run_posture_scan(wait=JOB_WAIT_SECONDS) is None:
+                raise Conflict("posture checks are off: turn them on in Features first")
+        elif how == "platform":
+            assert source is not None
+            self.sync_platform(source, actor=actor, wait=JOB_WAIT_SECONDS, clean=1)
+        elif how.startswith("microsoft:"):
+            key = how.split(":", 1)[1]
+            outcome = self.sync_microsoft([key], actor=actor, wait=JOB_WAIT_SECONDS)[key]
+            if outcome.get("off") or "lacks_permission" in outcome:
+                raise Conflict(f"AgentGov can't read {key} now: it is off, or lacks a permission")
+            if "error" in outcome:
+                raise PlatformError(outcome["error"])
+        else:
+            with self.db.session() as session:
+                agent = session.get(Agent, agent_id)
+                if how == "risk":
+                    agents_svc.refresh_risk(session, self.settings, agent)
+                else:
+                    instructions.rescan(
+                        session, agent, actor=actor, classify=self.guardian is not None
+                    )
+        with self.db.session() as session:
+            finding = findings.get(session, finding_id)
+            fixed = finding.status != "open"
+            findings.record(
+                session, finding, "fix_claimed", actor, severity="info", checked=how, fixed=fixed
+            )
+            return {
+                "fixed": fixed,
+                "checked": how,
+                "note": note,
+                "finding": findings.to_dict(finding),
+            }
+
     def run_rules(self, *, wait: float | None = None) -> dict[str, Any]:
         """A round of the management rules (docs/management-rules.md)."""
         with self.coordination.job("rules", wait=wait), self.db.session() as session:
@@ -391,9 +490,88 @@ class Runtime:
             out["logged"] = self.log_checkpoints()
             with self.db.session() as session:
                 out["archived"] = retention.archive(session, self.settings)
+            checked = self.check_witness()
+            out["witness"] = checked.state if checked is not None else None
             with self.db.session() as session:
                 out["pruned"] = retention.prune_records(session, self.settings)
             return out
+
+    def check_witness(self) -> witness.Status | None:
+        """Compare the database's ledger with its head kept outside it (docs/backup.md), and
+        keep that head up to date while they agree. A ledger behind it, or with another
+        history, is a critical finding until an administrator accepts it."""
+        path = self.settings.witness_file()
+        if path is None:
+            return None
+        with self.coordination.job("witness"):
+            with self.db.session() as session:
+                status = witness.compare(session, path)
+                if status.rewound:
+                    if status.restored_at is None:
+                        # Noticed now: where the database's ledger ended stays the start of
+                        # the gap, whatever is written after.
+                        status.restored_at = status.head_seq
+                    findings.raise_finding(
+                        session,
+                        type=witness.FINDING,
+                        severity="critical",
+                        subject="ledger",
+                        title="The ledger lost entries: the database was restored or changed",
+                        description=status.message(),
+                        details={
+                            "restored_at": status.restored_at,
+                            "witness": witness.kept_head(status),
+                        },
+                        remediation="If the database was restored on purpose (after a failed "
+                        "upgrade, say), accept the restore under Ledger: AgentGov writes what is "
+                        "missing into the ledger. If nobody restored it, find out who changed "
+                        "the database.",
+                    )
+            if not status.rewound and status.error is None:
+                try:
+                    witness.write(path, status.head_seq, status.head_hash)
+                except witness.WitnessError as exc:
+                    status.error = str(exc)
+            if status.error:
+                log.warning("ledger witness: %s", status.error)
+        return status
+
+    def accept_rewind(self, *, actor: str) -> witness.Status:
+        """An administrator accepts that the ledger lost entries (a restore): what is missing
+        goes into the ledger itself, and it goes on from the head it has."""
+        path = self.settings.witness_file()
+        if path is None:
+            raise Conflict("no file keeps the ledger's head (AGENTGOV_LEDGER_WITNESS_FILE)")
+        with self.coordination.job("witness"):
+            with self.db.session() as session:
+                status = witness.compare(session, path)
+                if not status.rewound:
+                    raise Conflict("the ledger has every entry AgentGov wrote: nothing to accept")
+                ledger.append(
+                    session,
+                    type="ledger.rewound",
+                    actor=actor,
+                    severity="critical",
+                    resource="ledger",
+                    reason=status.message(),
+                    details={
+                        "state": status.state,
+                        "head": {"seq": status.head_seq, "hash": status.head_hash},
+                        "witness": {**witness.kept_head(status), "at": status.witness_at},
+                        **({"missing": status.missing()} if status.missing() else {}),
+                        **(
+                            {"restored_at": status.restored_at}
+                            if status.restored_at is not None
+                            else {}
+                        ),
+                    },
+                )
+            with self.db.session() as session:
+                findings.resolve_key(session, f"{witness.FINDING}:ledger", actor=actor)
+                seq, hash_ = witness.head(session)
+            witness.write(path, seq, hash_)
+            with self.db.session() as session:
+                return witness.compare(session, path)
 
     def make_checkpoint(self, *, wait: float | None = None) -> dict[str, Any] | None:
         """A checkpoint at the chain's head now (None for an empty ledger), time-stamped
@@ -500,7 +678,7 @@ class Runtime:
         """Expire access packages and raise their reminders and reviews; route findings to
         the people responsible, escalate those nobody acknowledged, open accepted risks
         whose time ran out, resolve threats that haven't happened for a while, and send
-        what is due."""
+        what is due, the day's digests included."""
         with self.coordination.job("issues"):
             with self.db.session() as session:
                 access = access_packages.check(session, self.settings)
@@ -516,7 +694,14 @@ class Runtime:
                 **access,
                 **routed,
                 **self.notifier.run(),
+                **self.notifier.digest(),
             }
+
+    def run_tickets(self) -> dict[str, Any]:
+        """Open issues' tickets in the service desks, read back what happened to them there,
+        and tell the desks what changed (docs/tickets.md)."""
+        with self.coordination.job("tickets"):
+            return self.ticketing.run()
 
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;
@@ -629,6 +814,7 @@ class Runtime:
         runs = {
             "microsoft-365": self.sync_microsoft_365,
             "entra-agent-id": self.sync_agent_identities,
+            "entra-users": self.sync_people,
             "purview-audit": self.sync_audit,
             "defender": self.sync_defender,
             "entra-access-packages": self.sync_entra_access_packages,
@@ -655,10 +841,11 @@ class Runtime:
     # -- AgentGov's connectors to other platforms -------------------------------------
 
     def sync_platform(
-        self, source: str, *, actor: str | None = None, wait: float | None = None
+        self, source: str, *, actor: str | None = None, wait: float | None = None, clean: int = 2
     ) -> dict[str, int]:
         """Read one platform's agents into the registry; returns the counts. One run per
-        platform at a time, on one replica."""
+        platform at a time, on one replica. ``clean``: syncs in a row that must find a
+        finding gone before it resolves (one, when someone says they fixed it)."""
         connector = self.platforms.get(source)
         if connector is None:
             raise PlatformError(f"{platforms.SOURCES.get(source, source)} is not configured")
@@ -671,7 +858,12 @@ class Runtime:
                 raise
             with self.db.session() as session, platforms.first_sync(session, source):
                 counts = platforms.record_inventory(
-                    session, source, inventory, actor=actor, classify=self.guardian is not None
+                    session,
+                    source,
+                    inventory,
+                    actor=actor,
+                    classify=self.guardian is not None,
+                    clean=clean,
                 )
                 platforms.refresh_risk(session, self.settings)
                 return counts
@@ -701,6 +893,50 @@ class Runtime:
             counts = platforms.record_agent_identities(session, identities, actor=actor)
             platforms.refresh_risk(session, self.settings)
             return counts
+
+    def sync_people(
+        self,
+        *,
+        actor: str | None = None,
+        token: str | None = None,
+        limit: int = people.MAX_LOOKUP,
+    ) -> dict[str, int]:
+        """Look up the people platforms name as agents' owners and makers: with AgentGov's
+        app, or as the signed-in administrator whose access ``token`` is given. One lookup
+        at a time, on one replica."""
+        with self.coordination.job("people-lookup", wait=JOB_WAIT_SECONDS if actor else None):
+            with self.db.session() as session:
+                wanted = people.wanted(session, limit=limit)
+                emails = people.wanted_emails(session, limit=limit)
+            found: list[dict[str, Any]] = []
+            missing: list[str] = []
+            missing_emails: list[str] = []
+            try:
+                if token is not None:
+                    assert self.microsoft_admin is not None
+                    if wanted:
+                        found, missing = self.microsoft_admin.users(token, wanted)
+                    if emails:
+                        more, missing_emails = self.microsoft_admin.users_by_email(token, emails)
+                        found += more
+                else:
+                    assert self.m365 is not None
+                    # Whether it may ask whose account is enabled: what its token holds.
+                    roles = self.m365.granted() if wanted or emails else None
+                    if wanted:
+                        found, missing = self.m365.users(wanted, roles=roles)
+                    if emails:
+                        more, missing_emails = self.m365.users_by_email(emails, roles=roles)
+                        found += more
+            except PlatformError as exc:
+                self._failed("entra-users", exc, actor)
+                raise
+            with self.db.session() as session:
+                counts = people.record_lookup(
+                    session, found, missing, missing_emails=missing_emails, actor=actor
+                )
+                platforms.set_sync(session, "entra-users", ok=True, counts=counts, actor=actor)
+                return counts
 
     def sync_audit(self, *, actor: str | None = None) -> dict[str, Any]:
         """Read agents' use and makers' changes from the Purview audit log.

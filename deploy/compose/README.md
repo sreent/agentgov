@@ -11,6 +11,10 @@ Or less of it: `docker-compose.inventory.yml` runs the control plane and Postgre
 an inventory of the agents on your platforms without the gateway, and the
 `docker-compose.no-presidio.yml` override leaves Presidio out.
 
+For others to rely on, [one server](../../docs/deploy/server.md) runs either with your own
+secrets and HTTPS from Caddy (`caddy/`): the `docker-compose.server.yml` override for the
+whole of it, and `COMPOSE_PROFILES=https` for both.
+
 [Run AgentGov on your machine](../../docs/deploy/local.md#docker-compose) is the guide: the
 endpoints, signing in, settings and secrets, the optional overrides (Langfuse, Granite
 Guardian, no Presidio), [just the inventory](../../docs/deploy/local.md#just-the-inventory),

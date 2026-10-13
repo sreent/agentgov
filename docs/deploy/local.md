@@ -5,13 +5,13 @@ Three ways, for evaluation and development:
 | | What runs | For |
 |---|---|---|
 | [Docker Compose](#docker-compose) | The whole stack, with the demo's tool server, model and stand-ins | Trying AgentGov, the demo, end-to-end development |
-| [Just the inventory](#just-the-inventory) | The control plane and PostgreSQL, with Compose | An inventory of the agents on your platforms, their findings and issues, without the gateway |
+| [Just the inventory](#just-the-inventory) | The control plane and PostgreSQL, with Compose | An inventory of the agents on your platforms, their issues, without the gateway |
 | [Kubernetes with kind](#kubernetes-with-kind) | The Helm chart on a local cluster | Working on the chart, rehearsing a Kubernetes install |
 | [The control plane alone](#the-control-plane-alone) | The API and the admin UI, on a SQLite file | Working on the API or the UI |
 
-None of them is for anything others rely on. [Deploying AgentGov](README.md) covers
-servers and the cloud, and [SECURITY.md](../../SECURITY.md) what to do before anyone else
-can reach it.
+None of them is for anything others rely on: [one server](server.md) is, with Compose, and
+[Deploying AgentGov](README.md) covers Kubernetes and the cloud. [SECURITY.md](../../SECURITY.md)
+says what to do before anyone else can reach it.
 
 ## Docker Compose
 
@@ -36,10 +36,11 @@ realm. `agentgov apply` registers the examples: blueprints, the demo CRM tool se
 model provider, agents, a policy, an identity issuer, the security team's destinations, and
 the hand-off to them at `inform`.
 The demo then walks through each control with a real MCP client (the
-[README](../../README.md#quickstart) lists the steps).
+[demo](../demo.md) lists the steps).
 
-For anything beyond evaluation on your own machine, copy `deploy/compose/.env.example` to
-`deploy/compose/.env` first and replace every value in it: the defaults are known to all.
+The stack listens on this machine only: its defaults, the tokens and the demo users'
+password, are known to everyone. For others to use it, run it as [one server](server.md):
+your own secrets, HTTPS in front, and none of the demo's parts.
 
 ### Endpoints
 
@@ -77,7 +78,7 @@ comes with five demo users, whose password is `AGENTGOV_DEMO_PASSWORD` (default
 | User | Realm role | What they can do |
 |---|---|---|
 | `admin` | `agentgov-admin` | Everything |
-| `alice` | `agentgov-approver` | Decide approval requests and findings; attest the agents they sponsor (the demo's `support-bot`) |
+| `alice` | `agentgov-approver` | Decide approval requests and issues; attest the agents they sponsor (the demo's `support-bot`) |
 | `sofia` | `agentgov-secops` | The security team: see everything, and triage, contain or decide as far as the hand-off to [security operations](../secops.md) allows |
 | `audrey` | `agentgov-auditor` | See everything, change nothing |
 | `sam` | none (group `support`) | A person agents act for: signs in to the demo app `agentgov-demo-chat`, and to AgentGov to decide the approval requests sent to them, while `approvals-by-person` is on ([acting for people](../acting-for-people.md)) |
@@ -196,9 +197,10 @@ AGENTGOV_GUARDIAN_URL=http://demo-model:9100/guardian/v1 docker compose -f deplo
 Set `AGENTGOV_M365_TENANT_ID`, `AGENTGOV_M365_CLIENT_ID` and `AGENTGOV_M365_CLIENT_SECRET` in
 `.env` for a Microsoft Entra app registration, then run `docker compose up -d` again. Its
 Microsoft Graph application permissions decide what AgentGov reads: the Microsoft 365 agent
-catalog (`CopilotPackages.Read.All`), Entra Agent ID (`AgentIdentity.Read.All`), the Purview
-audit log (`AuditLogsQuery.Read.All`), Defender alerts (`SecurityAlert.Read.All`) and Entra
-access packages (`EntitlementManagement.Read.All`). The
+catalog (`CopilotPackages.Read.All`), Entra Agent ID (`AgentIdentity.Read.All`), who made
+each Copilot Studio agent (`User.Read.All`), the Purview audit log
+(`AuditLogsQuery.Read.All`), Defender alerts (`SecurityAlert.Read.All`) and Entra access
+packages (`EntitlementManagement.Read.All`). The
 control plane syncs at start-up and every hour, and the **Platforms** page shows each
 connection's state. Copilot Studio agents and their connectors are imported from a Power
 Platform inventory export on the **Platforms** page, with no configuration. When
@@ -233,6 +235,7 @@ To start with every control watching rather than stopping, set
 | `docker-compose.yml` | The services and how they connect |
 | `docker-compose.inventory.yml` | The control plane and PostgreSQL alone ([below](#just-the-inventory)) |
 | `docker-compose.no-presidio.yml`, `docker-compose.langfuse.yml`, `docker-compose.guardian.yml` | Overrides: without Presidio, with Langfuse, with Granite Guardian (above) |
+| `docker-compose.server.yml`, `caddy/`, `https/` | For others to rely on: the stack on [one server](server.md), with HTTPS from Caddy, and your own certificate if you have one |
 | `.env.example` | Every secret the stack uses, and its optional settings |
 | `keycloak/agentgov-realm.json` | The realm, imported on Keycloak's first start: the control plane's provisioning client, the `agentgov-admin` sign-in client, the AgentGov roles, the demo users and the demo app people use agents from, `agentgov-demo-chat` |
 | `opa/config.yaml` | OPA's bundle, decision log and status services, all served by the control plane on its internal port, and the key bundles are signed with |
@@ -250,7 +253,8 @@ there.
 ### Upgrading
 
 The control plane keeps its database schema current: when a new version starts, it applies
-the migrations it brings. Back up PostgreSQL first, then:
+the migrations it brings. Back up PostgreSQL first ([backing up](../backup.md#with-compose)),
+then:
 
 ```bash
 git pull
@@ -291,7 +295,7 @@ docker compose -f deploy/compose/docker-compose.yml down -v   # removes all data
 * **Model usage stays empty**: the gateway's access logs reach the control plane through
   the collector. Check `docker compose ... logs otel-collector`.
 * **Calls are denied with "policy engine unavailable"**: OPA has no bundle yet. Check
-  `docker compose ... logs opa`; bundle errors also raise a finding (`agentgov findings`).
+  `docker compose ... logs opa`; bundle errors also raise an issue (`agentgov issues`).
   While no control at the gateway is enforced, such calls go through unchecked instead,
   and the ledger records them as `Not checked`
   ([when something is down](../features.md#when-something-is-down)).
@@ -304,16 +308,19 @@ docker compose -f deploy/compose/docker-compose.yml down -v   # removes all data
 ## Just the inventory
 
 To keep an inventory of the agents on your platforms (Microsoft 365, Copilot Studio, AWS,
-Google Cloud, Salesforce, Databricks, Microsoft Foundry), with their findings sent to the
+Google Cloud, Salesforce, Databricks, Microsoft Foundry), with their issues sent to the
 people responsible, AgentGov needs neither the gateway nor what checks its calls. The
 control plane and PostgreSQL do, in about 200 MB of memory:
 
 ```bash
+echo "AGENTGOV_ADMIN_TOKEN=$(openssl rand -hex 32)" >> deploy/compose/.env
 docker compose -f deploy/compose/docker-compose.inventory.yml up -d --build --wait
 ```
 
-Open <http://localhost:8000/ui> with the token `dev-admin-token` (`AGENTGOV_ADMIN_TOKEN`).
-On its first start the control plane applies the inventory starting point: the gateway's
+Open <http://localhost:8000/ui> with that token (`grep ADMIN_TOKEN deploy/compose/.env`).
+Unlike the full stack, this one has no token everybody knows: it won't start without one.
+It listens on this machine only; for others to reach it, [one server](server.md#the-inventory)
+puts HTTPS in front. On its first start the control plane applies the inventory starting point: the gateway's
 features off, and discovery, posture checks, issues, management rules and the platforms on
 ([starting points](../features.md#starting-points)). Every setting in `deploy/compose/.env`
 reaches the control plane: the platforms' credentials
@@ -324,7 +331,7 @@ reaches the control plane: the platforms' credentials
 It runs as its own Compose project, `agentgov-inventory`, with its own database, so the full
 stack beside it starts afresh (not at the same time: both use port 8000). On Kubernetes the
 same choice is a [profile](kubernetes.md#profiles), and adding the gateway later is an
-upgrade that keeps the registry, its findings and the ledger.
+upgrade that keeps the registry, its issues and the ledger.
 
 ## Kubernetes with kind
 

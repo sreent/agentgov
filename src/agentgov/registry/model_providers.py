@@ -23,7 +23,7 @@ from agentgov.db import lock, mark_changed
 from agentgov.models import BLOCKED, MODEL_PROVIDER_KINDS, Agent, ModelProvider
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 APPROVED = "approved"
 KEY_DIR = "/model-keys"
@@ -157,7 +157,7 @@ def update(
             type="model_provider.updated",
             actor=actor,
             resource=f"model-provider/{provider.name}",
-            details={k: getattr(provider, k) for k in changed},
+            details={**{k: getattr(provider, k) for k in changed}, "changes": changes(provider)},
         )
         mark_changed(session, "toolservers")
     return changed

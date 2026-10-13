@@ -1191,19 +1191,25 @@ def management_rules(name: str) -> None:
             f"{issue['title'] if issue else ''}: to {to}",
         )
         if issue:
-            alice = agentgov_session("alice")
-            accepted = alice.post(
-                f"{CONTROL_PLANE}/v1/findings/{issue['id']}/accept",
-                json={"reason": "Kept blocked for the incident review", "until": 60},
+            reason = {"reason": "Kept blocked for the incident review", "until": 60}
+            # Who is accountable for an agent doesn't accept its risks: someone else does.
+            refused = agentgov_session("alice").post(
+                f"{CONTROL_PLANE}/v1/findings/{issue['id']}/accept", json=reason
             )
+            show(
+                "alice, its sponsor, can't accept its risk:",
+                refused.status_code == 403,
+                refused.json().get("detail", refused.text),
+            )
+            admin("POST", f"/v1/findings/{issue['id']}/accept", json=reason)
             admin("POST", "/v1/rules/evaluate")
             state = next(
                 (r for r in admin("GET", f"/v1/agents/{name}/rules") if r["rule"] == rule), {}
             )
             show(
-                "alice, its sponsor, accepted the risk:",
-                accepted.status_code == 200 and state.get("state") == "exempt",
-                f"the rule leaves it be: {state.get('detail', accepted.text)}",
+                "an administrator accepted it:",
+                state.get("state") == "exempt",
+                f"the rule leaves it be: {state.get('detail')}",
             )
     finally:
         admin("DELETE", f"/v1/rules/{rule}")

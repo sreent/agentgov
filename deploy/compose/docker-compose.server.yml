@@ -1,0 +1,127 @@
+# AgentGov on one server, for others to rely on (docs/deploy/server.md): docker-compose.yml
+# with every secret your own, Keycloak in production mode with AgentGov's realm at your
+# addresses and without the demo's people, none of the demo's stand-ins, every service
+# started again after a reboot, and, with COMPOSE_PROFILES=https, Caddy in front for HTTPS.
+#
+# In .env beside it (see .env.example): the secrets, the three addresses, and
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.server.yml
+#   COMPOSE_PROFILES=https
+#
+# then, from this folder: docker compose up -d --build --wait
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-demo: &demo
+  # The demo's stand-ins don't run here (docker compose --profile demo starts them).
+  profiles: [demo]
+
+services:
+  postgres:
+    <<: *restart
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (openssl rand -hex 32)}
+
+  # The realm Keycloak imports on its first start: AgentGov's, with administrators sent back
+  # to AGENTGOV_PUBLIC_URL after they sign in, and without the demo's people and their app.
+  keycloak-realm:
+    image: ${AGENTGOV_IMAGE:-agentgov:local}
+    user: root
+    command:
+      - keycloak-realm
+      - /realm/agentgov-realm.json
+      - --public-url=${AGENTGOV_PUBLIC_URL:?set AGENTGOV_PUBLIC_URL in .env to the control plane's https:// address}
+      - --no-demo-users
+      - --output=/import/agentgov-realm.json
+    volumes:
+      - ./keycloak/agentgov-realm.json:/realm/agentgov-realm.json:ro
+      - keycloak-import:/import
+
+  keycloak:
+    <<: *restart
+    command: ["start", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env (openssl rand -hex 32)}
+      # Tokens carry this issuer; AgentGov's parts still reach Keycloak at keycloak:8080.
+      KC_HOSTNAME: ${AGENTGOV_KEYCLOAK_PUBLIC_URL:?set AGENTGOV_KEYCLOAK_PUBLIC_URL in .env to Keycloak's https:// address}
+      # Behind Caddy (or a proxy of yours), which ends TLS and says so in X-Forwarded-*.
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+    volumes: !override
+      - keycloak-import:/opt/keycloak/data/import:ro
+    depends_on:
+      keycloak-realm:
+        condition: service_completed_successfully
+
+  control-plane:
+    <<: *restart
+    environment:
+      AGENTGOV_PUBLIC_URL: ${AGENTGOV_PUBLIC_URL:?set AGENTGOV_PUBLIC_URL in .env to the control plane's https:// address}
+      AGENTGOV_GATEWAY_PUBLIC_URL: ${AGENTGOV_GATEWAY_PUBLIC_URL:?set AGENTGOV_GATEWAY_PUBLIC_URL in .env to the gateway's https:// address}
+      AGENTGOV_KEYCLOAK_ISSUER: ${AGENTGOV_KEYCLOAK_PUBLIC_URL:?set AGENTGOV_KEYCLOAK_PUBLIC_URL in .env to Keycloak's https:// address}/realms/agentgov
+      # No defaults everybody knows: the other services take the same values from .env.
+      AGENTGOV_ADMIN_TOKEN: ${AGENTGOV_ADMIN_TOKEN:?set AGENTGOV_ADMIN_TOKEN in .env (openssl rand -hex 32)}
+      AGENTGOV_SERVICE_TOKEN: ${AGENTGOV_SERVICE_TOKEN:?set AGENTGOV_SERVICE_TOKEN in .env (openssl rand -hex 32)}
+      AGENTGOV_SIGNING_SECRET: ${AGENTGOV_SIGNING_SECRET:?set AGENTGOV_SIGNING_SECRET in .env (openssl rand -hex 32)}
+      AGENTGOV_KEYCLOAK_CLIENT_SECRET: ${AGENTGOV_KEYCLOAK_CLIENT_SECRET:?set AGENTGOV_KEYCLOAK_CLIENT_SECRET in .env (openssl rand -hex 32)}
+      AGENTGOV_OIDC_CLIENT_SECRET: ${AGENTGOV_OIDC_CLIENT_SECRET:?set AGENTGOV_OIDC_CLIENT_SECRET in .env (openssl rand -hex 32)}
+      # No demo app: the apps people use agents from, if any (docs/acting-for-people.md).
+      AGENTGOV_PEOPLE_APP_CLIENTS: ${AGENTGOV_PEOPLE_APP_CLIENTS:-}
+      # No stand-in authority: one that time-stamps the ledger's checkpoints, if any, such as
+      # https://freetsa.org/tsr (docs/evidence.md).
+      AGENTGOV_LEDGER_TSA_URL: ${AGENTGOV_LEDGER_TSA_URL:-}
+
+  rekor:
+    <<: *restart
+  opa:
+    <<: *restart
+  presidio-analyzer:
+    <<: *restart
+  processor:
+    <<: *restart
+  gateway-config:
+    <<: *restart
+  otel-collector:
+    <<: *restart
+
+  crm-mcp:
+    <<: *demo
+  demo-model:
+    <<: *demo
+  workload-issuer:
+    <<: *demo
+  billing-agent:
+    <<: *demo
+  demo-sink:
+    <<: *demo
+
+  # HTTPS in front of the three addresses: only with COMPOSE_PROFILES=https in .env (leave it
+  # out behind a proxy or load balancer of your own). Its certificates come from
+  # AGENTGOV_CERTIFICATES (caddy/certificates.caddy), and are kept on the caddy-data volume.
+  caddy:
+    <<: *restart
+    image: caddy:2.11.7-alpine
+    profiles: [https]
+    environment:
+      AGENTGOV_PUBLIC_URL: ${AGENTGOV_PUBLIC_URL:-}
+      AGENTGOV_GATEWAY_PUBLIC_URL: ${AGENTGOV_GATEWAY_PUBLIC_URL:-}
+      AGENTGOV_KEYCLOAK_PUBLIC_URL: ${AGENTGOV_KEYCLOAK_PUBLIC_URL:-}
+      AGENTGOV_CERTIFICATES: ${AGENTGOV_CERTIFICATES:-letsencrypt}
+      AGENTGOV_ACME_CA: ${AGENTGOV_ACME_CA:-}
+      # Who reaches Keycloak's admin console (Caddy's remote_ip ranges).
+      AGENTGOV_KEYCLOAK_CONSOLE_FROM: ${AGENTGOV_KEYCLOAK_CONSOLE_FROM:-private_ranges}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - ${AGENTGOV_HTTPS_DIR:-./https}:/https:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  keycloak-import:
+  caddy-data:
+  caddy-config:

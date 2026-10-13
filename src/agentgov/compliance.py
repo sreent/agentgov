@@ -2,10 +2,12 @@
 NIST AI RMF, whether that is set up here, and the evidence it holds (docs/evidence.md).
 
 A report doesn't say that an organisation complies: that depends on its AI systems, its
-processes and its people, and on assessors. Control by control, it says what the
-framework asks, what AgentGov does towards it, how far that is set up in this deployment
-(in place, partly, not set up, or outside what AgentGov does), and the evidence: counts
-from the registry and the ledger over the period, and where to look. An evidence pack
+processes and its people, and on assessors. It says first how much of the agents AgentGov
+saw in the period, and how (coverage): a control only works for the agents it sees. Then,
+control by control, it says what the framework asks, what AgentGov does towards it, how
+far that is set up in this deployment (in place, partly, configured but not observed in
+the period, not set up, or outside what AgentGov does), and the evidence: counts from the
+registry and the ledger over the period, and where to look. An evidence pack
 bundles the reports with the ledger for the period, the checkpoints and their
 time-stamps, the inventory and the registry as code, so that an assessor can check them
 without access to AgentGov.
@@ -26,7 +28,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agentgov import __version__, ids, ledger, transparency
+from agentgov import __version__, ids, ledger, transparency, witness
 from agentgov.config import LEDGER_MIN_DAYS, Settings
 from agentgov.models import (
     ACTIVE,
@@ -39,24 +41,38 @@ from agentgov.models import (
     Blueprint,
     Destination,
     Finding,
+    IntegrationState,
     LedgerCheckpoint,
     LedgerEntry,
     ManagementRule,
     ModelProvider,
+    PlatformAgent,
+    PlatformSync,
     Team,
     ToolServer,
 )
-from agentgov.registry import features
+from agentgov.registry import classification, features, posture
 from agentgov.registry import scopes as scope_rules
 
-IN_PLACE, PARTLY, NOT_SET_UP, ATTENTION, OUTSIDE = (
+# CONFIGURED: set up, but nothing in the period shows it working (no call through the
+# gateway, no scan run, nothing delivered).
+IN_PLACE, PARTLY, CONFIGURED, NOT_SET_UP, ATTENTION, OUTSIDE = (
     "in_place",
     "partly",
+    "configured",
     "not_set_up",
     "attention",
     "outside",
 )
-STATUSES = (IN_PLACE, PARTLY, NOT_SET_UP, ATTENTION, OUTSIDE)
+STATUSES = (IN_PLACE, PARTLY, CONFIGURED, NOT_SET_UP, ATTENTION, OUTSIDE)
+STATUS_NAMES = {
+    IN_PLACE: "In place",
+    PARTLY: "Partly",
+    CONFIGURED: "Configured, not observed",
+    NOT_SET_UP: "Not set up",
+    ATTENTION: "Needs attention",
+    OUTSIDE: "Outside AgentGov",
+}
 MAX_DAYS = 3650
 # The controls at the gateway that make calls safe, as Article 15 and MEASURE 2.7 ask.
 SAFEGUARDS = (
@@ -125,6 +141,8 @@ class Facts:
     denied: int = 0
     monitored: int = 0
     chain: dict[str, Any] = field(default_factory=dict)
+    # The ledger against its head kept outside the database (agentgov.witness), if kept.
+    witness: dict[str, Any] | None = None
     checkpoints: int = 0
     stamped: int = 0
     latest_stamp: datetime | None = None
@@ -144,6 +162,17 @@ class Facts:
     failing_destinations: int = 0
     rules_enforced: int = 0
     packages_active: int = 0
+    # What AgentGov saw of each agent in the period: its calls checked by AgentGov's
+    # policies (a decision about it), its activity (telemetry, its platform's usage logs),
+    # or its platform's inventory read.
+    checked: set[str] = field(default_factory=set)
+    platform_seen: set[str] = field(default_factory=set)
+    # The platforms read in the period, and those whose last read is older, or failed.
+    platforms_read: list[str] = field(default_factory=list)
+    platforms_not_read: list[str] = field(default_factory=list)
+    posture_scanned_at: datetime | None = None
+    # Destinations that delivered something to the security team in the period.
+    delivered: int = 0
 
     def count(self, *prefixes: str) -> int:
         return sum(n for t, n in self.by_type.items() if t.startswith(prefixes))
@@ -174,6 +203,8 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
         )
     )
     f.chain = ledger.verify(session)
+    path = settings.witness_file()
+    f.witness = witness.compare(session, path).to_dict() if path else None
     points = list(session.scalars(select(LedgerCheckpoint)))
     f.checkpoints = len(points)
     stamps = [p.timestamped_at for p in points if p.timestamp is not None and p.timestamped_at]
@@ -218,7 +249,63 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
         .select_from(AccessAssignment)
         .where(AccessAssignment.status == "active")
     )
+    f.checked = set(
+        session.scalars(
+            select(LedgerEntry.agent_id)
+            .where(
+                LedgerEntry.ts >= since,
+                LedgerEntry.type.startswith("decision."),
+                LedgerEntry.agent_id.is_not(None),
+            )
+            .distinct()
+        )
+    )
+    f.platform_seen = set(
+        session.scalars(
+            select(PlatformAgent.agent_id).where(PlatformAgent.synced_at >= since).distinct()
+        )
+    )
+    for sync in session.scalars(select(PlatformSync).order_by(PlatformSync.source)):
+        read = sync.ok and sync.synced_at >= since
+        (f.platforms_read if read else f.platforms_not_read).append(sync.source)
+    scanned = session.get(IntegrationState, posture.SCANNED)
+    at = (scanned.data or {}).get("at") if scanned is not None else None
+    f.posture_scanned_at = datetime.fromisoformat(at) if at else None
+    f.delivered = sum(
+        1 for d in destinations if d.delivered_at is not None and d.delivered_at >= since
+    )
     return f
+
+
+def coverage(f: Facts) -> dict[str, Any]:
+    """How much of the agents AgentGov saw in the period, and how. Each agent counts once,
+    by the most AgentGov saw of it: its calls checked by AgentGov's policies (at the
+    gateway, in the agent's own process, or by Copilot Studio's threat detection); its
+    activity only (telemetry, its platform's usage logs); its platform's inventory only
+    (its settings, not what it did); or nothing."""
+    seen: dict[str, list[str]] = {"calls_checked": [], "activity": [], "inventory": [], "none": []}
+    for a in f.agents:
+        if a.id in f.checked:
+            how = "calls_checked"
+        elif a.last_seen_at is not None and a.last_seen_at >= f.since:
+            how = "activity"
+        elif a.id in f.platform_seen:
+            how = "inventory"
+        else:
+            how = "none"
+        seen[how].append(a.name)
+    return {
+        "agents": len(f.agents),
+        "calls_checked": len(seen["calls_checked"]),
+        "activity_only": len(seen["activity"]),
+        "inventory_only": len(seen["inventory"]),
+        "not_seen": len(seen["none"]),
+        # A few of those not seen, by name, to look into.
+        "not_seen_names": sorted(seen["none"], key=str.lower)[:20],
+        "platforms_read": f.platforms_read,
+        "platforms_not_read": f.platforms_not_read,
+        "posture_scanned_at": ids.isoformat(f.posture_scanned_at),
+    }
 
 
 # ------------------------------------------------------------------ capabilities
@@ -264,6 +351,12 @@ def _logging(f: Facts) -> Assessment:
     if not f.chain.get("valid"):
         a.status = ATTENTION
         a.gaps.append("The ledger's chain is broken: find out why before relying on it.")
+    elif f.witness and f.witness["rewound"]:
+        a.status = ATTENTION
+        a.gaps.append(
+            f"{f.witness['message']} If that was a restore, an administrator accepts it under "
+            "Ledger, which records the gap in the ledger."
+        )
     elif not f.settings.ledger_tsa_url:
         a.status = PARTLY
         a.gaps.append(
@@ -330,6 +423,9 @@ def _oversight(f: Facts) -> Assessment:
 def _security(f: Facts) -> Assessment:
     modes = {k: f.modes.get(k, "off") for k in SAFEGUARDS}
     weak = [k for k, m in modes.items() if m != "enforce"]
+    # Calls AgentGov's own policies decided (Copilot Studio's threat detection decides on
+    # its agents' calls, but doesn't apply these safeguards).
+    decided = f.count("decision.") - f.by_type["decision.copilot_studio"]
     a = Assessment(
         IN_PLACE,
         "Every call through the gateway is checked: only the tools, models and agents granted, "
@@ -337,8 +433,14 @@ def _security(f: Facts) -> Assessment:
         "tool definitions pinned, unknown callers refused; agents' risk scores block them "
         "when they climb.",
         [
+            _row("Calls checked", decided, "#/ledger?type=decision.*"),
             _row("Calls refused", f.denied, "#/ledger?decision=deny"),
             _row("Let through in monitor mode", f.monitored, "#/ledger?decision=monitored"),
+            _row(
+                "Agents whose calls were checked",
+                f"{len(f.checked)} of {len(f.agents)}",
+                "#/agents",
+            ),
             *(_row(k, m, "#/features") for k, m in modes.items()),
         ],
     )
@@ -369,6 +471,12 @@ def _security(f: Facts) -> Assessment:
         )
     if (partly or exempt) and a.status == IN_PLACE:
         a.status = PARTLY
+    if not decided and a.status in (IN_PLACE, PARTLY):
+        a.status = CONFIGURED
+        a.gaps.append(
+            "No call went through AgentGov's checks in the period: the safeguards are set, "
+            "but nothing shows them working. Send agents' calls through the gateway."
+        )
     return a
 
 
@@ -388,12 +496,27 @@ def _inventory(f: Facts) -> Assessment:
             _row("Model providers", f.providers, "#/models"),
         ],
     )
+    if f.platforms_read or f.platforms_not_read:
+        a.evidence.append(
+            _row(
+                "Platforms read in the period", ", ".join(f.platforms_read) or "none", "#/platforms"
+            )
+        )
     if by[DISCOVERED]:
         a.status = PARTLY
         a.gaps.append(f"{by[DISCOVERED]} discovered agent(s) to adopt or block.")
     if not _on(f, "discovery"):
         a.status = PARTLY
         a.gaps.append("Shadow-agent discovery is off.")
+    if f.platforms_not_read:
+        if not f.platforms_read and a.status == IN_PLACE:
+            a.status = CONFIGURED
+        elif a.status == IN_PLACE:
+            a.status = PARTLY
+        a.gaps.append(
+            f"Not read in the period, or the last read failed: {', '.join(f.platforms_not_read)}. "
+            "What AgentGov holds about their agents may be out of date."
+        )
     return a
 
 
@@ -425,11 +548,11 @@ def _roles(f: Facts) -> Assessment:
 def _monitoring(f: Facts) -> Assessment:
     a = Assessment(
         IN_PLACE,
-        "AgentGov watches agents in production: posture checks and risk scores, findings "
+        "AgentGov watches agents in production: posture checks and risk scores, issues "
         "from the gateway and from Microsoft's services, issues sent to each agent's people "
         "until someone takes them on, and management rules for what lasts.",
         [
-            _row("Findings raised in the period", f.findings_raised, "#/findings"),
+            _row("Issues raised in the period", f.findings_raised, "#/findings"),
             _row("Resolved in the period", f.findings_resolved, "#/findings"),
             _row("Acknowledged in the period", f.acknowledged, "#/findings"),
             _row(
@@ -438,6 +561,11 @@ def _monitoring(f: Facts) -> Assessment:
                 "#/findings",
             ),
             _row("Management rules enforced", f.rules_enforced, "#/policies"),
+            _row(
+                "Last posture scan",
+                ids.isoformat(f.posture_scanned_at) if f.posture_scanned_at else "none",
+                "#/findings",
+            ),
         ],
     )
     for key, what in (
@@ -447,18 +575,28 @@ def _monitoring(f: Facts) -> Assessment:
         if not _on(f, key):
             a.status = PARTLY
             a.gaps.append(f"{what} are off.")
+    if _on(f, "posture-checks") and (
+        f.posture_scanned_at is None or f.posture_scanned_at < f.since
+    ):
+        if a.status == IN_PLACE:
+            a.status = CONFIGURED
+        a.gaps.append(
+            "Posture checks are on, but none ran in the period: see the scan interval "
+            "(AGENTGOV_POSTURE_INTERVAL_SECONDS), or scan now from Issues."
+        )
     return a
 
 
 def _incidents(f: Facts) -> Assessment:
     a = Assessment(
         IN_PLACE,
-        "Findings reach the people responsible as issues, and the security team's SIEMs and "
+        "Issues reach the people responsible for them, and the security team's SIEMs and "
         "chats get the ledger and alerts as they happen; reporting serious incidents to "
         "authorities stays with the organisation.",
         [
-            _row("Critical findings open", f.findings_open["critical"], "#/findings"),
+            _row("Critical issues open", f.findings_open["critical"], "#/findings"),
             _row("Destinations for the security team", f.destinations, "#/secops"),
+            _row("Delivered in the period", f.delivered, "#/secops"),
             _row("Failing destinations", f.failing_destinations, "#/secops"),
             _row(
                 "Hand-off to security operations",
@@ -470,6 +608,12 @@ def _incidents(f: Facts) -> Assessment:
     if not _on(f, "security-operations") or not f.destinations:
         a.status = PARTLY
         a.gaps.append("Hand the ledger to the security team: a destination, and the hand-off on.")
+    elif not f.delivered and a.status == IN_PLACE:
+        a.status = CONFIGURED
+        a.gaps.append(
+            "Nothing reached the security team's destinations in the period: send a test "
+            "from Security operations."
+        )
     if f.failing_destinations:
         a.status = ATTENTION
         a.gaps.append("A destination is failing: the security team isn't getting everything.")
@@ -482,10 +626,10 @@ def _risk(f: Facts) -> Assessment:
         IN_PLACE,
         "Agents' risk is assessed continuously: a risk tier from their blueprint, a score "
         "from what they do (refusals, credentials, injections, jailbreaks), posture "
-        "findings, and the level at which they are blocked.",
+        "issues, and the level at which they are blocked.",
         [
             _row("Agents at high or critical risk", risky, "#/agents"),
-            _row("Findings raised in the period", f.findings_raised, "#/findings"),
+            _row("Issues raised in the period", f.findings_raised, "#/findings"),
             _row("Risk-based access", f.modes.get("risk-based-access", "off"), "#/features"),
         ],
     )
@@ -601,6 +745,60 @@ def _interaction(f: Facts) -> Assessment:
     if not _on(f, "a2a-gateway"):
         a.status = PARTLY
         a.gaps.append("The agent-to-agent gateway is off: calls between agents aren't governed.")
+    elif not f.count("decision.a2a."):
+        a.status = CONFIGURED
+        a.gaps.append(
+            "No call between agents went through the gateway in the period: if agents call "
+            "each other, they do it around it."
+        )
+    return a
+
+
+def _classification(f: Facts) -> Assessment:
+    classified = [a for a in f.agents if a.classification]
+    by = Counter(a.classification["category"] for a in classified)
+    unclassified = [a for a in f.agents if not a.classification]
+    a = Assessment(
+        IN_PLACE,
+        "Each agent is classified under the EU AI Act: whether it is an AI system and at "
+        "which level of risk, the organisation's role for it (provider, deployer), why, and "
+        "what it is for. The register lists them, with who classified each and when.",
+        [
+            _row(
+                "Agents classified",
+                f"{len(classified)} of {len(f.agents)}",
+                "#/ledger/register",
+            ),
+            _row("High-risk", by["high-risk"], "#/ledger/register?category=high-risk"),
+            _row(
+                "With transparency obligations",
+                by["transparency"],
+                "#/ledger/register?category=transparency",
+            ),
+            _row("Minimal risk", by["minimal"], "#/ledger/register?category=minimal"),
+            _row("Prohibited practices", by["prohibited"], "#/ledger/register?category=prohibited"),
+            _row("Not classified", len(unclassified), "#/ledger/register?category=none"),
+        ],
+    )
+    if f.agents and not classified:
+        a.status = NOT_SET_UP
+        a.gaps.append("No agent is classified yet: classify them in Ledger > Register.")
+    elif unclassified:
+        a.status = PARTLY
+        found = sum(1 for x in unclassified if x.status == DISCOVERED)
+        a.gaps.append(
+            f"{len(unclassified)} agent(s) not classified"
+            + (f", {found} of them found and not reviewed yet" if found else "")
+            + "."
+        )
+    banned = sorted(
+        x.name
+        for x in classified
+        if x.classification["category"] == "prohibited" and x.status == ACTIVE
+    )
+    if banned:
+        a.status = ATTENTION
+        a.gaps.append(f"Classified as a prohibited practice, and active: {', '.join(banned)}.")
     return a
 
 
@@ -625,6 +823,10 @@ CONTROLS: dict[str, tuple[Control, ...]] = {
                 "the AI literacy of their staff.",
                 _outside("Training people is the organisation's. AgentGov's issues, "
                          "approvals and previews put the people responsible in the loop.")),
+        Control("Art. 5, 6, 50", "Classification", "Which obligations apply to an AI system "
+                "follows from what it is (a prohibited practice, high-risk, or with "
+                "transparency obligations) and from whether you are its provider or its "
+                "deployer.", _classification),
         Control("Art. 9", "Risk management system", "A continuous, iterative process that "
                 "identifies, evaluates and mitigates risks throughout the lifecycle.", _risk),
         Control("Art. 12", "Record-keeping", "High-risk AI systems record logs automatically "
@@ -681,6 +883,9 @@ CONTROLS: dict[str, tuple[Control, ...]] = {
                 _inventory),
         Control("GOVERN 2.1", "Roles and responsibilities", "Roles, responsibilities and "
                 "lines of communication for AI risks are documented.", _roles),
+        Control("MAP 1.1", "Intended purpose and context", "Intended purposes, beneficial "
+                "uses, the laws and norms that apply, and where the system is deployed are "
+                "understood and documented.", _classification),
         Control("MAP 4.1", "Third-party risks", "Risks from third-party data, software and "
                 "AI technologies are mapped and controlled.", _third_parties),
         Control("MEASURE 2.4", "Monitored in production", "The AI system's functionality "
@@ -740,6 +945,7 @@ def report(f: Facts, framework: str) -> dict[str, Any]:
             "timestamped": f.stamped,
             "last_timestamp": ids.isoformat(f.latest_stamp),
         },
+        "coverage": coverage(f),
         "summary": {s: sum(1 for c in controls if c["status"] == s) for s in STATUSES},
         "controls": controls,
     }
@@ -747,13 +953,7 @@ def report(f: Facts, framework: str) -> dict[str, Any]:
 
 def markdown(reports: list[dict[str, Any]]) -> str:
     """The reports as a document people read."""
-    names = {
-        IN_PLACE: "In place",
-        PARTLY: "Partly",
-        NOT_SET_UP: "Not set up",
-        ATTENTION: "Needs attention",
-        OUTSIDE: "Outside AgentGov",
-    }
+    names = STATUS_NAMES
     out: list[str] = []
     for r in reports:
         fw, period = r["framework"], r["period"]
@@ -767,6 +967,7 @@ def markdown(reports: list[dict[str, Any]]) -> str:
             "This report says what AgentGov does towards each control, how far that is set "
             "up, and the evidence it holds. It doesn't say that the organisation complies.",
             "",
+            *_coverage_lines(r["coverage"]),
             "| Control | Status | Evidence |",
             "|---|---|---|",
         ]
@@ -783,13 +984,45 @@ def markdown(reports: list[dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
+def _coverage_lines(c: dict[str, Any]) -> list[str]:
+    """What AgentGov saw in the period, for the document."""
+    lines = [
+        "## What AgentGov saw",
+        "",
+        "A control only works for the agents AgentGov sees. Of the "
+        f"{_count(c['agents'], 'agent')} in the inventory, in the period:",
+        "",
+        f"* {c['calls_checked']} had their calls checked by AgentGov's policies;",
+        f"* {c['activity_only']} were seen at work (telemetry, their platform's usage logs), "
+        "their calls not checked;",
+        f"* {c['inventory_only']} were seen only in their platform's inventory (their "
+        "settings, not what they did);",
+        f"* {c['not_seen']} weren't seen at all"
+        + (f": {', '.join(c['not_seen_names'])}" if c["not_seen_names"] else "")
+        + ("." if c["not_seen"] <= len(c["not_seen_names"]) else ", and more."),
+        "",
+    ]
+    if c["platforms_not_read"]:
+        lines += [
+            "Platforms not read in the period, or whose last read failed: "
+            f"{', '.join(c['platforms_not_read'])}.",
+            "",
+        ]
+    return lines
+
+
 # ---------------------------------------------------------------- evidence pack
 
 README = """AgentGov evidence pack
 ======================
 
-reports/*.json, report.md  What AgentGov does towards the EU AI Act, ISO/IEC 42001 and
-                           the NIST AI RMF, how far it is set up, and the evidence.
+reports/*.json, report.md  What AgentGov saw of the agents in the period (coverage), what
+                           it does towards the EU AI Act, ISO/IEC 42001 and the NIST AI
+                           RMF, how far it is set up, and the evidence.
 ledger.jsonl               The ledger's entries in the period, as AgentGov wrote them.
                            Check that they are intact, and link up, with:
                              agentgov ledger verify --file ledger.jsonl
@@ -813,6 +1046,9 @@ checkpoints/*.sigstore.json
                                --origin <the log's name, in transparency-log/log.json> \\
                                --key transparency-log/agentgov.pub
 inventory.json             The agents, with their owners, sponsors, teams, status and risk.
+register.csv, .json        The classification register: each agent's classification under
+                           the EU AI Act (category, role, basis, purpose), who classified it
+                           and when.
 manifests.yaml             The registry as code: blueprints, tool servers, policies, rules...
 features.json              Which of AgentGov's features are on, and how strictly.
 """
@@ -854,11 +1090,32 @@ def pack(session: Session, settings: Settings, days: int) -> SpooledTemporaryFil
         for name, content in _transparency_log(settings).items():
             z.writestr(f"transparency-log/{name}", content)
         z.writestr("inventory.json", json.dumps([_agent(a) for a in f.agents], indent=2))
+        rows = [classification.row(a) for a in f.agents]
+        z.writestr("register.json", json.dumps(rows, indent=2))
+        z.writestr("register.csv", _csv(rows))
         z.writestr("manifests.yaml", manifests.dump(manifests.export(session)))
         z.writestr("features.json", json.dumps(f.modes, indent=2, sort_keys=True))
         z.writestr("feature-exceptions.json", json.dumps(f.exceptions, indent=2, sort_keys=True))
     out.seek(0)
     return out
+
+
+def _csv(rows: list[dict[str, Any]]) -> str:
+    """The register as a spreadsheet: a header, then a line each. A cell a spreadsheet
+    would take for a formula (names come from the platforms) is kept as text."""
+    import csv
+    import io
+
+    def cell(value: Any) -> str:
+        text = "" if value is None else str(value)
+        return f"'{text}" if text.startswith(("=", "+", "-", "@", "\t", "\r")) else text
+
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(classification.COLUMNS)
+    for r in rows:
+        writer.writerow([cell(r.get(c)) for c in classification.COLUMNS])
+    return out.getvalue()
 
 
 def _transparency_log(settings: Settings) -> dict[str, str]:

@@ -5,25 +5,29 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from sqlalchemy import select
 
 from agentgov import ledger
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.api.versions import if_match
 from agentgov.identity.keycloak import KeycloakError
-from agentgov.models import ACTIVE
+from agentgov.models import ACTIVE, PlatformAgent
 from agentgov.registry import (
     agents,
     apikeys,
     blueprints,
+    bulk,
+    classification,
     features,
     identity_issuers,
     instructions,
+    people,
     platforms,
     policies,
     teams,
     toolservers,
 )
-from agentgov.registry.errors import Conflict
+from agentgov.registry.errors import Conflict, NotFound
 from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1")
@@ -54,17 +58,32 @@ def list_agents(
 ) -> list[dict[str, Any]]:
     """``source`` is ``registered``, ``discovered:<how>`` or ``platform:<platform>``."""
     with _rt(request).db.session() as s:
+        listed = agents.list_agents(
+            s,
+            status=status,
+            blueprint=blueprint,
+            risk_level=risk_level,
+            q=q,
+            source=source,
+            include_deleted=include_deleted,
+        )
+        # Who made each agent found on a platform, as its platform says.
+        makers = people.for_records(
+            s,
+            list(
+                s.scalars(
+                    select(PlatformAgent).where(
+                        PlatformAgent.agent_id.in_([a.id for a in listed if a.on_platform])
+                    )
+                )
+            ),
+        )
         return [
-            agents.to_dict(a)
-            for a in agents.list_agents(
-                s,
-                status=status,
-                blueprint=blueprint,
-                risk_level=risk_level,
-                q=q,
-                source=source,
-                include_deleted=include_deleted,
-            )
+            {
+                **agents.to_dict(a),
+                **({"maker": people.shown(makers[a.id])} if a.id in makers else {}),
+            }
+            for a in listed
         ]
 
 
@@ -104,10 +123,16 @@ def register_agent(
 def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         agent = agents.get(s, ref)
+        makers = people.for_agent(s, agent.id)
         return {
             **agents.to_dict(agent),
             # What Microsoft 365 or Copilot Studio reports, for agents that run there.
             "platforms": platforms.for_agent(s, agent.id),
+            # Who made it and owns it there, and whom adopting it would make its owner.
+            "makers": makers,
+            "suggested_owner": people.suggested(makers),
+            # Its owner and sponsors who have left (docs/issues.md#people-who-leave).
+            "left": people.who_left(s, agent),
             # The controls whose mode differs for it, and why (docs/features.md#exceptions).
             "control_modes": features.exceptions_for(
                 agent, features.modes(s), features.all_scopes(s)
@@ -131,10 +156,21 @@ def update_agent(
     body: dict[str, Any] = Body(...),
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+    rt = _rt(request)
+    with rt.db.session() as s:
         agent = agents.get(s, ref)
-        agents.update(s, agent, body, actor=principal.actor, version=if_match(request))
+        changed = agents.update(s, agent, body, actor=principal.actor, version=if_match(request))
+        if set(changed) & agents.RISKY_FIELDS:
+            agents.refresh_risk(s, rt.settings, agent)
         return agents.to_dict(agent)
+
+
+def _sponsors(agent: Any, principal: Principal) -> bool:
+    """Whether ``principal`` is one of the agent's sponsors: a person signed in, whatever
+    their role, or an approver's key named after them."""
+    if principal.via != "session" and "approver" not in principal.roles:
+        return False
+    return principal.name.lower() in {str(s).lower() for s in agent.sponsors or []}
 
 
 @router.post("/agents/{ref}/attest", tags=["agents"])
@@ -142,13 +178,21 @@ def attest_agent(
     request: Request,
     ref: str,
     body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(require("approver")),
+    principal: Principal = Depends(signed_in),
 ) -> dict[str, Any]:
-    """A sponsor confirms the agent is still needed (periodic access review)."""
+    """A sponsor confirms the agent is still needed (periodic access review): its sponsors,
+    whatever their role in AgentGov, and administrators."""
+    refused = "only the agent's sponsors or an admin can attest"
     with _rt(request).db.session() as s:
-        agent = agents.get(s, ref)
-        if not principal.is_admin and principal.name not in (agent.sponsors or []):
-            raise HTTPException(403, "only the agent's sponsors or an admin can attest")
+        try:
+            agent = agents.get(s, ref)
+        except NotFound:
+            # Which agents exist is for those who may read them.
+            if principal.roles & set(READ_ROLES):
+                raise
+            raise HTTPException(403, refused) from None
+        if not principal.is_admin and not _sponsors(agent, principal):
+            raise HTTPException(403, refused)
         agents.attest(s, agent, actor=principal.actor, note=body.get("note"))
         return agents.to_dict(agent)
 
@@ -209,6 +253,110 @@ def agent_credentials(
         return creds
 
 
+@router.post("/agents/adopt", tags=["agents"])
+def adopt_agents(
+    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
+) -> dict[str, Any]:
+    """Adopt agents found on platforms at once (``{"agents": [...]}``): with ``makers:
+    true``, each agent's maker on its platform as owner and sponsor, where AgentGov knows
+    them; ``owner`` and ``sponsors`` for the others. Those it can't adopt are left, each
+    with why."""
+    refs = body.get("agents")
+    sponsors = body.get("sponsors")
+    if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
+        raise HTTPException(422, "agents is a list of agents' names or IDs")
+    if sponsors is not None and (
+        not isinstance(sponsors, list) or not all(isinstance(x, str) for x in sponsors)
+    ):
+        raise HTTPException(422, "sponsors is a list of email addresses")
+    owner = body.get("owner")
+    if owner is not None and not isinstance(owner, str):
+        raise HTTPException(422, "owner is a team or a person's email address")
+    reason = body.get("reason")
+    rt = _rt(request)
+    with rt.db.session() as s:
+        return people.adopt(
+            s,
+            rt.settings,
+            refs,
+            owner=(owner or "").strip() or None,
+            sponsors=sponsors or None,
+            makers=bool(body.get("makers")),
+            actor=principal.actor,
+            reason=reason if isinstance(reason, str) else None,
+        )
+
+
+@router.put("/agents/{ref}/classification", tags=["agents"])
+def classify_agent(
+    request: Request,
+    ref: str,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(require("approver")),
+) -> dict[str, Any]:
+    """Classify an agent under the EU AI Act: ``category``, ``role``, ``basis`` and
+    ``purpose`` (docs/evidence.md#a-classification-register). Approvers and administrators."""
+    with _rt(request).db.session() as s:
+        agent = agents.get(s, ref)
+        classification.classify(s, agent, body, actor=principal.actor)
+        return agents.to_dict(agent)
+
+
+@router.delete("/agents/{ref}/classification", tags=["agents"])
+def unclassify_agent(
+    request: Request, ref: str, principal: Principal = Depends(require("approver"))
+) -> dict[str, Any]:
+    """The agent is no longer classified: it shows as such in the register."""
+    with _rt(request).db.session() as s:
+        agent = agents.get(s, ref)
+        classification.classify(s, agent, None, actor=principal.actor)
+        return agents.to_dict(agent)
+
+
+@router.post("/agents/bulk", tags=["agents"])
+def bulk_agents(
+    request: Request,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(require("secops", "approver")),
+) -> dict[str, Any]:
+    """Do one thing to many agents (``agents``, by name or ID) at once: a lifecycle
+    ``action`` (approve, block, unblock, delete or restore); ``update`` with ``fields``
+    (owner, team, sponsors, add_sponsors, remove_sponsors, blueprint, environment,
+    risk_tier); or ``classify`` with ``fields`` (category, role, basis, purpose). Each on
+    its own: those it can't do are ``left``, each with why. The secops role blocks and
+    unblocks, as far as the hand-off lets it; approvers classify."""
+    unknown = sorted(set(body) - {"action", "agents", "reason", "fields"})
+    if unknown:
+        raise HTTPException(
+            422, f"unknown field(s) {', '.join(unknown)}: send action, agents, reason and fields"
+        )
+    action = str(body.get("action") or "")
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        raise HTTPException(422, "reason is text")
+    rt = _rt(request)
+    with rt.db.session() as s:
+        if action == "update":
+            if not principal.is_admin:
+                raise HTTPException(403, "administrators edit agents")
+        elif action == "classify":
+            if not principal.roles & {"admin", "approver"}:
+                raise HTTPException(403, "approvers and administrators classify agents")
+        elif action in bulk.AGENT_ACTIONS:
+            if not principal.roles & {"admin", "secops"}:
+                raise HTTPException(403, f"role {principal.role!r} may not do this")
+            handoff.check_kill_switch(s, principal, action)
+        return bulk.agents(
+            s,
+            rt.settings,
+            body.get("agents"),
+            action,
+            actor=principal.actor,
+            reason=(reason or "").strip() or None,
+            fields=body.get("fields"),
+        )
+
+
 @router.post("/agents/{ref}/{action}", tags=["agents"])
 def agent_lifecycle(
     request: Request,
@@ -229,6 +377,12 @@ def agent_lifecycle(
         agents.transition(
             s, rt.settings, agent, action, actor=principal.actor, reason=body.get("reason")
         )
+        if action in ("adopt", "approve", "restore"):
+            # Its owner, sponsors and status count towards its risk: shown at once.
+            agents.refresh_risk(s, rt.settings, agent)
+        if agent.on_platform:
+            # Those waiting to be reviewed on their platforms: blocked or deleted, they aren't.
+            platforms.review_summary(s)
         return agents.to_dict(agent)
 
 
@@ -430,7 +584,7 @@ def approve_tool(
 def toolserver_action(
     request: Request, ref: str, action: str, principal: Principal = Depends(kill_switch)
 ) -> dict[str, Any]:
-    """approve (pending review), block, unblock."""
+    """approve (pending approval), block, unblock."""
     rt = _rt(request)
     with rt.db.session() as s:
         handoff.check_kill_switch(s, principal, action)

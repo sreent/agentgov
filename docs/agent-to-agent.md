@@ -58,9 +58,9 @@ gateway](#calls-around-the-gateway)). With the `a2a-gateway`
 | `POST /a2a/billing-agent` | Its A2A methods: `SendMessage`, `SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask` and the others |
 
 Callers authenticate with their AgentGov token, as for tool and model calls (while the
-`unknown-callers` feature monitors, others get through, and are recorded and discovered).
+`unknown-callers` feature monitors, others get through, and are recorded and added as unmanaged agents).
 Active and blocked agents are published: calls to a blocked agent are refused with a
-reason. Agents waiting for review, discovered or deleted aren't, nor agents on the
+reason. Agents waiting for approval, unmanaged or deleted aren't, nor agents on the
 platforms AgentGov inventories (Microsoft 365, Copilot Studio): the agent's page says why.
 With the feature off, no agent is published, and the registry keeps their A2A endpoints.
 
@@ -177,7 +177,7 @@ that check tool results:
 |---|---|---|
 | Credentials | Masked (`data-protection`) | Recorded |
 | Personal data | Masked, unless the agent that asked may have it (its `pii-access` label) | Recorded |
-| Instructions aimed at the agent that asked (by the rules, or the [classifier](detection.md)) | Withheld (`prompt-injection`): a JSON-RPC error with the answer's ID takes its place | Recorded, and a finding |
+| Instructions aimed at the agent that asked (by the rules, or the [classifier](detection.md)) | Withheld (`prompt-injection`): a JSON-RPC error with the answer's ID takes its place | Recorded, and an issue |
 
 So data an agent may see, because its blueprint lets it, doesn't reach the agents it
 answers that may not: in the demo, billing-agent reads customers' contact details, and
@@ -195,7 +195,7 @@ its answer reaches the support agent with them masked.
   JSON (gRPC's among them) pass as they are.
 * **Plain, not compressed.** The gateway asks the agent for answers that aren't
   compressed. One compressed anyway can't be read, and counts as one too long.
-* What was found in an answer is a finding about the agent that answered, and adds to its
+* What was found in an answer is an issue about the agent that answered, and adds to its
   risk score: `agent.prompt_injection_in_answers`, `agent.credentials_in_answers`.
 
 ## Calls around the gateway
@@ -262,14 +262,14 @@ Each agent's owners say what stops calls around the gateway to it (`a2a_protecti
 | Manifests | `a2a_protection` in an `Agent`'s spec ([example](../examples/manifests/agents.yaml)) |
 
 The `calls-around-gateway` [feature](features.md) says how AgentGov looks for such calls,
-to the agents published on the gateway. Its findings go to the agents' owners as
+to the agents published on the gateway. Its issues go to the agents' owners as
 [issues](issues.md):
 
 | Mode | |
 |---|---|
-| `watch` (the default) | Telemetry that shows a call straight to an agent's A2A URL is recorded in the ledger (`telemetry.a2a_around_gateway`), and raises a finding for the owners of the agent called (`agent.a2a_called_around_gateway`) and, when a registered agent made the call, for its owners (`agent.a2a_calls_around_gateway`). An agent whose owners haven't said what stops such calls raises a low one (`agent.a2a_protection_undeclared`). AgentGov calls no agent itself |
+| `watch` (the default) | Telemetry that shows a call straight to an agent's A2A URL is recorded in the ledger (`telemetry.a2a_around_gateway`), and raises an issue for the owners of the agent called (`agent.a2a_called_around_gateway`) and, when a registered agent made the call, for its owners (`agent.a2a_calls_around_gateway`). An agent whose owners haven't said what stops such calls raises a low one (`agent.a2a_protection_undeclared`). AgentGov calls no agent itself |
 | `test` | As `watch`, and each posture scan also calls each agent's A2A URL itself, without a delegation, as a call around the gateway would: a `GetTask` for a task that doesn't exist, which changes nothing, with the header `X-AgentGov-Check: calls-around-gateway`. An agent that takes the call raises `agent.a2a_reachable_around_gateway`: medium, or high if its owners said something stops such calls. The agent's page shows what the last test found, and the ledger records each change (`agent.a2a_tested`). It needs `posture-checks` on |
-| `off` | Nothing is looked for. What owners said is kept; findings already raised stay open, marked unverified |
+| `off` | Nothing is looked for. What owners said is kept; issues already raised stay open, marked unverified |
 
 Telemetry shows a call around the gateway as a client span whose `server.address` and
 `server.port`, or `url.full`, name an agent's A2A URL (a Kubernetes service by its short or

@@ -268,13 +268,34 @@ lint_docs() {
 lint_compose() {
   local file
   for file in docker-compose.yml docker-compose.inventory.yml; do
-    docker compose -f "deploy/compose/$file" config --quiet || return 1
+    # The inventory stack refuses to start without an admin token of its own.
+    AGENTGOV_ADMIN_TOKEN=lint COMPOSE_PROFILES=https \
+      docker compose -f "deploy/compose/$file" config --quiet || return 1
   done
+  # On one server (docs/deploy/server.md), the stack doesn't start without its own secrets
+  # and addresses (whatever a .env of yours holds).
+  local server=(deploy/compose/docker-compose.yml deploy/compose/docker-compose.server.yml)
+  if docker compose --env-file /dev/null -f "${server[0]}" -f "${server[1]}" config --quiet \
+    2>/dev/null; then
+    echo "docker-compose.server.yml starts without secrets of its own"
+    return 1
+  fi
   for file in deploy/compose/docker-compose.*.yml; do
     case "$file" in */docker-compose.inventory.yml) continue ;; esac
-    docker compose -f deploy/compose/docker-compose.yml -f "$file" config --quiet || return 1
+    env "${SERVER_LINT_ENV[@]}" COMPOSE_PROFILES=https \
+      docker compose -f deploy/compose/docker-compose.yml -f "$file" config --quiet || return 1
   done
 }
+
+# What docker-compose.server.yml needs, for checking it.
+SERVER_LINT_ENV=(
+  AGENTGOV_ADMIN_TOKEN=lint AGENTGOV_SERVICE_TOKEN=lint AGENTGOV_SIGNING_SECRET=lint
+  AGENTGOV_KEYCLOAK_CLIENT_SECRET=lint AGENTGOV_OIDC_CLIENT_SECRET=lint
+  KEYCLOAK_ADMIN_PASSWORD=lint POSTGRES_PASSWORD=lint
+  AGENTGOV_PUBLIC_URL=https://agentgov.example.com
+  AGENTGOV_GATEWAY_PUBLIC_URL=https://gateway.example.com
+  AGENTGOV_KEYCLOAK_PUBLIC_URL=https://auth.example.com
+)
 
 lint_rego() {
   local unformatted
@@ -544,18 +565,58 @@ inventory_end_to_end() {
     echo "port 8000 in use. Stop the stack that has it first"
     return 1
   fi
-  if ! "${compose[@]}" up -d --no-build --wait --wait-timeout 300 >/dev/null; then
+  # It has no token everybody knows: without one of its own, it doesn't start.
+  if AGENTGOV_ADMIN_TOKEN= "${compose[@]}" config --quiet >/dev/null 2>&1; then
+    echo "the inventory stack starts without an admin token"
+    return 1
+  fi
+  local token
+  token=$(python -c 'import secrets; print(secrets.token_hex(16))')
+  # With HTTPS in front from Caddy's own authority (docs/deploy/server.md), when ports 80
+  # and 443 are free. Every compose command below sees it.
+  local https=0 COMPOSE_PROFILES= AGENTGOV_PUBLIC_URL= AGENTGOV_CERTIFICATES=
+  if ! port_in_use 80 && ! port_in_use 443; then
+    https=1 COMPOSE_PROFILES=https AGENTGOV_PUBLIC_URL=https://agentgov.localhost
+    AGENTGOV_CERTIFICATES=internal
+    export COMPOSE_PROFILES AGENTGOV_PUBLIC_URL AGENTGOV_CERTIFICATES
+  else
+    echo "${yellow}ports 80 or 443 in use: without HTTPS in front${reset}"
+  fi
+  if ! AGENTGOV_ADMIN_TOKEN=$token "${compose[@]}" up -d --no-build --wait --wait-timeout 300 >/dev/null; then
     "${compose[@]}" logs --no-color --tail 100 || true
     "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
     return 1
   fi
-  AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=dev-admin-token \
-    python scripts/check-inventory.py &&
-    AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=dev-admin-token agentgov ledger verify ||
+  AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=$token python scripts/check-inventory.py &&
+    AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN=$token agentgov ledger verify ||
     rc=1
+  if [ "$rc" = 0 ] && [ "$https" = 1 ]; then
+    inventory_https "${compose[@]}" || rc=1
+  fi
   [ "$rc" = 0 ] || "${compose[@]}" logs --no-color --tail 100 || true
   "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   return "$rc"
+}
+
+# inventory_https <compose command...>: the control plane answers through Caddy, over
+# HTTPS, with a certificate from Caddy's authority.
+inventory_https() {
+  local root tries=0
+  root=$(mktemp)
+  until "$@" cp caddy:/data/caddy/pki/authorities/local/root.crt "$root" >/dev/null 2>&1 &&
+    curl -fsS --resolve agentgov.localhost:443:127.0.0.1 --cacert "$root" \
+      https://agentgov.localhost/readyz >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 30 ]; then
+      echo "the control plane didn't answer at https://agentgov.localhost through Caddy"
+      "$@" logs --no-color --tail 50 caddy || true
+      rm -f "$root"
+      return 1
+    fi
+    sleep 1
+  done
+  rm -f "$root"
+  echo "HTTPS in front: https://agentgov.localhost answers"
 }
 
 # The chart's pods, run by scripts/chart-on-docker.py where Kubernetes can't run

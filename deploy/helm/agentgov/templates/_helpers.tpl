@@ -201,6 +201,15 @@ capabilities:
     secretKeyRef:
       name: {{ include "agentgov.secretName" . }}
       key: service-token
+{{- /* The control plane and the processor sign with keys derived from it; OPA and the
+  collector, which hold the service token, don't get it. Optional: without it (an existing
+  Secret from before), the keys derive from the service token. */}}
+- name: AGENTGOV_SIGNING_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "agentgov.secretName" . }}
+      key: signing-secret
+      optional: true
 {{- if .Values.opa.enabled }}
 - name: AGENTGOV_OPA_URL
   value: {{ if .Values.internalTLS.enabled }}https{{ else }}http{{ end }}://{{ include "agentgov.name" (list . "opa") }}:8181

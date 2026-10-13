@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.config import FAILURE_SETTINGS, Settings
-from agentgov.models import ApprovedConnector, ComponentReport, Destination, PlatformSync
+from agentgov.models import ApprovedConnector, ComponentReport, Destination, PlatformSync, Team
 from agentgov.registry import features
 from agentgov.registry.errors import ValidationError
 
@@ -181,6 +181,8 @@ class Situation:
     destinations: int = 0
     # Connectors on the allowlist (Platforms, Connectors).
     approved_connectors: int = 0
+    # Whether a team takes the issues nobody else does (docs/issues.md).
+    default_team: bool = True
 
     @property
     def fresh(self) -> list[dict[str, Any]]:
@@ -211,6 +213,7 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
         platforms=rows,
         destinations=len(list(session.scalars(select(Destination.id)))),
         approved_connectors=len(list(session.scalars(select(ApprovedConnector.connector_id)))),
+        default_team=session.scalar(select(Team.name).where(Team.is_default.is_(True))) is not None,
     )
 
 
@@ -475,6 +478,14 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
                     f"{_with(keycloak['detail'])}.",
                 )
             )
+    elif key == "issues" and not s.default_team:
+        out.append(
+            (
+                LIMITED,
+                "No catch-all team: issues that no agent's owner, sponsor or team takes, and "
+                "issues about AgentGov itself, reach nobody. Name one on the Teams page.",
+            )
+        )
     elif key == "security-operations" and not s.destinations:
         out.append(
             (

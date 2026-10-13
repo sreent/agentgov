@@ -2,7 +2,7 @@
 
 The administration commands are a thin layer over the HTTP API and follow the
 admin UI's pages: agents, blueprints, tool servers, policies, approvals,
-findings, the ledger, access (API keys), platforms, features and security
+issues, the ledger, access (API keys), platforms, features and security
 operations, plus a checker for agent instructions. Whatever the UI can change,
 the CLI can change too, through the same endpoints and with the same role checks.
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import csv
 import hashlib
 import html
 import http.server
@@ -30,6 +31,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import httpx
 import typer
+import yaml
 
 from agentgov import __version__
 
@@ -46,8 +48,8 @@ policies_app = typer.Typer(
 )
 approvals_app = typer.Typer(help="Human-in-the-loop approvals.", no_args_is_help=True)
 findings_app = typer.Typer(
-    help="Posture and threat findings, and the issues they are for the people responsible "
-    "(lists open findings by default).",
+    help="Issues: posture gaps and threats AgentGov raises, and the people they go to "
+    "(lists the open ones by default; the API calls them findings).",
     invoke_without_command=True,
 )
 ledger_app = typer.Typer(help="The tamper-evident evidence ledger.", no_args_is_help=True)
@@ -59,7 +61,9 @@ app.add_typer(blueprints_app, name="blueprints")
 app.add_typer(toolservers_app, name="toolservers")
 app.add_typer(policies_app, name="policies")
 app.add_typer(approvals_app, name="approvals")
-app.add_typer(findings_app, name="findings")
+app.add_typer(findings_app, name="issues")
+# Their name before the admin center called them issues, for scripts that use it.
+app.add_typer(findings_app, name="findings", hidden=True)
 app.add_typer(ledger_app, name="ledger")
 app.add_typer(apikeys_app, name="apikeys")
 access_app = typer.Typer(
@@ -108,10 +112,16 @@ secops_app = typer.Typer(
 )
 app.add_typer(secops_app, name="secops")
 destinations_app = typer.Typer(
-    help="SIEMs, and Teams and Slack channels, that get AgentGov's events and alerts.",
+    help="SIEMs, Teams and Slack channels, and service desks: where AgentGov's events, "
+    "alerts and tickets go.",
     no_args_is_help=True,
 )
 app.add_typer(destinations_app, name="destinations")
+tickets_app = typer.Typer(
+    help="Issues' tickets in service desks: ServiceNow, Jira and Freshservice.",
+    no_args_is_help=True,
+)
+app.add_typer(tickets_app, name="tickets")
 teams_app = typer.Typer(
     help="Teams: people and chat channels that own agents, and that issues escalate to.",
     no_args_is_help=True,
@@ -219,8 +229,69 @@ def _table(rows: list[dict[str, Any]], columns: list[str]) -> None:
         typer.echo("  ".join(cell(row, c).ljust(widths[c]) for c in columns).rstrip())
 
 
+# A cell a spreadsheet would take for a formula (names and descriptions come from the
+# platforms): kept as text.
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv(rows: list[dict[str, Any]], columns: list[str]) -> None:
+    """The rows as CSV, for a spreadsheet: a header, then a line each."""
+    out = csv.writer(sys.stdout, lineterminator="\n")
+    out.writerow(columns)
+    for row in rows:
+        cells = []
+        for column in columns:
+            value = row.get(column)
+            text = (
+                ""
+                if value is None
+                else "; ".join(map(str, value))
+                if isinstance(value, list)
+                else str(value)
+            )
+            cells.append(f"'{text}" if text.startswith(FORMULA_START) else text)
+        out.writerow(cells)
+
+
 def _done(kind: str, name: str, outcome: str) -> None:
     typer.echo(f"{kind}/{name}: {outcome}")
+
+
+# The control plane takes this many agents or findings a call: more are sent in turns.
+AT_ONCE = 500
+
+
+def _at_once(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/{kind}s/bulk with every one named, in turns, the answers put together."""
+    out: dict[str, Any] = {"done": [], "left": []}
+    names = body[f"{kind}s"]
+    for start in range(0, len(names), AT_ONCE):
+        part = _call(
+            "POST", f"/v1/{kind}s/bulk", json={**body, f"{kind}s": names[start : start + AT_ONCE]}
+        )
+        out["done"] += part["done"]
+        out["left"] += part["left"]
+    return out
+
+
+def _many(
+    kind: str,
+    out: dict[str, Any],
+    outcome: str | None = None,
+    note: str | None = None,
+    label: str | None = None,
+) -> None:
+    """What one call did to many agents or issues: each done, then each left as it was,
+    and why. Fails if it left any. ``label`` names them, when not as the API does."""
+    shown = label or kind
+    for row in out["done"]:
+        _done(shown, row[kind], outcome or row["status"])
+    if note:
+        typer.echo(note, err=True)
+    for row in out["left"]:
+        typer.echo(f"{shown}/{row[kind]}: left as it was: {row['why']}", err=True)
+    if out["left"]:
+        raise typer.Exit(1)
 
 
 def _confirm(question: str, yes: bool) -> None:
@@ -539,6 +610,14 @@ def server(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     settings = Settings.from_env()
+    known = settings.well_known_secrets()
+    if known and not settings.only_this_machine():
+        _fail(
+            f"{', '.join(known)} {'holds' if len(known) == 1 else 'hold'} a value from "
+            f"AgentGov's examples, which everybody knows, and people reach this control plane "
+            f"at {settings.public_url}: give {'it' if len(known) == 1 else 'each'} a random "
+            "value of its own (openssl rand -hex 32)"
+        )
     if not settings.tls_dir:
         uvicorn.run(
             "agentgov.api.app:create_app",
@@ -738,6 +817,54 @@ def transparency_key(
     typer.echo(f"key: {key}\npublic key: {public}")
 
 
+@app.command("keycloak-realm")
+def keycloak_realm(
+    source: Path = typer.Argument(
+        ..., help="AgentGov's realm, as it comes: deploy/compose/keycloak/agentgov-realm.json."
+    ),
+    public_url: str | None = typer.Option(
+        None,
+        "--public-url",
+        help="The control plane's address (AGENTGOV_PUBLIC_URL), where Keycloak sends "
+        "administrators back after they sign in.",
+    ),
+    demo_users: bool = typer.Option(
+        True,
+        "--demo-users/--no-demo-users",
+        help="Keep the demo's people (admin, alice, sofia, ...), whose password everybody "
+        "knows, and the demo app they sign in to.",
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o", help="Write it here, for Keycloak to import (default: print it)."
+    ),
+) -> None:
+    """AgentGov's Keycloak realm made for an installation: administrators sent back to its
+    address, and, with --no-demo-users, none of the demo's people (docs/deploy/server.md).
+    Keycloak imports a realm on its first start only."""
+    from agentgov.identity import realm
+
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except OSError as exc:
+        _fail(f"can't read {source}: {exc.strerror}")
+    except ValueError:
+        _fail(f"{source} isn't a Keycloak realm (JSON)")
+    try:
+        made = realm.for_installation(data, public_url=public_url, demo_users=demo_users)
+    except ValueError as exc:
+        _fail(str(exc))
+    text = json.dumps(made, indent=2) + "\n"
+    if output is None:
+        typer.echo(text, nl=False)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
+    people = [u["username"] for u in made.get("users", []) if "serviceAccountClientId" not in u]
+    typer.echo(
+        f"realm: {output} ({'people: ' + ', '.join(people) if people else 'no demo people'})"
+    )
+
+
 @app.command("gateway-config")
 def gateway_config(
     output: Path = typer.Option(
@@ -834,6 +961,34 @@ def export() -> None:
 
 
 @app.command()
+def start(
+    place: list[str] = typer.Option(
+        [],
+        "--place",
+        help="Where your agents are (repeat it): copilot-studio, microsoft-365, entra-agent-id, "
+        "aws, google-cloud, salesforce, databricks, microsoft-foundry, gateway.",
+    ),
+    hide: bool | None = typer.Option(None, "--hide/--show", help="Hide the checklist, or show it."),
+) -> None:
+    """Where to start: say where your agents are, then follow the checklist."""
+    if place:
+        result = _call("PUT", "/v1/start", json={"places": place})
+    elif hide is not None:
+        result = _call("PUT", "/v1/start", json={"hidden": hide})
+    else:
+        result = _call("GET", "/v1/start")
+    for step in result["steps"]:
+        mark = "x" if step["done"] else " "
+        detail = f": {step['detail']}" if step.get("detail") else ""
+        typer.echo(f"[{mark}] {step['title']}{detail}")
+        if step["key"] == "agents" and not step["done"]:
+            for how in step.get("how") or []:
+                typer.echo(f"      {how['name']}: {how['how']}")
+    if not result["places"]:
+        typer.echo("\nSay where your agents are: agentgov start --place copilot-studio ...")
+
+
+@app.command()
 def overview() -> None:
     """Show the governance overview."""
     _print(_call("GET", "/v1/overview"))
@@ -854,6 +1009,28 @@ def replicas() -> None:
 # -------------------------------------------------------------------- agents
 
 
+AS_CSV = typer.Option(False, "--csv", help="As CSV, with more columns: for a spreadsheet.")
+REASON = typer.Option(None, help="Recorded in the evidence ledger.")
+AGENT_REFS = typer.Argument(..., help="The agents, by name or ID: one, or several at once.")
+AGENT_CSV = [
+    "name",
+    "id",
+    "status",
+    "risk_level",
+    "risk_score",
+    "owner",
+    "sponsors",
+    "team",
+    "blueprint",
+    "source",
+    "environment",
+    "maker",
+    "created_at",
+    "last_seen_at",
+    "description",
+]
+
+
 @agents_app.command("list")
 def agents_list(
     status: str | None = None,
@@ -862,9 +1039,25 @@ def agents_list(
         help="registered, discovered:<how>, or platform:<platform> (microsoft-365, "
         "copilot-studio, aws, google-cloud, salesforce, databricks, microsoft-foundry).",
     ),
+    risk: str | None = typer.Option(None, help="Only those at this risk level."),
+    as_csv: bool = AS_CSV,
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Only their names, one a line: to give other commands."
+    ),
 ) -> None:
     """List agents (all but deleted ones, unless --status is given)."""
-    rows = _call("GET", "/v1/agents", params=_given(status=status, source=source))
+    rows = _call("GET", "/v1/agents", params=_given(status=status, source=source, risk_level=risk))
+    if quiet:
+        for r in rows:
+            typer.echo(r["name"])
+        return
+    if as_csv:
+        for r in rows:
+            r["risk_level"], r["risk_score"] = r["risk"]["level"], r["risk"]["score"]
+            maker = r.get("maker") or {}
+            r["maker"] = maker.get("email") or maker.get("name") or maker.get("entra_id")
+        _csv(rows, AGENT_CSV)
+        return
     for r in rows:
         r["risk"] = f"{r['risk']['level']} ({r['risk']['score']})"
     _table(rows, ["name", "status", "blueprint", "owner", "risk", "last_seen_at"])
@@ -1064,7 +1257,7 @@ def agents_create(
     redirect_uri: list[str] | None = REDIRECT_URI,
     approve: bool = typer.Option(False, "--approve", help="Activate it now (admins only)."),
 ) -> None:
-    """Register an agent. It waits in pending review unless --approve is given."""
+    """Register an agent. It waits for approval unless --approve is given."""
     body = (
         _model_fields(model_access, token_budget, False)
         | _team_field(team)
@@ -1089,15 +1282,26 @@ def agents_create(
     _done("agent", agent["name"], agent["status"])
 
 
+# What an edit to several agents at once may change (and --add-sponsor, --remove-sponsor).
+EDITS_AT_ONCE = {"owner", "team", "sponsors", "blueprint", "environment", "risk_tier"}
+
+
 @agents_app.command("update")
 def agents_update(
-    ref: str,
+    refs: list[str] = AGENT_REFS,
     description: str | None = DESCRIPTION,
     blueprint: str | None = AGENT_BLUEPRINT,
     owner: str | None = OWNER,
     sponsor: list[str] | None = typer.Option(
         None, "--sponsor", help="Sponsors (replace the current ones; repeatable)."
     ),
+    add_sponsor: list[str] | None = typer.Option(
+        None, "--add-sponsor", help="Add a sponsor to each one's own (repeatable)."
+    ),
+    remove_sponsor: list[str] | None = typer.Option(
+        None, "--remove-sponsor", help="Take a sponsor from each one's own (repeatable)."
+    ),
+    reason: str | None = REASON,
     team: str | None = TEAM,
     environment: str | None = ENVIRONMENT,
     framework: str | None = None,
@@ -1173,9 +1377,33 @@ def agents_update(
             risk_tier=risk_tier,
         )
     )
+    if len(refs) > 1 or add_sponsor or remove_sponsor or reason:
+        # Several at once, each on its own: who is accountable for them, and how they are
+        # governed.
+        if if_version is not None:
+            _fail(
+                "--if-version goes with one agent, without --add-sponsor, --remove-sponsor or "
+                "--reason"
+            )
+        other = sorted(set(body) - EDITS_AT_ONCE)
+        if other:
+            _fail(
+                "several agents at once, or with --add-sponsor, --remove-sponsor or --reason, "
+                "take --owner, --team, --sponsor, --blueprint, --environment and --risk-tier: "
+                f"change {', '.join(other)} one agent at a time"
+            )
+        if add_sponsor:
+            body["add_sponsors"] = _split(add_sponsor)
+        if remove_sponsor:
+            body["remove_sponsors"] = _split(remove_sponsor)
+        if not body:
+            _fail("nothing to change: pass at least one option (see --help)")
+        out = _at_once("agent", _given(action="update", agents=refs, fields=body, reason=reason))
+        _many("agent", out, "updated")
+        return
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
-    agent = _call("PATCH", f"/v1/agents/{ref}", json=body, **_if_version(if_version))
+    agent = _call("PATCH", f"/v1/agents/{refs[0]}", json=body, **_if_version(if_version))
     _done("agent", agent["name"], "updated")
 
 
@@ -1215,18 +1443,30 @@ AROUND_THE_GATEWAY = {
 }
 
 
-def _lifecycle(ref: str, action: str, reason: str | None) -> None:
-    agent = _call("POST", f"/v1/agents/{ref}/{action}", json={"reason": reason} if reason else {})
-    _done("agent", agent["name"], agent["status"])
-
-
-REASON = typer.Option(None, help="Recorded in the evidence ledger.")
+def _lifecycle(refs: str | list[str], action: str, reason: str | None) -> None:
+    """One agent, or several at once: each on its own, those it can't do left as they are."""
+    names = [refs] if isinstance(refs, str) else list(refs)
+    if len(names) == 1:
+        agent = _call(
+            "POST", f"/v1/agents/{names[0]}/{action}", json={"reason": reason} if reason else {}
+        )
+        _done("agent", agent["name"], agent["status"])
+        return
+    out = _at_once("agent", _given(action=action, agents=names, reason=reason))
+    elsewhere = sorted({row["platform"] for row in out["done"] if row.get("platform")})
+    note = (
+        f"Those on {', '.join(elsewhere)} still run there: this changed AgentGov, not "
+        f"{'it' if len(elsewhere) == 1 else 'them'}."
+        if elsewhere and action in ("block", "delete")
+        else None
+    )
+    _many("agent", out, note=note)
 
 
 @agents_app.command("approve")
-def agents_approve(ref: str, reason: str | None = REASON) -> None:
-    """Approve a pending agent: it becomes active (needs a sponsor)."""
-    _lifecycle(ref, "approve", reason)
+def agents_approve(refs: list[str] = AGENT_REFS, reason: str | None = REASON) -> None:
+    """Approve pending agents: each becomes active (needs a sponsor)."""
+    _lifecycle(refs, "approve", reason)
 
 
 IN_PLATFORM = typer.Option(
@@ -1239,24 +1479,30 @@ IN_PLATFORM = typer.Option(
 
 @agents_app.command("block")
 def agents_block(
-    ref: str,
+    refs: list[str] = AGENT_REFS,
     reason: str = typer.Option("blocked from CLI", help="Why."),
     in_platform: bool = IN_PLATFORM,
 ) -> None:
-    """Kill switch: block the agent everywhere (identity, gateway, in-process OPA)."""
+    """Kill switch: block agents everywhere (identity, gateway, in-process OPA)."""
+    if in_platform and len(refs) > 1:
+        _fail("--in-platform blocks one agent at a time")
     # AgentGov first, then the platform: if the platform refuses, AgentGov has still blocked it.
-    _lifecycle(ref, "block", reason)
+    _lifecycle(refs, "block", reason)
     if in_platform:
-        _platform_block(ref, blocked=True)
+        _platform_block(refs[0], blocked=True)
 
 
 @agents_app.command("unblock")
-def agents_unblock(ref: str, reason: str | None = REASON, in_platform: bool = IN_PLATFORM) -> None:
-    """Unblock an agent: its calls are evaluated against policy again."""
+def agents_unblock(
+    refs: list[str] = AGENT_REFS, reason: str | None = REASON, in_platform: bool = IN_PLATFORM
+) -> None:
+    """Unblock agents: their calls are evaluated against policy again."""
+    if in_platform and len(refs) > 1:
+        _fail("--in-platform unblocks one agent at a time")
     # AgentGov first: if it refuses (an agent needs a sponsor), the platform keeps it blocked.
-    _lifecycle(ref, "unblock", reason)
+    _lifecycle(refs, "unblock", reason)
     if in_platform:
-        _platform_block(ref, blocked=False)
+        _platform_block(refs[0], blocked=False)
 
 
 def _platform_block(ref: str, *, blocked: bool) -> None:
@@ -1279,15 +1525,64 @@ def agents_platform_unblock(ref: str) -> None:
 
 
 @agents_app.command("delete")
-def agents_delete(ref: str, reason: str | None = REASON) -> None:
-    """Delete an agent (soft: it can be restored, or purged for good)."""
-    _lifecycle(ref, "delete", reason)
+def agents_delete(refs: list[str] = AGENT_REFS, reason: str | None = REASON) -> None:
+    """Delete agents (soft: they can be restored, or purged for good)."""
+    _lifecycle(refs, "delete", reason)
 
 
 @agents_app.command("restore")
-def agents_restore(ref: str, reason: str | None = REASON) -> None:
-    """Restore a deleted agent; it comes back pending review."""
-    _lifecycle(ref, "restore", reason)
+def agents_restore(refs: list[str] = AGENT_REFS, reason: str | None = REASON) -> None:
+    """Restore deleted agents; they come back pending approval."""
+    _lifecycle(refs, "restore", reason)
+
+
+@agents_app.command("adopt")
+def agents_adopt(
+    refs: list[str] = typer.Argument(
+        None, help="The agents, by name or ID; with --platform, those it found as well."
+    ),
+    platform: str | None = typer.Option(
+        None,
+        "--platform",
+        help="Every agent found on this platform that waits to be adopted (copilot-studio, "
+        "aws, ...).",
+    ),
+    makers: bool = typer.Option(
+        False,
+        "--makers",
+        help="Make each agent's maker on its platform its owner and sponsor, where AgentGov "
+        "knows them.",
+    ),
+    owner: str | None = typer.Option(
+        None, "--owner", help="A team or a person: for all, or those whose maker isn't known."
+    ),
+    sponsor: list[str] = typer.Option(None, "--sponsor", help="Repeatable."),
+    reason: str | None = REASON,
+) -> None:
+    """Adopt agents found on platforms, several at once: each pending review, with an owner
+    and sponsors. Those that can't be adopted are left, each with why."""
+    names = list(refs or [])
+    if platform:
+        listed = _call(
+            "GET", "/v1/agents", params={"status": "discovered", "source": f"platform:{platform}"}
+        )
+        names += [a["name"] for a in listed]
+    if not names:
+        _fail("name the agents to adopt, or a --platform")
+    if not makers and not owner:
+        _fail("give them an --owner, or their --makers")
+    body: dict[str, Any] = {"agents": names, "makers": makers}
+    if owner:
+        body["owner"] = owner
+    if sponsor:
+        body["sponsors"] = _split(sponsor)
+    if reason:
+        body["reason"] = reason
+    out = _call("POST", "/v1/agents/adopt", json=body)
+    for adopted in out["adopted"]:
+        typer.echo(f"adopted {adopted['agent']}: owner {adopted['owner']}")
+    for left in out["left"]:
+        typer.echo(f"left {left['agent']}: {left['why']}", err=True)
 
 
 @agents_app.command("lifecycle")
@@ -1296,8 +1591,45 @@ def agents_lifecycle(
     action: str = typer.Argument(..., help="approve | block | unblock | delete | restore | adopt"),
     reason: str | None = None,
 ) -> None:
-    """Run any lifecycle action, including adopting a discovered agent."""
+    """Run any lifecycle action, including adopting an unmanaged agent."""
     _lifecycle(ref, action, reason)
+
+
+@agents_app.command("classify")
+def agents_classify(
+    refs: list[str] = AGENT_REFS,
+    category: str | None = typer.Option(
+        None,
+        help="prohibited, high-risk, transparency (Art. 50 obligations), minimal or not-ai-system.",
+    ),
+    role: str | None = typer.Option(
+        None, help="The organisation's role for it: provider, deployer or provider-and-deployer."
+    ),
+    basis: str | None = typer.Option(
+        None, help="Why: the Annex III area, say, or the Article 5 practice."
+    ),
+    purpose: str | None = typer.Option(None, help="What it is for."),
+    clear: bool = typer.Option(False, "--clear", help="It is no longer classified."),
+) -> None:
+    """Classify agents under the EU AI Act, for the classification register
+    (docs/evidence.md#a-classification-register)."""
+    if clear:
+        for ref in refs:
+            agent = _call("DELETE", f"/v1/agents/{ref}/classification")
+            _done("agent", agent["name"], "not classified")
+        return
+    if not category or not role:
+        _fail("give its --category and --role (or --clear)")
+    fields = _given(category=category, role=role, basis=basis, purpose=purpose)
+    if len(refs) > 1:
+        _many(
+            "agent",
+            _at_once("agent", {"action": "classify", "agents": refs, "fields": fields}),
+            "classified",
+        )
+        return
+    agent = _call("PUT", f"/v1/agents/{refs[0]}/classification", json=fields)
+    _done("agent", agent["name"], f"classified {agent['classification']['category']}")
 
 
 @agents_app.command("purge")
@@ -1733,7 +2065,7 @@ def toolservers_create(
     authorization_server: str | None = AUTHORIZATION_SERVER,
     oauth_client_id: str | None = OAUTH_CLIENT_ID,
 ) -> None:
-    """Register a tool server (admins: approved at once; registrars: pending review)."""
+    """Register a tool server (admins: approved at once; registrars: pending approval)."""
     body = _toolserver_fields(
         url, description, owner, trust, classification, label,
         gateway=gateway, developers=developers, package=package, registry_name=registry_name,
@@ -1792,7 +2124,7 @@ def _server_action(name: str, action: str) -> None:
 
 @toolservers_app.command("approve")
 def toolservers_approve(name: str) -> None:
-    """Approve a server that is pending review."""
+    """Approve a server that is pending approval."""
     _server_action(name, "approve")
 
 
@@ -2037,6 +2369,60 @@ def approvals_deny(approval_id: str, note: str | None = None) -> None:
     typer.echo(f"{r['id']}: {r['status']}")
 
 
+# What to run to decide each kind of the inbox.
+INBOX_HOW = {
+    "calls": "agentgov approvals approve|deny ID",
+    "access": "agentgov access-packages approve|deny ID",
+    "risks": "agentgov issues accept|decline-to-accept ID",
+    "agents": "agentgov agents lifecycle NAME approve|block",
+    "toolservers": "agentgov toolservers approve|block NAME",
+    "definitions": "agentgov toolservers approve-tool SERVER TOOL",
+    "platform_agents": "agentgov agents list --status discovered, then adopt or block them",
+}
+
+
+def _inbox_line(kind: str, item: dict[str, Any]) -> str:
+    if kind == "calls":
+        return f"{item['id']}  {item['agent_name']}: {item['action']} {item['resource']}"
+    if kind == "access":
+        return (
+            f"{item['id']}  {item['package']} for {item['agent_name']}, asked by "
+            f"{item['requested_by']}: {item['reason']}"
+        )
+    if kind == "risks":
+        asked = item.get("asked") or {}
+        return (
+            f"{item['id']}  {item['title']} ({asked.get('by')}, until "
+            f"{str(asked.get('until'))[:10]}: {asked.get('reason')})"
+        )
+    if kind == "agents":
+        sponsors = ", ".join(item.get("sponsors") or []) or "none"
+        return f"{item['name']}  owner {item.get('owner') or 'none'}, sponsors {sponsors}"
+    if kind == "toolservers":
+        return f"{item['name']}  {item['url']}"
+    if kind == "definitions":
+        return f"{item['server']}/{item['tool']}"
+    return f"{item['platform']}: {item['count']}"
+
+
+@app.command("inbox")
+def inbox() -> None:
+    """Everything waiting for a decision you can make: calls held for a person, access
+    asked for agents, risks asked to be accepted, and, for administrators, agents and tool
+    servers to approve, changed tool definitions and platform agents nobody reviewed."""
+    view = _call("GET", "/v1/inbox")
+    if not view["total"]:
+        typer.echo("Nothing waits for a decision of yours.")
+        return
+    typer.echo(f"{view['total']} waiting for a decision of yours")
+    for kind in view["kinds"]:
+        if not kind["count"]:
+            continue
+        typer.echo(f"\n{kind['title']} ({kind['count']}): {INBOX_HOW[kind['kind']]}")
+        for item in kind["items"]:
+            typer.echo(f"  {_inbox_line(kind['kind'], item)}")
+
+
 # ------------------------------------------------------------------ findings
 
 FINDING_STATUS = typer.Option("open", help="open, resolved, dismissed, accepted or all.")
@@ -2059,31 +2445,97 @@ def _with(f: dict[str, Any]) -> str:
     return f"{who}, acknowledged" if f.get("acknowledged_at") else who
 
 
-def _list_findings(status: str, mine: bool = False) -> None:
-    path = "/v1/me/issues" if mine else "/v1/findings"
-    rows = _call("GET", path, params={"status": status})
+FINDING_TYPE = typer.Option(None, "--type", help="Only issues of this type.")
+FINDING_SEVERITY = typer.Option(None, help="Only issues of this severity.")
+FINDING_LIMIT = typer.Option(500, help="At most this many, newest first (up to 2000).")
+FINDING_QUIET = typer.Option(
+    False, "--quiet", "-q", help="Only their IDs, one a line: to give other commands."
+)
+FINDING_CSV = [
+    "id",
+    "severity",
+    "status",
+    "category",
+    "type",
+    "title",
+    "agent_id",
+    "subject",
+    "with",
+    "verified",
+    "occurrences",
+    "first_seen",
+    "last_seen",
+    "resolved_by",
+    "accepted_until",
+]
+
+
+def _list_findings(
+    status: str,
+    mine: bool = False,
+    type_: str | None = None,
+    severity: str | None = None,
+    limit: int = 500,
+    as_csv: bool = False,
+    quiet: bool = False,
+) -> None:
+    if mine:
+        rows = _call("GET", "/v1/me/issues", params={"status": status})
+    else:
+        params = {"status": status, "type": type_, "severity": severity, "limit": limit}
+        rows = _call("GET", "/v1/findings", params={k: v for k, v in params.items() if v})
     for row in rows:
         row["with"] = _with(row)
-        if row.get("verified") is False:
-            row["status"] = f"{row['status']} (unverified)"
-    _table(rows, ["id", "severity", "status", "type", "with", "title"])
+    if quiet:
+        for row in rows:
+            typer.echo(row["id"])
+    elif as_csv:
+        _csv(rows, FINDING_CSV)
+    else:
+        for row in rows:
+            if row.get("verified") is False:
+                row["status"] = f"{row['status']} (unverified)"
+        _table(rows, ["id", "severity", "status", "type", "with", "title"])
+    if not mine and len(rows) == limit:
+        typer.echo(
+            f"The newest {limit}: there may be more. Narrow them with --type or --severity, "
+            "or raise --limit.",
+            err=True,
+        )
 
 
 @findings_app.callback()
-def findings_main(ctx: typer.Context, status: str = FINDING_STATUS, mine: bool = MINE) -> None:
+def findings_main(
+    ctx: typer.Context,
+    status: str = FINDING_STATUS,
+    mine: bool = MINE,
+    type_: str | None = FINDING_TYPE,
+    severity: str | None = FINDING_SEVERITY,
+    limit: int = FINDING_LIMIT,
+    as_csv: bool = AS_CSV,
+    quiet: bool = FINDING_QUIET,
+) -> None:
     if ctx.invoked_subcommand is None:
-        _list_findings(status, mine)
+        _list_findings(status, mine, type_, severity, limit, as_csv, quiet)
 
 
 @findings_app.command("list")
-def findings_list(status: str = FINDING_STATUS, mine: bool = MINE) -> None:
-    """List findings."""
-    _list_findings(status, mine)
+def findings_list(
+    status: str = FINDING_STATUS,
+    mine: bool = MINE,
+    type_: str | None = FINDING_TYPE,
+    severity: str | None = FINDING_SEVERITY,
+    limit: int = FINDING_LIMIT,
+    as_csv: bool = AS_CSV,
+    quiet: bool = FINDING_QUIET,
+) -> None:
+    """List issues, newest first."""
+    _list_findings(status, mine, type_, severity, limit, as_csv, quiet)
 
 
 @findings_app.command("get")
 def findings_get(finding_id: str) -> None:
-    """Show a finding: who it goes to, the messages sent about it, and what happened to it."""
+    """Show an issue: who it goes to, the messages sent about it, and what happened to it."""
     f = _call("GET", f"/v1/findings/{quote(finding_id)}")
     typer.echo(f"{f['id']}  {f['severity']}  {f['status']}  {f['type']}")
     typer.echo(f["title"])
@@ -2110,56 +2562,142 @@ def findings_get(finding_id: str) -> None:
         _table(f["notifications"], ["level", "channel", "recipient", "status", "attempts"])
 
 
+FINDING_IDS = typer.Argument(..., help="The issues' IDs: one, or several at once.")
+
+
+def _findings_at_once(ids: list[str], action: str, **body: Any) -> None:
+    """Several issues at once: each on its own, those it can't do left as they are."""
+    out = _at_once("finding", _given(action=action, findings=ids, **body))
+    _many("finding", out, label="issue")
+
+
 @findings_app.command("acknowledge")
-def findings_acknowledge(finding_id: str) -> None:
-    """Take an issue on: it goes no further up its chain."""
-    f = _call("POST", f"/v1/findings/{quote(finding_id)}/acknowledge")
-    _done("finding", f["id"], f"acknowledged by {f['acknowledged_by']}")
+def findings_acknowledge(finding_ids: list[str] = FINDING_IDS) -> None:
+    """Take issues on: they go no further up their chains."""
+    if len(finding_ids) > 1:
+        return _findings_at_once(finding_ids, "acknowledge")
+    f = _call("POST", f"/v1/findings/{quote(finding_ids[0])}/acknowledge")
+    _done("issue", f["id"], f"acknowledged by {f['acknowledged_by']}")
 
 
 @findings_app.command("accept")
 def findings_accept(
-    finding_id: str,
+    finding_ids: list[str] = FINDING_IDS,
     reason: str = typer.Option(..., help="Why the risk is acceptable."),
     until: str = typer.Option(
         ...,
         help="Until when: a date (2026-12-31), a time, or a number of days (90). A year at most.",
     ),
 ) -> None:
-    """Accept a finding's risk until a date: it opens again then if it still holds."""
+    """Accept issues' risk until a date: each opens again then if it still holds."""
+    when: str | int = int(until) if until.isdigit() else until
+    if len(finding_ids) > 1:
+        return _findings_at_once(finding_ids, "accept", reason=reason, until=when)
+    f = _call(
+        "POST",
+        f"/v1/findings/{quote(finding_ids[0])}/accept",
+        json={"reason": reason, "until": when},
+    )
+    _done("issue", f["id"], f"risk accepted until {f['accepted_until']}")
+
+
+@findings_app.command("not-mine")
+def findings_not_mine(
+    finding_id: str,
+    reason: str = typer.Option(..., help="Why it isn't yours: whose it is, if you know."),
+) -> None:
+    """Say an issue isn't yours: it goes on to the next people responsible for it at once."""
+    out = _call(
+        "POST", f"/v1/findings/{quote(finding_id)}/not-mine", json={"reason": reason}
+    )  # fmt: skip
+    went = ", ".join(out["went_to"])
+    _done(
+        "finding", out["id"], f"passed on to {went}" if went else "recorded; it stays where it is"
+    )
+
+
+@findings_app.command("ask-to-accept")
+@findings_app.command("ask-exception", hidden=True)
+def findings_ask_exception(
+    finding_id: str,
+    reason: str = typer.Option(..., help="Why its risk is acceptable, for now."),
+    until: str = typer.Option(
+        ..., help="Until when: a date (2026-12-31), a time, or a number of days. A year at most."
+    ),
+) -> None:
+    """Ask an approver to accept an issue's risk until a date. It stays with you meanwhile."""
     when: str | int = int(until) if until.isdigit() else until
     f = _call(
-        "POST", f"/v1/findings/{quote(finding_id)}/accept", json={"reason": reason, "until": when}
+        "POST",
+        f"/v1/findings/{quote(finding_id)}/exception",
+        json={"reason": reason, "until": when},
     )
-    _done("finding", f["id"], f"risk accepted until {f['accepted_until']}")
+    _done("issue", f["id"], "asked to accept its risk: an approver decides")
 
 
-def _finding_action(finding_id: str, action: str) -> None:
-    f = _call("POST", f"/v1/findings/{finding_id}/{action}")
-    _done("finding", f["id"], f["status"])
+@findings_app.command("decline-to-accept")
+@findings_app.command("decline-exception", hidden=True)
+def findings_decline_exception(
+    finding_id: str, reason: str = typer.Option(..., help="Why not.")
+) -> None:
+    """Turn down a request to accept an issue's risk: it stays with whoever asked."""
+    f = _call(
+        "POST", f"/v1/findings/{quote(finding_id)}/exception/decline", json={"reason": reason}
+    )
+    _done("issue", f["id"], "its risk isn't accepted: it stays with whoever asked")
+
+
+@findings_app.command("recheck")
+def findings_recheck(finding_id: str) -> None:
+    """Say you fixed what an issue is about: AgentGov checks it again now, where it can."""
+    out = _call("POST", f"/v1/findings/{quote(finding_id)}/recheck", timeout=LONG_TIMEOUT)
+    outcome = "gone: resolved" if out["fixed"] else "still there"
+    note = f" ({out['note']})" if out.get("note") else ""
+    _done("issue", out["finding"]["id"], f"checked again ({out['checked']}), {outcome}{note}")
+    if not out["fixed"]:
+        raise typer.Exit(1)
+
+
+def _finding_action(finding_ids: list[str], action: str) -> None:
+    if len(finding_ids) > 1:
+        return _findings_at_once(finding_ids, action)
+    f = _call("POST", f"/v1/findings/{quote(finding_ids[0])}/{action}")
+    _done("issue", f["id"], f["status"])
 
 
 @findings_app.command("resolve")
-def findings_resolve(finding_id: str) -> None:
-    """Mark a finding as resolved."""
-    _finding_action(finding_id, "resolve")
+def findings_resolve(finding_ids: list[str] = FINDING_IDS) -> None:
+    """Mark issues as resolved."""
+    _finding_action(finding_ids, "resolve")
 
 
 @findings_app.command("dismiss")
-def findings_dismiss(finding_id: str) -> None:
-    """Dismiss a finding that is wrong (to accept a risk, use accept)."""
-    _finding_action(finding_id, "dismiss")
+def findings_dismiss(
+    finding_ids: list[str] = FINDING_IDS,
+    reason: str = typer.Option(..., help="Why it is wrong."),
+    until: str | None = typer.Option(
+        None, help="Open it again then if it still holds: a date, a time, or a number of days."
+    ),
+) -> None:
+    """Dismiss issues that are wrong (to accept a risk, use accept)."""
+    body: dict[str, Any] = {"reason": reason}
+    if until:
+        body["until"] = int(until) if until.isdigit() else until
+    if len(finding_ids) > 1:
+        return _findings_at_once(finding_ids, "dismiss", **body)
+    f = _call("POST", f"/v1/findings/{quote(finding_ids[0])}/dismiss", json=body)
+    _done("issue", f["id"], f["status"])
 
 
 @findings_app.command("reopen")
-def findings_reopen(finding_id: str) -> None:
-    """Reopen a resolved, dismissed or accepted finding."""
-    _finding_action(finding_id, "reopen")
+def findings_reopen(finding_ids: list[str] = FINDING_IDS) -> None:
+    """Reopen resolved, dismissed or accepted issues."""
+    _finding_action(finding_ids, "reopen")
 
 
 @findings_app.command("types")
 def findings_types() -> None:
-    """Each type of finding: on or off, its severity if set here, and how many are open."""
+    """Each type of issue: on or off, its severity if set here, and how many are open."""
     rows = _call("GET", "/v1/finding-types")
     for row in rows:
         row["severity"] = row["severity"] or "(its checks')"
@@ -2177,7 +2715,7 @@ def findings_type(
     ),
     yes: bool = YES,
 ) -> None:
-    """Set how a type of finding is handled here."""
+    """Set how a type of issue is handled here."""
     body: dict[str, Any] = {}
     if on is not None:
         body["mode"] = "on" if on else "off"
@@ -2187,7 +2725,7 @@ def findings_type(
         _fail("give --on, --off or --severity")
     if body.get("mode") == "off":
         _confirm(
-            f"Turn {type_} off? Its open findings are dismissed, and what it finds is kept "
+            f"Turn {type_} off? Its open issues are dismissed, and what it finds is kept "
             "dismissed.",
             yes,
         )
@@ -2270,6 +2808,36 @@ def ledger_checkpoint() -> None:
     out = _call("POST", "/v1/ledger/checkpoints")
     stamped = f", time-stamped at {out['timestamped_at']}" if out["timestamped"] else ""
     _done("checkpoint", str(out["seq"]), f"{out['hash']}{stamped}")
+
+
+@ledger_app.command("witness")
+def ledger_witness() -> None:
+    """Whether the database lost ledger entries AgentGov wrote: a restore from an older
+    backup, or a roll-back (docs/backup.md)."""
+    out = _call("GET", "/v1/ledger/witness")
+    if not out["configured"]:
+        typer.echo(
+            "No file keeps the ledger's head outside the database (AGENTGOV_LEDGER_WITNESS_FILE)."
+        )
+        return
+    typer.echo(out["message"])
+    if out.get("error"):
+        typer.echo(f"The file {out['file']}: {out['error']}")
+    if out["rewound"]:
+        raise typer.Exit(1)
+
+
+@ledger_app.command("accept-restore")
+def ledger_accept_restore(yes: bool = YES) -> None:
+    """Accept that the database lost ledger entries (a restore you made on purpose): what
+    is missing is written into the ledger, and it goes on from the head it has."""
+    seen = _call("GET", "/v1/ledger/witness")
+    if not seen.get("rewound"):
+        _fail("the ledger has every entry AgentGov wrote: nothing to accept")
+    typer.echo(seen["message"])
+    _confirm("Record the missing entries in the ledger and go on?", yes)
+    out = _call("POST", "/v1/ledger/witness/accept")
+    _done("ledger", "restore", f"accepted; it goes on from entry {out['head_seq']}")
 
 
 @ledger_app.command("proof")
@@ -2498,8 +3066,10 @@ def access_end_session(session_id: str) -> None:
 
 def _synced(source: str, verb: str, counts: dict[str, int]) -> None:
     outcome = f"{counts['created']} new, {counts['updated']} updated, {counts['skipped']} skipped"
+    if counts.get("gone"):
+        outcome += f", {counts['gone']} gone from the platform"
     if "findings" in counts:
-        outcome += f"; {counts['findings']} open findings"
+        outcome += f"; {counts['findings']} open issues"
     _done("platform", source, f"{verb} ({outcome})")
 
 
@@ -2542,7 +3112,14 @@ def platforms_status() -> None:
         )
 
 
-SYNC_SOURCES = ("microsoft-365", "copilot-studio", "entra-agent-id", "purview-audit", "defender")
+SYNC_SOURCES = (
+    "microsoft-365",
+    "copilot-studio",
+    "entra-agent-id",
+    "entra-users",
+    "purview-audit",
+    "defender",
+)
 # Platforms read by a connector of AgentGov's own (docs/other-platforms.md).
 OTHER_PLATFORMS = ("aws", "google-cloud", "salesforce", "databricks", "microsoft-foundry")
 
@@ -2557,9 +3134,11 @@ def _sync_summary(source: str, c: dict[str, Any]) -> str:
         )
     if source == "defender":
         return f"{c['alerts']} agent alerts, {c['matched']} matched, {c['resolved']} resolved"
+    if source == "entra-users":
+        return f"{c['found']} people found, {c['not_found']} not users, {c['left']} left"
     summary = f"{c['created']} new, {c['updated']} updated, {c['skipped']} skipped"
     if source in OTHER_PLATFORMS:
-        summary += f", {c['findings']} open findings"
+        summary += f", {c['findings']} open issues"
         if c.get("failed"):
             summary += f"; {c['failed']} parts couldn't be read (see `agentgov platforms status`)"
     return summary
@@ -2570,7 +3149,8 @@ def platforms_sync(
     source: str = typer.Argument(
         "all",
         help="all (every connection AgentGov's app may use), microsoft-365, entra-agent-id, "
-        "purview-audit, defender, copilot-studio (as you, after `agentgov login` through "
+        "entra-users, purview-audit, defender, copilot-studio (as you, after `agentgov login` "
+        "through "
         "Microsoft Entra ID), or another platform: aws, google-cloud, salesforce, databricks, "
         "microsoft-foundry.",
     ),
@@ -2595,6 +3175,7 @@ def platforms_sync(
     counts = _call("POST", f"/v1/platforms/{source}/sync", timeout=LONG_TIMEOUT)
     if source in ("microsoft-365", "copilot-studio"):
         _synced(source, "synced", counts)
+        _people_looked_up(counts.get("people"))
     else:
         _done("platform", source, f"synced ({_sync_summary(source, counts)})")
 
@@ -2653,17 +3234,78 @@ def platforms_push_connector_policy(
 
 @platforms_app.command("import")
 def platforms_import(
-    file: Path = typer.Argument(
-        ..., help="JSON from `pac resource-query` or the Power Platform API."
+    files: list[Path] = typer.Argument(
+        ...,
+        help="JSON from `pac resource-query`, the Power Platform API or `az graph query`: "
+        "one file, or each page of a larger export.",
+    ),
+    complete: bool = typer.Option(
+        False,
+        "--complete",
+        help="The files are the whole inventory, every environment: agents missing from "
+        "them are marked gone from Copilot Studio, and their issues close.",
     ),
 ) -> None:
     """Import Copilot Studio agents from a Power Platform inventory export."""
-    try:
-        payload = json.loads(file.read_text())
-    except (OSError, ValueError) as exc:
-        _fail(f"cannot read {file}: {exc}")
-    counts = _call("POST", "/v1/platforms/copilot-studio/import", json=payload)
+    rows: list[Any] = []
+    for file in files:
+        try:
+            payload = json.loads(file.read_text())
+        except (OSError, ValueError) as exc:
+            _fail(f"cannot read {file}: {exc}")
+        page = payload.get("data", payload.get("value")) if isinstance(payload, dict) else payload
+        if not isinstance(page, list):
+            _fail(f"{file} isn't an inventory export: a JSON list, or an object with a data list")
+        rows.extend(page)
+    counts = _call(
+        "POST",
+        "/v1/platforms/copilot-studio/import",
+        json={"data": rows},
+        params={"complete": "true"} if complete else None,
+    )
     _synced("copilot-studio", "imported", counts)
+    _people_looked_up(counts.get("people"))
+
+
+def _people_looked_up(outcome: dict[str, Any] | None) -> None:
+    """What looking up the makers an import or sync named came to."""
+    if outcome is None:
+        return
+    if "error" in outcome:
+        typer.echo(f"makers not looked up: {outcome['error']}", err=True)
+    else:
+        typer.echo(f"makers looked up: {_sync_summary('entra-users', outcome)}")
+
+
+@platforms_app.command("import-users")
+def platforms_import_users(
+    file: Path = typer.Argument(
+        ...,
+        help="The Microsoft Entra admin center's Users > Download users (CSV), or JSON with "
+        "id and mail.",
+    ),
+) -> None:
+    """Upload a list of users from Microsoft Entra ID, so that the people Copilot Studio
+    names by Entra ID are known by name without Microsoft Graph."""
+    try:
+        text = file.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        _fail(f"cannot read {file}: {exc}")
+    kind = "application/json" if text.lstrip().startswith(("[", "{")) else "text/csv"
+    out = _call(
+        "POST",
+        "/v1/platforms/entra-users/import",
+        content=text.encode(),
+        headers={"content-type": kind},
+        timeout=LONG_TIMEOUT,
+    )
+    makers = out["makers"]
+    _done(
+        "people",
+        file.name,
+        f"{out['people']} kept, {out['skipped']} without an object ID; "
+        f"{makers['known']} of the {makers['named']} people platforms name are known",
+    )
 
 
 @platforms_app.command("connectors")
@@ -2698,7 +3340,7 @@ def platforms_approve_connector(
     connector_id: str = typer.Argument(..., help="For example shared_office365."),
     note: str | None = typer.Option(None, help="Why it is allowed."),
 ) -> None:
-    """Put a connector on the allowlist; agents using others get a finding."""
+    """Put a connector on the allowlist; agents using others get an issue."""
     out = _call(
         "PUT",
         f"/v1/platforms/connectors/{_connector(connector_id)}/approval",
@@ -2868,6 +3510,17 @@ def features_set(
     _done("feature", key, f"{out['mode']}: {out['effect']}")
 
 
+# What listing a control's exceptions adds to each (registry.features.LISTED): not sent back.
+LISTED = ("describe", "agents", "missing")
+
+
+def _exception(e: dict[str, Any]) -> str:
+    """An exception in words, with how many agents it applies to now."""
+    missing = f"; there is no {', '.join(e['missing'])}" if e.get("missing") else ""
+    reach = f" ({e['agents']} agent(s) now{missing})" if "agents" in e else ""
+    return f"{e['mode']} for {e['describe']}{reach}"
+
+
 @features_app.command("scope")
 def features_scope(
     key: str,
@@ -2905,13 +3558,12 @@ def features_scope(
     modes = current["modes"]
     if mode in modes and modes.index(mode) < modes.index(current["mode"]):
         _confirm(f"{current['title']}: {mode} for these agents, {current['mode']} for others?", yes)
-    scopes = [{k: v for k, v in e.items() if k != "describe"} for e in current.get("scopes") or []]
+    scopes = [{k: v for k, v in e.items() if k not in LISTED} for e in current.get("scopes") or []]
     out = _call("PUT", f"/v1/features/{quote(key)}", json={"scopes": [*scopes, entry]})
     _done(
         "feature",
         key,
-        f"{len(out['scopes'])} exception(s): "
-        + "; ".join(f"{e['mode']} for {e['describe']}" for e in out["scopes"]),
+        f"{len(out['scopes'])} exception(s): " + "; ".join(_exception(e) for e in out["scopes"]),
     )
 
 
@@ -2925,7 +3577,7 @@ def features_unscope(
 ) -> None:
     """Remove one of a control's exceptions."""
     current = _call("GET", f"/v1/features/{quote(key)}")
-    scopes = [{k: v for k, v in e.items() if k != "describe"} for e in current.get("scopes") or []]
+    scopes = [{k: v for k, v in e.items() if k not in LISTED} for e in current.get("scopes") or []]
     if not 1 <= number <= len(scopes):
         _fail(f"{key} has {len(scopes)} exception(s)")
     gone = current["scopes"][number - 1]
@@ -3373,7 +4025,7 @@ def secops_events(
     after: int = typer.Option(0, help="From after this ledger entry (0: the start)."),
     limit: int = typer.Option(200, help="Events per request (up to 1000)."),
     events: str | None = typer.Option(
-        None, help="decisions, approvals, findings, access, changes (comma-separated)."
+        None, help="decisions, approvals, findings (issues), access, changes (comma-separated)."
     ),
     min_severity: str = typer.Option("info", help="info, low, medium, high or critical."),
     follow: bool = typer.Option(False, "--follow", "-f", help="Keep waiting for new ones."),
@@ -3397,24 +4049,28 @@ def secops_events(
         time.sleep(every)
 
 
+DESKS = ("servicenow", "jira", "freshservice")
+
+
 def _destination_table(rows: list[dict[str, Any]]) -> None:
     out = []
     for d in rows:
         delivery = d["delivery"]
-        state = delivery["last_error"] or (
-            f"{delivery['behind']} behind" if delivery["behind"] else "up to date"
-        )
+        events = ",".join(d["events"])
+        if d["kind"] in DESKS:
+            counts = delivery.get("tickets") or {}
+            events = "issues, as tickets"
+            state = delivery["last_error"] or f"{counts.get('open', 0)} tickets open"
+            if counts.get("failed"):
+                state += f", {counts['failed']} it couldn't open"
+        else:
+            state = delivery["last_error"] or (
+                f"{delivery['behind']} behind" if delivery["behind"] else "up to date"
+            )
         secret = d["secret"]
         if not secret["present"] and secret["need"] == "required":
             state = f"no secret file {secret['file']}"
-        out.append(
-            {
-                **d,
-                "events": ",".join(d["events"]),
-                "sent": delivery["delivered"],
-                "state": state,
-            }
-        )
+        out.append({**d, "events": events, "sent": delivery["delivered"], "state": state})
     _table(out, ["name", "kind", "status", "events", "min_severity", "sent", "state"])
 
 
@@ -3424,13 +4080,64 @@ DEST_URL = typer.Option(
 DEST_EVENTS = typer.Option(
     None,
     "--events",
-    help="SIEMs: decisions, approvals, findings, access, changes. Chats: findings, approvals, "
-    "blocks. Comma-separated; all by default.",
+    help="SIEMs: decisions, approvals, findings (issues), access, changes. Chats: findings, "
+    "approvals, blocks. Comma-separated; all by default.",
 )
 DEST_SEVERITY = typer.Option(
     None, "--min-severity", help="info, low, medium, high or critical (chats: high by default)."
 )
 DEST_FORMAT = typer.Option(None, "--format", help="Webhooks: json (an array) or ndjson.")
+DEST_TICKETS = typer.Option(
+    None,
+    "--tickets",
+    help="Service desks: ticket settings as JSON, or @FILE (JSON or YAML): group, groups, "
+    "fields, priorities, resolve and the like (docs/tickets.md). Those given replace theirs.",
+)
+DEST_GROUP = typer.Option(
+    None,
+    "--group",
+    help="Service desks: where tickets go: a ServiceNow assignment group, a Freshservice "
+    "group's ID, or a Jira project's key.",
+)
+DEST_TEAM_GROUP = typer.Option(
+    None,
+    "--team-group",
+    help="Service desks: where a team's tickets go instead, TEAM=GROUP (repeatable; TEAM= "
+    "takes it off).",
+)
+
+
+def _ticket_settings(
+    tickets: str | None,
+    group: str | None,
+    team_group: list[str] | None,
+    current: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """A service desk's ticket settings from the options (None: none given)."""
+    body: dict[str, Any] = {}
+    if tickets is not None:
+        text = Path(tickets[1:]).read_text() if tickets.startswith("@") else tickets
+        try:
+            loaded = yaml.safe_load(text)
+        except yaml.YAMLError:
+            _fail("--tickets is JSON or YAML, or @FILE")
+        if not isinstance(loaded, dict):
+            _fail("--tickets is an object: group, groups, fields and the like")
+        body.update(loaded)
+    if group is not None:
+        body["group"] = group
+    if team_group:
+        groups = dict(body.get("groups") or (current or {}).get("groups") or {})
+        for item in team_group:
+            team, sep, where = item.partition("=")
+            if not sep or not team.strip():
+                _fail(f"--team-group looks like TEAM=GROUP (got {item!r})")
+            if where.strip():
+                groups[team.strip()] = where.strip()
+            else:
+                groups.pop(team.strip(), None)
+        body["groups"] = groups or None
+    return body or None
 
 
 def _destination_fields(**fields: Any) -> dict[str, Any]:
@@ -3459,19 +4166,28 @@ def destinations_get(name: str) -> None:
 @destinations_app.command("create")
 def destinations_create(
     name: str,
-    kind: str = typer.Option(..., help="otlp, webhook, splunk-hec, slack or teams."),
+    kind: str = typer.Option(
+        ..., help="otlp, webhook, splunk-hec, slack, teams, servicenow, jira or freshservice."
+    ),
     url: str | None = DEST_URL,
     events: str | None = DEST_EVENTS,
     min_severity: str | None = DEST_SEVERITY,
     format: str | None = DEST_FORMAT,
+    tickets: str | None = DEST_TICKETS,
+    group: str | None = DEST_GROUP,
+    team_group: list[str] | None = DEST_TEAM_GROUP,
     backfill: bool = typer.Option(
-        False, "--backfill", help="SIEMs: send the ledger from its start, not from now."
+        False,
+        "--backfill",
+        help="SIEMs: send the ledger from its start, not from now. Service desks: open "
+        "tickets for the issues open now too.",
     ),
     paused: bool = typer.Option(False, "--paused", help="Add it paused."),
     description: str | None = DESCRIPTION,
     label: list[str] | None = LABEL,
 ) -> None:
-    """Send a SIEM the ledger, or a chat alerts. Its credential goes in its secret file."""
+    """Send a SIEM the ledger, a chat alerts, or a service desk issues as tickets. Its
+    credential goes in its secret file."""
     body = _destination_fields(
         kind=kind,
         url=url,
@@ -3481,6 +4197,9 @@ def destinations_create(
         description=description,
         label=label,
     )
+    settings = _ticket_settings(tickets, group, team_group)
+    if settings is not None:
+        body["tickets"] = settings
     if backfill:
         body["backfill"] = True
     if paused:
@@ -3500,6 +4219,9 @@ def destinations_update(
     events: str | None = DEST_EVENTS,
     min_severity: str | None = DEST_SEVERITY,
     format: str | None = DEST_FORMAT,
+    tickets: str | None = DEST_TICKETS,
+    group: str | None = DEST_GROUP,
+    team_group: list[str] | None = DEST_TEAM_GROUP,
     description: str | None = DESCRIPTION,
     label: list[str] | None = typer.Option(None, "--label", help="Labels (replace them)."),
     if_version: int | None = IF_VERSION,
@@ -3513,6 +4235,9 @@ def destinations_update(
         description=description,
         label=label,
     )
+    if tickets is not None or group is not None or team_group:
+        current = _call("GET", f"/v1/destinations/{quote(name)}").get("tickets")
+        body["tickets"] = _ticket_settings(tickets, group, team_group, current) or {}
     if not body:
         _fail("nothing to change: pass at least one option (see --help)")
     out = _call("PATCH", f"/v1/destinations/{quote(name)}", json=body, **_if_version(if_version))
@@ -3547,11 +4272,30 @@ def destinations_replay(
 
 @destinations_app.command("test")
 def destinations_test(name: str) -> None:
-    """Send a test event (SIEMs) or message (chats) now."""
+    """Send a test event (SIEMs) or message (chats) now; sign in to a service desk and look
+    at where its tickets go (changing nothing there)."""
     out = _call("POST", f"/v1/destinations/{quote(name)}/test")
     if not out["ok"]:
         _fail(f"destination/{name}: {out['error']}")
-    _done("destination", name, "test sent")
+    _done("destination", name, out.get("message") or "test sent")
+
+
+@tickets_app.command("list")
+def tickets_list(
+    desk: str | None = typer.Option(None, "--desk", help="Only this service desk's."),
+    status: str | None = typer.Option(
+        None, "--status", help="pending, open, closed or failed (AgentGov couldn't open it)."
+    ),
+) -> None:
+    """Issues' tickets in the service desks, newest first."""
+    rows = _call("GET", "/v1/tickets", params=_given(desk=desk, status=status))
+    if not rows:
+        typer.echo("No tickets.")
+        return
+    for row in rows:
+        row["ticket"] = row["key"] or "(not yet)"
+        row["error"] = (row["last_error"] or "")[:80]
+    _table(rows, ["desk", "ticket", "status", "state", "assignee", "finding_id", "error"])
 
 
 @destinations_app.command("delete")
@@ -3948,14 +4692,16 @@ OVERDUE = typer.Option(
     None, "--attestation-overdue-days", help="Condition: attestation overdue for N days."
 )
 FINDING = typer.Option(
-    None, "--finding", help="Condition: an open finding of this type, * allowed (repeatable)."
+    None, "--finding", help="Condition: an open issue of this type, * allowed (repeatable)."
 )
 FINDING_SEVERITY = typer.Option(
-    None, "--finding-severity", help="Condition: the finding is at least this severe."
+    None, "--finding-severity", help="Condition: the issue is at least this severe."
 )
 RISK_LEVEL = typer.Option(None, "--risk-level", help="Condition: at least this risk level.")
 STATUS = typer.Option(
-    None, "--status", help="Condition: pending, active, blocked or discovered (repeatable)."
+    None,
+    "--status",
+    help="Condition: pending, active, blocked or discovered (unmanaged); repeatable.",
 )
 IN_BLUEPRINT = typer.Option(None, "--blueprint", help="Scope: agents on these blueprints.")
 IN_TEAM = typer.Option(None, "--team", help="Scope: agents of these teams.")
@@ -4193,6 +4939,7 @@ EVIDENCE_DAYS = typer.Option(90, "--days", help="The period: the last N days.")
 STATUS_NAMES = {
     "in_place": "in place",
     "partly": "partly",
+    "configured": "configured, not observed",
     "not_set_up": "not set up",
     "attention": "NEEDS ATTENTION",
     "outside": "outside AgentGov",
@@ -4214,6 +4961,15 @@ def evidence_report(
         _print(report)
         return
     typer.echo(f"{report['framework']['title']}, the last {report['period']['days']} days")
+    c = report["coverage"]
+    typer.echo(
+        f"What AgentGov saw of the {c['agents']} agent{'' if c['agents'] == 1 else 's'}: "
+        f"{c['calls_checked']} had their calls checked, {c['activity_only']} were seen at "
+        f"work only, {c['inventory_only']} only in their platform's inventory, "
+        f"{c['not_seen']} not at all."
+    )
+    if c["platforms_not_read"]:
+        typer.echo(f"Not read in the period: {', '.join(c['platforms_not_read'])}.")
     rows = []
     for c in report["controls"]:
         evidence = "; ".join(f"{e['label']}: {e['value']}" for e in c["evidence"][:3])
@@ -4222,6 +4978,22 @@ def evidence_report(
     for c in report["controls"]:
         for gap in c["gaps"]:
             typer.echo(f"{c['id']}: {gap}")
+
+
+REGISTER_COLUMNS = ["agent", "status", "category", "role", "owner", "purpose", "classified_at"]
+
+
+@evidence_app.command("register")
+def evidence_register(as_csv: bool = AS_CSV) -> None:
+    """The classification register: each agent's classification under the EU AI Act, who
+    classified it and when."""
+    rows = _call("GET", "/v1/evidence/register")
+    if as_csv:
+        _csv(rows, [*REGISTER_COLUMNS[:6], "basis", "classified_by", "classified_at", "id"])
+        return
+    for r in rows:
+        r["category"] = r["category"] or "(not classified)"
+    _table(rows, REGISTER_COLUMNS)
 
 
 @evidence_app.command("pack")

@@ -27,6 +27,9 @@ APP_STATE = "microsoft-app"
 ENTRA_ACCESS = "entra-access-packages"
 # What managing Entra's access packages takes, besides a catalog role.
 WRITE = "EntitlementManagement.ReadWrite.All"
+# Besides User.Read.All, what reads users: User.ReadBasic.All doesn't say whose account is
+# disabled (agentgov.platforms.microsoft.USER_ROLES).
+USERS_ALSO = ("User.ReadBasic.All", "Directory.Read.All", "User.ReadWrite.All")
 
 
 @dataclass(frozen=True)
@@ -64,9 +67,18 @@ CONNECTIONS: tuple[Connection, ...] = (
         "entra-agent-id",
         "Microsoft Entra Agent ID",
         "Agents' Entra identities, linked to the agents they belong to, and whether they are "
-        "enabled; agents that only Entra knows about are discovered",
+        "enabled; agents that only Entra knows about are added as unmanaged",
         via="app",
         permission="AgentIdentity.Read.All",
+    ),
+    Connection(
+        "entra-users",
+        "Microsoft Entra users",
+        "The people Copilot Studio names as its agents' owners and makers, and the owners and "
+        "sponsors AgentGov names: their names, email addresses, and whether they have left",
+        via="app",
+        permission="User.Read.All",
+        also=USERS_ALSO,
     ),
     Connection(
         "purview-audit",

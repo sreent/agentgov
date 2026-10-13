@@ -101,11 +101,11 @@ enforced, monitored or off:
 | `data-protection` | Refuses a prompt that holds credentials, and withholds an answer that does. Masks personal data in prompts to providers that aren't verified. A conversation that holds tool calls can't be masked without breaking them, so it is refused instead |
 | `prompt-injection` | Refuses a prompt whose conversation holds a tool result with instructions aimed at the agent |
 | `traffic-classifier` | Asks IBM Granite Guardian about what the rules let through: the latest message from a person (a jailbreak?) and the tool results that came in since the model last answered (instructions aimed at the agent?). Where the check it supports is enforced too, the prompt waits for the verdict; otherwise the prompt goes on and the verdict is recorded after ([detection](detection.md)) |
-| `jailbreak-detection` | Looks for a jailbreak in the conversation's latest message from a person: "ignore your previous instructions", "you have no restrictions", a made-up system turn. Monitored by default, so such prompts go through and are recorded; enforce it to refuse them. Either way it raises a finding |
+| `jailbreak-detection` | Looks for a jailbreak in the conversation's latest message from a person: "ignore your previous instructions", "you have no restrictions", a made-up system turn. Monitored by default, so such prompts go through and are recorded; enforce it to refuse them. Either way it raises an issue |
 | `acting-for-people` | Refuses a prompt for a person the blueprint doesn't allow, or without the person it requires ([acting for people](acting-for-people.md)) |
 | `risk-based-access` | Refuses agents at critical risk |
 | `token-budgets` | Refuses agents that have used their daily token budget |
-| `unknown-callers` | In monitor mode, lets callers without an agent's token through and records them; with `discovery` on, they join the inventory as discovered agents |
+| `unknown-callers` | In monitor mode, lets callers without an agent's token through and records them; with `discovery` on, they join the inventory as unmanaged agents |
 
 Organisation policies' `redact` masks prompts too, and a model call that carries a
 delegation (`X-AgentGov-Delegation`) shows the chain of agents in `input.chain`

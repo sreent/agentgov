@@ -54,7 +54,7 @@ from agentgov.platforms import connections
 from agentgov.registry import access_packages, features, findings, scopes, teams, validation
 from agentgov.registry import agents as agents_svc
 from agentgov.registry.errors import Conflict, NotFound, RegistryError, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 FEATURE = "management-rules"
 POSTURE = "posture-checks"
@@ -265,6 +265,7 @@ def _apply(session: Session, rule: ManagementRule, data: dict[str, Any]) -> list
             value = _conditions(value)
         elif key == "scope":
             value = _scope(value)
+            scopes.check_names(session, value, had=[rule.scope or {}])
         elif key == "action":
             value = validation.one_of(value, ACTIONS, "action")
         elif key == "params":
@@ -364,7 +365,7 @@ def update(
             type="rule.updated",
             actor=actor,
             resource=f"rule/{rule.name}",
-            details={k: _details(rule)[k] for k in changed},
+            details={**{k: _details(rule)[k] for k in changed}, "changes": changes(rule)},
         )
     return changed
 
@@ -605,8 +606,8 @@ def assess(rule: ManagementRule, agent: Agent, ctx: _Context) -> Assessment:
         if not hits:
             return NO
         more = f" (and {len(hits) - 1} more)" if len(hits) > 1 else ""
-        reasons.append(f"open finding: {hits[0].title}{more}")
-        hints.append("fix its findings")
+        reasons.append(f"open issue: {hits[0].title}{more}")
+        hints.append("fix its issues")
     if "risk_level" in c:
         if RISK_LEVELS.index(agent.risk_level or "low") < RISK_LEVELS.index(c["risk_level"]):
             return NO

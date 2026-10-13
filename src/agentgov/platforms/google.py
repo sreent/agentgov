@@ -324,7 +324,7 @@ def runtime_agent(
                 f"{display} may be used by everyone in {', '.join(domains)}",
                 "Its IAM policy grants a role to whole domains.",
                 "Grant the role to the groups that need the agent, or confirm everyone should "
-                "have it and dismiss this finding.",
+                "have it and ask an approver to accept its risk.",
                 {"domains": domains},
             )
         )

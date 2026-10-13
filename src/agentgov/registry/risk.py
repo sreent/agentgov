@@ -89,11 +89,14 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
         if points:
             factors.append({"factor": name, "points": points, "detail": detail})
 
-    factor("Declared risk tier", TIER_POINTS.get(agent.risk_tier, 10), agent.risk_tier)
-    if agent.status == DISCOVERED and agent.on_platform:
-        # Inventoried by its platform, not seen acting outside governance.
-        factor("Not reviewed in AgentGov yet", 15)
-    elif agent.status == DISCOVERED:
+    # An agent found on a platform and not reviewed yet: that is its status, not a risk, and
+    # nobody has declared its tier. Its risk is what its platform's settings expose, which
+    # its findings say, and its missing owner and sponsor.
+    unreviewed = agent.status == DISCOVERED and agent.on_platform
+    if not unreviewed:
+        factor("Declared risk tier", TIER_POINTS.get(agent.risk_tier, 10), agent.risk_tier)
+    if agent.status == DISCOVERED and not agent.on_platform:
+        # Seen acting outside governance.
         factor("Unmanaged (discovered, not registered)", 30)
     if not agent.owner:
         factor("No owner", 10)

@@ -35,7 +35,7 @@ from agentgov.registry import (
     validation,
 )
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 # action -> (allowed source states, target state)
 TRANSITIONS: dict[str, tuple[frozenset[str], str]] = {
@@ -47,6 +47,8 @@ TRANSITIONS: dict[str, tuple[frozenset[str], str]] = {
     "adopt": (frozenset({DISCOVERED}), PENDING),
 }
 ACTIVATING = {"approve", "unblock"}
+# What an agent's risk counts that an edit can change.
+RISKY_FIELDS = {"owner", "sponsors", "risk_tier", "blueprint", "permissions"}
 
 EDITABLE = (
     "description",
@@ -373,6 +375,7 @@ def update(
     *,
     actor: str,
     version: int | None = None,
+    reason: str | None = None,
 ) -> list[str]:
     start_edit(session, agent, version, f"agent {agent.name}")
     if agent.status == DELETED:
@@ -385,7 +388,8 @@ def update(
             type="agent.updated",
             actor=actor,
             agent=agent,
-            details={"changed": changed},
+            reason=reason,
+            details={"changed": changed, "changes": changes(agent)},
         )
         mark_changed(session, "agents")
     return changed
@@ -510,6 +514,34 @@ def purge_expired(session: Session, settings: Settings) -> list[str]:
     return names
 
 
+def _high_risk(session: Session, agent: Agent, result: risk.RiskResult, *, raise_it: bool) -> None:
+    """The finding that an agent at the gateway is high or critical risk: a threat when what
+    it did adds to its risk, otherwise about how it is set up. It resolves once the risk is
+    down. An agent on another platform has none: its risk is the sum of its own findings,
+    each already raised."""
+    key = f"agent.high_risk:{agent.id}"
+    if agent.on_platform or result.level not in ("high", "critical"):
+        findings.resolve_key(session, key, actor="system:risk")
+        return
+    if not raise_it:
+        return
+    acted = any(f["factor"] in risk.SIGNAL_LABELS.values() for f in result.factors)
+    findings.raise_finding(
+        session,
+        type="agent.high_risk",
+        severity="critical" if result.level == "critical" else "high",
+        subject=agent.id,
+        agent_id=agent.id,
+        category=findings.THREAT if acted else findings.POSTURE,
+        title=f"Agent {agent.name} is {result.level} risk (score {result.score})",
+        description="; ".join(f["factor"] for f in result.factors),
+        remediation="Investigate recent decisions in the ledger; block the agent if the "
+        "activity is not expected."
+        if acted
+        else "Fix what adds to its risk: its open findings, its owner and sponsors, its grants.",
+    )
+
+
 def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.RiskResult:
     """Recompute the agent's risk; publish level changes and apply auto-block."""
     result = risk.evaluate(session, agent, settings.risk_window_hours)
@@ -519,22 +551,7 @@ def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.Ris
     agent.risk_factors = result.factors
     if level_changed:
         mark_changed(session, "agents")
-        if result.level in ("high", "critical"):
-            findings.raise_finding(
-                session,
-                type="agent.high_risk",
-                severity="critical" if result.level == "critical" else "high",
-                subject=agent.id,
-                agent_id=agent.id,
-                category=findings.THREAT,
-                title=f"Agent {agent.name} is {result.level} risk (score {result.score})",
-                description="; ".join(f["factor"] for f in result.factors),
-                remediation="Fix its open findings in the platform it runs on, or block it in "
-                "that platform's admin center."
-                if agent.on_platform
-                else "Investigate recent decisions in the ledger; block the agent if "
-                "the activity is not expected.",
-            )
+    _high_risk(session, agent, result, raise_it=level_changed)
     # Auto-block is a gateway kill switch: it can't stop an agent on another platform.
     threshold = settings.auto_block_risk_score
     if threshold and result.score >= threshold and agent.status == ACTIVE and not agent.on_platform:
@@ -598,6 +615,7 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         "models": agent.models or [],
         "environment": agent.environment,
         "risk_tier": agent.risk_tier,
+        "classification": agent.classification,
         "risk": {
             "score": agent.risk_score,
             "level": agent.risk_level,

@@ -15,13 +15,14 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.config import Settings
-from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, ToolServer
+from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, IntegrationState, ToolServer
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import (
     destinations,
     features,
     findings,
     identity_issuers,
+    people,
     platforms,
     reachability,
     validation,
@@ -29,9 +30,13 @@ from agentgov.registry import (
 
 # Failed deliveries in a row before a destination is a finding.
 FAILING = 3
+# Where the last scan's time is kept (an IntegrationState).
+SCANNED = "posture-scan"
 POSTURE_TYPES = {
     "agent.no_owner",
     "agent.no_sponsor",
+    "agent.owner_left",
+    "agent.sponsor_left",
     "agent.attestation_expired",
     "agent.stale",
     "agent.broad_permissions",
@@ -43,6 +48,43 @@ POSTURE_TYPES = {
     "toolserver.unverified",
     "toolserver.pending_review",
 }
+
+
+def _people_who_left(agent: Agent, gone: list[dict[str, Any]], flag: Any) -> None:
+    """An agent whose owner, or some of its sponsors, have left: its issues no longer reach
+    them, and someone names others."""
+
+    def words(g: dict[str, Any]) -> str:
+        return (
+            f"{g['name']} has left" if g["how"] == "left" else f"{g['name']}'s account is disabled"
+        )
+
+    owner = [g for g in gone if g["role"] == "owner"]
+    if owner:
+        flag(
+            "agent.owner_left",
+            agent.id,
+            "medium",
+            f"The owner of {agent.name} "
+            + ("has left" if owner[0]["how"] == "left" else "has a disabled account"),
+            agent_id=agent.id,
+            description=f"{words(owner[0])}: its issues go to its sponsors and team instead.",
+            remediation="Give it a new owner on its page (Edit), or delete it if nobody needs it.",
+            details={"person": owner[0]["name"], "how": owner[0]["how"]},
+        )
+    sponsors = [g for g in gone if g["role"] == "sponsor"]
+    if sponsors:
+        none_left = len(sponsors) >= len(agent.sponsors or [])
+        flag(
+            "agent.sponsor_left",
+            agent.id,
+            "medium" if none_left else "low",
+            f"{'Every' if none_left else 'A'} sponsor of {agent.name} has left",
+            agent_id=agent.id,
+            description="; ".join(words(g) for g in sponsors) + ".",
+            remediation="Name another sponsor: someone who vouches that it is still needed.",
+            details={"people": [g["name"] for g in sponsors]},
+        )
 
 
 def scan(
@@ -69,6 +111,8 @@ def scan(
         .unique()
         .all()
     )
+    # The people who left (docs/issues.md#people-who-leave), read once.
+    left = people.gone(session)
     for agent in agents:
         managed = agent.status in (ACTIVE, PENDING, BLOCKED)
         # Agents run by another platform (Microsoft 365, Copilot Studio) never call
@@ -103,8 +147,9 @@ def scan(
                 "medium",
                 f"Attestation for {agent.name} expired",
                 agent_id=agent.id,
-                remediation="A sponsor should confirm the agent is still needed "
-                "(POST /v1/agents/{id}/attest) or delete it.",
+                remediation="One of its sponsors confirms it is still needed: Attest, on its "
+                "issue or its page in AgentGov, or `agentgov agents attest NAME`. If it isn't "
+                "needed, an administrator deletes it.",
             )
         stale_cutoff = now - timedelta(days=settings.stale_agent_days)
         last = agent.last_seen_at or agent.created_at
@@ -135,6 +180,8 @@ def scan(
                 agent_id=agent.id,
                 remediation="Assign an IT-approved blueprint.",
             )
+        if managed and left:
+            _people_who_left(agent, people.who_left(session, agent, left), flag)
         if managed and agent.identity_error:
             flag(
                 "agent.identity_error",
@@ -167,6 +214,7 @@ def scan(
                 session, agent, flag, tested=tested.get(agent.id) if tested is not None else None
             )
         agents_svc.refresh_risk(session, settings, agent)
+    platforms.review_summary(session)
 
     for issuer in identity_issuers.list_all(session):
         if issuer.sync_error:
@@ -225,6 +273,11 @@ def scan(
         else:
             findings.mark_unverified(session, types={type_}, reason=why)
     resolved = findings.resolve_absent(session, types=checked, present_keys=present)
+    # When it last ran, for the compliance reports: a check set up but never run shows
+    # nothing working (agentgov.compliance).
+    row = session.get(IntegrationState, SCANNED) or IntegrationState(key=SCANNED, data={})
+    row.data, row.updated_at = {"at": ids.isoformat(now), "agents": len(agents)}, now
+    session.add(row)
     return {
         "checked_agents": len(agents),
         "open_posture_findings": len(present),

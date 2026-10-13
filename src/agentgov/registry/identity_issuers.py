@@ -25,7 +25,7 @@ from agentgov.db import lock, mark_changed
 from agentgov.models import BLOCKED, ISSUER_KINDS, Agent, IdentityIssuer
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
-from agentgov.registry.versions import edited, start_edit
+from agentgov.registry.versions import changes, edited, start_edit
 
 APPROVED = "approved"
 KUBERNETES, SPIFFE, OIDC = ISSUER_KINDS
@@ -174,7 +174,7 @@ def update(
             type="identity_issuer.updated",
             actor=actor,
             resource=f"identity-issuer/{issuer.name}",
-            details={k: getattr(issuer, k) for k in changed},
+            details={**{k: getattr(issuer, k) for k in changed}, "changes": changes(issuer)},
         )
         mark_changed(session, "issuers")
     return changed

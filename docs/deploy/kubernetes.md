@@ -11,8 +11,25 @@ This page covers any cluster; the [Google Cloud](gcp.md), [Azure](azure.md) and
 
 Each release will publish the AgentGov image to `ghcr.io/sreent/agentgov` (amd64 and arm64)
 and the chart to `oci://ghcr.io/sreent/charts/agentgov`; the chart installs its own version of
-the image. Until the first release, or to run a build of your own, build the image and push it
-to a registry your cluster pulls from:
+the image. Both are signed with Sigstore's keyless signing: the signature says that this
+repository's release workflow built them from a version tag, as GitHub vouches for it. Check
+it before installing, with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+(the same for the chart, `ghcr.io/sreent/charts/agentgov:0.1.0`):
+
+```bash
+cosign verify ghcr.io/sreent/agentgov:0.1.0 \
+  --certificate-identity-regexp '^https://github\.com/sreent/ai-agent-governance-platform/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+An admission controller (Sigstore's policy-controller, Kyverno) can check the same before
+any pod runs it. The image's index also holds its SBOM and how it was built (SLSA
+provenance), covered by the signature:
+`docker buildx imagetools inspect ghcr.io/sreent/agentgov:0.1.0 --format '{{ json .SBOM }}'`
+(`.Provenance` for the build).
+
+Until the first release, or to run a build of your own, build the image and push it to a
+registry your cluster pulls from:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
@@ -58,7 +75,7 @@ the chart, and add your values after it:
 |---|---|---|---|
 | (the defaults) | Everything: the control plane, the gateway and its processor, OPA, Presidio, the OpenTelemetry Collector, PostgreSQL and Keycloak | 810m CPU, 3.1 GiB | Governing agents' calls, and the inventory |
 | [`profiles/monitor.yaml`](../../deploy/helm/agentgov/profiles/monitor.yaml) | The same without Presidio, with every control watching rather than stopping ([starting points](../features.md#starting-points)) | 710m, 1.6 GiB | Seeing what the gateway's controls would do before they do it |
-| [`profiles/inventory.yaml`](../../deploy/helm/agentgov/profiles/inventory.yaml) | The control plane, the OpenTelemetry Collector and PostgreSQL: no gateway, processor, OPA, Presidio or Keycloak | 250m, 576 MiB | The agents on your platforms, their findings and issues, management rules and the evidence ledger, with nothing enforced on agents' calls |
+| [`profiles/inventory.yaml`](../../deploy/helm/agentgov/profiles/inventory.yaml) | The control plane, the OpenTelemetry Collector and PostgreSQL: no gateway, processor, OPA, Presidio or Keycloak | 250m, 576 MiB | The agents on your platforms, their issues, management rules and the evidence ledger, with nothing enforced on agents' calls |
 
 ```bash
 helm install agentgov deploy/helm/agentgov -n agentgov --create-namespace --wait \
@@ -74,7 +91,7 @@ sign in with your identity provider (`AGENTGOV_OIDC_ISSUER` and `AGENTGOV_OIDC_C
 `controlPlane.env`, its client's secret as `oidc-client-secret` in the Secret;
 [Microsoft Entra ID](#signing-in-with-microsoft-entra-id)) or an API token. Moving from the
 inventory to the gateway later is an upgrade with the other values: the registry, its
-findings and the ledger stay; turn the gateway's features on in **Features**.
+issues and the ledger stay; turn the gateway's features on in **Features**.
 
 ## Before others rely on it
 
@@ -101,6 +118,7 @@ The defaults are for evaluation. For an installation others use:
   |---|---|
   | `admin-token` | The bootstrap administrator's token |
   | `service-token` | AgentGov's parts calling the control plane |
+  | `signing-secret` | The keys the control plane and the processor sign delegations and ID-JAGs with. Optional: without it, they derive from `service-token`, which OPA and the collector hold too |
   | `keycloak-client-secret` | The control plane's Keycloak client, `agentgov-control-plane` |
   | `oidc-client-secret` | Administrators' single sign-on: the client `agentgov-admin`, or your Entra ID app |
   | `keycloak-admin-password` | The bundled Keycloak's first administrator |
@@ -243,7 +261,7 @@ The chart always sets `AGENTGOV_OIDC_CLIENT_SECRET` from the Secret, so a value 
 | `controlPlane.autoMigrate` | `true` | Migrate the database when the control plane starts |
 | `controlPlane.env`, `controlPlane.envFrom`, `processor.env`, `processor.envFrom` | — | More settings ([configuration](../configuration.md#helm)) |
 | `controlPlane.extraVolumes`, `controlPlane.extraVolumeMounts` | — | More volumes, such as the database's certificate authority |
-| `controlPlane.ledgerArchive.enabled`, `.retentionDays`, `.existingClaim`, `.size`, `.storageClass`, `.accessMode` | off, 365, —, 20Gi, —, `ReadWriteOnce` | Keep the ledger's entries in the database for `retentionDays` (183 at least), then archive them to a volume, the chart's or yours ([evidence](../evidence.md#retention)). The chart's volume is kept when the release is uninstalled. Several replicas need `ReadWriteMany` |
+| `controlPlane.ledgerArchive.enabled`, `.retentionDays`, `.existingClaim`, `.size`, `.storageClass`, `.accessMode` | off, 365, —, 20Gi, —, `ReadWriteOnce` | Keep the ledger's entries in the database for `retentionDays` (183 at least), then archive them to a volume, the chart's or yours ([evidence](../evidence.md#retention)). The ledger's head is kept there too, so that a database restored from an older backup shows ([backing up](../backup.md#a-rewound-ledger)). The chart's volume is kept when the release is uninstalled. Several replicas need `ReadWriteMany` |
 | `internalTLS.enabled` | `true` | Mutual TLS between AgentGov's components, with an authority and certificates the chart makes and keeps ([production](../production.md#mutual-tls-between-components)) |
 | `internalTLS.certManager.enabled`, `.issuerRef`, `.duration` | off, an authority of the release's own, `87600h` | cert-manager issues the components' certificates instead: from an authority it makes for the release, or from your Issuer in the release's namespace, a CA issuer that issues AgentGov's certificates only (not a ClusterIssuer) ([production](../production.md#mutual-tls-between-components)) |
 | `internalTLS.spire.enabled`, `.trustDomain`, `.className`, `.ttl` | off, `example.org`, `spire-mgmt-spire`, SPIRE's | SPIRE issues the components' certificates instead, as X.509-SVIDs through the SPIFFE CSI driver, registered with ClusterSPIFFEIDs, and the components take only the callers they name, by their SPIFFE IDs ([production](../production.md#workload-identities-from-spire)) |
@@ -254,7 +272,7 @@ The chart always sets `AGENTGOV_OIDC_CLIENT_SECRET` from the Secret, so a value 
 | `featurePreset` | — | The features' starting modes, applied once: `monitor` or `inventory` ([starting points](../features.md#starting-points)) |
 | `controlPlane.ingress`, `gateway.ingress`, `keycloak.ingress` | off | Ingresses, at the hosts of the addresses above unless `host` is set |
 | `controlPlane.httpRoute`, `gateway.httpRoute`, `keycloak.httpRoute` | off | Gateway API routes instead, attached to the Gateway in `parentRefs`, with optional `timeouts` |
-| `gateway.enabled` | `true` | The gateway and its governance processor (and Presidio): what enforces on agents' calls. Off, AgentGov keeps the inventory, findings and issues ([profiles](#profiles)) |
+| `gateway.enabled` | `true` | The gateway and its governance processor (and Presidio): what enforces on agents' calls. Off, AgentGov keeps the inventory and its issues ([profiles](#profiles)) |
 | `opa.enabled` | `true` | OPA, which the gateway needs; the control plane asks it about Copilot Studio's tool calls and AuthZEN's questions |
 | `gateway.replicas`, `processor.replicas`, `opa.replicas` | `1` | The decision path; scale them together |
 | `gateway.configInterval` | `5` | Seconds between the gateway's checks for configuration changes |

@@ -1,4 +1,4 @@
-"""Alerts for the security team's chats, from ledger entries: findings from a severity up,
+"""Alerts for the security team's chats, from ledger entries: issues from a severity up,
 approval requests, and kill switches (agents, tool servers, model providers and identity
 issuers blocked; agents deleted)."""
 
@@ -40,8 +40,8 @@ def _facts(*pairs: tuple[str, Any]) -> list[tuple[str, str]]:
 def alert(
     entry: LedgerEntry, *, events: list[str], min_severity: str, public_url: str
 ) -> Alert | None:
-    """The alert a chat gets for this entry, or None. ``min_severity`` applies to findings:
-    approval requests and kill switches always go to the chats that take them."""
+    """The alert a chat gets for this entry, or None. ``min_severity`` applies to issues:
+    approval requests and blocks always go to the chats that take them."""
     details = entry.details or {}
     ui = f"{public_url.rstrip('/')}/ui/#"
     if entry.type in ("finding.raised", "finding.reopened") and "findings" in events:
@@ -53,13 +53,13 @@ def alert(
         reopened = entry.type == "finding.reopened"
         subject = entry.resource if entry.resource != entry.agent_id else None
         return Alert(
-            title=f"{severity.capitalize()} finding{' (again)' if reopened else ''}: "
+            title=f"{severity.capitalize()}-severity issue{' (again)' if reopened else ''}: "
             f"{entry.reason or details.get('type') or 'finding'}",
             text=str(details.get("description") or entry.reason or ""),
             severity=severity,
             facts=_facts(
                 ("Agent", entry.agent_name),
-                ("Finding", details.get("type")),
+                ("Issue type", details.get("type")),
                 ("Subject", subject),
                 ("What to do", details.get("remediation")),
             ),
@@ -67,7 +67,7 @@ def alert(
             link=f"{ui}/findings/{details['finding_id']}"
             if details.get("finding_id")
             else f"{ui}/findings",
-            link_label="Open the finding",
+            link_label="Open the issue",
         )
     if entry.type == "approval.requested" and "approvals" in events:
         person = entry.on_behalf_of
