@@ -38,6 +38,7 @@ from agentgov.registry import (
     findings,
     issues,
     manifests,
+    start,
 )
 from agentgov.registry.errors import ValidationError
 from agentgov.runtime import JOB_WAIT_SECONDS
@@ -342,6 +343,29 @@ def export_ledger(request: Request, _: Principal = Depends(read)) -> StreamingRe
 
 
 # --------------------------------------------------------------- overview & map
+
+
+@router.get("/start", tags=["overview"])
+def start_checklist(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+    """Where to start: where the organisation said its agents are, and each step to a first
+    useful day, done or not (docs/administration.md#start-here)."""
+    with _rt(request).db.session() as s:
+        return start.checklist(s)
+
+
+@router.put("/start", tags=["overview"])
+def start_answer(
+    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
+) -> dict[str, Any]:
+    """Say where your agents are, ``{"places": ["copilot-studio", "gateway"]}``: what reads
+    them is turned on and the rest off. Or hide the checklist, ``{"hidden": true}``."""
+    rt = _rt(request)
+    with rt.db.session() as s:
+        if set(body) == {"hidden"}:
+            if not isinstance(body["hidden"], bool):
+                raise ValidationError("hidden is true or false")
+            return start.hide(s, body["hidden"], actor=principal.actor)
+        return start.answer(s, rt.settings, body, actor=principal.actor)
 
 
 @router.get("/overview", tags=["overview"])

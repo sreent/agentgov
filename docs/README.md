@@ -2,7 +2,8 @@
 
 ## Get started
 
-* [README](../README.md): what AgentGov is, how it works, and the quickstart
+* [README](../README.md): what AgentGov is, how it works, and where to start
+* [The demo](demo.md): the whole stack, and a demo agent that goes through every control
 * [Run AgentGov on your machine](deploy/local.md): Docker Compose, Kubernetes with kind, or
   the control plane alone
 * [Requirements](requirements.md): versions, resources, network, and accounts for the

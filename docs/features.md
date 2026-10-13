@@ -202,6 +202,7 @@ in a row, or three minutes, whichever is longer, is out of touch and doesn't cou
 | `developer-sign-in`, `identity-assertions`, `approvals-by-person` | Keycloak's keys unreachable from the control plane: limited |
 | The Microsoft connections | not set up, or the app lacks the permission: inactive; the last sync failed: limited |
 | The other platforms | not configured: inactive; the last sync didn't read everything: limited |
+| `issues` | no catch-all team: limited, since issues nobody else takes reach no one |
 | `security-operations` | no destinations: inactive |
 
 A mode a feature can't use yet, for want of a setting, makes it inactive too, and says

@@ -53,9 +53,10 @@ checks](instructions.md) as every agent's.
 ## Checks
 
 AgentGov raises a finding for each risky setting it finds. A finding resolves itself once two
-syncs in a row find the setting fixed. Open findings count towards the agent's risk score, so
-a risky agent also gets a high-risk alert; dismissing one (an accepted risk) takes it out of
-the score.
+syncs in a row find the setting fixed. Open findings count towards the agent's risk score;
+accepting a finding's risk, or dismissing one that is wrong, takes it out of the score. How
+many agents are left to review is one issue per platform, `platform.agents_to_review`, as
+on [Copilot Studio](platforms.md#checks).
 
 | Finding | Risk points | Raised when |
 |---|---|---|

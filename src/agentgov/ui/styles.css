@@ -913,3 +913,10 @@ details.disclosure > .kv-pre, details.disclosure > div { margin-top: 10px; }
 /* Management rules: a rule's preview lists the agents it matches, scrolling in its dialog. */
 .rule-preview .access-list { max-height: 320px; overflow: auto; }
 .rule-preview-box:empty { display: none; }
+
+/* Start here: the steps to a first useful day */
+.start-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.start-step { display: grid; grid-template-columns: 20px 1fr; gap: 8px; align-items: start; }
+.start-step[data-done="true"] strong { color: var(--ink-2, inherit); font-weight: 500; }
+.start-step[aria-current="step"] strong { color: var(--ink); }
+.start-how { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; }

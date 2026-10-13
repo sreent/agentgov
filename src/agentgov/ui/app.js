@@ -1231,18 +1231,84 @@ function unmanagedNote(all, onPlatforms) {
 }
 
 async function renderOverview() {
-  const [ov, info, features] = await Promise.all([api('v1/overview'), getInfo(), api('v1/features').then((v) => v.features).catch(() => null)]);
+  const [ov, info, features, start] = await Promise.all([
+    api('v1/overview'), getInfo(), api('v1/features').then((v) => v.features).catch(() => null),
+    api('v1/start').catch(() => null),
+  ]);
   updateBadges({ pendingApprovals: ov.approvals?.pending ?? 0, findings: ov.findings });
+  // The gateway's panels once agents may call through it, or have: until then they would
+  // show nothing but zeros.
+  const gateway = (features || []).some((f) => f.key === 'mcp-gateway' && f.mode !== 'off')
+    || (ov.activity || []).some((d) => d.tool_calls || d.model_calls) || (ov.recent_blocks || []).length > 0;
   return h('div', { class: 'page' },
     pageHead({
       title: 'Overview',
-      sub: 'Agent inventory, policy decisions and evidence for this control plane.',
+      sub: gateway ? 'Agent inventory, policy decisions and evidence for this control plane.' : 'Your agents, what to look at, and the evidence for this control plane.',
       actions: [ledgerBadge(ov.ledger), refreshButton()],
     }),
+    startCard(start),
     kpiTiles(ov),
-    h('div', { class: 'grid-2 grid-2--even' }, activityCard(ov.activity || []), decisionsCard(ov.decisions_24h || {})),
-    h('div', { class: 'grid-2 grid-2--even' }, recentBlocksCard(ov.recent_blocks || []), riskyCard(ov.top_risky || [])),
-    controlPlaneCard(ov, info, features));
+    gateway ? h('div', { class: 'grid-2 grid-2--even' }, activityCard(ov.activity || []), decisionsCard(ov.decisions_24h || {})) : null,
+    gateway ? h('div', { class: 'grid-2 grid-2--even' }, recentBlocksCard(ov.recent_blocks || []), riskyCard(ov.top_risky || []))
+      : riskyCard(ov.top_risky || []),
+    controlPlaneCard(ov, info, features, gateway));
+}
+
+// Where to look for each place's agents, from the checklist.
+const START_LINKS = { gateway: '#/agents' };
+
+// Until it is done or hidden: where the organisation's agents are, then each step to a
+// first useful day (docs/administration.md#start-here).
+function startCard(st) {
+  if (!st || st.hidden || st.done) return null;
+  const admin = can('admin');
+  const choose = guarded(async () => {
+    const done = await ask({
+      title: 'Where are your agents?',
+      text: 'AgentGov turns on what reads these places and turns off what reads the others. Change it here any time.',
+      iconName: 'platforms', confirm: 'Save',
+      fields: st.choices.map((c) => ({ id: c.place, type: 'checkbox', label: c.name, value: st.places.includes(c.place) })),
+      submit: (v) => api('v1/start', { method: 'PUT', body: { places: st.choices.map((c) => c.place).filter((p) => v[p]) } }),
+    });
+    if (done) await refresh();
+  });
+  const hide = guarded(async () => {
+    await api('v1/start', { method: 'PUT', body: { hidden: true } });
+    await refresh();
+  });
+  if (!st.places.length) {
+    return card({
+      title: 'Start here', cls: 'start-card',
+      body: h('div', { class: 'stack' },
+        h('p', {}, 'Tell AgentGov where your agents are: Copilot Studio, Microsoft 365, AWS, Google Cloud, Salesforce, Databricks, Microsoft Foundry, or your own agents through its gateway. It turns on only what reads those places.'),
+        admin ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn--primary', onclick: choose }, 'Where are your agents?'))
+          : h('p', { class: 'muted' }, 'An administrator answers this.')),
+    });
+  }
+  const links = {
+    team: '#/findings/teams', review: '#/agents?status=discovered', owners: '#/agents?owner=none',
+  };
+  const next = st.steps.find((x) => !x.done);
+  const rows = st.steps.map((x) => {
+    const how = x.key === 'agents' && !x.done ? h('ul', { class: 'start-how' }, (x.how || []).map((w) =>
+      h('li', {}, h('a', { href: START_LINKS[w.place] || '#/platforms' }, w.name), `: ${w.how}`))) : null;
+    const target = links[x.key];
+    return h('li', { class: 'start-step', 'data-done': String(x.done), 'aria-current': x === next ? 'step' : null },
+      icon(x.done ? 'check-circle' : x === next ? 'arrow' : 'minus', { cls: x.done ? 't-good' : x === next ? null : 'muted' }),
+      h('div', {},
+        h('strong', {}, !x.done && target ? h('a', { href: target }, x.title) : x.title),
+        x.detail ? h('span', { class: 'muted' }, ` · ${x.detail}`) : null,
+        how));
+  });
+  return card({
+    title: 'Start here', cls: 'start-card',
+    sub: `${st.steps.filter((x) => x.done).length} of ${st.steps.length} done`,
+    actions: admin ? [
+      h('button', { type: 'button', class: 'btn btn--sm btn--ghost', onclick: choose }, 'Change where'),
+      h('button', { type: 'button', class: 'btn btn--sm btn--ghost', onclick: hide }, 'Hide'),
+    ] : null,
+    body: h('ol', { class: 'start-steps' }, rows),
+  });
 }
 
 function ledgerBadge(lg) {
@@ -1283,7 +1349,8 @@ function kpiTiles(ov) {
     {
       label: 'Unmanaged agents', value: agents.unmanaged, href: '#/agents?status=discovered',
       note: unmanagedNote(agents.unmanaged || 0, agents.on_platforms || 0),
-      tone: agents.unmanaged ? 'serious' : null,
+      // Agents seen acting outside governance are serious; found on a platform, to review.
+      tone: agents.unmanaged > (agents.on_platforms || 0) ? 'serious' : agents.unmanaged ? 'warning' : null,
     },
     {
       label: 'Agents at risk', value: agents.at_risk, href: '#/agents?risk=elevated',
@@ -1562,7 +1629,7 @@ function riskyCard(list) {
   });
 }
 
-function controlPlaneCard(ov, info, features) {
+function controlPlaneCard(ov, info, features, gateway = true) {
   const ts = ov.toolservers || {};
   const cell = (title, value, note, href) => h('div', {},
     h('span', { class: 'cp-title' }, title),
@@ -1573,18 +1640,20 @@ function controlPlaneCard(ov, info, features) {
       h('h2', { id: 'cp-title' }, 'Control plane'),
       h('p', { class: 'card-sub' }, 'Where policy is enforced and evidence is kept'))),
     h('div', { class: 'cp-grid', style: 'margin-top:12px; border-top:1px solid var(--line)' },
-      cell('Tool servers', plural(ts.total || 0, 'server'),
-        `${plural(ts.tools || 0, 'tool')} in catalogs · ${fmt(ts.pending)} pending · ${fmt(ts.blocked)} blocked`, '#/toolservers'),
+      // Tool servers and the gateway, once agents may call through it.
+      gateway ? cell('Tool servers', plural(ts.total || 0, 'server'),
+        `${plural(ts.tools || 0, 'tool')} in catalogs · ${fmt(ts.pending)} pending · ${fmt(ts.blocked)} blocked`, '#/toolservers') : null,
       cell('Policy bundle', ov.opa?.bundle_revision ? h('span', { class: 'hash', title: `Bundle revision ${ov.opa.bundle_revision}` }, `rev ${String(ov.opa.bundle_revision).slice(0, 12)}`) : 'Not built',
         opaNote(ov.opa)),
       cell('Replicas', replicasValue(ov.replicas), replicasNote(ov.replicas)),
       cell('Evidence ledger', ov.ledger ? plural(ov.ledger.checked, 'entry', 'entries') : 'Not verified',
         ov.ledger?.head ? ['Head ', h('span', { class: 'hash', title: ov.ledger.head }, shortHash(ov.ledger.head))] : null, '#/ledger'),
-      cell('Gateway', info?.gateway_url ? copyable(info.gateway_url, 'gateway URL') : 'Not configured',
+      gateway ? cell('Gateway', info?.gateway_url ? copyable(info.gateway_url, 'gateway URL') : 'Not configured',
         features ? [
           features.find((f) => f.key === 'unknown-callers')?.mode === 'monitor' ? 'Unknown callers let through' : 'Unknown callers refused',
           ' · ', h('a', { href: '#/features' }, featureSummary(features)),
-        ] : null)));
+        ] : null)
+        : cell('Features', features ? h('a', { href: '#/features' }, featureSummary(features)) : 'Unknown', 'No gateway: AgentGov reads your platforms')));
 }
 
 // The control plane's replicas, and the one that runs the scheduled work.

@@ -168,6 +168,7 @@ def scan(
                 session, agent, flag, tested=tested.get(agent.id) if tested is not None else None
             )
         agents_svc.refresh_risk(session, settings, agent)
+    platforms.review_summary(session)
 
     for issuer in identity_issuers.list_all(session):
         if issuer.sync_error:

@@ -438,6 +438,28 @@ class TestRiskAndPosture:
             assert agent.status == BLOCKED
             assert "auto-blocked" in agent.status_reason
 
+    def test_a_high_risk_finding_says_why_and_resolves_once_the_risk_is_down(
+        self, rt, settings
+    ) -> None:
+        """A threat when what the agent did adds to its risk; otherwise about how it is set
+        up. Either way it resolves when the risk is back below high."""
+        from agentgov.models import RiskSignal
+
+        with rt.db.session() as s:
+            _blueprint(s)
+            agent = _agent(s, settings)
+            for _ in range(2):
+                risk.add_signal(s, agent.id, "secret_detected")
+                risk.add_signal(s, agent.id, "prompt_injection")
+            s.flush()
+            assert agents.refresh_risk(s, settings, agent).level in ("high", "critical")
+            high = s.query(findings.Finding).filter_by(key=f"agent.high_risk:{agent.id}").one()
+            assert (high.status, high.category) == ("open", findings.THREAT)
+            s.query(RiskSignal).filter_by(agent_id=agent.id).delete()
+            s.flush()
+            assert agents.refresh_risk(s, settings, agent).level not in ("high", "critical")
+            assert (high.status, high.resolved_by) == ("resolved", "system:risk")
+
     def test_levels(self) -> None:
         assert [risk.level_for(x) for x in (0, 24, 25, 49, 50, 74, 75, 100)] == [
             "low",

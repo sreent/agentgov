@@ -78,7 +78,10 @@ resolves itself when fixed instructions arrive. If it is a false positive, dismi
 it stays dismissed until different problems appear.
 
 An open finding adds to the agent's risk score: 40 points if it is critical, 25 if
-high and 10 if medium. Scores of 50 and above raise an `agent.high_risk` finding. While
+high and 10 if medium. For an agent at the gateway, scores of 50 and above raise an
+`agent.high_risk` finding, a threat when what it did adds to its risk, which resolves once
+its risk is below 50 again; an agent on another platform has none, its own findings saying
+what adds to its risk. While
 `risk-based-access` is enforced (the default), the gateway refuses tool calls, model calls
 and calls between agents from agents at critical risk (75 points or more).
 

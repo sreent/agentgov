@@ -55,6 +55,33 @@ logout tokens (Keycloak: the `agentgov-admin` client's **Backchannel logout URL*
 to end at expiry (`AGENTGOV_SESSION_HOURS`), or when you sign them out on the **Access**
 page.
 
+## Start here
+
+A new AgentGov starts with a question on its **Overview**: where are your agents? Copilot
+Studio, Microsoft 365 Copilot agents, Microsoft Entra Agent ID, AWS, Google Cloud,
+Salesforce, Databricks, Microsoft Foundry, or your own agents, through AgentGov's gateway.
+AgentGov turns on what reads the places chosen and turns off what reads the others (but
+what the deployment pins), and starts from the [inventory starting
+point](features.md#starting-points), or from the monitor one when agents will call through
+its gateway. Choosing again later changes them again.
+
+A checklist then leads to a first useful day, each step worked out from the registry:
+
+1. **Say where your agents are**, as above.
+2. **Find your agents**: how, for each place chosen, such as importing Copilot Studio's
+   inventory ([platforms](platforms.md#copilot-studio-inventory)).
+3. **Name a catch-all team**, for the issues no agent's owner, sponsor or team takes
+   ([issues](issues.md)). Until there is one, the `issues` feature says it is limited.
+4. **Review the agents found**: adopt the ones you keep, and block or delete the others
+   where they run.
+5. **Give every agent an owner**.
+
+It stays on the Overview until every step is done, or an administrator hides it. With the
+CLI, `agentgov start` shows it, `agentgov start --place copilot-studio --place aws`
+answers, and `--hide` hides it; with the API, `GET` and `PUT /v1/start`
+(`{"places": [...]}` or `{"hidden": true}`). The answer is in the ledger
+(`start.answered`), with the starting point and the features it changed.
+
 ## Roles
 
 | Role | Can |

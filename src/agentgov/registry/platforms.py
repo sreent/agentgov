@@ -166,19 +166,8 @@ def upsert(
             agent=agent,
             details={"platform": SOURCES[source], "external_id": external_id, "name": name},
         )
-        findings.raise_finding(
-            session,
-            type="agent.unmanaged",
-            severity="medium",
-            subject=agent.id,
-            agent_id=agent.id,
-            title=f"{SOURCES[source]} agent to review: {name}",
-            description=f"This agent exists in {SOURCES[source]} but has no owner, sponsors or "
-            "periodic review in AgentGov.",
-            remediation="Adopt it to give it an owner, sponsors and attestation, or dismiss this "
-            f"finding. To stop it from being used, block it in {SOURCES[source]}'s admin center.",
-            details={"platform": SOURCES[source]},
-        )
+        # Not a finding of its own: one per platform says how many are left to review
+        # (review_summary), so that an import of 300 agents raises one issue, not 300.
         mark_changed(session, "agents")
     else:
         agent.external_ids = {**(agent.external_ids or {}), **external_ids}
@@ -817,13 +806,58 @@ def sync_failed(session: Session, source: str, message: str, *, actor: str | Non
 
 
 def refresh_risk(session: Session, settings: Settings) -> None:
-    """Recompute platform agents' risk now rather than at the next posture scan."""
+    """Recompute platform agents' risk now rather than at the next posture scan, and how
+    many of them are left to review."""
     for agent in session.scalars(
         select(Agent)
         .where(Agent.source.like("platform:%"), Agent.status != DELETED)
         .order_by(Agent.id)  # in the posture scan's order (registry/posture)
     ).unique():
         agents_svc.refresh_risk(session, settings, agent)
+    review_summary(session)
+
+
+TO_REVIEW = "platform.agents_to_review"
+# Agents named in the summary's description, at most.
+NAMED = 5
+
+
+def review_summary(session: Session) -> None:
+    """One issue per platform with agents found there and not reviewed yet: how many, and
+    a few of their names. It goes to the catch-all team, and resolves once none is left.
+    (Agents found on platforms each had a finding of their own before: those resolve.)"""
+    left: dict[str, list[str]] = defaultdict(list)
+    platform_agents = []
+    for agent in session.scalars(
+        select(Agent).where(Agent.source.like("platform:%"), Agent.status != DELETED)
+    ).unique():
+        platform_agents.append(agent.id)
+        source = (agent.source or "").removeprefix("platform:")
+        if agent.status == DISCOVERED and source in SOURCES:
+            left[source].append(agent.name)
+    for agent_id in platform_agents:
+        findings.resolve_key(session, f"agent.unmanaged:{agent_id}", actor="system:platforms")
+    for source, label in SOURCES.items():
+        names = sorted(left.get(source, []), key=str.lower)
+        key = f"{TO_REVIEW}:platform:{source}"
+        if not names:
+            findings.resolve_key(session, key, actor="system:platforms")
+            continue
+        shown = ", ".join(names[:NAMED])
+        if len(names) > NAMED:
+            shown += f" and {len(names) - NAMED} more"
+        findings.raise_finding(
+            session,
+            type=TO_REVIEW,
+            severity="medium",
+            subject=f"platform:{source}",
+            title=f"{len(names)} {label} agent{'' if len(names) == 1 else 's'} to review",
+            description=f"Found in {label}, with no owner, sponsors or review in AgentGov yet: "
+            f"{shown}.",
+            remediation="Adopt the agents you keep, giving each an owner and sponsors (Agents, "
+            f"those not reviewed yet), and block or delete the others in {label}.",
+            details={"platform": label, "count": len(names)},
+        )
 
 
 # ------------------------------------------------- acting in Microsoft's platforms

@@ -36,10 +36,13 @@ realm. `agentgov apply` registers the examples: blueprints, the demo CRM tool se
 model provider, agents, a policy, an identity issuer, the security team's destinations, and
 the hand-off to them at `inform`.
 The demo then walks through each control with a real MCP client (the
-[README](../../README.md#quickstart) lists the steps).
+[demo](../demo.md) lists the steps).
 
-For anything beyond evaluation on your own machine, copy `deploy/compose/.env.example` to
-`deploy/compose/.env` first and replace every value in it: the defaults are known to all.
+The stack listens on this machine only: its defaults, the tokens and the demo users'
+password, are known to everyone. For anything beyond evaluation on your own machine, copy
+`deploy/compose/.env.example` to `deploy/compose/.env` first and replace every value in it;
+then, to take connections from other machines, set `AGENTGOV_LISTEN_ADDRESS=0.0.0.0` there
+(plain HTTP: put HTTPS in front of it).
 
 ### Endpoints
 

@@ -147,8 +147,8 @@ class Settings:
     # Seconds between rounds of routing issues, escalating them and sending what is due.
     issues_interval_seconds: int = 60
     # Issues below this severity reach people in AgentGov only, without an email or a chat
-    # message. info: every issue is sent.
-    issues_notify_severity: str = "info"
+    # message: by default, low and info ones wait there. info: every issue is sent.
+    issues_notify_severity: str = "medium"
     # What a platform's first sync finds reaches people in AgentGov only, without an email
     # or a chat message: what was there before AgentGov looked doesn't flood inboxes. Found
     # again after it is resolved, it is sent as any other.

@@ -834,6 +834,34 @@ def export() -> None:
 
 
 @app.command()
+def start(
+    place: list[str] = typer.Option(
+        [],
+        "--place",
+        help="Where your agents are (repeat it): copilot-studio, microsoft-365, entra-agent-id, "
+        "aws, google-cloud, salesforce, databricks, microsoft-foundry, gateway.",
+    ),
+    hide: bool | None = typer.Option(None, "--hide/--show", help="Hide the checklist, or show it."),
+) -> None:
+    """Where to start: say where your agents are, then follow the checklist."""
+    if place:
+        result = _call("PUT", "/v1/start", json={"places": place})
+    elif hide is not None:
+        result = _call("PUT", "/v1/start", json={"hidden": hide})
+    else:
+        result = _call("GET", "/v1/start")
+    for step in result["steps"]:
+        mark = "x" if step["done"] else " "
+        detail = f": {step['detail']}" if step.get("detail") else ""
+        typer.echo(f"[{mark}] {step['title']}{detail}")
+        if step["key"] == "agents" and not step["done"]:
+            for how in step.get("how") or []:
+                typer.echo(f"      {how['name']}: {how['how']}")
+    if not result["places"]:
+        typer.echo("\nSay where your agents are: agentgov start --place copilot-studio ...")
+
+
+@app.command()
 def overview() -> None:
     """Show the governance overview."""
     _print(_call("GET", "/v1/overview"))

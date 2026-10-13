@@ -87,6 +87,14 @@ def open_findings(client: TestClient, name: str) -> dict[str, dict[str, Any]]:
     return {f["type"]: f for f in items if f.get("agent_id") == me}
 
 
+def to_review(client: TestClient, source: str) -> dict[str, Any]:
+    """The issue that says how many of a platform's agents are left to review."""
+    rows = client.get(
+        "/v1/findings", params={"type": "platform.agents_to_review"}, headers=ADMIN
+    ).json()
+    return next(f for f in rows if f["subject"] == f"platform:{source}")
+
+
 def test_agents_become_discovered_with_their_platforms_view(client, connector) -> None:
     connector.next = Inventory(
         found=[found("billing-helper", "111122223333/us-east-1", NO_GUARDRAIL)],
@@ -101,7 +109,9 @@ def test_agents_become_discovered_with_their_platforms_view(client, connector) -
     assert view["kind"] == "Amazon Bedrock agent" and view["in_inventory"] is True
     assert view["facts"] == [{"label": "Region", "value": "us-east-1"}]
     found_types = set(open_findings(client, "billing-helper"))
-    assert {"agent.unmanaged", "platform.no_guardrail"} <= found_types
+    assert "platform.no_guardrail" in found_types
+    # That it is left to review is one issue for all the platform's agents.
+    assert to_review(client, "aws")["title"] == "1 AWS agent to review"
     factors = {f["factor"] for f in billing["risk"]["factors"]}
     assert "No guardrails on what it says" in factors
     # Syncing again updates rather than duplicates.
@@ -216,8 +226,8 @@ def test_what_the_first_sync_finds_reaches_no_inbox(client, connector, settings)
     connector.next = Inventory(found=[found("billing-helper", part, NO_GUARDRAIL)], read={part})
     sync(client)
     found_first = open_findings(client, "billing-helper")
-    # All it found about the agents it read: theirs, and AgentGov's own about them.
-    assert {"platform.no_guardrail", "agent.unmanaged", "agent.high_risk"} <= set(found_first)
+    # All it found about the agents it read.
+    assert set(found_first) == {"platform.no_guardrail"}
     assert all(f["details"][findings.BASELINE] is True for f in found_first.values())
     first = found_first["platform.no_guardrail"]
     connector.next = Inventory(
@@ -226,12 +236,14 @@ def test_what_the_first_sync_finds_reaches_no_inbox(client, connector, settings)
     sync(client)
     later = open_findings(client, "billing-helper")["platform.plain_secret"]
     assert findings.BASELINE not in later["details"]
+    summary = to_review(client, "aws")
     with rt.db.session() as s:
         issues.route(s, mail)
         sent = {n.finding_id for n in s.scalars(select(Notification))}
-        # Both are with the default team; only the new one is in its inbox.
+        # Both are with the default team; only the new one is in its inbox, with the one
+        # issue that says how many of the platform's agents are left to review.
         assert findings.get(s, first["id"]).level == "team"
-        assert sent == {later["id"]}
+        assert sent == {later["id"], summary["id"]}
     # Gone, then back: news like any other.
     with rt.db.session() as s:
         findings.set_status(s, first["id"], "resolved", "admin:test")

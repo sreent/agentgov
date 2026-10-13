@@ -131,10 +131,17 @@ def update_agent(
     body: dict[str, Any] = Body(...),
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+    rt = _rt(request)
+    with rt.db.session() as s:
         agent = agents.get(s, ref)
-        agents.update(s, agent, body, actor=principal.actor, version=if_match(request))
+        changed = agents.update(s, agent, body, actor=principal.actor, version=if_match(request))
+        if set(changed) & RISKY_FIELDS:
+            agents.refresh_risk(s, rt.settings, agent)
         return agents.to_dict(agent)
+
+
+# What an agent's risk counts that an edit can change.
+RISKY_FIELDS = {"owner", "sponsors", "risk_tier", "blueprint", "permissions"}
 
 
 def _sponsors(agent: Any, principal: Principal) -> bool:
@@ -245,6 +252,11 @@ def agent_lifecycle(
         agents.transition(
             s, rt.settings, agent, action, actor=principal.actor, reason=body.get("reason")
         )
+        if action in ("adopt", "approve", "restore"):
+            # Its owner, sponsors and status count towards its risk: shown at once.
+            agents.refresh_risk(s, rt.settings, agent)
+            if agent.on_platform:
+                platforms.review_summary(s)
         return agents.to_dict(agent)
 
 

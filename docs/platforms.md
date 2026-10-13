@@ -133,8 +133,9 @@ some environments.
 
 AgentGov checks every imported Copilot Studio agent and raises a finding for each
 problem it finds. A finding resolves itself when a later import shows the problem fixed.
-Open findings also count towards the agent's risk score, so a risky agent also gets a
-high-risk alert. Dismissing a finding (an accepted risk) takes it out of the score.
+Open findings count towards the agent's risk score: an agent's risk is what its settings
+expose, and 10 points each for a missing owner and sponsor. Accepting a finding's risk, or
+dismissing one that is wrong, takes it out of the score.
 
 | Finding | Severity | Raised when the agent | Risk points |
 |---|---|---|---|
@@ -143,9 +144,11 @@ high-risk alert. Dismissing a finding (an accepted risk) takes it out of the sco
 | `platform.maker_credentials` | Medium | has tools that use its maker's connection, so every user reaches data with the maker's access | 10 |
 | `platform.shared_with_everyone` | Medium | is shared with the whole organisation | 10 |
 
-An agent that is simply waiting for review scores 15 points for it. That is less than a
-shadow agent seen calling tools (30 points), because the platform already knows about
-it.
+An agent waiting for review isn't riskier for it: that is its status, and nobody has
+declared its risk tier yet. A shadow agent seen calling tools outside governance scores 30
+points. How many of a platform's agents are left to review is one issue,
+`platform.agents_to_review`, for the catch-all team, not one per agent: it says how many
+and names a few, keeps count as they are adopted, and resolves when none is left.
 
 ## Connector allowlist
 

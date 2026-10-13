@@ -157,17 +157,20 @@ them in `controlPlane.env`, with the password from a secret
 
 Not every issue needs to reach an inbox:
 
-* **A severity floor.** `AGENTGOV_ISSUES_NOTIFY_SEVERITY` (`info`: every issue is sent)
-  sends emails and chat messages for issues of that severity and above only. Those below
-  still go to their people, one step at a time, and are listed for them in AgentGov; their
-  `finding.assigned` and `finding.escalated` entries say why nothing was sent (`quiet`).
+* **A severity floor.** `AGENTGOV_ISSUES_NOTIFY_SEVERITY` (`medium` by default; `info`
+  sends every issue) sends emails and chat messages for issues of that severity and above
+  only. Those below still go to their people, one step at a time, and are listed for them
+  in AgentGov; their `finding.assigned` and `finding.escalated` entries say why nothing was
+  sent (`quiet`).
 * **A quiet first sync.** When AgentGov first reads a platform (AWS, Copilot Studio,
   Microsoft 365, ...), what it finds about the platform's agents was there before anyone
-  looked: their risky settings, and AgentGov's own findings about them, such as unmanaged
-  or high risk. With `AGENTGOV_ISSUES_QUIET_FIRST_SYNC` (true by default), those go to their
-  people in AgentGov without an email or a chat message, so that connecting a platform
-  doesn't flood inboxes; the finding's `details.baseline` says so. What later syncs find is
-  sent as usual, and so is a baseline finding that comes back after it was resolved.
+  looked: their risky settings, and AgentGov's own findings about them. With
+  `AGENTGOV_ISSUES_QUIET_FIRST_SYNC` (true by default), those go to their people in
+  AgentGov without an email or a chat message, so that connecting a platform doesn't flood
+  inboxes; the finding's `details.baseline` says so. One message does go: the issue that
+  says how many of the platform's agents are left to review (`platform.agents_to_review`),
+  to the catch-all team. What later syncs find is sent as usual, and so is a baseline
+  finding that comes back after it was resolved.
 * **Types turned off** reach no one at all ([below](#kinds-of-findings)).
 
 ## Kinds of findings
