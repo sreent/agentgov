@@ -27,7 +27,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Boolean, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agentgov.db import Base, UTCDateTime
@@ -468,6 +479,24 @@ class AdminSession(Base):
     provider_session: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     created_at: Mapped[datetime] = _created()
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+
+
+class RoleGrant(Base):
+    """An AgentGov role given to a person in AgentGov rather than by the identity provider:
+    for providers whose tokens carry no groups (Google's), and the first administrators.
+    It applies when they sign in with this email address, which the provider vouches for.
+    """
+
+    __tablename__ = "role_grants"
+    __table_args__ = (UniqueConstraint("email", "role"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # Lowercase.
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    role: Mapped[str] = mapped_column(String(32))
+    granted_by: Mapped[str] = mapped_column(String(255))
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = _created()
 
 
 class LoginState(Base):

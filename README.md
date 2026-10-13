@@ -116,9 +116,10 @@ flowchart LR
    control plane uses them to record activity and to discover agents that were never
    registered. The gateway's access logs give each model call's tokens, which the
    control plane counts against the agent's daily budget.
-6. People sign in to the admin UI with single sign-on through the same Keycloak, and
-   their roles decide whether they administer agents, approve requests, work in security
-   operations or only audit.
+6. People sign in to the admin UI with single sign-on, through the same Keycloak or
+   your own identity provider (Microsoft Entra ID, Okta, Google or any OpenID Connect
+   provider), and their roles decide whether they administer agents, approve requests,
+   work in security operations or only audit.
 
 [Architecture](docs/architecture.md) covers the design in detail: sequence diagrams,
 trust boundaries, failure modes and scaling.

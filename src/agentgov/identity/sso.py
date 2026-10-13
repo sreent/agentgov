@@ -8,6 +8,12 @@ cookie with a random session token (the backend-for-frontend pattern from
 OAuth 2.0 for Browser-Based Applications). Provider roles such as
 ``agentgov-approver`` map to AgentGov roles.
 
+Any OpenID Connect provider can sign people in: Keycloak's and Microsoft Entra ID's
+endpoints are known, and other providers' are read from their discovery document
+(OpenID Connect Discovery 1.0). Roles come from a claim of the provider's tokens (group
+names with the ``agentgov-`` prefix, or values mapped to roles), and from the roles given
+to people in AgentGov itself (agentgov.registry.access).
+
 When the provider ends a person's session (they sign out there, from another app, or an
 administrator ends it), it can tell the control plane at ``/auth/backchannel-logout``
 with a logout token (OpenID Connect Back-Channel Logout 1.0), and their AgentGov sessions
@@ -19,13 +25,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import jwt
@@ -34,7 +42,9 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.models import AdminSession, CliLogin, LoginState
+from agentgov.models import AdminSession, CliLogin, LoginState, RoleGrant
+
+log = logging.getLogger(__name__)
 
 # AgentGov roles a person can hold through single sign-on, most privileged first.
 SSO_ROLES = ("admin", "approver", "secops", "auditor", "registrar")
@@ -51,6 +61,17 @@ SIGNING_ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES2
 # What makes a token a logout token (OpenID Connect Back-Channel Logout 1.0).
 LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout"
 JWKS_REFETCH_SECONDS = 30
+# Where a provider publishes its endpoints (OpenID Connect Discovery 1.0), under its issuer,
+# and how long AgentGov uses what it read there before reading it again.
+DISCOVERY_PATH = "/.well-known/openid-configuration"
+DISCOVERY_SECONDS = 3600
+# While the provider can't be read, how long the last document read is used before trying
+# again (rather than at every step of every sign-in).
+DISCOVERY_RETRY_SECONDS = 60
+ENDPOINTS = ("authorization_endpoint", "token_endpoint", "jwks_uri", "end_session_endpoint")
+# The endpoints sign-in can't do without (a provider without a logout endpoint only signs
+# people out of AgentGov).
+REQUIRED_ENDPOINTS = ENDPOINTS[:3]
 
 
 class SSOError(Exception):
@@ -69,6 +90,11 @@ class Identity:
     id_token: str
     # The provider's session (the ID token's sid), which its logout tokens name.
     provider_session: str | None = None
+    # Their email address, where the provider vouches for it (verified_email): the roles
+    # given in AgentGov are given to it.
+    email: str | None = None
+    # The roles of theirs given in AgentGov rather than by the provider.
+    given: tuple[str, ...] = ()
 
 
 def _b64url(data: bytes) -> str:
@@ -84,41 +110,192 @@ def pkce_challenge(verifier: str) -> str:
     return _b64url(hashlib.sha256(verifier.encode()).digest())
 
 
-def roles_from_claims(claims: dict[str, Any], path: str, prefix: str) -> list[str]:
-    """AgentGov roles named in the claim at ``path`` (e.g. ``realm_access.roles``)."""
-    value: Any = claims
-    for part in path.split("."):
-        value = value.get(part) if isinstance(value, dict) else None
+def claim_values(claims: dict[str, Any], path: str) -> list[str]:
+    """The strings in the claim at ``path``: the claim of that name (namespaced claims, such
+    as ``https://example.com/roles``, have dots in their names), or else a dot path into
+    nested claims (``realm_access.roles``). A string is taken whole and word by word."""
+    value: Any = claims.get(path)
+    if value is None:
+        value = claims
+        for part in path.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
     if isinstance(value, str):
-        value = value.split()
+        return list(dict.fromkeys([value, *value.split()]))
     if not isinstance(value, list):
         return []
-    found = set()
-    for item in value:
-        if isinstance(item, str):
+    return [item for item in value if isinstance(item, str)]
+
+
+def roles_from_claims(
+    claims: dict[str, Any],
+    paths: str | Sequence[str],
+    prefix: str,
+    role_map: dict[str, set[str]] | None = None,
+) -> list[str]:
+    """AgentGov roles named in the claims at ``paths`` (e.g. ``realm_access.roles``): the
+    values ``role_map`` maps to roles when there is one, else the names with ``prefix``
+    (``agentgov-approver`` is the approver role)."""
+    found: set[str] = set()
+    for path in [paths] if isinstance(paths, str) else paths:
+        for item in claim_values(claims, path):
+            if role_map:
+                found |= role_map.get(item, set())
+                continue
             name = item.lstrip("/")  # group paths, e.g. "/agentgov-admin"
             if name.startswith(prefix) and name[len(prefix) :] in SSO_ROLES:
                 found.add(name[len(prefix) :])
     return [role for role in SSO_ROLES if role in found]
 
 
-def display_name(claims: dict[str, Any]) -> str:
-    """Email when the provider has verified it (sponsor checks compare emails)."""
-    if claims.get("email") and claims.get("email_verified") is True:
-        return str(claims["email"])
-    return str(claims.get("preferred_username") or claims["sub"])
+def _true(value: Any) -> bool:
+    return value is True or (isinstance(value, str) and value.lower() in ("true", "1"))
+
+
+def verified_email(claims: dict[str, Any], provider: str = "oidc") -> str | None:
+    """The person's email address, where the provider vouches for it: one it verified
+    (email_verified). Microsoft Entra ID verifies none, but only the tenant's
+    administrators set a person's email address and user principal name: its email,
+    unless the tenant says the address's domain isn't one it verified (xms_edov), or
+    else the user principal name."""
+    email = claims.get("email")
+    if isinstance(email, str) and "@" in email:
+        if _true(claims.get("email_verified")):
+            return email
+        if provider == "entra" and not ("xms_edov" in claims and not _true(claims.get("xms_edov"))):
+            return email
+    upn = claims.get("preferred_username")
+    if provider == "entra" and isinstance(upn, str) and "@" in upn:
+        return upn
+    return None
+
+
+def display_name(claims: dict[str, Any], provider: str = "oidc") -> str:
+    """Email when the provider vouches for it (sponsor checks compare emails)."""
+    return verified_email(claims, provider) or str(
+        claims.get("preferred_username") or claims["sub"]
+    )
+
+
+def _absolute(url: Any) -> bool:
+    return (
+        isinstance(url, str)
+        and urlsplit(url).scheme in ("https", "http")
+        and bool(urlsplit(url).netloc)
+    )
 
 
 class OIDCClient:
-    """The provider side: authorization URLs, code redemption and token validation."""
+    """The provider side: its endpoints, authorization URLs, code redemption and token
+    validation."""
 
     def __init__(self, settings: Settings, *, http: httpx.Client | None = None) -> None:
         self.settings = settings
-        self.endpoints = settings.oidc_endpoints()
+        self.provider = settings.oidc_provider
+        self.roles_claims = settings.oidc_roles_claims()
+        self.role_map = settings.oidc_role_pairs()
+        self.domains = settings.oidc_domains()
+        self._configured = settings.oidc_endpoints()
         self._http = http or httpx.Client(timeout=10)
         self._keys: dict[str, jwt.PyJWK] = {}
         self._fetched_at = 0.0
         self._lock = threading.Lock()
+        self._metadata: dict[str, Any] | None = None
+        self._metadata_at = 0.0
+        self._metadata_lock = threading.Lock()
+
+    @property
+    def discovers(self) -> bool:
+        """Whether the provider's endpoints come from its discovery document: for providers
+        other than Keycloak and Microsoft Entra ID whose endpoints aren't all set."""
+        return any(not self._configured.get(name) for name in REQUIRED_ENDPOINTS)
+
+    def metadata(self) -> dict[str, Any]:
+        """The provider's discovery document, read when first needed and again after an
+        hour. While the provider can't be reached, the last one read is used."""
+        with self._metadata_lock:
+            if (
+                self._metadata is not None
+                and time.monotonic() - self._metadata_at < DISCOVERY_SECONDS
+            ):
+                return self._metadata
+            try:
+                document = self._discover()
+            except SSOError as exc:
+                if self._metadata is None:
+                    raise
+                log.warning("using the identity provider's last discovery document: %s", exc)
+                self._metadata_at = time.monotonic() - DISCOVERY_SECONDS + DISCOVERY_RETRY_SECONDS
+                return self._metadata
+            self._metadata, self._metadata_at = document, time.monotonic()
+            return document
+
+    def _discover(self) -> dict[str, Any]:
+        configured = str(self._configured.get("issuer") or "")
+        url = configured.rstrip("/") + DISCOVERY_PATH
+        try:
+            resp = self._http.get(url)
+            resp.raise_for_status()
+            document = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SSOError(
+                "provider", f"cannot read the identity provider's discovery document {url}: {exc}"
+            ) from exc
+        if not isinstance(document, dict):
+            raise SSOError("provider", f"{url} is not a discovery document")
+        # The document must be the issuer's own (OpenID Connect Discovery 1.0, 4.3), give or
+        # take a trailing slash, which some providers' issuers end in (Auth0's) and their
+        # administrators often leave off.
+        issuer = document.get("issuer")
+        if not isinstance(issuer, str) or issuer.rstrip("/") != configured.rstrip("/"):
+            raise SSOError(
+                "provider",
+                f"the discovery document {url} is for issuer {issuer!r}, not {configured!r}",
+            )
+        for name in REQUIRED_ENDPOINTS:
+            if not self._configured.get(name) and not _absolute(document.get(name)):
+                raise SSOError("provider", f"the discovery document {url} names no {name}")
+        return document
+
+    @property
+    def endpoints(self) -> dict[str, Any]:
+        """The issuer and the endpoints: those set or known, the rest discovered. Raises
+        SSOError when they must be discovered and the provider can't be read."""
+        if not self.discovers:
+            return self._configured
+        document = self.metadata()
+        found = {
+            name: document[name] if _absolute(document.get(name)) else None for name in ENDPOINTS
+        }
+        mine = {name: value for name, value in self._configured.items() if value}
+        return {**found, **mine, "issuer": document["issuer"]}
+
+    def prepare(self) -> None:
+        """Read the provider's discovery document now if it is needed, so that the
+        sign-in's database transaction makes no network call."""
+        self.endpoints  # noqa: B018
+
+    @property
+    def issuers(self) -> list[str]:
+        """The issuer tokens must name: as set or discovered, with or without a trailing
+        slash."""
+        issuer = str(self.endpoints["issuer"])
+        return list(dict.fromkeys([issuer, issuer.rstrip("/"), issuer.rstrip("/") + "/"]))
+
+    @property
+    def client_auth(self) -> str:
+        """How AgentGov shows its secret at the token endpoint: basic unless set, or the
+        provider takes only client_secret_post."""
+        if self.settings.oidc_client_auth:
+            return self.settings.oidc_client_auth
+        if self.discovers:
+            supported = self.metadata().get("token_endpoint_auth_methods_supported")
+            if (
+                isinstance(supported, list)
+                and "client_secret_basic" not in supported
+                and "client_secret_post" in supported
+            ):
+                return "client_secret_post"
+        return "client_secret_basic"
 
     @property
     def redirect_uri(self) -> str:
@@ -142,29 +319,41 @@ class OIDCClient:
             "code_challenge": pkce_challenge(code_verifier),
             "code_challenge_method": "S256",
         }
-        return f"{self.endpoints['authorization_endpoint']}?{urlencode(query)}"
+        endpoint = self.endpoints["authorization_endpoint"]
+        return f"{endpoint}{'&' if '?' in endpoint else '?'}{urlencode(query)}"
 
-    def logout_url(self, id_token: str | None) -> str:
+    def logout_url(self, id_token: str | None) -> str | None:
+        """Where the browser goes to end the provider's session too, if the provider has a
+        logout endpoint (Google and Dex, for instance, don't)."""
+        try:
+            endpoint = self.endpoints.get("end_session_endpoint")
+        except SSOError:
+            return None
+        if not endpoint:
+            return None
         query = {
             "client_id": self.settings.oidc_client_id,
             "post_logout_redirect_uri": self.settings.public_url.rstrip("/") + "/ui/",
         }
         if id_token:
             query["id_token_hint"] = id_token
-        return f"{self.endpoints['end_session_endpoint']}?{urlencode(query)}"
+        return f"{endpoint}{'&' if '?' in endpoint else '?'}{urlencode(query)}"
 
     def redeem(self, code: str, code_verifier: str) -> dict[str, Any]:
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": self.redirect_uri,
+            "code_verifier": code_verifier,
+        }
+        client_id, secret = self.settings.oidc_client_id, self.settings.oidc_client_secret or ""
+        auth = None
+        if self.client_auth == "client_secret_post":
+            data |= {"client_id": client_id, "client_secret": secret}
+        else:
+            auth = (client_id, secret)
         try:
-            resp = self._http.post(
-                self.endpoints["token_endpoint"],
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": self.redirect_uri,
-                    "code_verifier": code_verifier,
-                },
-                auth=(self.settings.oidc_client_id, self.settings.oidc_client_secret or ""),
-            )
+            resp = self._http.post(self.endpoints["token_endpoint"], data=data, auth=auth)
         except httpx.HTTPError as exc:
             raise SSOError("provider", f"identity provider unreachable: {exc}") from exc
         if resp.status_code != 200:
@@ -176,17 +365,18 @@ class OIDCClient:
             kid = jwt.get_unverified_header(token).get("kid")
         except jwt.PyJWTError as exc:
             raise SSOError("token", f"malformed token: {exc}") from exc
+        jwks_uri = self.endpoints["jwks_uri"]
         with self._lock:
             if kid not in self._keys and time.monotonic() - self._fetched_at > JWKS_REFETCH_SECONDS:
-                self._refresh_keys()
+                self._refresh_keys(jwks_uri)
             key = self._keys.get(kid) if kid else next(iter(self._keys.values()), None)
         if key is None:
             raise SSOError("token", f"token signed with unknown key {kid!r}")
         return key
 
-    def _refresh_keys(self) -> None:
+    def _refresh_keys(self, jwks_uri: str) -> None:
         try:
-            resp = self._http.get(self.endpoints["jwks_uri"])
+            resp = self._http.get(jwks_uri)
             resp.raise_for_status()
             jwks = resp.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -214,7 +404,7 @@ class OIDCClient:
                 if key.algorithm_name in SIGNING_ALGORITHMS
                 else SIGNING_ALGORITHMS,
                 audience=audience,
-                issuer=self.endpoints["issuer"],
+                issuer=self.issuers,
                 leeway=30,
                 options={
                     "require": ["exp", "iat", "iss", "sub"],
@@ -240,7 +430,7 @@ class OIDCClient:
                 if key.algorithm_name in SIGNING_ALGORITHMS
                 else SIGNING_ALGORITHMS,
                 audience=self.settings.oidc_client_id,
-                issuer=self.endpoints["issuer"],
+                issuer=self.issuers,
                 leeway=30,
                 options={"require": ["iat", "iss", "aud"]},
             )
@@ -255,6 +445,24 @@ class OIDCClient:
             raise SSOError("token", "a logout token has no nonce")
         return claims
 
+    def allowed(self, claims: dict[str, Any], email: str | None) -> bool:
+        """Whether the person's organisation may sign in (AGENTGOV_OIDC_ALLOWED_DOMAINS):
+        their verified email address's domain, and with Google, a Google Workspace or Cloud
+        Identity account (its hosted domain, hd), not a personal one."""
+        if not self.domains:
+            return True
+        domain = email.rsplit("@", 1)[1].lower() if email else None
+        if self.provider == "google":
+            hosted = claims.get("hd")
+            if not isinstance(hosted, str) or not hosted:
+                return False
+            return hosted.lower() in self.domains or domain in self.domains
+        return domain in self.domains
+
+    def roles(self, claims: dict[str, Any]) -> list[str]:
+        prefix = self.settings.oidc_role_prefix
+        return roles_from_claims(claims, self.roles_claims, prefix, self.role_map)
+
     def identify(self, tokens: dict[str, Any], nonce: str) -> Identity:
         """Validate the token response and work out who signed in, with which roles."""
         if "id_token" not in tokens:
@@ -262,27 +470,52 @@ class OIDCClient:
         claims = self.validate(
             tokens["id_token"], audience=self.settings.oidc_client_id, nonce=nonce
         )
-        path, prefix = self.settings.oidc_roles_claim, self.settings.oidc_role_prefix
-        roles = roles_from_claims(claims, path, prefix)
-        if not roles and tokens.get("access_token"):
-            # Keycloak puts realm roles in the access token, not the ID token.
-            access = self.validate(tokens["access_token"], audience=None)
-            if access.get("sub") != claims["sub"]:
-                raise SSOError("token", "access token belongs to a different subject")
-            if access.get("azp") not in (None, self.settings.oidc_client_id):
-                raise SSOError("token", "access token was issued to a different client")
-            roles = roles_from_claims(access, path, prefix)
+        email = verified_email(claims, self.provider)
+        if not self.allowed(claims, email):
+            raise SSOError(
+                "domain", f"{email or claims['sub']} is not in a domain allowed to sign in"
+            )
+        roles = self.roles(claims)
+        if not roles and self.provider == "keycloak" and tokens.get("access_token"):
+            # Keycloak puts realm roles in the access token, not the ID token. Other
+            # providers' access tokens are for other APIs (Microsoft Graph's), or name the
+            # person differently (Okta's subject is their login): roles come from their
+            # ID tokens.
+            roles = self._access_token_roles(tokens["access_token"], str(claims["sub"]))
         sid = claims.get("sid")
         return Identity(
             subject=str(claims["sub"]),
-            name=display_name(claims),
+            name=display_name(claims, self.provider),
             roles=roles,
             id_token=tokens["id_token"],
             provider_session=sid if isinstance(sid, str) and sid else None,
+            email=email,
         )
+
+    def _access_token_roles(self, token: str, subject: str) -> list[str]:
+        """Roles from Keycloak's access token, which must be about the same person, for
+        AgentGov's client."""
+        access = self.validate(token, audience=None)
+        if access.get("sub") != subject:
+            raise SSOError("token", "access token belongs to a different subject")
+        if access.get("azp") not in (None, self.settings.oidc_client_id):
+            raise SSOError("token", "access token was issued to a different client")
+        return self.roles(access)
 
 
 # --------------------------------------------------------------------- sessions
+
+
+def with_given_roles(session: Session, who: Identity) -> Identity:
+    """Add the roles given to the person in AgentGov (agentgov.registry.access), by the
+    email address the provider vouches for."""
+    if not who.email:
+        return who
+    given = set(session.scalars(select(RoleGrant.role).where(RoleGrant.email == who.email.lower())))
+    if not given:
+        return who
+    roles = [role for role in SSO_ROLES if role in given or role in who.roles]
+    return replace(who, roles=roles, given=tuple(r for r in SSO_ROLES if r in given))
 
 
 def people_may_sign_in(session: Session) -> bool:
@@ -352,6 +585,8 @@ def cli_signed_in(session: Session, state: str, who: Identity) -> str:
         "roles": who.roles,
         "id_token": who.id_token,
         "provider_session": who.provider_session,
+        "email": who.email,
+        "given": list(who.given),
     }
     login.expires_at = ids.utcnow() + CLI_CODE_TTL
     return code
@@ -374,7 +609,9 @@ def collect_cli_login(
         return login.state, None
     if not hmac.compare_digest(pkce_challenge(verifier), login.challenge):
         return login.state, None
-    return login.state, Identity(**login.identity)
+    identity = dict(login.identity)
+    identity["given"] = tuple(identity.get("given") or ())
+    return login.state, Identity(**identity)
 
 
 def start_session(
@@ -402,6 +639,7 @@ def start_session(
             "subject": who.subject,
             "session_id": record.id,
             "client": client,
+            **({"given_in_agentgov": list(who.given)} if who.given else {}),
         },
     )
     return token, record

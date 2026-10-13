@@ -97,12 +97,11 @@ To sign in your own people, connect your directory to the realm as an identity p
 `agentgov-*` realm roles, and delete the demo users. If the control plane is served from
 another address, set `AGENTGOV_PUBLIC_URL` and update the `agentgov-admin` client's
 redirect URI (`<public URL>/auth/callback`) and post-logout redirect URI
-(`<public URL>/ui/`) in Keycloak. Another OpenID Connect provider can sign administrators
-in instead of Keycloak: set `AGENTGOV_OIDC_ISSUER` and the claim that carries roles in
-`.env`, and its endpoints in `docker-compose.override.yml`
-([configuration](../configuration.md#administrator-single-sign-on-oidc)). For
-Microsoft Entra ID, AgentGov knows the endpoints, and
-[setting it up](../platforms.md#setting-it-up) has the steps.
+(`<public URL>/ui/`) in Keycloak. Your own identity provider (Microsoft Entra ID, Okta,
+Google, Ping, any OpenID Connect provider) can sign people in instead of Keycloak: set
+`AGENTGOV_OIDC_ISSUER`, the client's ID and secret in `.env`, and AgentGov reads the
+provider's endpoints from its discovery document
+([your identity provider](../administration.md#your-identity-provider)).
 
 The CLI signs in the same way with `agentgov login`. API tokens work next to single
 sign-on: scripts and the CLI can use them, the UI accepts one on its sign-in page, and the

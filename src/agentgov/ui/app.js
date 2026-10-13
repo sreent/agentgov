@@ -287,7 +287,8 @@ function home() {
 
 // Reasons /auth/callback sends back (?sso_error=...). Only these fixed texts are shown.
 const SSO_ERRORS = {
-  no_role: 'You signed in, but your account has no AgentGov role. Ask an administrator for agentgov-admin, agentgov-approver, agentgov-secops or agentgov-auditor.',
+  no_role: 'You signed in, but your account has no AgentGov role. Ask an administrator to give you one.',
+  domain: "Your account isn't from an organisation allowed to sign in to AgentGov. Sign in with your work account.",
   state: 'That sign-in could not be completed in this browser. Start again.',
   expired: 'That sign-in expired or was already used. Start again.',
   provider: 'The identity provider could not complete the sign-in. Try again, or use an API token.',
@@ -1126,7 +1127,7 @@ function enterApp() {
     const components = await api('v1/components').catch(() => null);
     const opa = components?.control_plane?.opa;
     const opaWords = !info.opa ? 'not configured' : opa ? (opa.ok ? 'reachable' : 'unreachable') : 'set up';
-    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'Keycloak identities' : 'no identity provider'} · OPA ${opaWords}${who}`;
+    $('#nav-meta').textContent = `AgentGov ${info.version} · ${info.identity_provider ? 'agents in Keycloak' : 'no Keycloak for agents'} · OPA ${opaWords}${who}`;
   });
 }
 
@@ -6717,7 +6718,9 @@ async function renderAccess() {
     }),
     view.bootstrap_token ? callout('neutral', 'key', h('span', {}, h('strong', {}, 'The bootstrap admin token is set. '),
       'Anyone who has it is an admin. Keep it for setup and emergencies, and give people and automation their own roles.')) : null,
+    view.provider?.problem ? callout('critical', 'octagon', h('span', {}, h('strong', {}, "People can't sign in now: "), view.provider.problem)) : null,
     signInsCard(view),
+    roleGrantsCard(view),
     apiKeysCard(keys),
     features['workload-identity'] === 'off' ? callout('warning', 'power', h('span', {},
       h('strong', {}, "Agents' own identities are off: "), 'no issuer is trusted, so agents with a workload identity can\'t authenticate. ',
@@ -6899,10 +6902,84 @@ function signInsCard(view) {
   }
   return card({
     title: 'People',
-    sub: `${plural(signedIn, 'person', 'people')} signed in now. Roles come from the identity provider at each sign-in: to take someone's access away, remove their role there, then sign them out here.`,
+    sub: [`${plural(signedIn, 'person', 'people')} signed in now. Roles come from the identity provider at each sign-in, and from those given below: to take someone's access away, remove their role there, then sign them out here.`,
+      view.provider ? h('span', { style: 'display:block;margin-top:4px' }, providerSummary(view.provider)) : null],
     flush: people.length > 0,
     body,
   });
+}
+
+// What people sign in with, as AgentGov reads it.
+const PROVIDER_NAMES = { keycloak: 'Keycloak', entra: 'Microsoft Entra ID', google: 'Google', oidc: 'OpenID Connect' };
+
+function providerSummary(p) {
+  const roles = p.role_map?.length
+    ? ` Roles from ${p.roles_claims.join(', ')}: ${p.role_map.map((m) => `${m.value} → ${humanize(m.role)}`).join('; ')}.`
+    : ` Roles from ${p.roles_claims.join(', ')}, named ${p.role_prefix}admin, ${p.role_prefix}approver and so on.`;
+  const domains = p.allowed_domains?.length ? ` Only ${p.allowed_domains.join(', ')} may sign in.` : '';
+  return `Signing in with ${PROVIDER_NAMES[p.kind] || p.kind}: ${p.issuer}.${roles}${domains}`;
+}
+
+function roleGrantsCard(view) {
+  if (!view.sso_enabled) return null;
+  const grants = view.grants || [];
+  return card({
+    title: 'Roles given in AgentGov',
+    sub: "Roles usually come from the identity provider. Give one here when its tokens carry no groups (Google's do not), or to the first administrators: it applies from the person's next sign-in with this email address, beside the provider's.",
+    actions: can('admin') ? [h('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-focus-key': 'give-role', onclick: guarded(giveRole) }, icon('plus'), 'Give a role')] : null,
+    flush: grants.length > 0,
+    body: grants.length
+      ? h('div', { class: 'table-wrap' }, h('table', { class: 'data rtable' },
+        h('caption', { class: 'sr-only' }, 'Roles given in AgentGov'),
+        h('thead', {}, h('tr', {}, ['Person', 'Role', 'Given by', 'When', ''].map((t) => h('th', { scope: 'col' }, t || h('span', { class: 'sr-only' }, 'Actions'))))),
+        h('tbody', {}, grants.map((g) => h('tr', { 'data-grant': `${g.email}/${g.role}` },
+          h('td', { 'data-label': 'Person', class: 'break' }, h('span', { class: 'cell-title' }, g.email),
+            g.reason ? h('div', { class: 'cell-sub' }, g.reason) : null),
+          h('td', { 'data-label': 'Role' }, plainChip(humanize(g.role))),
+          h('td', { 'data-label': 'Given by', class: 'break' }, g.granted_by),
+          h('td', { 'data-label': 'When', class: 'nowrap' }, timeEl(g.granted_at)),
+          h('td', { 'data-label': '' }, can('admin')
+            ? h('button', { type: 'button', class: 'btn btn--sm btn--danger-quiet', 'data-focus-key': `take-role-${g.email}-${g.role}`, onclick: () => takeRole(g) }, icon('trash'), 'Take away')
+            : null))))))
+      : emptyState('No roles given here', "Everyone's roles come from the identity provider."),
+  });
+}
+
+async function giveRole() {
+  const saved = await ask({
+    title: 'Give a role',
+    text: 'The person gets it the next time they sign in, with this email address, which the identity provider vouches for. It is recorded in the evidence ledger.',
+    iconName: 'key', confirm: 'Give role',
+    fields: [
+      { id: 'email', label: 'Email address', required: true, placeholder: 'alice@example.com' },
+      {
+        id: 'role', label: 'Role', type: 'select', value: 'auditor', required: true, options: [
+          { value: 'admin', label: 'Admin: everything' },
+          { value: 'approver', label: 'Approver: decide approvals and issues' },
+          { value: 'secops', label: 'Security operations: triage and contain' },
+          { value: 'auditor', label: 'Auditor: read everything, change nothing' },
+          { value: 'registrar', label: 'Registrar: register agents and tool servers' },
+        ],
+      },
+      { id: 'reason', label: 'Why', type: 'textarea', hint: 'For the evidence ledger.' },
+    ],
+    submit: (v) => api('v1/access/grants', { method: 'POST', body: { email: v.email, role: v.role, reason: orNull(v.reason) } }),
+  });
+  if (!saved) return;
+  toast(`Gave ${saved.email} the ${humanize(saved.role)} role, from their next sign-in.`);
+  await refresh();
+}
+
+async function takeRole(g) {
+  const done = await ask({
+    title: `Take ${humanize(g.role)} away from ${g.email}?`,
+    text: 'Their sessions end now. When they sign in again, they have only the roles the identity provider gives them.',
+    tone: 'danger', iconName: 'trash', confirm: 'Take away', busy: 'Taking away…',
+    submit: () => api(`v1/access/grants/${encodeURIComponent(g.email)}/${encodeURIComponent(g.role)}`, { method: 'DELETE' }),
+  });
+  if (!done) return;
+  toast(`Took ${humanize(g.role)} away from ${g.email} (${plural(done.ended, 'session')} ended).`);
+  await refresh();
 }
 
 async function signPersonOut(person) {

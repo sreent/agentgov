@@ -226,17 +226,20 @@ never in a values file you share.
 
 ### Administrator single sign-on (OIDC)
 
-The control plane signs administrators in with an OIDC provider (Keycloak by default) as a confidential client and keeps the session server-side: the browser only holds an HttpOnly cookie. Enabled when a client secret is set.
+The control plane signs people in (administrators, and the people issues and approvals are sent to) with the bundled Keycloak or your own OpenID Connect provider ([administration](administration.md#your-identity-provider)), as a confidential client, and keeps the session server-side: the browser only holds an HttpOnly cookie. Enabled when a client secret is set.
 
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_OIDC_CLIENT_ID` | `agentgov-admin` | The client AgentGov signs administrators in as. |
 | `AGENTGOV_OIDC_CLIENT_SECRET` (secret) | — | Its secret. Single sign-on is on when this is set. |
-| `AGENTGOV_OIDC_ISSUER` | — | Defaults to `AGENTGOV_KEYCLOAK_ISSUER`. Endpoints default to Keycloak's paths: the authorization and logout endpoints under the issuer (browser-facing), the token endpoint and JWKS under `AGENTGOV_KEYCLOAK_URL` when set (server-to-server). |
-| `AGENTGOV_OIDC_AUTHORIZATION_ENDPOINT`<br>`AGENTGOV_OIDC_TOKEN_ENDPOINT`<br>`AGENTGOV_OIDC_JWKS_URL`<br>`AGENTGOV_OIDC_END_SESSION_ENDPOINT` | —<br>—<br>—<br>— | The provider's endpoints, where they aren't Keycloak's or Microsoft Entra ID's. |
+| `AGENTGOV_OIDC_ISSUER` | — | Your identity provider's issuer, exactly as its tokens name it (Okta, Google, Microsoft Entra ID, Ping, Auth0 and any other OpenID Connect provider). Defaults to `AGENTGOV_KEYCLOAK_ISSUER`, the bundled Keycloak. |
+| `AGENTGOV_OIDC_AUTHORIZATION_ENDPOINT`<br>`AGENTGOV_OIDC_TOKEN_ENDPOINT`<br>`AGENTGOV_OIDC_JWKS_URL`<br>`AGENTGOV_OIDC_END_SESSION_ENDPOINT` | —<br>—<br>—<br>— | The provider's endpoints: read from its discovery document (&lt;issuer&gt;/.well-known/openid-configuration) unless set here. Keycloak's and Microsoft Entra ID's are known: for the bundled Keycloak, the authorization and logout endpoints are under the issuer (browser-facing), the token endpoint and JWKS under `AGENTGOV_KEYCLOAK_URL` when set (server-to-server). |
+| `AGENTGOV_OIDC_CLIENT_AUTH` | empty | How AgentGov shows its client secret at the token endpoint: client_secret_basic or client_secret_post. By default basic, or post with a provider that takes only that. |
 | `AGENTGOV_OIDC_SCOPES` | `openid profile email` | The scopes asked for at sign-in. |
-| `AGENTGOV_OIDC_ROLES_CLAIM` | `realm_access.roles` | Where role names are found in the tokens (a dot path). |
+| `AGENTGOV_OIDC_ROLES_CLAIM` | empty | Where role names are found in the tokens: dot paths, comma-separated. By default realm_access.roles with the bundled Keycloak, roles (app roles) with Microsoft Entra ID, and groups with other providers. |
 | `AGENTGOV_OIDC_ROLE_PREFIX` | `agentgov-` | The prefix that marks AgentGov roles: `agentgov-approver` grants the approver role. |
+| `AGENTGOV_OIDC_ROLE_MAP` | empty | Values of the roles claim that grant AgentGov roles, as value=role pairs, comma-separated: a group's ID or name, or an app role (8f0c2d1e-...=admin,Security Operations=secops). When set, only these grant roles. |
+| `AGENTGOV_OIDC_ALLOWED_DOMAINS` | empty | The email domains whose people may sign in, comma-separated (empty: anyone the provider signs in to this client). Google's issuer is shared by every Google account, so with Google this is required and checked against the hosted domain. |
 | `AGENTGOV_SESSION_HOURS` | `8` | The longest an administrator's session lasts. |
 | `AGENTGOV_MICROSOFT_ADMIN_ACTIONS` | `false` | Act in Microsoft 365 and Power Platform as the administrator who is signed in (quarantine Copilot Studio agents, read the Power Platform inventory, block Microsoft 365 agents): Microsoft accepts these only from a signed-in admin. Needs sign-in through Microsoft Entra ID (`AGENTGOV_OIDC_ISSUER` `https://login.microsoftonline.com/<tenant>/v2.0`) and an app registration with the delegated permissions listed in [platforms](platforms.md). |
 

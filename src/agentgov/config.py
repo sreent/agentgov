@@ -92,6 +92,11 @@ ENTRA_ISSUER = re.compile(
     r"^(?P<base>https://login\.microsoftonline\.(?:com|us)|https://login\.chinacloudapi\.cn)"
     r"/(?P<tenant>[^/]+)/v2\.0$"
 )
+# Google's issuer, which every Google account shares.
+GOOGLE_ISSUER = "https://accounts.google.com"
+# A Keycloak realm's issuer: https://sso.example.com/realms/<realm>
+KEYCLOAK_REALM = re.compile(r"/realms/[^/]+$")
+_DOMAIN = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 
 
 def _coerce(raw: str, target: str) -> Any:
@@ -266,29 +271,48 @@ class Settings:
     assertion_lifetime_seconds: int = 300
 
     # --- Administrator single sign-on (OIDC) -------------------------------------
-    # The control plane signs administrators in with an OIDC provider (Keycloak by
-    # default) as a confidential client and keeps the session server-side: the
-    # browser only holds an HttpOnly cookie. Enabled when a client secret is set.
+    # The control plane signs people in (administrators, and the people issues and
+    # approvals are sent to) with the bundled Keycloak or your own OpenID Connect provider
+    # (docs/administration.md#your-identity-provider), as a confidential client, and keeps
+    # the session server-side: the browser only holds an HttpOnly cookie. Enabled when a
+    # client secret is set.
 
     # The client AgentGov signs administrators in as.
     oidc_client_id: str = "agentgov-admin"
     # Its secret. Single sign-on is on when this is set.
     oidc_client_secret: str | None = None
-    # Defaults to keycloak_issuer. Endpoints default to Keycloak's paths: the
-    # authorization and logout endpoints under the issuer (browser-facing), the
-    # token endpoint and JWKS under keycloak_url when set (server-to-server).
+    # Your identity provider's issuer, exactly as its tokens name it (Okta, Google,
+    # Microsoft Entra ID, Ping, Auth0 and any other OpenID Connect provider). Defaults to
+    # keycloak_issuer, the bundled Keycloak.
     oidc_issuer: str | None = None
-    # The provider's endpoints, where they aren't Keycloak's or Microsoft Entra ID's.
+    # The provider's endpoints: read from its discovery document
+    # (<issuer>/.well-known/openid-configuration) unless set here. Keycloak's and Microsoft
+    # Entra ID's are known: for the bundled Keycloak, the authorization and logout
+    # endpoints are under the issuer (browser-facing), the token endpoint and JWKS under
+    # keycloak_url when set (server-to-server).
     oidc_authorization_endpoint: str | None = None
     oidc_token_endpoint: str | None = None
     oidc_jwks_url: str | None = None
     oidc_end_session_endpoint: str | None = None
+    # How AgentGov shows its client secret at the token endpoint: client_secret_basic or
+    # client_secret_post. By default basic, or post with a provider that takes only that.
+    oidc_client_auth: str = ""
     # The scopes asked for at sign-in.
     oidc_scopes: str = "openid profile email"
-    # Where role names are found in the tokens (a dot path).
-    oidc_roles_claim: str = "realm_access.roles"
+    # Where role names are found in the tokens: dot paths, comma-separated. By default
+    # realm_access.roles with the bundled Keycloak, roles (app roles) with Microsoft Entra
+    # ID, and groups with other providers.
+    oidc_roles_claim: str = ""
     # The prefix that marks AgentGov roles: "agentgov-approver" grants the approver role.
     oidc_role_prefix: str = "agentgov-"
+    # Values of the roles claim that grant AgentGov roles, as value=role pairs,
+    # comma-separated: a group's ID or name, or an app role
+    # (8f0c2d1e-...=admin,Security Operations=secops). When set, only these grant roles.
+    oidc_role_map: str = ""
+    # The email domains whose people may sign in, comma-separated (empty: anyone the
+    # provider signs in to this client). Google's issuer is shared by every Google
+    # account, so with Google this is required and checked against the hosted domain.
+    oidc_allowed_domains: str = ""
     # The longest an administrator's session lasts.
     session_hours: int = 8
     # Act in Microsoft 365 and Power Platform as the administrator who is signed in
@@ -755,6 +779,17 @@ class Settings:
                 "set AGENTGOV_M365_TENANT_ID, AGENTGOV_M365_CLIENT_ID and "
                 "AGENTGOV_M365_CLIENT_SECRET together"
             )
+        if self.oidc_client_auth not in ("", "client_secret_basic", "client_secret_post"):
+            raise ValueError(
+                "AGENTGOV_OIDC_CLIENT_AUTH must be client_secret_basic or client_secret_post"
+            )
+        self.oidc_role_pairs()  # raises on malformed pairs and unknown roles
+        domains = self.oidc_domains()  # raises on malformed domains
+        if self.sso_enabled and self.oidc_provider == "google" and not domains:
+            raise ValueError(
+                "signing in with Google needs AGENTGOV_OIDC_ALLOWED_DOMAINS: every Google "
+                "account shares Google's issuer, so name your organisation's domains"
+            )
         if self.microsoft_admin_actions and not (self.sso_enabled and self.oidc_issuer):
             raise ValueError(
                 "AGENTGOV_MICROSOFT_ADMIN_ACTIONS needs single sign-on through Microsoft Entra "
@@ -967,9 +1002,72 @@ class Settings:
     def sso_enabled(self) -> bool:
         return bool(self.oidc_client_secret and (self.oidc_issuer or self.keycloak_issuer))
 
-    def oidc_endpoints(self) -> dict[str, str]:
-        """Issuer and endpoints for administrator sign-in (Keycloak paths by default,
-        Microsoft Entra ID's when the issuer is an Entra tenant)."""
+    @property
+    def oidc_provider(self) -> str:
+        """Which identity provider signs people in: ``keycloak`` (the bundled realm, or
+        another Keycloak realm), ``entra`` (Microsoft Entra ID), ``google``, or ``oidc``
+        (any other)."""
+        if not self.oidc_issuer:
+            return "keycloak"
+        issuer = self.oidc_issuer.rstrip("/")
+        if ENTRA_ISSUER.match(issuer):
+            return "entra"
+        if issuer == GOOGLE_ISSUER:
+            return "google"
+        if KEYCLOAK_REALM.search(issuer):
+            return "keycloak"
+        return "oidc"
+
+    def oidc_roles_claims(self) -> list[str]:
+        """The claims role names are read from, by default the provider's usual one."""
+        configured = [c.strip() for c in self.oidc_roles_claim.split(",") if c.strip()]
+        if configured:
+            return configured
+        return [
+            {"keycloak": "realm_access.roles", "entra": "roles"}.get(self.oidc_provider, "groups")
+        ]
+
+    def oidc_role_pairs(self) -> dict[str, set[str]]:
+        """AGENTGOV_OIDC_ROLE_MAP: each claim value and the AgentGov roles it grants."""
+        if not self.oidc_role_map.strip():
+            return {}
+        from agentgov.identity.sso import SSO_ROLES
+
+        pairs: dict[str, set[str]] = {}
+        for item in self.oidc_role_map.split(","):
+            if not item.strip():
+                continue
+            value, sep, role = item.rpartition("=")
+            value, role = value.strip(), role.strip()
+            if not sep or not value or role not in SSO_ROLES:
+                raise ValueError(
+                    f"AGENTGOV_OIDC_ROLE_MAP takes value=role pairs, the roles one of "
+                    f"{', '.join(SSO_ROLES)} (got {item.strip()!r})"
+                )
+            pairs.setdefault(value, set()).add(role)
+        return pairs
+
+    def oidc_domains(self) -> list[str]:
+        """AGENTGOV_OIDC_ALLOWED_DOMAINS, lowercase."""
+        domains = [d.strip().lower().lstrip("@") for d in self.oidc_allowed_domains.split(",")]
+        for domain in domains:
+            if domain and not _DOMAIN.match(domain):
+                raise ValueError(f"AGENTGOV_OIDC_ALLOWED_DOMAINS: {domain!r} is not a domain")
+        return [d for d in domains if d]
+
+    def oidc_endpoints(self) -> dict[str, str | None]:
+        """Issuer and endpoints for administrator sign-in: Keycloak's paths for a Keycloak
+        realm, Microsoft Entra ID's for an Entra tenant, and for other providers the
+        endpoints set here, if any (agentgov.identity.sso reads the rest from the
+        provider's discovery document)."""
+        if self.oidc_provider in ("google", "oidc"):
+            return {
+                "issuer": self.oidc_issuer,
+                "authorization_endpoint": self.oidc_authorization_endpoint,
+                "token_endpoint": self.oidc_token_endpoint,
+                "jwks_uri": self.oidc_jwks_url,
+                "end_session_endpoint": self.oidc_end_session_endpoint,
+            }
         issuer = (self.oidc_issuer or self.keycloak_issuer or "").rstrip("/")
         entra = ENTRA_ISSUER.match(issuer)
         if entra:

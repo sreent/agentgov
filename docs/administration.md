@@ -55,6 +55,74 @@ logout tokens (Keycloak: the `agentgov-admin` client's **Backchannel logout URL*
 to end at expiry (`AGENTGOV_SESSION_HOURS`), or when you sign them out on the **Access**
 page.
 
+### Your identity provider
+
+Single sign-on is for people: administrators, approvers, the security team, auditors, and
+the owners and others who sign in to see the issues and approval requests sent to them.
+Agents never use it; they authenticate at the gateway with identities of their own
+([agents' own identities](agent-identity.md)).
+
+The Keycloak that comes with Compose and the chart signs people in, and can bring in your
+directory ([signing in](deploy/local.md#signing-in)). Any OpenID Connect provider can
+sign them in instead:
+
+1. Register AgentGov with the provider as a web application (a confidential client),
+   with the redirect URI `<AGENTGOV_PUBLIC_URL>/auth/callback` and, where it asks, the
+   sign-out redirect `<AGENTGOV_PUBLIC_URL>/ui/` and the back-channel logout URL
+   `<AGENTGOV_PUBLIC_URL>/auth/backchannel-logout`. AgentGov signs in with the
+   authorization code flow and PKCE, and keeps sessions on the server.
+2. Set `AGENTGOV_OIDC_ISSUER` to the provider's issuer, `AGENTGOV_OIDC_CLIENT_ID` and
+   `AGENTGOV_OIDC_CLIENT_SECRET` to the application's. AgentGov reads the provider's
+   endpoints from its discovery document (`<issuer>/.well-known/openid-configuration`),
+   when it first needs them and again every hour; while the provider can't be read, the
+   **Access** page says so, and sign-ins fail with a message saying the provider didn't
+   answer. It proves itself with the client secret in the way the provider takes
+   (`AGENTGOV_OIDC_CLIENT_AUTH` to choose).
+3. Say where roles come from. The ID token's `groups` claim, by default (Keycloak's
+   realm roles, and Microsoft Entra ID's app roles, are read where those put them), names
+   the person's groups; a group called `agentgov-admin` makes them an admin, and so on for
+   the other roles. To use the groups you have, map them instead:
+   `AGENTGOV_OIDC_ROLE_MAP=<group ID or name>=admin,Security Operations=secops`, and then
+   only the values mapped give roles. `AGENTGOV_OIDC_ROLES_CLAIM` names other claims. The
+   **Access** page shows how AgentGov reads the provider.
+4. Where the provider's tokens carry no groups, give roles in AgentGov
+   ([below](#roles-given-in-agentgov)); give the first administrators theirs there, too.
+
+| Provider | Issuer | Roles |
+|---|---|---|
+| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant ID>/v2.0` | App roles, assigned to people and groups ([setting it up](platforms.md#setting-it-up), which also lets AgentGov act in Microsoft 365 as the person signed in) |
+| Okta | `https://<org>.okta.com`, or a custom authorization server's (`https://<org>.okta.com/oauth2/default`) | A groups claim added to the ID token, on the application's sign-on settings or the authorization server |
+| Google Workspace | `https://accounts.google.com` | None in Google's tokens: [give roles in AgentGov](#roles-given-in-agentgov). `AGENTGOV_OIDC_ALLOWED_DOMAINS` is required, because every Google account shares this issuer |
+| Ping Identity | PingOne: `https://auth.pingone.com/<environment ID>/as` | A groups claim added to the ID token |
+| OneLogin | `https://<subdomain>.onelogin.com/oidc/2` | A groups claim added to the ID token |
+| JumpCloud | `https://oauth.id.jumpcloud.com/` | A groups claim added to the ID token |
+| Auth0 | `https://<tenant>.auth0.com/` | A claim an Action adds to the ID token, with a namespaced name such as `https://agentgov/roles`, set as `AGENTGOV_OIDC_ROLES_CLAIM` |
+| Amazon Cognito | `https://cognito-idp.<region>.amazonaws.com/<user pool ID>` | `cognito:groups`, set as `AGENTGOV_OIDC_ROLES_CLAIM` |
+| Another Keycloak | `https://<host>/realms/<realm>` | Realm roles, as with the bundled one |
+
+Write the issuer as the provider's tokens name it; a trailing slash may be left off.
+`AGENTGOV_OIDC_ALLOWED_DOMAINS` (comma-separated) lets in only people whose email address
+the provider vouches for is in one of those domains, and with Google, only accounts of
+your organisation (its hosted domain). A person's name in AgentGov is that email address,
+which issues and approvals are addressed to; Microsoft Entra ID's people are named by their
+email address or else their user principal name. Some providers, Google among them, have
+no sign-out endpoint: signing out then ends the AgentGov session, not the provider's.
+
+A provider that only speaks SAML, or a directory (Active Directory, LDAP), signs people in
+through Keycloak, which brokers it: connect it to the realm as an identity provider or
+through user federation.
+
+### Roles given in AgentGov
+
+An administrator can give a person a role in AgentGov itself, on the **Access** page or
+with `agentgov access grant alice@example.com auditor --reason "..."`: for providers
+whose tokens carry no groups, such as Google's, and for the first administrators before
+groups are set up. It applies from the person's next sign-in with that email address, the
+one the provider vouches for, beside the roles the provider gives them. Taking it away
+(`agentgov access revoke`) ends their sessions at once. Both are in the ledger
+(`access.role_granted`, `access.role_revoked`), and each sign-in's `admin.login` entry
+lists the roles given here.
+
 ## Start here
 
 A new AgentGov starts with a question on its **Overview**: where are your agents? Copilot
@@ -95,10 +163,10 @@ answers, and `--hide` hides it; with the API, `GET` and `PUT /v1/start`
 | `service` | The internal endpoints used by OPA, the governance processor, the gateway's config sidecar and the OpenTelemetry Collector; with mutual TLS between the components, only on the control plane's internal port ([production](production.md#mutual-tls-between-components)) |
 
 People who sign in with single sign-on get their roles from the identity provider each time
-they sign in (see [single sign-on](configuration.md#administrator-single-sign-on-oidc), and the
-demo realm's users in [signing in](deploy/local.md#signing-in)). To take
-someone's access away, remove their role there, then sign them out on the **Access**
-page so that their open sessions end too. The same page lists everyone who has signed
+they sign in ([your identity provider](#your-identity-provider), and the demo realm's users
+in [signing in](deploy/local.md#signing-in)), and from the [roles given in
+AgentGov](#roles-given-in-agentgov). To take someone's access away, remove their role
+there, then sign them out on the **Access** page so that their open sessions end too. The same page lists everyone who has signed
 in (or been refused) and every API key, for access reviews. API keys have one role each.
 The UI only shows the controls a role may use; the API enforces the roles either way.
 

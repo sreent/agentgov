@@ -263,10 +263,11 @@ action under their name, and so does the ledger (`platform.agent_blocked`,
    secrets**, create a client secret.
 2. Under **App roles**, create the roles AgentGov maps: `agentgov-admin`,
    `agentgov-approver`, `agentgov-secops`, `agentgov-auditor` and `agentgov-registrar` (the
-   value is what counts). Then assign them to people under **Enterprise applications** > the
-   app > **Users and groups** (assigning groups needs Entra ID P1 or P2). People without a
-   role are turned away, unless the `approvals-by-person` feature is on, which lets them sign
-   in to decide what agents acting for them ask.
+   value is what counts; or map the app roles you have with `AGENTGOV_OIDC_ROLE_MAP`). Then
+   assign them to people under **Enterprise applications** > the app > **Users and
+   groups** (assigning groups needs Entra ID P1 or P2). People without a role are turned
+   away, unless the `issues` or `approvals-by-person` feature is on, which lets them sign in
+   to see the issues sent to them and decide what agents acting for them ask.
 3. Under **API permissions**, add these *delegated* permissions and grant admin consent:
 
    | API | Permission | For |
@@ -288,13 +289,13 @@ action under their name, and so does the ledger (`platform.agent_blocked`,
    AGENTGOV_OIDC_ISSUER=https://login.microsoftonline.com/<tenant ID>/v2.0
    AGENTGOV_OIDC_CLIENT_ID=<application (client) ID>
    AGENTGOV_OIDC_CLIENT_SECRET=<client secret>
-   AGENTGOV_OIDC_ROLES_CLAIM=roles
    AGENTGOV_MICROSOFT_ADMIN_ACTIONS=true
    ```
 
    Use the tenant ID (a GUID), not a domain name: Entra's tokens name the tenant by its
    ID, and AgentGov checks the issuer exactly. AgentGov works out Entra's endpoints from
-   the issuer and asks for `offline_access`, so it gets a refresh token.
+   the issuer, reads roles from the app roles (`roles`), and asks for `offline_access`, so
+   it gets a refresh token.
 
 The same app registration can also run the [catalog sync](#microsoft-365-agent-catalog)
 if you add the Graph *application* permission `CopilotPackages.Read.All` to it.

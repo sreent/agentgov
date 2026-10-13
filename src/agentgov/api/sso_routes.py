@@ -78,6 +78,11 @@ def login(
     client = _client(request)
     if (cli_port is None) != (cli_challenge is None):
         raise HTTPException(400, "cli_port and cli_challenge go together")
+    try:
+        client.prepare()  # the provider's endpoints, read before the transaction
+    except sso.SSOError as exc:
+        log.warning("cannot sign in: %s", exc)
+        return _back_to_cli(cli_port, error=exc.code) if cli_port else _back_to_ui(exc.code)
     with request.app.state.rt.db.session() as s:
         state, url = sso.begin_login(s, client, cli_port=cli_port, cli_challenge=cli_challenge)
     resp = RedirectResponse(url, status_code=302)
@@ -130,6 +135,7 @@ def callback(
         return failed(exc.code)
     refresh_token = tokens.get("refresh_token") if rt.delegations is not None else None
     with rt.db.session() as s:
+        who = sso.with_given_roles(s, who)
         if not who.roles:
             if not sso.people_may_sign_in(s):
                 sso.record_denied(s, who)

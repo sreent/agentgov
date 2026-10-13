@@ -67,7 +67,8 @@ app.add_typer(findings_app, name="findings", hidden=True)
 app.add_typer(ledger_app, name="ledger")
 app.add_typer(apikeys_app, name="apikeys")
 access_app = typer.Typer(
-    help="Who has access: people signed in with single sign-on, and their sessions.",
+    help="Who has access: people signed in with single sign-on, their sessions, and the "
+    "roles given to people in AgentGov.",
     no_args_is_help=True,
 )
 app.add_typer(access_app, name="access")
@@ -376,7 +377,9 @@ LOGIN_WAIT_SECONDS = 600
 # Reasons /auth/callback sends back (?error=...), as the admin UI words them.
 LOGIN_ERRORS = {
     "no_role": "you signed in, but your account has no AgentGov role. Ask an administrator "
-    "for agentgov-admin, agentgov-approver, agentgov-secops or agentgov-auditor.",
+    "to give you one.",
+    "domain": "your account isn't from an organisation allowed to sign in to AgentGov. Sign "
+    "in with your work account.",
     "state": "that sign-in could not be completed in this browser. Start again.",
     "expired": "that sign-in expired or was already used. Start again.",
     "provider": "the identity provider could not complete the sign-in. Try again.",
@@ -3024,6 +3027,9 @@ def access_list() -> None:
         )
     if not view["sso_enabled"]:
         typer.echo("note: single sign-on is not set up; people use API keys", err=True)
+    provider = view.get("provider")
+    if provider and provider.get("problem"):
+        typer.echo(f"note: people can't sign in: {provider['problem']}", err=True)
     rows = [
         {**p, "roles": ",".join(p["roles"]) or "-", "sessions": p["active_sessions"]}
         for p in view["people"]
@@ -3059,6 +3065,37 @@ def access_end_session(session_id: str) -> None:
     """End one session (see `agentgov access sessions`)."""
     _call("DELETE", f"/v1/access/sessions/{session_id}")
     _done("session", session_id, "ended")
+
+
+@access_app.command("grants")
+def access_grants() -> None:
+    """The roles given to people in AgentGov, beside those their identity provider gives."""
+    _table(_call("GET", "/v1/access")["grants"], ["email", "role", "granted_by", "granted_at"])
+
+
+@access_app.command("grant")
+def access_grant(
+    email: str = typer.Argument(..., help="The email address they sign in with."),
+    role: str = typer.Argument(..., help="admin, approver, secops, auditor or registrar."),
+    reason: str | None = typer.Option(None, "--reason", help="Why, for the ledger."),
+) -> None:
+    """Give a person an AgentGov role, from their next sign-in: for identity providers whose
+    tokens carry no groups (Google's), and the first administrators."""
+    body: dict[str, Any] = {"email": email, "role": role}
+    if reason:
+        body["reason"] = reason
+    out = _call("POST", "/v1/access/grants", json=body)
+    _done("role", f"{out['role']} for {out['email']}", "given")
+
+
+@access_app.command("revoke")
+def access_revoke(
+    email: str = typer.Argument(..., help="The email address the role was given to."),
+    role: str = typer.Argument(..., help="The role to take away."),
+) -> None:
+    """Take away a role given in AgentGov. The person's sessions end with it."""
+    out = _call("DELETE", f"/v1/access/grants/{quote(email, safe='')}/{quote(role, safe='')}")
+    _done("role", f"{role} for {email}", f"taken away ({out['ended']} sessions ended)")
 
 
 # ----------------------------------------------------------------- platforms

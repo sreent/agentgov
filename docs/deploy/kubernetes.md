@@ -86,10 +86,11 @@ helm install agentgov deploy/helm/agentgov -n agentgov --create-namespace --wait
 A profile sets values like any other: `gateway.enabled` and `opa.enabled` say whether the
 gateway (with its processor, and Presidio) and OPA run, and `featurePreset` the features'
 starting modes. The gateway needs OPA, and Keycloak (the bundled one or yours) to check
-agents' tokens; without the gateway, neither is needed. Without Keycloak, administrators
-sign in with your identity provider (`AGENTGOV_OIDC_ISSUER` and `AGENTGOV_OIDC_CLIENT_ID` in
-`controlPlane.env`, its client's secret as `oidc-client-secret` in the Secret;
-[Microsoft Entra ID](#signing-in-with-microsoft-entra-id)) or an API token. Moving from the
+agents' tokens; without the gateway, neither is needed. Without Keycloak, people sign in
+with your identity provider (`AGENTGOV_OIDC_ISSUER` and `AGENTGOV_OIDC_CLIENT_ID` in
+`controlPlane.env`, its client's secret as `oidc-client-secret` in the Secret; [your
+identity provider](../administration.md#your-identity-provider), and [Microsoft Entra
+ID](#signing-in-with-microsoft-entra-id)) or an API token. Moving from the
 inventory to the gateway later is an upgrade with the other values: the registry, its
 issues and the ledger stay; turn the gateway's features on in **Features**.
 
@@ -243,7 +244,6 @@ controlPlane:
   env:
     AGENTGOV_OIDC_ISSUER: https://login.microsoftonline.com/<tenant ID>/v2.0
     AGENTGOV_OIDC_CLIENT_ID: <application (client) ID>
-    AGENTGOV_OIDC_ROLES_CLAIM: roles
     AGENTGOV_MICROSOFT_ADMIN_ACTIONS: "true"
 ```
 

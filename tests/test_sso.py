@@ -458,7 +458,14 @@ class TestAccess:
 
     def test_available_without_single_sign_on(self, client) -> None:
         view = client.get("/v1/access", headers=ADMIN).json()
-        assert view == {"sso_enabled": False, "bootstrap_token": True, "people": [], "sessions": []}
+        assert view == {
+            "sso_enabled": False,
+            "bootstrap_token": True,
+            "provider": None,
+            "people": [],
+            "sessions": [],
+            "grants": [],
+        }
 
 
 def _check(client: TestClient, sub: str, username: str) -> dict[str, Any]:

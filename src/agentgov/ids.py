@@ -26,6 +26,7 @@ MANAGEMENT_RULE = "rul"
 RULE_MATCH = "rmt"
 EVENT = "evt"
 SESSION = "ses"
+ROLE_GRANT = "rgr"
 SIGNAL = "sig"
 SIGHTING = "mcs"
 
