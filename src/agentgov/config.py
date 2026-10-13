@@ -533,6 +533,12 @@ class Settings:
     gateway_failure_mode: str = "modes"
     # OTLP/gRPC endpoint for gateway traces, e.g. http://otel-collector:4317.
     gateway_otlp_endpoint: str | None = None
+    # OTLP/gRPC endpoint for the gateway's access logs of model calls, which meter tokens and
+    # cost: a receiver of the collector's own, which takes them from the gateway alone (with
+    # AGENTGOV_TLS_DIR, the gateway shows its certificate), e.g. otel-collector:4319. Unset,
+    # they go with the traces to AGENTGOV_GATEWAY_OTLP_ENDPOINT, where whatever can send
+    # traces (agents do) can report model usage too.
+    gateway_usage_endpoint: str | None = None
     # agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts.
     gateway_ipv6: bool = False
     # Link to a trace in your trace viewer, with {trace_id} where the W3C trace ID

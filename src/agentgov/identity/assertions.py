@@ -240,7 +240,25 @@ class SubjectTokens:
             )
         except jwt.PyJWTError as exc:
             raise Refused("invalid_grant", f"the subject token is refused: {exc}") from None
+        if not access and not _id_token(claims):
+            # Keycloak's other tokens (one exchanged down to a resource server, say) would
+            # name an agent and its person to whoever holds them.
+            raise Refused(
+                "invalid_grant",
+                "the subject token isn't an ID token: Keycloak marks those (typ ID), for the "
+                "client the person signed in to",
+            )
         return claims
+
+
+def _id_token(claims: Mapping[str, Any]) -> bool:
+    """Whether ``claims`` are an ID token's: Keycloak marks it as one, for the one client
+    the person signed in to (its audience, and who it was issued to)."""
+    audience = claims.get("aud")
+    names = [audience] if isinstance(audience, str) else list(audience or [])
+    if claims.get("typ") != "ID" or len(names) != 1:
+        return False
+    return claims.get("azp") in (None, names[0])
 
 
 def caller(claims: Mapping[str, Any], kind: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -270,6 +288,7 @@ def caller(claims: Mapping[str, Any], kind: str) -> tuple[dict[str, Any], dict[s
             "roles": roles,
             "act": claims.get("act"),
             "sign_in": claims.get("agentgov_sign_in"),
+            "client_id": client_id,
         }
     )
     return identity, person

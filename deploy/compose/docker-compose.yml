@@ -120,6 +120,8 @@ services:
       AGENTGOV_MICROSOFT_ADMIN_ACTIONS: ${AGENTGOV_MICROSOFT_ADMIN_ACTIONS:-}
       AGENTGOV_GATEWAY_PUBLIC_URL: http://localhost:8080
       AGENTGOV_GATEWAY_OTLP_ENDPOINT: http://otel-collector:4317
+      # The gateway's access logs (model usage), on a receiver that takes only its certificate.
+      AGENTGOV_GATEWAY_USAGE_ENDPOINT: otel-collector:4319
       AGENTGOV_PROCESSOR_ADDRESS: processor:50051
       AGENTGOV_POSTURE_INTERVAL_SECONDS: "60"
       # The authority that time-stamps the ledger's checkpoints (docs/evidence.md): the demo

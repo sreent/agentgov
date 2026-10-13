@@ -265,7 +265,8 @@ grant_type=urn:ietf:params:oauth:grant-type:token-exchange
 ```
 
 AgentGov checks the token with Keycloak's keys (it must be for the gateway; an ID token
-Keycloak issued for the agent's client is taken too, as `...:token-type:id_token`), finds
+Keycloak issued for the agent's client is taken too, as `...:token-type:id_token`: one
+Keycloak marks as an ID token, for that client alone), finds
 the server registered with that authorization server (and that `resource`, when several
 share it), and asks its policies (`data.agentgov.idjag.decision`). The agent must be
 active and the server approved; and the controls apply as their modes say, as they do to

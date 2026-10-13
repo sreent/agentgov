@@ -129,6 +129,8 @@ spec:
             {{- if .Values.otelCollector.enabled }}
             - name: AGENTGOV_GATEWAY_OTLP_ENDPOINT
               value: "http://{{ include "agentgov.name" (list . "otel-collector") }}:4317"
+            - name: AGENTGOV_GATEWAY_USAGE_ENDPOINT
+              value: "{{ include "agentgov.name" (list . "otel-collector") }}:4319"
             {{- end }}
             {{- if and .Values.bundleSigning.enabled .Values.opa.enabled }}
             - name: AGENTGOV_BUNDLE_SIGNING_KEY_FILE

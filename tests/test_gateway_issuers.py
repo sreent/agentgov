@@ -591,6 +591,34 @@ class TestProcessor:
         # A subject alone (AgentGov's own tokens') names a person, not a workload.
         assert "subject" not in TestProcessor._model_identity({"x-agentgov-subject": "u-1"})
 
+    def test_providers_keys_are_spent_for_agents_alone(self) -> None:
+        """While unknown callers are monitored, a model call from a subject of a trusted
+        issuer that names no agent is refused all the same: anyone the issuer gives a token
+        to could otherwise spend the provider's key. AgentGov's own tokens pass, recorded."""
+
+        def unknown(inp: dict[str, Any]) -> dict[str, Any]:
+            return {"effect": "deny", "reasons": ["Caller is not a registered agent"]}
+
+        stranger = {
+            "x-agentgov-issuer": CLUSTER_URL,
+            "x-agentgov-subject": "sa:stranger",
+            "x-agentgov-provider": "openai",
+        }
+        opa = WorkloadOpa(unknown, modes={"unknown-callers": "monitor"})
+        result, cp = check(opa, prompt(user("hello")), headers=stranger)
+        assert result != {"action": {}} and "not a registered agent" in json.dumps(result)
+        assert [r["effect"] for r in cp.records] == ["deny"]
+        # Still found, for someone to adopt.
+        assert [p["subject"] for kind, p in cp.calls if kind == "observe"] == ["sa:stranger"]
+        own = {
+            "x-agentgov-issuer": KEYCLOAK,
+            "x-agentgov-client-id": "svc",
+            "x-agentgov-provider": "openai",
+        }
+        opa = WorkloadOpa(unknown, modes={"unknown-callers": "monitor"})
+        result, cp = check(opa, prompt(user("hello")), headers=own)
+        assert result == {"action": {}} and [r["effect"] for r in cp.records] == ["allow"]
+
     @staticmethod
     def _model_identity(headers: dict[str, str]) -> dict[str, Any]:
         from agentgov.processor.model_guard import ModelGuard

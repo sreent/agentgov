@@ -149,14 +149,23 @@ def test_presidio_down_refuses_calls_while_enforced_and_closed(client) -> None:
 
 
 def test_token_budgets_need_the_gateways_access_logs(settings: Settings) -> None:
-    for endpoint, status in ((None, "inactive"), ("http://otel-collector:4317", "active")):
-        app = create_app(settings.with_overrides(gateway_otlp_endpoint=endpoint), background=False)
+    traces, usage = "http://otel-collector:4317", "otel-collector:4319"
+    for endpoints, status, problem in (
+        ((None, None), "inactive", "budgets never run out"),
+        # Where agents send traces too, any of them could report usage for another.
+        ((traces, None), "limited", "use up its budget"),
+        ((traces, usage), "active", None),
+        ((None, usage), "active", None),
+    ):
+        names = ("gateway_otlp_endpoint", "gateway_usage_endpoint")
+        overrides = dict(zip(names, endpoints, strict=True))
+        app = create_app(settings.with_overrides(**overrides), background=False)
         with TestClient(app) as client:
             report(client, processor())
             found = feature(client, "token-budgets")
             assert found["status"] == status
-            if endpoint is None:
-                assert "budgets never run out" in found["problems"][0]
+            if problem:
+                assert problem in found["problems"][0]
 
 
 def test_the_traffic_classifier_and_your_decision_point(settings: Settings) -> None:

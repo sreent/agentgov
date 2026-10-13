@@ -83,7 +83,7 @@ file, which is how [CONTRIBUTING.md](../CONTRIBUTING.md) develops it.
 | `features`, `featurePreset` | `AGENTGOV_FEATURES`, `AGENTGOV_FEATURE_PRESET` |
 | `peopleApps` (and the demo app, with `keycloak.demoUsers`) | `AGENTGOV_PEOPLE_APP_CLIENTS` |
 | `presidio.enabled` | `AGENTGOV_PRESIDIO_URL` |
-| `otelCollector.enabled` | `AGENTGOV_GATEWAY_OTLP_ENDPOINT` |
+| `otelCollector.enabled` | `AGENTGOV_GATEWAY_OTLP_ENDPOINT`, `AGENTGOV_GATEWAY_USAGE_ENDPOINT` |
 | `opa.enabled` | `AGENTGOV_OPA_URL` |
 | `gateway.enabled` | `AGENTGOV_PROCESSOR_ADDRESS`, `AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS`, and the processor's and the sidecar's `AGENTGOV_CONTROL_PLANE_URL` |
 | always | `AGENTGOV_DESTINATION_SECRETS_DIR` |
@@ -332,6 +332,7 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Micro
 | `AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS` | `processor:8091` | ...and for model calls and calls between agents (HTTP). |
 | `AGENTGOV_GATEWAY_FAILURE_MODE` | `modes` | When a call through the gateway can't be checked (OPA can't decide, or the governance processor can't be reached or fails): `closed` refuses it; `open` lets it through unchecked, and recorded where the processor can; `modes` refuses it only while a control at the gateway is enforced, so that controls in monitor mode never stop a call. Set it alike where the control plane (which configures the gateway) and the processor run. |
 | `AGENTGOV_GATEWAY_OTLP_ENDPOINT` | — | OTLP/gRPC endpoint for gateway traces, e.g. `http://otel-collector:4317`. |
+| `AGENTGOV_GATEWAY_USAGE_ENDPOINT` | — | OTLP/gRPC endpoint for the gateway's access logs of model calls, which meter tokens and cost: a receiver of the collector's own, which takes them from the gateway alone (with `AGENTGOV_TLS_DIR`, the gateway shows its certificate), e.g. otel-collector:4319. Unset, they go with the traces to `AGENTGOV_GATEWAY_OTLP_ENDPOINT`, where whatever can send traces (agents do) can report model usage too. |
 | `AGENTGOV_GATEWAY_IPV6` | `false` | agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts. |
 | `AGENTGOV_TRACE_URL` | — | Link to a trace in your trace viewer, with {trace_id} where the W3C trace ID goes, such as `http://localhost:16686/trace/{trace_id}` for Jaeger. Ledger entries recorded at the gateway then link to their trace. |
 

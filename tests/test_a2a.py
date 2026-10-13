@@ -360,6 +360,35 @@ class TestA2AGuard:
         ask(opa, body=message)
         assert "secret" in opa.inputs[0][1]["detections"]["categories"]
 
+    @pytest.mark.parametrize(
+        ("body", "headers", "why"),
+        [
+            (SEND, {"content-encoding": "gzip"}, "compressed"),
+            ([SEND, SEND], {}, "isn't a JSON-RPC call"),  # a batch
+            ("\x00\x00\x00\x00\x05grpc", {}, "isn't a JSON-RPC call"),
+            ({"message": SEND["params"]["message"]}, {}, "names no JSON-RPC method"),
+            # A server that reads keys in any case would take this message: the check
+            # wouldn't see it.
+            (
+                {"jsonrpc": "2.0", "id": 7, "method": "SendMessage", "PARAMS": SEND["params"]},
+                {},
+                "'PARAMS' where 'params' belongs",
+            ),
+        ],
+    )
+    def test_calls_it_cant_read_are_refused_while_data_protection_is_enforced(
+        self, body: Any, headers: dict[str, str], why: str
+    ) -> None:
+        resp, cp = ask(FakeOpa(allow), body=body, headers=headers)
+        assert resp.status_code == 403 and why in resp.text
+        assert cp.records[0]["effect"] == "deny"
+        # Monitored, it goes on, and the record says what wasn't checked.
+        resp, cp = ask(
+            FakeOpa(allow, modes={"data-protection": "monitor"}), body=body, headers=headers
+        )
+        assert resp.status_code == 200
+        assert any(why in m for m in cp.records[0]["monitored"])
+
     def test_what_the_gateway_masks_in_the_message_is_recorded(self) -> None:
         def masks(inp: dict[str, Any]) -> dict[str, Any]:
             return {**allow(inp), "redact": ["pii"]}  # a2a-masking enforced
@@ -459,6 +488,19 @@ class TestAgentsTakeOnlyCallsThroughTheGateway:
         lenient = a2a_auth.DelegationCheck("billing-agent", jwks=chains.jwks(KEYS), max_age=None)
         assert lenient(earlier)["jti"] == "dlg_1"
 
+    def test_a_delegation_is_taken_once(self) -> None:
+        """The gateway gives one with each call: whoever else saw it (a tool server the
+        agent sent it to with its own calls) can't call the agent with it again."""
+        token = self.given()
+        check = a2a_auth.DelegationCheck("billing-agent", jwks=chains.jwks(KEYS))
+        assert check(token)["aud"] == ["agt_2", "billing-agent"]
+        with pytest.raises(a2a_auth.DelegationRefused, match="used before"):
+            check(token)
+        # Another delegation is taken as before; and an agent may choose to take one again.
+        assert check(self.given())
+        again = a2a_auth.DelegationCheck("billing-agent", jwks=chains.jwks(KEYS), once=False)
+        assert again(token) and again(token)
+
     def test_agentgovs_keys_are_read_once_and_kept(self) -> None:
         reads: list[str] = []
         published = {"body": json.dumps(chains.jwks(KEYS)).encode()}
@@ -480,7 +522,8 @@ class TestAgentsTakeOnlyCallsThroughTheGateway:
         try:
             check = a2a_auth.DelegationCheck("billing-agent", jwks_url=url)
             token = self.given()
-            assert check(token)["iss"] == "agentgov" and check(token)
+            # Each call carries a delegation of its own.
+            assert check(token)["iss"] == "agentgov" and check(self.given())
             assert reads == ["/v1/delegations/jwks"]
             # A key AgentGov doesn't publish: read again, but not for every such call.
             another = chains.keys("another-token")
@@ -499,7 +542,7 @@ class TestAgentsTakeOnlyCallsThroughTheGateway:
             server.shutdown()
             server.server_close()
         # AgentGov can't be reached: the keys read last still check its delegations.
-        assert check(token)["jti"]
+        assert check(self.given())["jti"]
         unreachable = a2a_auth.DelegationCheck("billing-agent", jwks_url=url)
         with pytest.raises(a2a_auth.DelegationRefused, match="keys can't be read"):
             unreachable(token)

@@ -89,7 +89,7 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 | `tool-integrity` | off, monitor, **enforce** | Quarantines tools whose descriptions hide instructions. Tools that changed since approval are held until an administrator reviews them |
 | `risk-based-access` | off, monitor, **enforce** | Refuses agents at critical risk, and blocks agents whose risk score reaches `AGENTGOV_AUTO_BLOCK_RISK_SCORE`. Monitor lets them through, and the automatic block raises an `agent.would_auto_block` issue instead. Risk is always scored and shown |
 | `token-budgets` | off, monitor, **enforce** | Refuses model calls from agents that have used their daily token budget, their own or their blueprint's, until the day ends (UTC). Off, budgets aren't checked; usage is still metered |
-| `unknown-callers` | monitor, **enforce** | Refuses callers without a registered agent's identity. Monitor lets them through and records them; with `discovery` on, they are added to the inventory. Calls to models need a valid token in either mode, since the gateway pays for them with the provider's key |
+| `unknown-callers` | monitor, **enforce** | Refuses callers without a registered agent's identity. Monitor lets them through and records them; with `discovery` on, they are added to the inventory. Calls to models need a valid token in either mode, since the gateway pays for them with the provider's key, and a token from an identity issuer the gateway trusts needs to name a registered agent too ([workload identities](agent-identity.md#straight-to-the-gateway)) |
 
 ### Detection
 
@@ -197,7 +197,7 @@ in a row, or three minutes, whichever is longer, is out of touch and doesn't cou
 | `a2a-masking` | `data-protection` off, or Presidio missing or unreachable: inactive, since nothing finds the personal data to mask |
 | `traffic-classifier` | no Granite Guardian where the processor runs: inactive; unreachable: limited, since the rules decide alone, or failing where calls wait for it with `AGENTGOV_GUARDIAN_FAILURE_MODE=closed` |
 | `external-decision-point` | no `AGENTGOV_AUTHZEN_URL` where the processor runs: inactive; unreachable: failing while enforced with `AGENTGOV_AUTHZEN_FAILURE_MODE=closed`, limited otherwise |
-| `token-budgets` | no `AGENTGOV_GATEWAY_OTLP_ENDPOINT`: inactive, since usage isn't metered |
+| `token-budgets` | neither `AGENTGOV_GATEWAY_USAGE_ENDPOINT` nor `AGENTGOV_GATEWAY_OTLP_ENDPOINT`: inactive, since usage isn't metered; only the latter: limited, since whatever sends traces there could report usage too ([usage](models.md#usage-cost-and-budgets)) |
 | `authzen-decision-point`, `copilot-studio-threat-detection` | OPA unreachable from the control plane: failing |
 | `connector-allowlist` | Copilot Studio threat detection off: inactive, since calls aren't checked as they run; in monitor mode: limited; an empty allowlist: inactive; OPA unreachable from the control plane: failing |
 | `developer-sign-in`, `identity-assertions`, `approvals-by-person` | Keycloak's keys unreachable from the control plane: limited |

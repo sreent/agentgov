@@ -542,6 +542,24 @@ class TestPeople:
         _, cp = run(opa, request=call_request("get", {}, **claims))
         assert "user" not in opa.inputs[0][1]
         assert cp.records[0]["user"] is None
+        # Keycloak names a client's service account after it, in lower case.
+        opa = FakeOpa()
+        claims = {
+            "client_id": "Agent-Bot",
+            "subject": "sa-1",
+            "username": "service-account-agent-bot",
+        }
+        run(opa, request=call_request("get", {}, **claims))
+        assert "user" not in opa.inputs[0][1]
+
+    def test_a_person_named_like_a_service_account_is_a_person(self) -> None:
+        """Only the service account of the client the token was issued to is the agent's
+        own: a person whose username starts the same way is a person, whom policy sees."""
+        opa = FakeOpa()
+        claims = {"subject": "u-9", "username": "service-account-billing", "email": "m@x.com"}
+        _, cp = run(opa, request=call_request("get", {}, **claims))
+        assert opa.inputs[0][1]["user"]["username"] == "service-account-billing"
+        assert cp.records[0]["user"]["id"] == "u-9"
 
     def test_tools_are_listed_for_the_person(self) -> None:
         opa = FakeOpa(visible=["get"])

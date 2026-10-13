@@ -14,8 +14,9 @@ one takes only calls AgentGov checked (docs/agent-to-agent.md#calls-around-the-g
 
 It needs only PyJWT (``pyjwt[crypto]``): copy this file into an agent that doesn't install
 AgentGov. Any JWT library does the same: ES256, issuer ``agentgov``, audience the agent's
-name (or its AgentGov ID), issued in the last minutes, and the keys AgentGov publishes at
-``/v1/delegations/jwks``. The agent's card stays open: A2A clients read it before they call.
+name (or its AgentGov ID), issued in the last minutes, each taken once (by its ``jti``),
+and the keys AgentGov publishes at ``/v1/delegations/jwks``. The agent's card stays open:
+A2A clients read it before they call.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import json
 import threading
 import time
 import urllib.request
+from collections import deque
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
@@ -95,7 +97,11 @@ class PublishedKeys:
 class DelegationCheck:
     """Checks the delegation a call carries, with AgentGov's public keys: read from
     ``jwks_url``, or given as ``jwks``. AgentGov issues one for each call it lets through, so
-    one issued more than ``max_age`` seconds ago is refused too (None: any until it expires)."""
+    one issued more than ``max_age`` seconds ago is refused too (None: any until it expires),
+    and so is one taken before: whoever else saw it (a tool server or a model provider the
+    agent sent it to with its own calls) can't call the agent with it around the gateway.
+    The ones taken are kept in memory: an agent with several replicas refuses a second use
+    on the replica that took the first."""
 
     def __init__(
         self,
@@ -105,12 +111,18 @@ class DelegationCheck:
         jwks: dict[str, Any] | None = None,
         max_age: int | None = 120,
         leeway: int = 30,
+        once: bool = True,
     ) -> None:
         if (jwks_url is None) == (jwks is None):
             raise ValueError("give AgentGov's keys as jwks_url or as jwks")
         self.agent = agent
         self.max_age = max_age
         self.leeway = leeway
+        self.once = once
+        # The delegations taken (by jti), until they'd be refused anyway, oldest first.
+        self._taken: set[str] = set()
+        self._until: deque[tuple[float, str]] = deque()
+        self._taken_lock = threading.Lock()
         self._published = PublishedKeys(jwks_url) if jwks_url else None
         self._given = (
             {key.key_id: key.key for key in jwt.PyJWKSet.from_dict(jwks).keys}
@@ -149,7 +161,28 @@ class DelegationCheck:
                 "the delegation it carries was given for an earlier call: the gateway gives "
                 "one with each call"
             )
+        if self.once:
+            self._take(claims)
         return claims
+
+    def _take(self, claims: dict[str, Any]) -> None:
+        """Takes the delegation, or refuses it if it was taken before."""
+        jti = str(claims["jti"])
+        expires = float(claims["exp"])
+        if self.max_age is not None:
+            expires = min(expires, float(claims["iat"]) + self.max_age)
+        now = time.time()
+        with self._taken_lock:
+            while self._until and self._until[0][0] < now:
+                self._taken.discard(self._until.popleft()[1])
+            if jti in self._taken:
+                raise DelegationRefused(
+                    "the delegation it carries was used before: the gateway gives one with "
+                    "each call"
+                )
+            self._taken.add(jti)
+            # Kept until no clock the leeway allows for would take it.
+            self._until.append((expires + 2 * self.leeway, jti))
 
 
 class RequireDelegation:

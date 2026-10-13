@@ -243,8 +243,9 @@ def identity_headers(settings: Settings, issuers: Any = ()) -> dict[str, str]:
 
 
 def processor_tls(settings: Settings, address: str, *, grpc: bool = False) -> dict[str, Any]:
-    """agentgateway's TLS to the processor (with AGENTGOV_TLS_DIR): it checks the
-    processor's certificate against AgentGov's authority, and shows its own."""
+    """agentgateway's TLS to the processor, or another of AgentGov's components (with
+    AGENTGOV_TLS_DIR): it checks the component's certificate against AgentGov's authority,
+    and shows its own."""
     folder = settings.gateway_tls_dir.rstrip("/")
     tls: dict[str, Any] = {
         "cert": f"{folder}/tls.crt",
@@ -395,6 +396,8 @@ def model_route_for(
         "x-agentgov-model": "llmRequest.model",
         # The delegation the agent carries, when another agent handed it the work.
         chains.HEADER: f'request.headers["{chains.HEADER}"]',
+        # The agent's trace, which the decisions recorded link to.
+        "traceparent": 'request.headers["traceparent"]',
     }
     webhook = {
         "host": settings.processor_webhook_address,
@@ -629,23 +632,33 @@ def render(
         }
     )
     config: dict[str, Any] = {"config": {"enableIpv6": settings.gateway_ipv6}}
+    frontend: dict[str, Any] = {}
     if settings.gateway_otlp_endpoint:
-        endpoint = urlsplit(settings.gateway_otlp_endpoint)
-        host = endpoint.netloc or endpoint.path
-        config["frontendPolicies"] = {
-            "tracing": {"host": host, "protocol": "grpc", "randomSampling": "true"},
-            # Access logs carry each model call's tokens; the agent comes from its token.
-            "accessLog": {
-                "add": _access_log_fields(settings, trusted),
-                "otlp": {"host": host, "protocol": "grpc"},
-            },
-        }
+        host = _host(settings.gateway_otlp_endpoint)
+        frontend["tracing"] = {"host": host, "protocol": "grpc", "randomSampling": "true"}
+    usage = settings.gateway_usage_endpoint or settings.gateway_otlp_endpoint
+    if usage:
+        # Access logs carry each model call's tokens; the agent comes from its token. To a
+        # receiver of their own, they come from the gateway alone (what they say is billed).
+        otlp: dict[str, Any] = {"host": _host(usage), "protocol": "grpc"}
+        if settings.gateway_usage_endpoint and settings.tls_dir:
+            tls = processor_tls(settings, _host(usage), grpc=True)
+            otlp["policies"] = {"backendTLS": tls}
+        frontend["accessLog"] = {"add": _access_log_fields(settings, trusted), "otlp": otlp}
+    if frontend:
+        config["frontendPolicies"] = frontend
     listener = {
         "policies": {"transformations": {"request": {"remove": list(DROPPED)}}},
         "routes": routes,
     }
     config["binds"] = [{"port": settings.gateway_port, "listeners": [listener]}]
     return config
+
+
+def _host(endpoint: str) -> str:
+    """An endpoint's host and port, as agentgateway takes them, from a URL or as they are."""
+    url = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}")
+    return url.netloc or url.path
 
 
 def _access_log_fields(settings: Settings, issuers: Any) -> dict[str, str]:

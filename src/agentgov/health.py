@@ -458,12 +458,24 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
                     f"{_with(down.get('detail', ''))}: calls go through without its answer.",
                 )
             )
-    elif key == "token-budgets" and not s.settings.gateway_otlp_endpoint:
+    elif key == "token-budgets" and not (
+        s.settings.gateway_usage_endpoint or s.settings.gateway_otlp_endpoint
+    ):
         out.append(
             (
                 INACTIVE,
                 "Usage isn't metered, so budgets never run out: the gateway sends no access "
-                "logs (AGENTGOV_GATEWAY_OTLP_ENDPOINT).",
+                "logs (AGENTGOV_GATEWAY_USAGE_ENDPOINT, or AGENTGOV_GATEWAY_OTLP_ENDPOINT).",
+            )
+        )
+    elif key == "token-budgets" and not s.settings.gateway_usage_endpoint:
+        out.append(
+            (
+                LIMITED,
+                "Usage is reported where agents send their traces: an agent, or anything "
+                "else that can send there, could report usage for another and use up its "
+                "budget. Give the gateway's access logs a receiver of their own "
+                "(AGENTGOV_GATEWAY_USAGE_ENDPOINT).",
             )
         )
     elif key in ("authzen-decision-point", "copilot-studio-threat-detection"):

@@ -24,6 +24,7 @@ import asyncio
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from datetime import UTC, datetime
@@ -62,6 +63,9 @@ CHAIN = "x-agentgov-chain"
 # call, as an agent that doesn't check does.
 JWKS_URL = os.environ.get("DELEGATION_JWKS_URL", "")
 _KEYS = jwt.PyJWKClient(JWKS_URL, cache_jwk_set=True, lifespan=300) if JWKS_URL else None
+# The delegations taken in the last minutes (by jti), when.
+_TAKEN: dict[str, float] = {}
+_TAKEN_LOCK = threading.Lock()
 
 CARD = {
     "name": NAME,
@@ -229,13 +233,21 @@ def around_the_gateway(delegation: str | None) -> str | None:
             audience=NAME,
             issuer="agentgov",
             leeway=30,
-            options={"require": ["exp", "iat"]},
+            options={"require": ["exp", "iat", "jti"]},
         )
     except jwt.PyJWTError as exc:
         return f"the delegation it carries isn't valid ({exc})"
-    # The gateway gives one with each call, moments before: an old one came another way.
-    if time.time() - claims["iat"] > 150:
+    # The gateway gives one with each call, moments before: an old one came another way,
+    # and so did one taken before (a tool server the agent sent it to could send it back).
+    now = time.time()
+    if now - claims["iat"] > 150:
         return "the delegation it carries was given for an earlier call"
+    with _TAKEN_LOCK:
+        for jti in [jti for jti, taken_at in _TAKEN.items() if now - taken_at > 300]:
+            del _TAKEN[jti]
+        if claims["jti"] in _TAKEN:
+            return "the delegation it carries was used before"
+        _TAKEN[claims["jti"]] = now
     return None
 
 

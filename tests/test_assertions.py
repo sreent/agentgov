@@ -156,10 +156,28 @@ class TestTheTokenItBrings:
 
     def test_an_id_token_names_the_agent_by_its_audience(self) -> None:
         kc = FakeKeycloak()
-        token = kc.token(sub="u-sam", aud="agent-bot", preferred_username="sam")
+        token = kc.token(sub="u-sam", aud="agent-bot", typ="ID", preferred_username="sam")
         claims = kc.checker().check(token, assertions.ID_TOKEN)
         identity, _ = assertions.caller(claims, assertions.ID_TOKEN)
         assert identity == {"client_id": "agent-bot"}
+
+    @pytest.mark.parametrize(
+        "claims",
+        [
+            # An agent's token exchanged down to a resource server, which holds it: it names
+            # the agent and its person, but it isn't an ID token.
+            {"typ": "Bearer", "aud": "billing-api", "azp": "agent-bot", "agent_id": "agt_1"},
+            {"aud": "agent-bot"},  # not marked as an ID token
+            {"typ": "ID", "aud": ["agent-bot", "billing-api"]},
+            {"typ": "ID", "aud": "billing-api", "azp": "agent-bot"},
+        ],
+    )
+    def test_only_id_tokens_are_taken_as_such(self, claims: dict[str, Any]) -> None:
+        kc = FakeKeycloak()
+        token = kc.token(sub="u-sam", preferred_username="sam", **claims)
+        with pytest.raises(assertions.Refused, match="isn't an ID token") as refused:
+            kc.checker().check(token, assertions.ID_TOKEN)
+        assert refused.value.error == "invalid_grant"
 
     @pytest.mark.parametrize(
         "claims",

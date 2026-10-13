@@ -247,6 +247,7 @@ library does the same, as the demo's billing-agent does with PyJWT
 | `aud` | The agent's name, or its AgentGov ID: the token holds both |
 | `exp` | Not passed. A delegation lasts an hour, for the calls the agent makes for the work |
 | `iat` | Within the last two minutes or so: the gateway gives one with each call, so an older one came another way |
+| `jti` | Not taken before. The agent sends its delegation on with its calls for the work, so the tool servers and models it calls see it: one could send it back to the agent around the gateway. Keep the `jti`s taken for as long as the `iat` check would take them |
 
 Read the key set over HTTPS, at the control plane's public address: whoever can change it
 on its way can make delegations the agent accepts.
@@ -372,7 +373,10 @@ demo cluster) that looks customers up in the CRM through the gateway. The
 ## Limits
 
 * Personal data in a message an agent sends is masked only while `a2a-masking` is
-  enforced. A compressed message can't be read: nothing in it is found or masked.
+  enforced. A call the processor can't read (compressed, not one JSON-RPC call, such as
+  a batch or another binding, or with `params`, `message` or `parts` spelled in another
+  case, which some servers read all the same) is refused while `data-protection` is
+  enforced, and goes on otherwise, its decision saying what wasn't checked.
 * The processor reads each request whole, up to 256 KiB: agentgateway refuses larger ones
   (HTTP 413) before they reach policy.
 * Calls that go around the gateway aren't governed, and AgentGov can't stop them: the
@@ -383,9 +387,15 @@ demo cluster) that looks customers up in the CRM through the gateway. The
   ([when something is down](features.md#when-something-is-down)). It carries no
   delegation from AgentGov for the agent called (only the caller's own, if it sent one)
   and none of the plain headers, so agents that refuse calls without one refuse it too.
+  While answers are checked (`data-protection` or `prompt-injection` on), agentgateway 1.6
+  answers such a call 500 when it can't reach the processor with the answer, whatever the
+  failure mode: the agent called has had the call by then.
 * A delegation is a bearer token: whoever holds one can present it until it expires. The
-  agent it was given to holds it, and sends it with its calls through the gateway; the
-  `iat` check above keeps an agent from taking it as proof for a later call.
+  agent it was given to holds it, and sends it with its calls through the gateway, where
+  the tool servers and models it calls see it too; the `iat` and `jti` checks above keep an
+  agent from taking it as proof for a later call, or for a call around the gateway.
+  `agentgov.a2a_auth` keeps the `jti`s it took in memory: an agent with several replicas
+  refuses a second use on the replica that took the first.
 * The gateway routes the JSON-RPC binding. Push notifications, the agent calling a
   caller's webhook back, don't go through it.
 * Delegations are signed with a key derived from the service token: changing

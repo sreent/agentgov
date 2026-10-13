@@ -240,7 +240,8 @@ presidio:
 
 otelCollector:
   # Receives agents' and the gateway's traces (OTLP :4317 gRPC, :4318 HTTP) for
-  # discovery and activity.
+  # discovery and activity, and the gateway's access logs of model calls (:4319, from
+  # the gateway alone), which meter tokens and cost.
   enabled: true
   image:
     repository: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib

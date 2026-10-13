@@ -272,7 +272,9 @@ budgets, the kill switch, the ledger (whose entries record the token's issuer an
 and model usage. A subject no agent has is an unknown caller: refused while
 [`unknown-callers`](features.md) is enforced; let through and recorded while it is
 monitored, and found as a discovered agent with that workload identity, so adopting it is
-all it needs. Only AgentGov's own tokens are believed for which agent or client they name
+all it needs. Its model calls are refused whatever the mode: the gateway spends a
+provider's key for agents alone, and anyone the issuer gives a token for the gateway's
+audience could ask. Only AgentGov's own tokens are believed for which agent or client they name
 and for the person an agent acts for: claims such as `agent_id`, `azp` or `email` in
 another issuer's token are ignored.
 

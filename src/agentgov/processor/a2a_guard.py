@@ -57,6 +57,34 @@ def _rpc(body: bytes) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+# Where the processor finds a call's message: a JSON-RPC call's params, and the message in
+# them. Some servers read JSON's keys in any case: one spelled otherwise could carry a
+# message the processor wouldn't see.
+ENVELOPE = ("jsonrpc", "method", "params", "id", "message", "parts")
+
+
+def unreadable(headers: Any, body: bytes) -> str | None:
+    """Why the processor can't read what a POST to an agent carries, if it can't: it reads
+    A2A's JSON-RPC binding (one call, a JSON object), as the gateway routes it, plain."""
+    encoding = (headers.get("content-encoding") or "identity").strip().lower()
+    if encoding not in ("", "identity"):
+        return "it is compressed"
+    if not body.strip():
+        return None
+    rpc = _rpc(body)
+    if not rpc:
+        return "it isn't a JSON-RPC call"
+    if not isinstance(rpc.get("method"), str):
+        return "it names no JSON-RPC method"
+    params = rpc.get("params") if isinstance(rpc.get("params"), dict) else {}
+    message = params.get("message") if isinstance(params.get("message"), dict) else {}
+    for found in (rpc, params, message):
+        for key in found:
+            if key not in ENVELOPE and key.lower() in ENVELOPE and key.lower() not in found:
+                return f"it has a {key!r} where {key.lower()!r} belongs"
+    return None
+
+
 def refuse(
     rpc_id: Any, effect: str, reasons: list[str], approval_id: str | None = None
 ) -> Response:
@@ -169,6 +197,13 @@ class A2AGuard:
         if unusable:
             finish("deny", [unusable], agent=self.p.holder(identity))
             return refuse(rpc_id, "deny", [unusable])
+        why = unreadable(headers, body) if request.method == "POST" else None
+        if why:
+            reason = f"The call can't be read ({why}), so what it carries can't be checked"
+            if modes["data-protection"] == "enforce":
+                finish("deny", [reason])
+                return refuse(rpc_id, "deny", [reason])
+            monitored.append(reason)
         if inspection.scan.pii_error and self.p._fail_closed(modes):
             reasons = ["Content inspection is unavailable, so the call was not passed on"]
             finish("deny", reasons)

@@ -135,6 +135,14 @@ control plane, which adds them up per agent, UTC day, provider and model and pri
 with the provider's prices. Streamed calls are counted too: the gateway asks the provider
 for their usage.
 
+What the logs say is billed to agents and counts against their budgets, so they go to a
+receiver of their own on the collector (`AGENTGOV_GATEWAY_USAGE_ENDPOINT`, port 4319 in
+the Compose stack and the chart), not the one agents send their traces to: with mutual TLS
+between components it takes only a certificate from AgentGov's authority, the gateway's,
+and in Kubernetes the chart's network policy lets only the gateway reach it. Without one,
+anything that can send traces could report usage for an agent and use up its budget; the
+*Token budgets* feature says so.
+
 | | How |
 |---|---|
 | Admin UI | **Models** page: today's tokens against each agent's budget; who is spending, per owner and per sponsor of the agents; and calls, tokens and cost per day. Each agent's page shows its own |

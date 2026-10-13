@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 import subprocess
@@ -212,6 +213,8 @@ class TestModelRoutes:
             assert webhook["headers"]["x-agentgov-subject"] == "jwt.sub"
             assert webhook["headers"]["x-agentgov-groups"] == "toJson(jwt.groups)"
             assert webhook["headers"]["x-agentgov-act"] == "toJson(jwt.act)"
+            # The agent's trace, for the decisions recorded.
+            assert webhook["headers"]["traceparent"] == 'request.headers["traceparent"]'
 
     def test_a_token_is_always_needed_for_a_model(self) -> None:
         # The gateway spends the provider's key: callers without a valid token never get
@@ -254,6 +257,26 @@ def test_tracing_and_ipv6() -> None:
     tracing = config["frontendPolicies"]["tracing"]
     assert (tracing["host"], tracing["protocol"]) == ("otel-collector:4317", "grpc")
     assert config["config"]["enableIpv6"] is False
+
+
+def test_usage_goes_to_a_receiver_of_its_own() -> None:
+    """The access logs that meter model calls go where only the gateway sends (with mutual
+    TLS, showing its certificate); the traces, where agents send theirs too."""
+    alone = dataclasses.replace(SETTINGS, gateway_usage_endpoint="otel-collector:4319")
+    logs = render([], alone)["frontendPolicies"]["accessLog"]["otlp"]
+    assert logs == {"host": "otel-collector:4319", "protocol": "grpc"}
+    mutual = dataclasses.replace(alone, tls_dir="/tls")
+    config = render([], mutual)["frontendPolicies"]
+    tls = config["accessLog"]["otlp"]["policies"]["backendTLS"]
+    assert (tls["cert"], tls["root"], tls["hostname"]) == (
+        "/tls/tls.crt",
+        "/tls/ca.crt",
+        "otel-collector",
+    )
+    assert config["tracing"]["host"] == "otel-collector:4317"
+    # Without a receiver of their own, they go with the traces (as before).
+    shared = render([], SETTINGS)["frontendPolicies"]["accessLog"]["otlp"]
+    assert shared == {"host": "otel-collector:4317", "protocol": "grpc"}
 
 
 def test_atomic_write(tmp_path: Path) -> None:
