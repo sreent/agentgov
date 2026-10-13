@@ -57,11 +57,24 @@ class Principal:
     def is_admin(self) -> bool:
         return "admin" in self.roles
 
+    @property
+    def teams(self) -> dict[str, frozenset[str]]:
+        """The roles held for some teams only (approver@sales), and those teams. They never
+        count where a role is checked for itself: only where its team is checked too
+        (agentgov.api.reach)."""
+        held: dict[str, set[str]] = {}
+        for value in self.roles:
+            role, team = sso.split_role(value)
+            if team is not None and role in sso.TEAM_ROLES:
+                held.setdefault(role, set()).add(team)
+        return {role: frozenset(names) for role, names in held.items()}
+
     def describe(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "role": self.role,
             "roles": sorted(self.roles),
+            "teams": {role: sorted(names) for role, names in sorted(self.teams.items())},
             "actor": self.actor,
             "via": self.via,
             "microsoft": self.microsoft,
@@ -77,7 +90,7 @@ def describe(rt: Any, principal: Principal) -> dict[str, Any]:
             "issues": features.is_on(s, "issues"),
             "approvals": features.is_on(s, "approvals-by-person"),
         }
-        if "secops" in principal.roles:
+        if "secops" in principal.roles or "secops" in principal.teams:
             out["handoff"] = {"level": handoff.level(s), "reached": handoff.reached(s)}
     return out
 
@@ -157,7 +170,8 @@ def _signed_in(rt: Any, token: str | None) -> Principal | None:
         record = sso.lookup(session, token)
         if record is None:
             return None
-        roles = [r for r in sso.SSO_ROLES if r in (record.roles or [])]
+        # For every team, then for one (approver@sales).
+        roles = [r for r in sso.ordered(record.roles or []) if r != sso.PERSON]
         if not roles:
             # Someone without an AgentGov role, there for the requests and issues sent to
             # them: given the person role, or, while anyone may sign in, with none at all.

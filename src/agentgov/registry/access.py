@@ -23,8 +23,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
-from agentgov.identity.sso import GIVABLE
+from agentgov.identity.sso import GIVABLE, TEAM_ROLES, for_team
 from agentgov.models import AdminSession, LedgerEntry, RoleGrant
+from agentgov.registry import teams
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
 SIGN_IN_EVENTS = ("admin.login", "admin.login_denied")
@@ -164,13 +165,35 @@ def grants(session: Session) -> list[RoleGrant]:
     return list(session.scalars(select(RoleGrant).order_by(RoleGrant.email, RoleGrant.role)))
 
 
+def team_role(session: Session, role: Any, team: Any, allowed: tuple[str, ...]) -> str:
+    """``role``, held for team ``team`` when one is given (``approver@sales``): one of
+    ``allowed``, and for a team, one of the roles that can be held for a team, and a team
+    there is."""
+    if not isinstance(role, str) or role not in allowed:
+        raise ValidationError(f"role must be one of {', '.join(allowed)}")
+    if team in (None, ""):
+        return role
+    if role not in TEAM_ROLES:
+        raise ValidationError(
+            f"the {role} role is for every team: one team takes {', '.join(TEAM_ROLES)}"
+        )
+    name = teams.reference(session, team)
+    return for_team(role, str(name))
+
+
 def grant(
-    session: Session, email: str, role: str, *, actor: str, reason: str | None = None
+    session: Session,
+    email: str,
+    role: str,
+    *,
+    actor: str,
+    reason: str | None = None,
+    team: str | None = None,
 ) -> RoleGrant:
-    """Give a person an AgentGov role, from their next sign-in."""
+    """Give a person an AgentGov role, from their next sign-in: for every team, or for
+    ``team``'s agents only."""
     email = _email(email)
-    if role not in GIVABLE:
-        raise ValidationError(f"role must be one of {', '.join(GIVABLE)}")
+    role = team_role(session, role, team, GIVABLE)
     existing = session.scalar(
         select(RoleGrant).where(RoleGrant.email == email, RoleGrant.role == role)
     )

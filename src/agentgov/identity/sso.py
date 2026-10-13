@@ -54,6 +54,9 @@ PERSON = "person"
 # The roles the provider (agentgov-person, ...) or AgentGov can give. The person role, given,
 # lets someone in even when only people with a role may sign in (AGENTGOV_OIDC_REQUIRE_ROLE).
 GIVABLE = (*SSO_ROLES, PERSON)
+# Each of these can be held for one team's agents only: "approver@sales" is the approver role
+# for team sales' agents (docs/administration.md#roles-for-one-team).
+TEAM_ROLES = SSO_ROLES
 # The features that let them sign in: while one is on.
 PERSON_FEATURES = ("approvals-by-person", "issues")
 LOGIN_TTL = timedelta(minutes=10)
@@ -129,6 +132,39 @@ def claim_values(claims: dict[str, Any], path: str) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
+def split_role(value: str) -> tuple[str, str | None]:
+    """A role and the team it is held for: ("approver", "sales") for "approver@sales", and
+    no team for a role held for every team."""
+    role, mark, team = value.partition("@")
+    return (role, team) if mark and team else (value, None)
+
+
+def for_team(role: str, team: str) -> str:
+    return f"{role}@{team}"
+
+
+def is_team_role(value: str) -> bool:
+    role, team = split_role(value)
+    return team is not None and role in TEAM_ROLES
+
+
+def known_role(value: str) -> bool:
+    """A role the provider or AgentGov can give: for every team, or for one."""
+    return value in GIVABLE or is_team_role(value)
+
+
+def ordered(roles: Any) -> list[str]:
+    """The known ones of ``roles``, most privileged first: those for every team (the person
+    role last), then those for one team, by role and team."""
+    given = set(roles)
+    every = [role for role in GIVABLE if role in given]
+    one = sorted(
+        (r for r in given if is_team_role(r)),
+        key=lambda r: (TEAM_ROLES.index(split_role(r)[0]), str(split_role(r)[1]).lower()),
+    )
+    return every + one
+
+
 def roles_from_claims(
     claims: dict[str, Any],
     paths: str | Sequence[str],
@@ -137,7 +173,8 @@ def roles_from_claims(
 ) -> list[str]:
     """AgentGov roles named in the claims at ``paths`` (e.g. ``realm_access.roles``): the
     values ``role_map`` maps to roles when there is one, else the names with ``prefix``
-    (``agentgov-approver`` is the approver role)."""
+    (``agentgov-approver`` is the approver role, ``agentgov-approver@sales`` the approver
+    role for team sales)."""
     found: set[str] = set()
     for path in [paths] if isinstance(paths, str) else paths:
         for item in claim_values(claims, path):
@@ -145,9 +182,9 @@ def roles_from_claims(
                 found |= role_map.get(item, set())
                 continue
             name = item.lstrip("/")  # group paths, e.g. "/agentgov-admin"
-            if name.startswith(prefix) and name[len(prefix) :] in GIVABLE:
+            if name.startswith(prefix) and known_role(name[len(prefix) :]):
                 found.add(name[len(prefix) :])
-    return [role for role in GIVABLE if role in found]
+    return ordered(found)
 
 
 def _true(value: Any) -> bool:
@@ -517,8 +554,7 @@ def with_given_roles(session: Session, who: Identity) -> Identity:
     given = set(session.scalars(select(RoleGrant.role).where(RoleGrant.email == who.email.lower())))
     if not given:
         return who
-    roles = [role for role in GIVABLE if role in given or role in who.roles]
-    return replace(who, roles=roles, given=tuple(r for r in GIVABLE if r in given))
+    return replace(who, roles=ordered(given | set(who.roles)), given=tuple(ordered(given)))
 
 
 def without_role(session: Session, settings: Settings) -> str | None:
@@ -533,11 +569,12 @@ def without_role(session: Session, settings: Settings) -> str | None:
 def admit(session: Session, settings: Settings, who: Identity) -> Identity | None:
     """Who signed in, with the roles they sign in with, or None if they may not sign in.
 
-    Their AgentGov roles, if they have one. Otherwise the person role, while issues or
-    approvals go to people: given to them, by the provider or in AgentGov, or else to anyone
-    the provider signs in, unless only people with a role may sign in. Given, it is stored as
-    their role; unasked, their session has none, so that requiring a role ends it too."""
-    held = [role for role in SSO_ROLES if role in who.roles]
+    Their AgentGov roles, if they have one, for every team or for one. Otherwise the person
+    role, while issues or approvals go to people: given to them, by the provider or in
+    AgentGov, or else to anyone the provider signs in, unless only people with a role may sign
+    in. Given, it is stored as their role; unasked, their session has none, so that requiring
+    a role ends it too."""
+    held = [role for role in ordered(who.roles) if role != PERSON]
     if held:
         return replace(who, roles=held)
     if not people_may_sign_in(session):

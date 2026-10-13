@@ -77,6 +77,8 @@ class Grant(BaseModel):
 
     email: str = Field(min_length=3, max_length=255)
     role: str = Field(min_length=1, max_length=32)
+    # For this team's agents only (docs/administration.md#roles-for-one-team).
+    team: str | None = Field(None, max_length=128)
     reason: str | None = Field(None, max_length=1000)
 
 
@@ -85,9 +87,12 @@ def give_role(
     request: Request, body: Grant, principal: Principal = Depends(admin)
 ) -> dict[str, Any]:
     """Give a person an AgentGov role, by the email address their identity provider vouches
-    for: from their next sign-in, beside the roles the provider gives them."""
+    for: from their next sign-in, beside the roles the provider gives them. With ``team``,
+    for that team's agents only."""
     with request.app.state.rt.db.session() as s:
-        record = access.grant(s, body.email, body.role, actor=principal.actor, reason=body.reason)
+        record = access.grant(
+            s, body.email, body.role, actor=principal.actor, reason=body.reason, team=body.team
+        )
         return access.grant_to_dict(record)
 
 

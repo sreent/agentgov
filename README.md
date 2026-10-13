@@ -123,7 +123,7 @@ flowchart LR
 6. People sign in to the admin UI with single sign-on, through the same Keycloak or
    your own identity provider (Microsoft Entra ID, Okta, Google or any OpenID Connect
    provider), and their roles decide whether they administer agents, approve requests,
-   work in security operations or only audit.
+   work in security operations or only audit: for every team, or for one team's agents.
 
 [Architecture](docs/architecture.md) covers the design in detail: sequence diagrams,
 trust boundaries, failure modes and scaling.

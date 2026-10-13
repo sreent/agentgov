@@ -59,6 +59,51 @@ def reference(session: Session, value: Any) -> str | None:
     return name
 
 
+def _with(
+    own: str | None, blueprints: str | None, names: set[str], fallback: str | None
+) -> str | None:
+    """The team an agent is with: the first of its own team and its blueprint's that is a
+    team, else the default team (as its issues reach a team)."""
+    for name in (own, blueprints):
+        if name and name in names:
+            return name
+    return fallback
+
+
+def team_of(session: Session, agent: Agent) -> str | None:
+    """The team ``agent`` is with, as its issues reach a team: its own, else its
+    blueprint's, else the default team."""
+    blueprint = agent.blueprint
+    fallback = default(session)
+    names = set(session.scalars(select(Team.name)))
+    return _with(
+        agent.team,
+        blueprint.team if blueprint else None,
+        names,
+        fallback.name if fallback else None,
+    )
+
+
+def agents_in(session: Session, names: Any) -> set[str]:
+    """The agents, by ID, that are with the teams ``names`` (any case): see team_of."""
+    wanted = {str(name).lower() for name in names if name}
+    if not wanted:
+        return set()
+    fallback = default(session)
+    existing = set(session.scalars(select(Team.name)))
+    rows = session.execute(
+        select(Agent.id, Agent.team, Blueprint.team).outerjoin(
+            Blueprint, Agent.blueprint_id == Blueprint.id
+        )
+    )
+    return {
+        agent_id
+        for agent_id, own, blueprints in rows
+        if (_with(own, blueprints, existing, fallback.name if fallback else None) or "").lower()
+        in wanted
+    }
+
+
 def list_all(session: Session) -> list[Team]:
     return list(session.scalars(select(Team).order_by(Team.name)))
 

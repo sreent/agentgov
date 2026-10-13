@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy import select
 
 from agentgov import ledger
+from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.api.versions import if_match
 from agentgov.identity.keycloak import KeycloakError
@@ -38,8 +39,9 @@ router = APIRouter(prefix="/v1")
 
 read = require(*READ_ROLES)
 admin = require("admin")
-# Kill switches: administrators, and the security team's tools as far as the hand-off lets them.
-kill_switch = require("secops")
+# Kill switches: administrators, and the security team's tools as far as the hand-off lets them
+# (for the agents of their teams, when their role is for some teams only).
+kill_switch = reach.require("secops")
 
 
 def _rt(request: Request) -> Any:
@@ -58,9 +60,10 @@ def list_agents(
     q: str | None = None,
     source: str | None = None,
     include_deleted: bool = False,
-    _: Principal = Depends(read),
+    principal: Principal = Depends(reach.read),
 ) -> list[dict[str, Any]]:
-    """``source`` is ``registered``, ``discovered:<how>`` or ``platform:<platform>``."""
+    """``source`` is ``registered``, ``discovered:<how>`` or ``platform:<platform>``. Someone
+    with roles for some teams only sees those teams' agents."""
     with _rt(request).db.session() as s:
         listed = agents.list_agents(
             s,
@@ -71,6 +74,9 @@ def list_agents(
             source=source,
             include_deleted=include_deleted,
         )
+        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        if reached is not None:
+            listed = [a for a in listed if a.id in reached]
         # Who made each agent found on a platform, as its platform says.
         makers = people.for_records(
             s,
@@ -82,35 +88,45 @@ def list_agents(
                 )
             ),
         )
-        return [
+        rows = [
             {
                 **agents.to_dict(a),
                 **({"maker": people.shown(makers[a.id])} if a.id in makers else {}),
             }
             for a in listed
         ]
+        reach.mark(rows, s, principal)
+        return rows
 
 
 @router.post("/agents", status_code=201, tags=["agents"])
 def register_agent(
     request: Request,
     body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(require("registrar")),
+    principal: Principal = Depends(reach.require("registrar")),
 ) -> dict[str, Any]:
     """Register an agent. Admins may pass ``approve: true``; registrars always
-    create ``pending`` agents that need approval (Agent 365 "requests")."""
+    create ``pending`` agents that need approval (Agent 365 "requests"). A registrar or an
+    admin for some teams only registers into one of them (``team``; their team, when they
+    have one), an admin for it approving as admins do."""
     rt = _rt(request)
     known_fields(body, AGENT_FIELDS | {"name", "source", "approve", "instructions"}, "an agent")
     requested = bool(body.pop("approve", False))
     text = body.pop("instructions", None)
     with rt.db.session() as s:
-        if principal.is_admin:
-            approve = requested
-        else:
-            approve = not features.is_on(s, "registration-approval")
+        own = reach.teams(principal, "registrar")
+        if own is not None and not body.get("team") and len(own) == 1:
+            body["team"] = next(iter(own))  # their one team
+        team = str(body.get("team") or "").lower()
+        admin_there = principal.is_admin or team in {
+            name.lower() for name in principal.teams.get("admin", ())
+        }
+        approve = requested if admin_there else not features.is_on(s, "registration-approval")
+        # The labels that exempt agents from controls: administrators for every team.
         agent = agents.register(
             s, rt.settings, body, actor=principal.actor, approve=approve, admin=principal.is_admin
         )
+        reach.keep(s, principal, agent, "registrar")
         if text is not None:
             instructions.report(
                 s,
@@ -125,11 +141,14 @@ def register_agent(
 
 
 @router.get("/agents/{ref}", tags=["agents"])
-def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
+def get_agent(
+    request: Request, ref: str, principal: Principal = Depends(reach.read)
+) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         agent = agents.get(s, ref)
+        reach.check(s, principal, agent, *READ_ROLES, ref=ref)
         makers = people.for_agent(s, agent.id)
-        return {
+        row = {
             **agents.to_dict(agent),
             # What Microsoft 365 or Copilot Studio reports, for agents that run there.
             "platforms": platforms.for_agent(s, agent.id),
@@ -145,15 +164,21 @@ def get_agent(request: Request, ref: str, _: Principal = Depends(read)) -> dict[
                 agent, features.modes(s), features.all_scopes(s)
             ),
         }
+        reach.mark([row], s, principal)
+        return row
 
 
 @router.get("/agents/{ref}/a2a", tags=["agents"])
-def agent_a2a(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
+def agent_a2a(
+    request: Request, ref: str, principal: Principal = Depends(reach.read)
+) -> dict[str, Any]:
     """Agent to agent: where other agents call it through the gateway, whom it may call,
     and who may call it."""
     rt = _rt(request)
     with rt.db.session() as s:
-        return agents.a2a_view(s, rt.settings, agents.get(s, ref))
+        agent = agents.get(s, ref)
+        reach.check(s, principal, agent, *READ_ROLES, ref=ref)
+        return agents.a2a_view(s, rt.settings, agent)
 
 
 @router.patch("/agents/{ref}", tags=["agents"])
@@ -161,16 +186,33 @@ def update_agent(
     request: Request,
     ref: str,
     body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
+    principal: Principal = Depends(reach.require("admin")),
 ) -> dict[str, Any]:
     rt = _rt(request)
     known_fields(body, AGENT_FIELDS, "an agent's edit")
     with rt.db.session() as s:
         agent = agents.get(s, ref)
+        reach.check(s, principal, agent, "admin", ref=ref)
+        _exemptions(principal, agent, body)
         changed = agents.update(s, agent, body, actor=principal.actor, version=if_match(request))
+        reach.keep(s, principal, agent, "admin")
         if set(changed) & agents.RISKY_FIELDS:
             agents.refresh_risk(s, rt.settings, agent)
         return agents.to_dict(agent)
+
+
+def _exemptions(principal: Principal, agent: Any, body: dict[str, Any]) -> None:
+    """Refuse an administrator for some teams only a change to the labels that exempt an
+    agent from rules or controls: those are for administrators for every team."""
+    if principal.is_admin or not isinstance(body.get("labels"), dict):
+        return
+    changed = agents.reserved_changes(agent.labels, body["labels"])
+    if changed:
+        raise HTTPException(
+            403,
+            f"label(s) {', '.join(changed)}: labels under {agents.RESERVED_LABELS} are set by "
+            "administrators for every team",
+        )
 
 
 def _sponsors(agent: Any, principal: Principal) -> bool:
@@ -199,7 +241,8 @@ def attest_agent(
             if principal.roles & set(READ_ROLES):
                 raise
             raise HTTPException(403, refused) from None
-        if not principal.is_admin and not _sponsors(agent, principal):
+        admin_here = "admin" in reach.roles_at(s, principal, agent)
+        if not admin_here and not _sponsors(agent, principal):
             raise HTTPException(403, refused)
         agents.attest(s, agent, actor=principal.actor, note=body.get("note"))
         return agents.to_dict(agent)
@@ -210,7 +253,7 @@ def agent_credentials(
     request: Request,
     ref: str,
     body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(admin),
+    principal: Principal = Depends(reach.require("admin")),
 ) -> dict[str, Any]:
     """Return the agent's OAuth client credentials (``rotate: true`` issues a new secret);
     for an agent with a workload identity, what token authenticates it instead; and for a
@@ -220,6 +263,7 @@ def agent_credentials(
         raise HTTPException(409, "identity provider integration is not configured")
     with rt.db.session() as s:
         agent = agents.get(s, ref)
+        reach.check(s, principal, agent, "admin", ref=ref)
         if agent.status != ACTIVE:
             raise Conflict("credentials are only issued to active agents")
         if agent.workload_issuer and body.get("rotate"):
@@ -263,12 +307,14 @@ def agent_credentials(
 
 @router.post("/agents/adopt", tags=["agents"])
 def adopt_agents(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
+    request: Request,
+    body: dict[str, Any] = Body(...),
+    principal: Principal = Depends(reach.require("admin")),
 ) -> dict[str, Any]:
     """Adopt agents found on platforms at once (``{"agents": [...]}``): with ``makers:
     true``, each agent's maker on its platform as owner and sponsor, where AgentGov knows
     them; ``owner`` and ``sponsors`` for the others. Those it can't adopt are left, each
-    with why."""
+    with why. An administrator for some teams only adopts those teams' agents."""
     refs = body.get("agents")
     sponsors = body.get("sponsors")
     if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
@@ -292,6 +338,7 @@ def adopt_agents(
             makers=bool(body.get("makers")),
             actor=principal.actor,
             reason=reason if isinstance(reason, str) else None,
+            reached=reach.agent_ids(s, principal, "admin"),
         )
 
 
@@ -300,23 +347,25 @@ def classify_agent(
     request: Request,
     ref: str,
     body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(require("approver")),
+    principal: Principal = Depends(reach.require("approver")),
 ) -> dict[str, Any]:
     """Classify an agent under the EU AI Act: ``category``, ``role``, ``basis`` and
     ``purpose`` (docs/evidence.md#a-classification-register). Approvers and administrators."""
     with _rt(request).db.session() as s:
         agent = agents.get(s, ref)
+        reach.check(s, principal, agent, "approver", ref=ref)
         classification.classify(s, agent, body, actor=principal.actor)
         return agents.to_dict(agent)
 
 
 @router.delete("/agents/{ref}/classification", tags=["agents"])
 def unclassify_agent(
-    request: Request, ref: str, principal: Principal = Depends(require("approver"))
+    request: Request, ref: str, principal: Principal = Depends(reach.require("approver"))
 ) -> dict[str, Any]:
     """The agent is no longer classified: it shows as such in the register."""
     with _rt(request).db.session() as s:
         agent = agents.get(s, ref)
+        reach.check(s, principal, agent, "approver", ref=ref)
         classification.classify(s, agent, None, actor=principal.actor)
         return agents.to_dict(agent)
 
@@ -325,7 +374,7 @@ def unclassify_agent(
 def bulk_agents(
     request: Request,
     body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(require("secops", "approver")),
+    principal: Principal = Depends(reach.require("secops", "approver")),
 ) -> dict[str, Any]:
     """Do one thing to many agents (``agents``, by name or ID) at once: a lifecycle
     ``action`` (approve, block, unblock, delete or restore); ``update`` with ``fields``
@@ -342,18 +391,21 @@ def bulk_agents(
     reason = body.get("reason")
     if reason is not None and not isinstance(reason, str):
         raise HTTPException(422, "reason is text")
+    if action not in bulk.AGENT_ACTIONS:
+        raise HTTPException(422, f"action is {', '.join(bulk.AGENT_ACTIONS)}")
+    role = {"update": "admin", "classify": "approver"}.get(action, "secops")
     rt = _rt(request)
     with rt.db.session() as s:
-        if action == "update":
-            if not principal.is_admin:
-                raise HTTPException(403, "administrators edit agents")
-        elif action == "classify":
-            if not principal.roles & {"admin", "approver"}:
-                raise HTTPException(403, "approvers and administrators classify agents")
-        elif action in bulk.AGENT_ACTIONS:
-            if not principal.roles & {"admin", "secops"}:
-                raise HTTPException(403, f"role {principal.role!r} may not do this")
-            handoff.check_kill_switch(s, principal, action)
+        if reach.teams(principal, role) == frozenset():
+            raise HTTPException(403, f"role {principal.role!r} may not do this")
+        check = None
+        if role == "secops":
+            if principal.teams:
+                # What the kill switch lets them do, by their roles where each agent is.
+                def check(agent: Any) -> None:
+                    handoff.check_kill_switch(s, reach.here(s, principal, agent), action)
+            else:
+                handoff.check_kill_switch(s, principal, action)
         return bulk.agents(
             s,
             rt.settings,
@@ -362,6 +414,9 @@ def bulk_agents(
             actor=principal.actor,
             reason=(reason or "").strip() or None,
             fields=body.get("fields"),
+            reached=reach.agent_ids(s, principal, role),
+            check=check,
+            keep=lambda agent: reach.keep(s, principal, agent, role),
         )
 
 
@@ -373,15 +428,19 @@ def agent_lifecycle(
     body: dict[str, Any] = Body(default={}),
     principal: Principal = Depends(kill_switch),
 ) -> dict[str, Any]:
-    """Lifecycle actions: approve, block (kill switch), unblock, delete (soft), restore, adopt."""
+    """Lifecycle actions: approve, block (kill switch), unblock, delete (soft), restore, adopt.
+    Those with roles for some teams only, for those teams' agents."""
     rt = _rt(request)
     with rt.db.session() as s:
-        handoff.check_kill_switch(s, principal, action)
         agent = agents.get(s, ref)
+        reach.check(s, principal, agent, "secops", ref=ref)
+        handoff.check_kill_switch(s, reach.here(s, principal, agent), action)
         if action == "adopt" and body:
+            _exemptions(principal, agent, body)
             agents.update(
                 s, agent, {k: v for k, v in body.items() if k != "reason"}, actor=principal.actor
             )
+            reach.keep(s, principal, agent, "admin")
         agents.transition(
             s, rt.settings, agent, action, actor=principal.actor, reason=body.get("reason")
         )
@@ -413,18 +472,25 @@ def purge_agent(
 
 
 @router.get("/agents/{ref}/risk", tags=["agents"])
-def agent_risk(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
+def agent_risk(
+    request: Request, ref: str, principal: Principal = Depends(reach.read)
+) -> dict[str, Any]:
     """The agent's current risk, as last computed from decisions and posture scans."""
     with _rt(request).db.session() as s:
-        return agents.to_dict(agents.get(s, ref))["risk"]
+        agent = agents.get(s, ref)
+        reach.check(s, principal, agent, *READ_ROLES, ref=ref)
+        return agents.to_dict(agent)["risk"]
 
 
 @router.post("/agents/{ref}/risk/refresh", tags=["agents"])
-def refresh_agent_risk(request: Request, ref: str, _: Principal = Depends(admin)) -> dict[str, Any]:
+def refresh_agent_risk(
+    request: Request, ref: str, principal: Principal = Depends(reach.require("admin"))
+) -> dict[str, Any]:
     """Recompute risk now. May raise findings and, with auto-block enabled, block the agent."""
     rt = _rt(request)
     with rt.db.session() as s:
         agent = agents.get(s, ref)
+        reach.check(s, principal, agent, "admin", ref=ref)
         result = agents.refresh_risk(s, rt.settings, agent)
         return {"score": result.score, "level": result.level, "factors": result.factors}
 
@@ -433,7 +499,8 @@ def refresh_agent_risk(request: Request, ref: str, _: Principal = Depends(admin)
 
 
 @router.get("/blueprints", tags=["blueprints"])
-def list_blueprints(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+def list_blueprints(request: Request, _: Principal = Depends(reach.read)) -> list[dict[str, Any]]:
+    """Every blueprint, for everyone who reads AgentGov (for some teams too)."""
     with _rt(request).db.session() as s:
         return [blueprints.to_dict(b) for b in blueprints.list_all(s)]
 
@@ -448,7 +515,7 @@ def create_blueprint(
 
 
 @router.get("/blueprints/{ref}", tags=["blueprints"])
-def get_blueprint(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
+def get_blueprint(request: Request, ref: str, _: Principal = Depends(reach.read)) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         return blueprints.to_dict(blueprints.get(s, ref))
 
@@ -480,9 +547,17 @@ def delete_blueprint(
 
 
 @router.get("/teams", tags=["teams"])
-def list_teams(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+def list_teams(
+    request: Request, principal: Principal = Depends(reach.read)
+) -> list[dict[str, Any]]:
+    """The teams: for someone with roles for some teams only, those."""
+    mine = reach.teams(principal, *READ_ROLES)
     with _rt(request).db.session() as s:
-        return [teams.to_dict(t) for t in teams.list_all(s)]
+        return [
+            teams.to_dict(t)
+            for t in teams.list_all(s)
+            if mine is None or t.name.lower() in {n.lower() for n in mine}
+        ]
 
 
 @router.post("/teams", status_code=201, tags=["teams"])
@@ -495,9 +570,14 @@ def create_team(
 
 
 @router.get("/teams/{ref}", tags=["teams"])
-def get_team(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
+def get_team(
+    request: Request, ref: str, principal: Principal = Depends(reach.read)
+) -> dict[str, Any]:
+    mine = reach.teams(principal, *READ_ROLES)
     with _rt(request).db.session() as s:
         team = teams.get(s, ref)
+        if mine is not None and team.name.lower() not in {n.lower() for n in mine}:
+            raise NotFound(f"team {ref!r} not found")
         return {**teams.to_dict(team), "named_by": teams.users(s, team.name)}
 
 
@@ -667,7 +747,7 @@ def create_apikey(
 ) -> dict[str, Any]:
     """A new key: ``expires_in_days`` days (AGENTGOV_API_KEY_DAYS when left out; null: it
     never expires, unless AGENTGOV_API_KEY_MAX_DAYS says keys must)."""
-    known_fields(body, {"name", "role", "expires_in_days"}, "an API key")
+    known_fields(body, {"name", "role", "expires_in_days", "team"}, "an API key")
     rt = _rt(request)
     settings = rt.settings
     days = apikeys.lifetime(
@@ -680,6 +760,7 @@ def create_apikey(
             role=body.get("role", ""),
             actor=principal.actor,
             days=days,
+            team=body.get("team"),
         )
         return {**apikeys.to_dict(key, settings.api_key_max_days), "token": token}
 

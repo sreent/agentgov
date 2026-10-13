@@ -451,7 +451,8 @@ class ApiKey(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
-    role: Mapped[str] = mapped_column(String(32))
+    # Its role, for every team (auditor) or one team's agents only (auditor@sales).
+    role: Mapped[str] = mapped_column(String(200))
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     prefix: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime] = _created()
@@ -496,7 +497,8 @@ class RoleGrant(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     # Lowercase.
     email: Mapped[str] = mapped_column(String(255), index=True)
-    role: Mapped[str] = mapped_column(String(32))
+    # For every team (approver), or one team's agents only (approver@sales).
+    role: Mapped[str] = mapped_column(String(200))
     granted_by: Mapped[str] = mapped_column(String(255))
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = _created()

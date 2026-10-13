@@ -86,11 +86,19 @@ def lifetime(value: Any, *, max_days: int = 0) -> int | None:
 
 
 def create(
-    session: Session, *, name: str, role: str, actor: str, days: int | None = None
+    session: Session,
+    *,
+    name: str,
+    role: str,
+    actor: str,
+    days: int | None = None,
+    team: str | None = None,
 ) -> tuple[ApiKey, str]:
-    """A new key, working for ``days`` (None: until it is revoked)."""
-    if role not in ROLES:
-        raise ValidationError(f"role must be one of {', '.join(ROLES)}")
+    """A new key, working for ``days`` (None: until it is revoked); with ``team``, its role is
+    for that team's agents only (auditor@sales)."""
+    from agentgov.registry import access
+
+    role = access.team_role(session, role, team, ROLES)
     if not name or not isinstance(name, str):
         raise ValidationError("name is required")
     token = "agk_" + secrets.token_urlsafe(32)

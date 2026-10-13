@@ -62,6 +62,8 @@ class TestAuth:
             "name": "bootstrap",
             "role": "admin",
             "roles": ["admin"],
+            # Roles held for some teams only (docs/administration.md#roles-for-one-team).
+            "teams": {},
             "actor": "admin:bootstrap",
             "via": "token",
             "microsoft": False,

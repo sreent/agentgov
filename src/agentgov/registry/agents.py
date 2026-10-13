@@ -306,6 +306,16 @@ def workload_identity(agent: Agent) -> dict[str, str] | None:
 RESERVED_LABELS = "agentgov/"
 
 
+def reserved_changes(old: Any, new: Any) -> list[str]:
+    """The labels under RESERVED_LABELS that ``new`` adds, removes or changes from ``old``."""
+    old, new = dict(old or {}), dict(new or {})
+    return sorted(
+        k
+        for k in set(old) | set(new)
+        if str(k).startswith(RESERVED_LABELS) and old.get(k) != new.get(k)
+    )
+
+
 def register(
     session: Session,
     settings: Settings,

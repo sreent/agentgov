@@ -307,7 +307,8 @@ class Settings:
     oidc_role_prefix: str = "agentgov-"
     # Values of the roles claim that grant AgentGov roles, as value=role pairs,
     # comma-separated: a group's ID or name, or an app role
-    # (8f0c2d1e-...=admin,Security Operations=secops). When set, only these grant roles.
+    # (8f0c2d1e-...=admin,Security Operations=secops,Sales approvers=approver@sales, the
+    # last for team sales' agents only). When set, only these grant roles.
     oidc_role_map: str = ""
     # The email domains whose people may sign in, comma-separated (empty: anyone the
     # provider signs in to this client). Google's issuer is shared by every Google
@@ -1047,7 +1048,7 @@ class Settings:
         """AGENTGOV_OIDC_ROLE_MAP: each claim value and the AgentGov roles it grants."""
         if not self.oidc_role_map.strip():
             return {}
-        from agentgov.identity.sso import GIVABLE
+        from agentgov.identity.sso import GIVABLE, known_role
 
         pairs: dict[str, set[str]] = {}
         for item in self.oidc_role_map.split(","):
@@ -1055,10 +1056,11 @@ class Settings:
                 continue
             value, sep, role = item.rpartition("=")
             value, role = value.strip(), role.strip()
-            if not sep or not value or role not in GIVABLE:
+            if not sep or not value or not known_role(role):
                 raise ValueError(
                     f"AGENTGOV_OIDC_ROLE_MAP takes value=role pairs, the roles one of "
-                    f"{', '.join(GIVABLE)} (got {item.strip()!r})"
+                    f"{', '.join(GIVABLE)}, or one of them for a team, such as approver@sales "
+                    f"(got {item.strip()!r})"
                 )
             pairs.setdefault(value, set()).add(role)
         return pairs

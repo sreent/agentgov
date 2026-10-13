@@ -3137,11 +3137,16 @@ def apikeys_create(
     no_expiry: bool = typer.Option(
         False, "--no-expiry", help="It works until it is revoked, where keys may."
     ),
+    team: str | None = typer.Option(
+        None, "--team", help="Its role for this team's agents only (not for service)."
+    ),
 ) -> None:
     """Create a key. It is printed once, on standard output, and only its hash is kept."""
     if expires_in is not None and no_expiry:
         _fail("give --expires-in or --no-expiry, not both")
     body: dict[str, Any] = {"name": name, "role": role}
+    if team:
+        body["team"] = team
     if no_expiry:
         body["expires_in_days"] = None
     elif expires_in is not None:
@@ -3227,12 +3232,21 @@ def access_grant(
         ..., help="admin, approver, secops, auditor, registrar, or person (what is sent to them)."
     ),
     reason: str | None = typer.Option(None, "--reason", help="Why, for the ledger."),
+    team: str | None = typer.Option(
+        None,
+        "--team",
+        help="For this team's agents only: their issues, approvals and ledger entries "
+        "(not for person).",
+    ),
 ) -> None:
     """Give a person an AgentGov role, from their next sign-in: for identity providers whose
-    tokens carry no groups (Google's), and the first administrators."""
+    tokens carry no groups (Google's), and the first administrators. With --team, for one
+    team's agents only (docs/administration.md#roles-for-one-team)."""
     body: dict[str, Any] = {"email": email, "role": role}
     if reason:
         body["reason"] = reason
+    if team:
+        body["team"] = team
     out = _call("POST", "/v1/access/grants", json=body)
     _done("role", f"{out['role']} for {out['email']}", "given")
 
@@ -3241,8 +3255,11 @@ def access_grant(
 def access_revoke(
     email: str = typer.Argument(..., help="The email address the role was given to."),
     role: str = typer.Argument(..., help="The role to take away."),
+    team: str | None = typer.Option(None, "--team", help="The team it was given for."),
 ) -> None:
     """Take away a role given in AgentGov. The person's sessions end with it."""
+    if team:
+        role = f"{role}@{team}"
     out = _call("DELETE", f"/v1/access/grants/{quote(email, safe='')}/{quote(role, safe='')}")
     _done("role", f"{role} for {email}", f"taken away ({out['ended']} sessions ended)")
 

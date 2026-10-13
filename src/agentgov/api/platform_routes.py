@@ -9,6 +9,7 @@ import anyio
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.coordination import JobBusy
 from agentgov.identity.delegation import GRAPH, POWER_PLATFORM, DelegationError
@@ -452,10 +453,12 @@ def entra_access_packages(request: Request, _: Principal = Depends(read)) -> dic
 
 
 @agent_router.get("/{ref}/entra-access-packages")
-def agent_entra_access(request: Request, ref: str, _: Principal = Depends(read)) -> dict:
+def agent_entra_access(
+    request: Request, ref: str, principal: Principal = Depends(reach.read)
+) -> dict:
     """The Entra access packages the agent's Entra identity holds, and those it could."""
     with request.app.state.rt.db.session() as s:
-        return entra_access.for_agent(s, agents.get(s, ref))
+        return entra_access.for_agent(s, reach.agent(s, principal, ref))
 
 
 @agent_router.post("/{ref}/entra-access-packages/assign")

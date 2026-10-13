@@ -130,7 +130,8 @@ groups are set up. It applies from the person's next sign-in with that email add
 one the provider vouches for, beside the roles the provider gives them. Taking it away
 (`agentgov access revoke`) ends their sessions at once. Both are in the ledger
 (`access.role_granted`, `access.role_revoked`), and each sign-in's `admin.login` entry
-lists the roles given here.
+lists the roles given here. With `--team`, the role is for that team's agents only
+([roles for one team](#roles-for-one-team)).
 
 ### Who can sign in
 
@@ -237,6 +238,43 @@ there, then sign them out on the **Access** page so that their open sessions end
 in (or been refused) and every API key, for access reviews. API keys have one role each.
 The UI only shows the controls a role may use; the API enforces the roles either way.
 
+### Roles for one team
+
+Each role but `person` and `service` can be held for one team's agents only, as projects
+are in n8n and teams in OpenMetadata: `approver@sales` is the approver role for team
+sales' agents. An agent is with a team the way its [issues](issues.md) reach one: its own
+team, else its blueprint's, else the default team.
+
+Someone with a role for one team:
+
+- sees that team's agents, and what hangs off them: their issues, approval requests,
+  access packages, ledger entries and model usage. Their menu has **Agents**, **Issues**,
+  **Approvals** and **Ledger**. An agent of another team isn't there for them: it is not
+  found, and in an action on many agents it is left out as one there is no such agent.
+- does to those agents what the role does: an approver for sales decides their approval
+  requests and access packages and triages their issues; secops for sales blocks and
+  unblocks them as far as the [hand-off](secops.md) allows; an admin for sales registers,
+  edits, approves, blocks, deletes and restores them, and is each of the other roles for
+  them. A registrar or an admin for one team registers agents into it (theirs, when they
+  have one team).
+- keeps what they change within their teams: a change that would take an agent to another
+  team, its own or its blueprint's, is refused.
+- reads the blueprints and their own teams, and does nothing organisation-wide: features,
+  policies, blueprints, teams, tool servers, model providers, identity issuers,
+  destinations, platforms, API keys and access, the whole ledger's verification and export,
+  compliance reports and the register stay with roles for every team. So do deleting an
+  agent for good and the `agentgov/` labels that exempt agents from rules and controls.
+
+| Where it comes from | How |
+|---|---|
+| The identity provider | A group or role named with the prefix, the role, `@` and the team (`agentgov-approver@sales`), or a group mapped to it: `AGENTGOV_OIDC_ROLE_MAP="<group ID>=approver@sales"`. With Microsoft Entra ID, map a group's object ID |
+| Given in AgentGov | On the **Access** page (*For*: the team), or `agentgov access grant bo@example.com approver --team sales`; `agentgov access revoke bo@example.com approver --team sales` takes it away |
+| An API key | `agentgov apikeys create sales-ci --role auditor --team sales`, or *For* when creating one on the **Access** page. The ledger records what it does as `auditor@sales:sales-ci` |
+
+Roles for every team and for one team add up: an auditor who is also an approver for sales
+reads everything and decides for sales. `agentgov whoami` (or `GET /v1/me`) says which
+roles someone holds for which teams (`teams`).
+
 ## The menu
 
 The admin center's menu has the overview first, then five groups:
@@ -249,7 +287,9 @@ The admin center's menu has the overview first, then five groups:
 | *Evidence* | **Ledger**, **Compliance**, **Register** | What happened, the reports for a framework, and how each agent is classified |
 | *Settings* | **Teams**, **Security operations**, **Access**, **Features** | Who takes the issues, the security team's tools, who signs in, and which features are on |
 
-People without an AgentGov role see only their issues and the approvals waiting for them.
+People without an AgentGov role see only their issues and the approvals waiting for them;
+people with [roles for one team](#roles-for-one-team) only, **Agents**, **Issues**,
+**Approvals** and **Ledger**, for their teams' agents.
 
 ## Approvals
 

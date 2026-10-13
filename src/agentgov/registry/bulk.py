@@ -108,12 +108,18 @@ def agents(
     actor: str,
     reason: str | None = None,
     fields: Any = None,
+    reached: set[str] | None = None,
+    check: Callable[[Agent], None] | None = None,
+    keep: Callable[[Agent], None] | None = None,
 ) -> dict[str, Any]:
     """Approve, block, unblock, delete or restore many agents, ``update`` them with
     ``fields`` (see EDITS), or ``classify`` them with ``fields`` (a classification: see
     agentgov.registry.classification). ``done`` lists those it did, with their platform for
     those found on one (blocking or deleting them here doesn't stop them there); ``left``
-    those it couldn't, each with why."""
+    those it couldn't, each with why. For a caller with a role for some teams only:
+    ``reached``, the agents (by ID) of those teams, the others not found; ``check``, which
+    refuses what they may not do to an agent; ``keep``, which refuses a change that takes an
+    agent out of them."""
     if action not in AGENT_ACTIONS:
         raise ValidationError(f"action is {', '.join(AGENT_ACTIONS)}")
     if action == "update":
@@ -135,6 +141,8 @@ def agents(
         try:
             agent = agents_svc.get(session, ref)
         except NotFound:
+            agent = None
+        if agent is None or (reached is not None and agent.id not in reached):
             left.append((i, {"agent": ref, "why": "there is no such agent"}))
             continue
         found.setdefault(agent.id, (i, agent))
@@ -142,6 +150,8 @@ def agents(
     for i, agent in sorted(found.values(), key=lambda x: x[1].id):
         try:
             with session.begin_nested():
+                if check is not None:
+                    check(agent)
                 if action == "update":
                     changed = agents_svc.update(
                         session, agent, _for(agent, change), actor=actor, reason=reason
@@ -156,6 +166,8 @@ def agents(
                     )
                     if action in ("approve", "restore"):
                         agents_svc.refresh_risk(session, settings, agent)
+                if keep is not None:
+                    keep(agent)
         except RegistryError as exc:
             left.append((i, {"agent": agent.name, "why": str(exc)}))
             continue
