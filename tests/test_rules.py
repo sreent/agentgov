@@ -238,7 +238,9 @@ class TestEnforce:
         now = ids.utcnow()
         _run(client, now)
         issue_id = _issues(client)[0].id
-        client.post(f"/v1/findings/{issue_id}/dismiss", headers=ADMIN).raise_for_status()
+        client.post(
+            f"/v1/findings/{issue_id}/dismiss", json={"reason": "Kept on purpose"}, headers=ADMIN
+        ).raise_for_status()
         _run(client, now + timedelta(days=8))
         assert _status(client) == "active"
         assert _issues(client)[0].status == "dismissed"

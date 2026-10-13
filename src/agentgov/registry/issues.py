@@ -276,11 +276,29 @@ def route(session: Session, settings: Settings, now: datetime | None = None) -> 
 
 
 def reopen_accepted(session: Session, now: datetime | None = None) -> int:
-    """Accepted risks whose date has come open again, for someone to decide anew. If the
-    condition is gone, the next check resolves them."""
+    """Accepted risks, and dismissals given until a date, whose date has come open again,
+    for someone to decide anew. If the condition is gone, the next check resolves them."""
     now = now or ids.utcnow()
     count = 0
     off = finding_types.off_types(session)
+    for finding in session.scalars(
+        select(Finding).where(
+            Finding.status == "dismissed", Finding.details[findings.DISMISSAL].is_not(None)
+        )
+    ):
+        until = ((finding.details or {}).get(findings.DISMISSAL) or {}).get("until")
+        if not until or datetime.fromisoformat(until) > now or finding.type in off:
+            continue
+        finding.status = "open"
+        finding.resolved_at = finding.resolved_by = None
+        finding.details = {
+            k: v for k, v in (finding.details or {}).items() if k != findings.DISMISSAL
+        }
+        findings.restart_chain(finding)
+        findings.record(
+            session, finding, "reopened", SYSTEM, why="the time it was dismissed for ran out"
+        )
+        count += 1
     for finding in session.scalars(
         select(Finding).where(Finding.status == "accepted", Finding.accepted_until <= now)
     ):

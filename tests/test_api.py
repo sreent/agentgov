@@ -426,10 +426,17 @@ class TestGovernance:
         client.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
         finding = client.get("/v1/findings", headers=ADMIN).json()[0]
         approver = key(client, "approver")
-        assert (
-            client.post(f"/v1/findings/{finding['id']}/dismiss", headers=approver).json()["status"]
-            == "dismissed"
-        )
+        # Dismissing says why it is wrong.
+        bare = client.post(f"/v1/findings/{finding['id']}/dismiss", headers=approver)
+        assert bare.status_code == 422 and "say why it is wrong" in bare.json()["detail"]
+        dismissed = client.post(
+            f"/v1/findings/{finding['id']}/dismiss",
+            json={"reason": "A test agent", "until": 30},
+            headers=approver,
+        ).json()
+        assert dismissed["status"] == "dismissed"
+        assert dismissed["details"]["dismissal"]["reason"] == "A test agent"
+        assert dismissed["details"]["dismissal"]["until"]
         assert (
             client.post(f"/v1/findings/{finding['id']}/reopen", headers=approver).json()["status"]
             == "open"

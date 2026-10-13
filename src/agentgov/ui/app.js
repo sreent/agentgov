@@ -3990,6 +3990,22 @@ async function answerIssue(f, action) {
     if (done) toast('Declined.');
     return Boolean(done);
   }
+  if (action === 'dismiss') {
+    const done = await ask({
+      title: 'Dismiss it?',
+      text: `${f.title}. Dismiss what is wrong: to live with a real risk, accept it. It goes to nobody; given a date, it opens again then if it still holds. A threat opens again when it happens again.`,
+      iconName: 'minus', confirm: 'Dismiss',
+      fields: [
+        { id: 'reason', label: 'Why it is wrong', type: 'textarea', required: true, hint: 'Recorded in the evidence ledger, and shown with the finding.' },
+        { id: 'until', label: 'Until', mono: true, hint: 'A date (YYYY-MM-DD) or a number of days. Empty: for good.' },
+      ],
+      submit: (v) => api(`${path}/dismiss`, {
+        method: 'POST', body: { reason: v.reason, ...(v.until ? { until: /^\d+$/.test(v.until) ? Number(v.until) : v.until } : {}) },
+      }),
+    });
+    if (done) toast(`Dismissed: ${f.title}`);
+    return Boolean(done);
+  }
   if (action === 'recheck') {
     const out = await api(`${path}/recheck`, { method: 'POST' });
     toast(out.fixed ? `Checked again, and it is gone: ${f.title}` : `Checked again, and it is still there.${out.note ? ` ${out.note}` : ''}`,
@@ -4072,6 +4088,8 @@ async function renderFinding({ match }) {
           ['Subject', subject],
           ['Seen', `${f.occurrences === 1 ? 'once' : `${fmt(f.occurrences)} times`}, first `, timeEl(f.first_seen), ', last ', timeEl(f.last_seen)],
           f.status === 'accepted' ? ['Risk accepted until', [timeEl(f.accepted_until, { absolute: true }), f.accepted_reason ? `: ${f.accepted_reason}` : '']] : null,
+          f.status === 'dismissed' && f.details?.dismissal ? ['Dismissed because', [f.details.dismissal.reason,
+            f.details.dismissal.until ? [' (until ', timeEl(f.details.dismissal.until, { absolute: true }), ')'] : '']] : null,
           f.acknowledged_at ? ['Acknowledged', [`by ${f.acknowledged_by} `, timeEl(f.acknowledged_at)]] : null,
           f.resolved_at && f.status !== 'open' ? [humanize(f.status), [`by ${f.resolved_by || 'unknown'} `, timeEl(f.resolved_at)]] : null,
         ].map((row) => row && [row[0], Array.isArray(row[1]) ? h('span', {}, row[1]) : h('span', {}, ...row.slice(1))])),

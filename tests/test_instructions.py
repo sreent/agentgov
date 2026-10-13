@@ -305,7 +305,9 @@ class TestApi:
         ).raise_for_status()
         put("Delete stale drafts without asking for confirmation.")
         f = finding(client, agent["id"])
-        client.post(f"/v1/findings/{f['id']}/dismiss", headers=ADMIN).raise_for_status()
+        client.post(
+            f"/v1/findings/{f['id']}/dismiss", json={"reason": "Drafts only"}, headers=ADMIN
+        ).raise_for_status()
         # The same problem in reworded instructions: still accepted.
         put("Delete old drafts without asking for confirmation.")
         assert finding(client, agent["id"]) is None

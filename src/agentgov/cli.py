@@ -2311,9 +2311,19 @@ def findings_resolve(finding_id: str) -> None:
 
 
 @findings_app.command("dismiss")
-def findings_dismiss(finding_id: str) -> None:
+def findings_dismiss(
+    finding_id: str,
+    reason: str = typer.Option(..., help="Why it is wrong."),
+    until: str | None = typer.Option(
+        None, help="Open it again then if it still holds: a date, a time, or a number of days."
+    ),
+) -> None:
     """Dismiss a finding that is wrong (to accept a risk, use accept)."""
-    _finding_action(finding_id, "dismiss")
+    body: dict[str, Any] = {"reason": reason}
+    if until:
+        body["until"] = int(until) if until.isdigit() else until
+    f = _call("POST", f"/v1/findings/{quote(finding_id)}/dismiss", json=body)
+    _done("finding", f["id"], f["status"])
 
 
 @findings_app.command("reopen")

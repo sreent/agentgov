@@ -364,6 +364,32 @@ def recheck_finding(
         raise HTTPException(502, str(exc)) from exc
 
 
+@router.post("/findings/{finding_id}/dismiss", tags=["findings"])
+def dismiss_finding(
+    request: Request,
+    finding_id: str,
+    body: dict[str, Any] = Body(default={}),
+    principal: Principal = Depends(require("approver", "secops")),
+) -> dict[str, Any]:
+    """Dismiss a finding that is wrong, saying why (``reason``); with ``until`` (a date, a
+    time or a number of days), it opens again then if it still holds."""
+    unknown = sorted(set(body) - {"reason", "until"})
+    if unknown:
+        raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
+    with _rt(request).db.session() as s:
+        handoff.check(s, principal, handoff.TRIAGE, also=("approver",))
+        finding = findings.get(s, finding_id)
+        until = body.get("until")
+        dismissed = findings.dismiss(
+            s,
+            finding,
+            reason=body.get("reason"),
+            actor=principal.actor,
+            until=issues.parse_until(until) if until not in (None, "") else None,
+        )
+        return findings.to_dict(dismissed)
+
+
 @router.post("/findings/{finding_id}/{action}", tags=["findings"])
 def finding_action(
     request: Request,
@@ -371,7 +397,7 @@ def finding_action(
     action: str,
     principal: Principal = Depends(require("approver", "secops")),
 ) -> dict[str, Any]:
-    status = {"resolve": "resolved", "dismiss": "dismissed", "reopen": "open"}.get(action)
+    status = {"resolve": "resolved", "reopen": "open"}.get(action)
     if status is None:
         raise HTTPException(
             404,

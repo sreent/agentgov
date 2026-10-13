@@ -105,7 +105,7 @@ them and sends what is due every `AGENTGOV_ISSUES_INTERVAL_SECONDS` (60).
 | Ask for an exception | The people it reached | An approver decides whether to accept its risk until the date asked for |
 | Say you fixed it | The people it reached, approvers and administrators | AgentGov checks it again now, where it can, and resolves it if it is gone |
 | Accept the risk | Approvers and administrators, and the `secops` role from triage on | It goes to nobody until the date chosen, at most a year away, and opens again then if it still holds. A reason is required |
-| Resolve, dismiss | The same | As for any finding. Dismiss is for findings that are wrong: to live with a real one, accept its risk |
+| Resolve, dismiss | The same | As for any finding. Dismiss is for findings that are wrong, and says why ([dismissing a finding](#dismissing-a-finding)): to live with a real one, accept its risk |
 | Reopen | The same | It starts its chain over |
 
 The people responsible for an agent acknowledge its issues, but don't accept its risks:
@@ -282,6 +282,27 @@ resolved, with a `finding.resolved` entry that says so; if it happens again, it 
 and starts its chain over. `0` keeps threats open until someone closes them. Posture
 findings aren't affected: they close when their check finds their cause gone.
 
+## Dismissing a finding
+
+Dismissing says a finding is wrong, and why: the reason is in the ledger and on the
+finding. It can be for a while (`until`: a date, or a number of days, a year at most), after
+which it opens again if it still holds and someone decides anew; without one, it is for
+good. A threat someone dismissed opens again as soon as it happens again, its history saying
+who dismissed it and why: each one is a new event.
+
+| Where | How |
+|---|---|
+| Admin UI | A finding's **Dismiss** asks why, and until when |
+| CLI | `agentgov findings dismiss ID --reason "…" [--until 30]` |
+| API | `POST /v1/findings/{id}/dismiss` with `{"reason": "…", "until": 30}` |
+
+## When it gets worse
+
+A finding raised again at a higher severity than its people were told it had (medium,
+then high) starts its chain over, from its first step: they are told again, and a step that
+had acknowledged it acknowledges it again (`finding.severity_raised`). Its severity
+settling back, or rising again only as far as they were told, tells nobody again.
+
 ## In the ledger
 
 | Entry | When |
@@ -294,9 +315,10 @@ findings aren't affected: they close when their check finds their cause gone.
 | `finding.fix_claimed` | Someone said they fixed it: how AgentGov checked it, and whether it was gone |
 | `person.left` (warning) | Someone the directory had is no longer there ([people who leave](#people-who-leave)) |
 | `finding.accepted` (warning) | Its risk was accepted, with the date and the reason |
-| `finding.reopened` | Raised again, reopened by hand, or its accepted risk ran out |
+| `finding.reopened` | Raised again, reopened by hand, its accepted risk or dismissal ran out, or a dismissed threat happened again |
+| `finding.severity_raised` | Raised again more severe than its people were told: they are told again |
 | `finding.resolved` | Its cause is gone, or, a threat, it hasn't happened for a while |
-| `finding.dismissed` | Dismissed by hand, or because its type was turned off |
+| `finding.dismissed` | Dismissed by hand, with why (and until when), or because its type was turned off |
 | `finding_type.changed` | A type was turned off or on, or given a severity |
 | `finding.notified` | A message went, to whom and how |
 | `finding.notification_failed` (warning) | A message was given up on after retrying |
