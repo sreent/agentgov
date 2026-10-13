@@ -250,6 +250,22 @@ class TestSignIn:
         events = [e["type"] for e in sso.get("/v1/ledger", headers=ADMIN).json()]
         assert events[:2] == ["admin.logout", "admin.login"]
 
+    def test_back_to_the_page_the_link_was_for(self, sso, provider) -> None:
+        # An email links to an issue: once signed in, the person is there, not on a list.
+        start = sso.get(
+            "/auth/login", params={"next": "#/findings/fnd_123"}, follow_redirects=False
+        )
+        state, code = provider.authorize(start.headers["location"], roles=["agentgov-admin"])
+        back = sso.get(
+            "/auth/callback", params={"state": state, "code": code}, follow_redirects=False
+        )
+        assert back.headers["location"] == "/ui/#/findings/fnd_123"
+        # Only a page of the UI: anywhere else is refused before the sign-in starts.
+        for elsewhere in ("https://evil.test/", "//evil.test", "#//evil.test\\x"):
+            refused = sso.get("/auth/login", params={"next": elsewhere}, follow_redirects=False)
+            assert refused.status_code == 422, elsewhere
+        assert sign_in(sso, provider, roles=["agentgov-admin"]).headers["location"] == "/ui/"
+
     def test_the_session_probe_always_answers(self, sso, provider) -> None:
         assert sso.get("/auth/session").json() == {"signed_in": False}
         sign_in(sso, provider, roles=["agentgov-auditor"])

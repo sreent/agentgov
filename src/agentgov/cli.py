@@ -1492,7 +1492,17 @@ def agents_block(
     # AgentGov first, then the platform: if the platform refuses, AgentGov has still blocked it.
     _lifecycle(refs, "block", reason)
     if in_platform:
-        _platform_block(refs[0], blocked=True)
+        try:
+            _platform_block(refs[0], blocked=True)
+        except typer.Exit:
+            typer.secho(
+                f"{refs[0]} is blocked in AgentGov, but still runs in its platform: quarantine "
+                "it there (the Power Platform admin center for Copilot Studio), or have an "
+                "administrator who can do it there run `agentgov agents platform-block`.",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+            raise
 
 
 @agents_app.command("unblock")
@@ -2751,9 +2761,22 @@ def ledger_verify(
     follows: str | None = typer.Option(
         None, "--follows", help="Offline: the hash the first entry must follow (a checkpoint's)."
     ),
+    checkpoints: Path | None = typer.Option(
+        None,
+        "--checkpoints",
+        help="Offline: a folder of checkpoints (N.txt, and N.tsr time-stamps) the entries "
+        "must match.",
+    ),
+    pack: Path | None = typer.Option(
+        None,
+        "--pack",
+        help="Check an evidence pack offline (its folder or zip file): its ledger, against "
+        "its time-stamped checkpoints.",
+    ),
 ) -> None:
-    """Recompute the hash chain and report tampering; offline, check exports and archives."""
-    if not file:
+    """Recompute the hash chain and report tampering; offline, check exports, archives and
+    evidence packs, against the time-stamped checkpoints that vouch for them."""
+    if not file and pack is None:
         result = _call("GET", "/v1/ledger/verify")
         _print(result)
         if not result.get("valid"):
@@ -2761,17 +2784,34 @@ def ledger_verify(
         return
     from agentgov import ledger, retention
 
+    if pack is not None:
+        contents = _pack_files(pack)
+        if "ledger.jsonl" not in contents:
+            _fail(f"{pack} is not an evidence pack: it has no ledger.jsonl")
+        runs = [(f"{pack}: ledger.jsonl", _jsonl(contents["ledger.jsonl"]))]
+        points = _checkpoint_points(contents, prefix="checkpoints/")
+    else:
+        runs = [(str(path), retention.read_archive(path)) for path in file or []]
+        points = _checkpoint_points(_folder_files(checkpoints)) if checkpoints else []
+    wanted = {seq for seq, _, _ in points}
+    hashes: dict[int, str] = {}
     start: tuple[int, str] | None = None
-    for path in file:
-        records = list(retention.read_archive(path))
+    first: int | None = None
+    for name, lines in runs:
+        records = list(lines)
         if start is None and follows and records:
             start = (records[0]["seq"] - 1, follows)
+        if records and first is None:
+            first = records[0]["seq"]
+            if first - 1 in wanted:
+                hashes[first - 1] = records[0]["prev_hash"]
+        hashes.update({r["seq"]: r["hash"] for r in records if r["seq"] in wanted})
         result = ledger.verify_records(records, start=start)
         state = (
             "valid" if result["valid"] else f"BROKEN at {result['broken_at']}: {result['problem']}"
         )
         typer.echo(
-            f"{path}: {state}, entries {result.get('first')} to {result.get('last')} "
+            f"{name}: {state}, entries {result.get('first')} to {result.get('last')} "
             f"({result['checked']} checked)"
         )
         if not result["valid"]:
@@ -2781,6 +2821,85 @@ def ledger_verify(
             start = (result["last"], result["head"])
     if start is not None:
         typer.echo(f"last entry {start[0]}, hash {start[1]}")
+    if pack is None and checkpoints is None:
+        typer.echo(
+            "note: only the chain was checked; one rewritten with its hashes worked out again "
+            "holds together. Check it against the time-stamped checkpoints (--checkpoints)."
+        )
+        return
+    found = ledger.check_checkpoints(hashes, points)
+    for problem in found["problems"]:
+        typer.secho(f"BROKEN: {problem}", fg=typer.colors.RED)
+    if found["problems"]:
+        raise typer.Exit(2)
+    if not found["vouched"]:
+        typer.echo(
+            "warning: no checkpoint vouches for these entries, so a rewrite with its hashes "
+            "worked out again wouldn't show"
+        )
+        return
+    last = max(found["vouched"])
+    stamped = [seq for seq, _, answer in points if answer is not None and seq in found["vouched"]]
+    count = len(found["vouched"])
+    typer.echo(
+        f"{count} checkpoint{' vouches' if count == 1 else 's vouch'} for these entries, up to "
+        f"entry {last}{f', {len(stamped)} of them time-stamped' if stamped else ''}"
+    )
+    if start is not None and start[0] > last:
+        typer.echo(
+            f"entries {last + 1} to {start[0]} come after the last checkpoint: nothing outside "
+            "AgentGov vouches for them yet"
+        )
+    if stamped:
+        typer.echo(
+            "check each time-stamp's signature, against the authority's certificate, with: "
+            "openssl ts -verify -data checkpoints/N.txt -in checkpoints/N.tsr -CAfile <its CA>"
+        )
+
+
+def _jsonl(data: bytes) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in data.decode().splitlines() if line.strip()]
+
+
+def _pack_files(path: Path) -> dict[str, bytes]:
+    """An evidence pack's files, from its folder or its zip file."""
+    import zipfile
+
+    if path.is_dir():
+        return {
+            str(f.relative_to(path)).replace(os.sep, "/"): f.read_bytes()
+            for f in path.rglob("*")
+            if f.is_file()
+        }
+    try:
+        with zipfile.ZipFile(path) as z:
+            return {name: z.read(name) for name in z.namelist() if not name.endswith("/")}
+    except (OSError, zipfile.BadZipFile) as exc:
+        _fail(f"cannot read the evidence pack {path}: {exc}")
+
+
+def _folder_files(path: Path) -> dict[str, bytes]:
+    if not path.is_dir():
+        _fail(f"{path} is not a folder of checkpoints")
+    return {f.name: f.read_bytes() for f in path.iterdir() if f.is_file()}
+
+
+def _checkpoint_points(
+    files: dict[str, bytes], *, prefix: str = ""
+) -> list[tuple[int, str, bytes | None]]:
+    """The checkpoints in a set of files: each N.txt statement, with its N.tsr time-stamp."""
+    from agentgov import ledger
+
+    points = []
+    for name, data in files.items():
+        if not name.startswith(prefix) or not name.endswith(".txt"):
+            continue
+        try:
+            seq, hash_ = ledger.read_statement(data)
+        except ValueError:
+            continue
+        points.append((seq, hash_, files.get(name.removesuffix(".txt") + ".tsr")))
+    return points
 
 
 @ledger_app.command("checkpoints")

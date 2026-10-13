@@ -12,6 +12,7 @@ from agentgov.api.versions import if_match
 from agentgov.models import Agent
 from agentgov.registry import agents, model_providers, model_usage
 from agentgov.registry.errors import NotFound
+from agentgov.registry.validation import known_fields
 from agentgov.secops import handoff
 
 router = APIRouter(prefix="/v1/models", tags=["models"])
@@ -31,6 +32,7 @@ def create_provider(
 ) -> dict[str, Any]:
     """Approve a model provider; agents call it at ``/llm/<name>`` once the gateway can
     read its API key (``key_file``)."""
+    known_fields(body, {"name", *model_providers.FIELDS}, "a model provider")
     with request.app.state.rt.db.session() as s:
         return model_providers.to_dict(model_providers.create(s, body, actor=principal.actor))
 
@@ -48,6 +50,7 @@ def update_provider(
     body: dict[str, Any] = Body(...),
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
+    known_fields(body, model_providers.FIELDS, "a model provider's edit")
     with request.app.state.rt.db.session() as s:
         provider = model_providers.get(s, ref)
         model_providers.update(s, provider, body, actor=principal.actor, version=if_match(request))

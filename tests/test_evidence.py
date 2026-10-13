@@ -226,6 +226,85 @@ class TestCheckpoints:
         runtime.db.dispose()
 
 
+class TestRewrites:
+    """A chain rewritten with its hashes worked out again holds together: the checkpoints,
+    time-stamped by an authority before the rewrite, don't match it."""
+
+    def test_a_checkpoint_rewritten_too_fails_its_time_stamp(self, settings: Settings) -> None:
+        from tests.test_ledger import _rewrite
+
+        runtime = Runtime(
+            settings.with_overrides(ledger_tsa_url="https://tsa.test/"),
+            tsa_http=httpx.Client(transport=httpx.MockTransport(FakeTSA())),
+        )
+        runtime.init_db()
+        _old_entries(runtime, 3, 1)
+        assert runtime.run_retention()["timestamped"] == 1
+        with runtime.db.session() as s:
+            _rewrite(s, 2, "edited")
+            s.get(LedgerCheckpoint, 3).hash = s.get(LedgerEntry, 3).hash
+        with runtime.db.session() as s:
+            result = ledger.verify(s)
+        assert result["valid"] is False
+        assert result["problem"].startswith("checkpoint 3's time-stamp doesn't cover it")
+        runtime.db.dispose()
+
+    def test_the_evidence_pack_is_checked_against_its_checkpoints(
+        self, settings: Settings, tmp_path: Path
+    ) -> None:
+        import zipfile
+
+        from agentgov import cli
+        from agentgov.api.app import create_app
+        from tests.test_cli import runner
+
+        stamped = settings.with_overrides(ledger_tsa_url="https://tsa.test/")
+        runtime = Runtime(stamped, tsa_http=httpx.Client(transport=httpx.MockTransport(FakeTSA())))
+        with TestClient(create_app(stamped, runtime=runtime, background=False)) as client:
+            seed(client)
+            assert runtime.run_retention()["timestamped"] == 1
+            seed_more = {"name": "later", "description": "after the checkpoint"}
+            client.post("/v1/teams", json=seed_more, headers=ADMIN)
+            pack = client.get("/v1/evidence/pack", params={"days": 7}, headers=ADMIN).content
+        good = tmp_path / "pack.zip"
+        good.write_bytes(pack)
+        out = runner.invoke(cli.app, ["ledger", "verify", "--pack", str(good)])
+        assert out.exit_code == 0, out.output
+        assert "1 checkpoint vouches for these entries" in out.output
+        assert "1 of them time-stamped" in out.output
+        assert "come after the last checkpoint" in out.output
+        # Unzipped, too.
+        folder = tmp_path / "unzipped"
+        with zipfile.ZipFile(good) as z:
+            z.extractall(folder)
+        assert runner.invoke(cli.app, ["ledger", "verify", "--pack", str(folder)]).exit_code == 0
+        # A decision rewritten, every later hash worked out again: the chain holds, the
+        # checkpoint doesn't.
+        records = [json.loads(line) for line in (folder / "ledger.jsonl").read_text().splitlines()]
+        records[0]["reason"] = "rewritten"
+        prev = records[0]["prev_hash"]
+        for record in records:
+            record["prev_hash"] = prev
+            record["hash"] = prev = ledger.record_hash(prev, record)
+        (folder / "ledger.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+        out = runner.invoke(cli.app, ["ledger", "verify", "--pack", str(folder)])
+        assert out.exit_code == 2, out.output
+        assert "valid, entries" in out.output  # the chain alone
+        assert "doesn't match checkpoint" in out.output
+        # An export checked alone says what it couldn't check.
+        out = runner.invoke(cli.app, ["ledger", "verify", "--file", str(folder / "ledger.jsonl")])
+        assert out.exit_code == 0 and "only the chain was checked" in out.output
+        out = runner.invoke(
+            cli.app,
+            [
+                "ledger", "verify", "--file", str(folder / "ledger.jsonl"),
+                "--checkpoints", str(folder / "checkpoints"),
+            ],
+        )  # fmt: skip
+        assert out.exit_code == 2 and "doesn't match checkpoint" in out.output
+        runtime.db.dispose()
+
+
 class TestArchives:
     def test_old_entries_are_archived_then_removed(self, archiving: Runtime) -> None:
         rt = archiving
@@ -476,6 +555,12 @@ class TestCompliance:
         assert control("Art. 14")["status"] == "in_place"
         client.put("/v1/features/approvals", json={"mode": "off"}, headers=ADMIN).raise_for_status()
         assert control("Art. 14")["status"] == "partly"
+        # Monitored, the calls that would wait go through: not in place either.
+        body = {"mode": "monitor"}
+        client.put("/v1/features/approvals", json=body, headers=ADMIN).raise_for_status()
+        oversight = control("Art. 14")
+        assert oversight["status"] == "partly"
+        assert "monitor mode" in oversight["gaps"][0]
         client.put("/v1/features/least-privilege", json={"mode": "monitor"}, headers=ADMIN)
         security = control("MEASURE 2.7", "nist-ai-rmf")
         # Set, but no call went through AgentGov's checks yet: nothing shows them working.

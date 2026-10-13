@@ -89,7 +89,7 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 | `tool-integrity` | off, monitor, **enforce** | Quarantines tools whose descriptions hide instructions. Tools that changed since approval are held until an administrator reviews them |
 | `risk-based-access` | off, monitor, **enforce** | Refuses agents at critical risk, and blocks agents whose risk score reaches `AGENTGOV_AUTO_BLOCK_RISK_SCORE`. Monitor lets them through, and the automatic block raises an `agent.would_auto_block` issue instead. Risk is always scored and shown |
 | `token-budgets` | off, monitor, **enforce** | Refuses model calls from agents that have used their daily token budget, their own or their blueprint's, until the day ends (UTC). Off, budgets aren't checked; usage is still metered |
-| `unknown-callers` | monitor, **enforce** | Refuses callers without a registered agent's identity. Monitor lets them through and records them; with `discovery` on, they are added to the inventory |
+| `unknown-callers` | monitor, **enforce** | Refuses callers without a registered agent's identity. Monitor lets them through and records them; with `discovery` on, they are added to the inventory. Calls to models need a valid token in either mode, since the gateway pays for them with the provider's key |
 
 ### Detection
 
@@ -231,7 +231,7 @@ a call: not when it decides, and not when it can't.
 | `AGENTGOV_AUTHZEN_FAILURE_MODE` | your decision point can't be asked while `external-decision-point` is enforced | `closed`: refused | `open`: AgentGov's own decision stands |
 
 Unchecked isn't anonymous: agentgateway still checks each caller's token itself, unless
-`unknown-callers` is monitored. A call that goes through unchecked is a warning in the
+`unknown-callers` is monitored, and on calls to models always. A call that goes through unchecked is a warning in the
 ledger: its decision is `allow`, its reason starts with `Not checked`, and
 `details.unchecked` says why. Where the processor
 can't be reached at all, agentgateway lets the call through itself, and only the gateway's

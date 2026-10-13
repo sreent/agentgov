@@ -177,8 +177,9 @@ as a team, for the others; those it can't adopt are listed with why. From the CL
 AgentGov checks every imported Copilot Studio agent and raises an issue for each
 problem it finds. An issue resolves itself when a later import shows the problem fixed.
 Open issues count towards the agent's risk score: an agent's risk is what its settings
-expose, and 10 points each for a missing owner and sponsor. Accepting an issue's risk, or
-dismissing one that is wrong, takes it out of the score.
+expose, and 10 points each for a missing owner and sponsor. An open issue of high severity
+or worse makes it high risk at least, whatever its points add up to. Accepting an issue's
+risk, or dismissing one that is wrong, takes it out of the score.
 
 | Issue | Severity | Raised when the agent | Risk points |
 |---|---|---|---|

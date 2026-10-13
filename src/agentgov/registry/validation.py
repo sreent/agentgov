@@ -257,3 +257,13 @@ def merge_grants(*grant_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def is_broad(grants: list[dict[str, Any]]) -> bool:
     """True when a grant covers every tool on every server."""
     return any(g["server"] == "*" and "*" in g["tools"] for g in grants)
+
+
+def known_fields(data: dict[str, Any], allowed: Any, what: str) -> None:
+    """Refuse fields an API body doesn't take, rather than ignore them: a field sent and
+    silently dropped (an API key's "scope", say) looks like a setting that took."""
+    unknown = sorted(set(data) - set(allowed))
+    if unknown:
+        raise ValidationError(
+            f"unknown field(s) {', '.join(unknown)}; {what} takes {', '.join(sorted(allowed))}"
+        )

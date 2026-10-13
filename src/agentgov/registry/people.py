@@ -24,7 +24,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
@@ -115,6 +115,24 @@ def owners_and_sponsors(session: Session) -> set[str]:
 
 def _names(person: Person) -> set[str]:
     return {n.lower() for n in (person.email, person.upn) if n}
+
+
+def aliases(session: Session, name: str | None) -> set[str]:
+    """The names a person goes by, lower case: the one given, and, where the directory knows
+    them by it, their email address and user principal name too. Owners are named by their
+    email address; a person may sign in by their user principal name."""
+    key = (name or "").strip().lower()
+    if not key:
+        return set()
+    found = {key}
+    if "@" in key:
+        for person in session.scalars(
+            select(Person).where(
+                (func.lower(Person.email) == key) | (func.lower(Person.upn) == key)
+            )
+        ):
+            found |= _names(person)
+    return found
 
 
 def wanted(session: Session, now: datetime | None = None, *, limit: int = MAX_LOOKUP) -> list[str]:

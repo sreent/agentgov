@@ -105,7 +105,7 @@ enforced, monitored or off:
 | `acting-for-people` | Refuses a prompt for a person the blueprint doesn't allow, or without the person it requires ([acting for people](acting-for-people.md)) |
 | `risk-based-access` | Refuses agents at critical risk |
 | `token-budgets` | Refuses agents that have used their daily token budget |
-| `unknown-callers` | In monitor mode, lets callers without an agent's token through and records them; with `discovery` on, they join the inventory as unmanaged agents |
+| `unknown-callers` | Refuses a caller whose valid token isn't a registered agent's; in monitor mode, lets it through and records it, and with `discovery` on, it joins the inventory as an unmanaged agent. A call to a model without a valid token is refused in either mode: the gateway pays for it with the provider's key. With no token issuer to check against, the model routes answer 503 |
 
 Organisation policies' `redact` masks prompts too, and a model call that carries a
 delegation (`X-AgentGov-Delegation`) shows the chain of agents in `input.chain`

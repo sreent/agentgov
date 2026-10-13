@@ -1095,7 +1095,10 @@ function showSignin(message) {
   getInfo().then((info) => {
     const sso = Boolean(info?.sso?.enabled);
     $('#sso').hidden = !sso;
-    $('#sso-link').href = new URL('auth/login', API_ROOT).href;
+    // Back to the page the link was for (an issue, from an email) once signed in.
+    const login = new URL('auth/login', API_ROOT);
+    if (/^#\/[\w\-/?=&.%]*$/.test(location.hash) && location.hash.length <= 500) login.searchParams.set('next', location.hash);
+    $('#sso-link').href = login.href;
     $('#signin-submit').className = `btn btn--block${sso ? '' : ' btn--primary'}`;
   });
 }

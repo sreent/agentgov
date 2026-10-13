@@ -197,7 +197,9 @@ take turns rather than deadlock. Each edit's entry says what it changed, from wh
 (`details.changes`; text longer than a thousand characters by its length and SHA-256), and
 a policy's holds the policy as it then became, so the ledger keeps every version that was in
 force. `GET /v1/ledger/verify` recomputes the chain and reports the first broken entry
-(edited, deleted or truncated). The overview's integrity badge checks new entries as they
+(edited, deleted or truncated). A chain rewritten with every hash worked out again would
+still link up, so it also checks the entries against the checkpoints made before, and each
+checkpoint's time-stamp against its statement. The overview's integrity badge checks new entries as they
 arrive and re-verifies the whole chain every five minutes. `GET /v1/ledger/export`
 streams the ledger as JSON Lines for offline verification
 (`agentgov ledger verify --file`). Every day the chain's head is kept as a checkpoint,

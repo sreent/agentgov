@@ -138,4 +138,28 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
             factor(*FINDING_WEIGHTS[type_])
 
     score = min(100, sum(f["points"] for f in factors))
-    return RiskResult(score=score, level=level_for(score), factors=factors)
+    level = level_for(score)
+    # An open issue of high severity or worse about how the agent is exposed: whatever the
+    # score adds up to, the agent is at high risk at least (not critical, which would block
+    # it where risk-based access is enforced).
+    if level in ("low", "medium"):
+        worst = session.scalar(
+            select(Finding.title)
+            .where(
+                Finding.agent_id == agent.id,
+                Finding.status == "open",
+                Finding.severity.in_(("high", "critical")),
+                Finding.type.in_((*FINDING_WEIGHTS, "agent.unsafe_instructions")),
+            )
+            .limit(1)
+        )
+        if worst:
+            level = "high"
+            factors.append(
+                {
+                    "factor": "Open issue of high severity: at least high risk",
+                    "points": 0,
+                    "detail": worst,
+                }
+            )
+    return RiskResult(score=score, level=level, factors=factors)

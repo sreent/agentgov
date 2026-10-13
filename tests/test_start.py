@@ -146,3 +146,10 @@ def test_issues_say_when_nobody_takes_what_nobody_else_does(client) -> None:
         headers=ADMIN,
     ).raise_for_status()  # fmt: skip
     assert not any("catch-all" in p for p in issues()["problems"])
+    # Nothing tells the people responsible: no mail server, chat or service desk.
+    told = "Issues reach the people responsible only in AgentGov"
+    assert any(p.startswith(told) for p in issues()["problems"])
+    client.post(
+        "/v1/destinations", json={"name": "cx-chat", "kind": "teams"}, headers=ADMIN
+    ).raise_for_status()
+    assert not any(p.startswith(told) for p in issues()["problems"])

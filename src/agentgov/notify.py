@@ -281,7 +281,7 @@ class Notifier:
             body += [f"And {_count(len(lines) - len(shown), 'more issue')}.", ""]
         body += [
             "All of them, and what you can do about each (take it on, say it isn't yours, ask "
-            "for an exception, or say you fixed it):",
+            "to accept the risk, or say you fixed it):",
             self._ui("findings?status=mine"),
             "",
             "You get this once a day, as the owner, a sponsor or the team of the agents they "
@@ -346,9 +346,11 @@ class Notifier:
         if item.remediation:
             lines += [f"What to do: {item.remediation}", ""]
         lines += [
-            f"You get this as {_who(item.level)}. In AgentGov, acknowledge it, or it goes on "
-            "to the next people responsible for it. There too: say it isn't yours, ask for an "
-            "exception, or say you fixed it, and AgentGov checks it again:",
+            f"You get this as {_who(item.level)}. AgentGov is how your organisation keeps "
+            "track of its AI agents and what they may do. Acknowledge the issue there, or it "
+            "goes on to the next people responsible for it. There too: say it isn't yours, "
+            "ask to accept the risk, or say you fixed it, and AgentGov checks it again. Sign "
+            "in with your work account:",
             self._link(item.finding_id),
         ]
         message.set_content("\n".join(lines))

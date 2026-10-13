@@ -319,7 +319,8 @@ CATALOG: tuple[Feature, ...] = (
         {
             ENFORCE: "They are refused.",
             MONITOR: "They are let through and recorded, and with discovery on, added to the "
-            "inventory as unmanaged agents.",
+            "inventory as unmanaged agents. Calls to models still need a valid token: the "
+            "gateway pays for them with the provider's key.",
         },
     ),
     Feature(

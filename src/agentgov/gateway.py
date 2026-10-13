@@ -21,7 +21,10 @@ Every approved model provider becomes a route
 ``/llm/<provider>/v1/chat/completions`` (while the model-gateway feature is on),
 where agents call models in OpenAI's format with their agent token:
 
-* ``jwtAuth``       - as for tool servers.
+* ``jwtAuth``       - as for tool servers, but always strict: the gateway spends the
+                      provider's key, so a call without a valid token is refused even
+                      while unknown callers are monitored (and without a token issuer to
+                      check against, the route answers 503).
 * ``backendAuth``   - the provider's API key, which the gateway reads from a file
                       mounted into it (it never enters AgentGov).
 * ``promptGuard``   - every prompt and answer goes to the governance processor's
@@ -236,13 +239,16 @@ AI_PROVIDERS = {
 CHAT_PATH = "/v1/chat/completions"
 
 
-def _jwt_auth(settings: Settings, modes: dict[str, str]) -> dict[str, Any] | None:
+def _jwt_auth(
+    settings: Settings, modes: dict[str, str], *, strict: bool = False
+) -> dict[str, Any] | None:
     if not (settings.keycloak_issuer and settings.keycloak_jwks_url):
         return None
+    optional = modes["unknown-callers"] == features.MONITOR and not strict
     return {
         # "optional" lets unauthenticated callers reach the processor, which lets
         # them through and records them while unknown callers are monitored.
-        "mode": "optional" if modes["unknown-callers"] == features.MONITOR else "strict",
+        "mode": "optional" if optional else "strict",
         "issuer": settings.keycloak_issuer,
         "audiences": [settings.gateway_audience],
         "jwks": {"url": settings.keycloak_jwks_url},
@@ -309,12 +315,30 @@ def model_route_for(
             },
         }
     )
-    auth = _jwt_auth(settings, modes)
-    if auth:
-        policies["jwtAuth"] = auth
+    matches = [{"path": {"exact": f"/llm/{name}{CHAT_PATH}"}}]
+    # The gateway spends the provider's key on the caller's behalf: only for callers whose
+    # token it has checked, whatever the mode of unknown callers, and not at all when it
+    # can't check tokens.
+    auth = _jwt_auth(settings, modes, strict=True)
+    if not auth:
+        message = (
+            f"The gateway uses {name}'s key only for agents whose tokens it can check: "
+            "set AGENTGOV_KEYCLOAK_ISSUER and AGENTGOV_KEYCLOAK_JWKS_URL"
+        )
+        return {
+            "name": f"llm-{name}",
+            "matches": matches,
+            "policies": {
+                "directResponse": {
+                    "body": json.dumps({"error": {"message": message}}),
+                    "status": 503,
+                }
+            },
+        }
+    policies["jwtAuth"] = auth
     return {
         "name": f"llm-{name}",
-        "matches": [{"path": {"exact": f"/llm/{name}{CHAT_PATH}"}}],
+        "matches": matches,
         "policies": policies,
         "backends": [{"ai": backend}],
     }

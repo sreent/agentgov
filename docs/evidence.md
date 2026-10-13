@@ -121,7 +121,12 @@ agentgov ledger verify --file ledger-000000000001-000000050000.jsonl.gz \
 
 checks archives offline, in order: each entry, and that each archive goes on from the one
 before. `--follows HASH` names the hash the first must follow, such as a checkpoint's.
-Exports (`agentgov ledger export`) check the same way.
+Exports (`agentgov ledger export`) check the same way. That shows entries edited, removed or
+out of order, but not a ledger rewritten with every hash worked out again, which links up
+just the same: add `--checkpoints FOLDER`, a folder of checkpoint statements (`N.txt`, as
+the evidence pack holds them, with their time-stamps `N.tsr`), and each checkpoint the
+entries reach must name its entry's hash, and each time-stamp must cover its statement.
+Entries after the last checkpoint aren't vouched for until the next one.
 
 **Operational records.** With `AGENTGOV_DATA_RETENTION_DAYS`, the records whose history
 is in the ledger go once older than that: agents' daily activity and model usage, risk
@@ -248,7 +253,7 @@ A zip for the last N days:
 | File | What it is |
 |---|---|
 | `reports/*.json`, `report.md` | The three frameworks' reports, as data and as a document, each starting with what AgentGov saw |
-| `ledger.jsonl` | The ledger's entries in the period, as AgentGov wrote them: `agentgov ledger verify --file ledger.jsonl` checks them |
+| `ledger.jsonl` | The ledger's entries in the period, as AgentGov wrote them: `agentgov ledger verify --pack <the pack, or its folder>` checks them, link by link and against the checkpoints, which show a ledger rewritten with every hash worked out again |
 | `checkpoints.json`, `checkpoints/*.txt`, `*.tsr` | The checkpoints, their archives, and each time-stamp with its statement, for `openssl ts -verify` |
 | `checkpoints/*.sigstore.json`, `transparency-log/` | Each checkpoint's entry in the transparency log, as a Sigstore bundle, with AgentGov's key, the log's, and a trusted root with the log, for `cosign verify-blob` or `agentgov ledger verify-log-entry` |
 | `inventory.json` | The agents, with their owners, sponsors, teams, status, risk and attestations |

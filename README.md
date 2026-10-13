@@ -55,9 +55,12 @@ only to tenants with an Agent 365 licence: syncing the Microsoft 365 agent catal
 blocking Microsoft 365 agents from AgentGov, and Defender's threat detections for agents.
 Without one, leave them off. Everything else works, including Copilot Studio agents:
 importing or syncing them needs only a Microsoft Entra role that can read the Power
-Platform inventory, such as Power Platform administrator or AI reader, and quarantining
-them needs the AI administrator or Power Platform administrator role
-([details](docs/platforms.md)).
+Platform inventory, such as Power Platform administrator or AI reader. Quarantining them
+from AgentGov also needs an app registration in Entra ID that an administrator who may
+consent for the tenant consents to once, and the AI administrator or Power Platform
+administrator role for the person who quarantines; until then, AgentGov's block is
+recorded in AgentGov only, and agents are quarantined in the Power Platform admin center
+([details](docs/platforms.md#acting-as-the-signed-in-admin)).
 
 ## Capabilities
 

@@ -28,8 +28,12 @@ from agentgov.registry import (
     toolservers,
 )
 from agentgov.registry.errors import Conflict, NotFound
+from agentgov.registry.validation import known_fields
 from agentgov.secops import handoff
 
+# What an agent's body takes besides its name: the fields an edit changes, and its
+# identity from an issuer of its own.
+AGENT_FIELDS = {*agents.EDITABLE, "workload_identity"}
 router = APIRouter(prefix="/v1")
 
 read = require(*READ_ROLES)
@@ -96,6 +100,7 @@ def register_agent(
     """Register an agent. Admins may pass ``approve: true``; registrars always
     create ``pending`` agents that need approval (Agent 365 "requests")."""
     rt = _rt(request)
+    known_fields(body, AGENT_FIELDS | {"name", "source", "approve", "instructions"}, "an agent")
     requested = bool(body.pop("approve", False))
     text = body.pop("instructions", None)
     with rt.db.session() as s:
@@ -157,6 +162,7 @@ def update_agent(
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
     rt = _rt(request)
+    known_fields(body, AGENT_FIELDS, "an agent's edit")
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         changed = agents.update(s, agent, body, actor=principal.actor, version=if_match(request))
@@ -433,6 +439,7 @@ def list_blueprints(request: Request, _: Principal = Depends(read)) -> list[dict
 def create_blueprint(
     request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
 ) -> dict[str, Any]:
+    known_fields(body, {"name", *blueprints.FIELDS}, "a blueprint")
     with _rt(request).db.session() as s:
         return blueprints.to_dict(blueprints.create(s, body, actor=principal.actor))
 
@@ -450,6 +457,7 @@ def update_blueprint(
     body: dict[str, Any] = Body(...),
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
+    known_fields(body, blueprints.FIELDS, "a blueprint's edit")
     with _rt(request).db.session() as s:
         bp = blueprints.get(s, ref)
         blueprints.update(s, bp, body, actor=principal.actor, version=if_match(request))
@@ -536,6 +544,7 @@ def create_toolserver(
     """Register an MCP server. Registrar requests start ``pending`` review
     (Agent 365's bring-your-own MCP server approval flow)."""
     rt = _rt(request)
+    known_fields(body, {"name", *toolservers.FIELDS}, "a tool server")
     with rt.db.session() as s:
         ts = toolservers.create(s, body, actor=principal.actor, approve=principal.is_admin)
         return toolservers.to_dict(ts, rt.settings.gateway_public_url)
@@ -556,6 +565,7 @@ def update_toolserver(
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
     rt = _rt(request)
+    known_fields(body, toolservers.FIELDS, "a tool server's edit")
     with rt.db.session() as s:
         ts = toolservers.get(s, ref)
         toolservers.update(s, ts, body, actor=principal.actor, version=if_match(request))
@@ -651,6 +661,7 @@ def list_apikeys(request: Request, _: Principal = Depends(read)) -> list[dict[st
 def create_apikey(
     request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
 ) -> dict[str, Any]:
+    known_fields(body, {"name", "role"}, "an API key")
     with _rt(request).db.session() as s:
         key, token = apikeys.create(
             s, name=body.get("name", ""), role=body.get("role", ""), actor=principal.actor

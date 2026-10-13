@@ -376,7 +376,9 @@ def _retention(f: Facts) -> Assessment:
     a = Assessment(
         IN_PLACE,
         f"The ledger keeps its records at least six months: {kept}. Archives are checked "
-        "link by link as they are written, and verify offline.",
+        "link by link as they are written, and verify offline. An evidence pack holds the "
+        "entries still in the database; the archives named in its checkpoints.json hold "
+        "the older ones.",
         [
             _row(
                 "Oldest entry in the database",
@@ -417,6 +419,12 @@ def _oversight(f: Facts) -> Assessment:
     if approvals == "off":
         a.status = PARTLY
         a.gaps.append("Human approval is off: destructive tool calls don't wait for anyone.")
+    elif approvals == "monitor":
+        a.status = PARTLY
+        a.gaps.append(
+            "Human approval is in monitor mode: destructive tool calls go through, recorded as "
+            "calls that would have waited for an approver. Enforce it for people to decide."
+        )
     return a
 
 
@@ -438,7 +446,7 @@ def _security(f: Facts) -> Assessment:
             _row("Let through in monitor mode", f.monitored, "#/ledger?decision=monitored"),
             _row(
                 "Agents whose calls were checked",
-                f"{len(f.checked)} of {len(f.agents)}",
+                f"{len(f.checked & {a.id for a in f.agents})} of {len(f.agents)}",
                 "#/agents",
             ),
             *(_row(k, m, "#/features") for k, m in modes.items()),
@@ -1023,11 +1031,16 @@ README = """AgentGov evidence pack
 reports/*.json, report.md  What AgentGov saw of the agents in the period (coverage), what
                            it does towards the EU AI Act, ISO/IEC 42001 and the NIST AI
                            RMF, how far it is set up, and the evidence.
-ledger.jsonl               The ledger's entries in the period, as AgentGov wrote them.
-                           Check that they are intact, and link up, with:
-                             agentgov ledger verify --file ledger.jsonl
-                           (the first entry's prev_hash is the hash of the entry
-                           before the period, which a checkpoint or the ledger vouches for).
+ledger.jsonl               The ledger's entries in the period, as AgentGov wrote them,
+                           as far back as the database keeps them: older ones are in the
+                           archives that checkpoints.json names, kept by the administrators.
+                           Check that they are intact, link up, and match the checkpoints
+                           below, from this folder (or on the zip file), with:
+                             agentgov ledger verify --pack .
+                           A ledger rewritten with every hash worked out again still links
+                           up: only the checkpoints, which an authority time-stamped (or a
+                           transparency log holds) before, show it. Entries after the last
+                           checkpoint aren't vouched for yet.
 checkpoints.json           The ledger's checkpoints, with their archives.
 checkpoints/*.txt, *.tsr   Each time-stamped checkpoint's statement and the time-stamping
                            authority's answer. Check one with:
