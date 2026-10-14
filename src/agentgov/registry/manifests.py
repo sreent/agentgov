@@ -202,13 +202,13 @@ def _destination(session: Session, settings: Settings, spec: dict[str, Any], act
     try:
         destination = destinations.get(session, spec["name"])
     except NotFound:
-        destinations.create(session, {**spec, "status": desired}, actor=actor)
+        destinations.create(session, {**spec, "status": desired}, actor=actor, settings=settings)
         return "created"
     spec.pop("backfill", None)  # where a new destination starts in the ledger
     if "tickets" in spec and isinstance(spec["tickets"], dict):
         # The manifest says all of a desk's ticket settings: what it leaves out goes.
         spec["tickets"] = {**{k: None for k in destination.tickets or {}}, **spec["tickets"]}
-    changed = destinations.update(session, destination, spec, actor=actor)
+    changed = destinations.update(session, destination, spec, actor=actor, settings=settings)
     action = "configured" if changed else "unchanged"
     if destination.status != desired:
         verb = "pause" if desired == destinations.PAUSED else "resume"
@@ -265,9 +265,11 @@ def _toolserver(session: Session, settings: Settings, spec: dict[str, Any], acto
         toolservers.set_status(session, ts, "block", actor=actor)
         action = "configured"
     elif desired == "approved" and ts.status != "approved":
-        toolservers.set_status(
-            session, ts, "approve" if ts.status == PENDING else "unblock", actor=actor
-        )
+        if ts.status == BLOCKED:
+            # Unblocked, it is as it was when it was blocked: pending, it is approved next.
+            toolservers.set_status(session, ts, "unblock", actor=actor)
+        if ts.status == PENDING:
+            toolservers.set_status(session, ts, "approve", actor=actor)
         action = "configured"
     return action
 
@@ -278,10 +280,10 @@ def _model_provider(session: Session, settings: Settings, spec: dict[str, Any], 
         raise ValidationError(f"model provider {spec['name']}: status must be approved or blocked")
     try:
         provider = model_providers.get(session, spec["name"])
-        changed = model_providers.update(session, provider, spec, actor=actor)
+        changed = model_providers.update(session, provider, spec, actor=actor, settings=settings)
         action = "configured" if changed else "unchanged"
     except NotFound:
-        provider = model_providers.create(session, spec, actor=actor)
+        provider = model_providers.create(session, spec, actor=actor, settings=settings)
         action = "created"
     if provider.status != desired:
         verb = "block" if desired == BLOCKED else "unblock"
@@ -362,8 +364,11 @@ def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: st
     if classified is not None and classification.classify(session, agent, classified, actor=actor):
         action = "configured"
     if desired == ACTIVE and agent.status in (PENDING, BLOCKED):
-        verb = "approve" if agent.status == PENDING else "unblock"
-        agents.transition(session, settings, agent, verb, actor=actor, reason="manifest")
+        if agent.status == BLOCKED:
+            # Unblocked, it is as it was when it was blocked: pending, it is approved next.
+            agents.transition(session, settings, agent, "unblock", actor=actor, reason="manifest")
+        if agent.status == PENDING:
+            agents.transition(session, settings, agent, "approve", actor=actor, reason="manifest")
         action = "configured"
     elif desired == BLOCKED and agent.status in (PENDING, ACTIVE):
         agents.transition(session, settings, agent, "block", actor=actor, reason="manifest")

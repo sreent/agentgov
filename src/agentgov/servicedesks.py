@@ -4,11 +4,16 @@ how it stands, adding a note, changing its priority, and resolving it.
 * ServiceNow: the Table API (``/api/now/table/<table>``). The ticket's correlation ID is
   AgentGov's marker; notes are work notes, which the people who work tickets see and the
   caller doesn't.
-* Jira, Cloud or Data Center: REST API 2 (``/rest/api/2/issue``), which takes plain text
-  everywhere. The marker is a label; comments are internal on Jira Service Management
-  projects; resolving takes the transition to a done status (``resolve_transition`` names
-  one, where there are several).
+* Jira, Cloud or Data Center: REST API 2 (``/rest/api/2/issue``), which takes wiki markup.
+  The marker is a label; comments are internal on Jira Service Management projects;
+  resolving takes the transition to a done status (``resolve_transition`` names one, where
+  there are several).
 * Freshservice: API v2 (``/api/v2/tickets``). The marker is a tag; notes are private.
+
+Tickets carry what agents, platforms and people wrote (names, descriptions, reasons), so
+each desk shows it as text: in a ``{noformat}`` block in Jira, where nothing renders (links,
+mentions, images, macros, formatting); in ServiceNow without ``[code]`` tags, which render
+HTML in work notes; and HTML-escaped in Freshservice. Only AgentGov's own link is live.
 
 Errors say what went wrong, never the credential. Some hold up the whole desk for a while:
 it can't be reached, it refused AgentGov's credential, or it asked AgentGov to slow down
@@ -20,6 +25,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -109,6 +115,33 @@ def _html(text: str) -> str:
     return html.escape(text).replace("\n", "<br>")
 
 
+def _with_link(text: str, link: str | None) -> str:
+    return f"{text}\n\n{link}" if link else text
+
+
+# A zero-width space: it breaks a tag up without showing.
+_BREAK = "​"
+# What would end a {noformat} block early (any case, any parameters).
+_NOFORMAT = re.compile(r"\{(\s*noformat)", re.IGNORECASE)
+
+
+def _jira_text(text: str) -> str:
+    """Text as it was written, in Jira's wiki markup: a {noformat} block, which it can't
+    end early. Mentions are broken up too, in case a Jira looks for them in blocks."""
+    guarded = _NOFORMAT.sub("{" + _BREAK + r"\1", text).replace("[~", f"[{_BREAK}~")
+    return f"{{noformat}}\n{guarded}\n{{noformat}}"
+
+
+# ServiceNow renders the HTML between [code] and [/code] in journal fields (where the
+# instance allows it), in any case and with spaces inside the brackets.
+_CODE_TAG = re.compile(r"\[(\s*/?\s*code\s*\])", re.IGNORECASE)
+
+
+def _snow_text(text: str) -> str:
+    """Text as it was written, for ServiceNow: no [code] tag opens or closes."""
+    return _CODE_TAG.sub(f"[{_BREAK}" + r"\1", text)
+
+
 class Desk:
     """One desk, as AgentGov signs in to it."""
 
@@ -194,13 +227,14 @@ class Desk:
     def read(self, remote: Remote) -> Seen:
         raise NotImplementedError
 
-    def note(self, remote: Remote, text: str) -> None:
+    # ``text`` holds what agents, platforms and people wrote; ``link``, AgentGov's own.
+    def note(self, remote: Remote, text: str, link: str | None = None) -> None:
         raise NotImplementedError
 
     def set_priority(self, remote: Remote, fields: dict[str, Any]) -> None:
         raise NotImplementedError
 
-    def resolve(self, remote: Remote, text: str) -> None:
+    def resolve(self, remote: Remote, text: str, link: str | None = None) -> None:
         raise NotImplementedError
 
     def test(self) -> str:
@@ -235,8 +269,8 @@ class ServiceNow(Desk):
         body = {
             **ticket.fields,
             **ticket.priority,
-            "short_description": ticket.summary[:160],
-            "description": ticket.description,
+            "short_description": _snow_text(ticket.summary[:160]),
+            "description": _snow_text(f"{ticket.description}\n\n{ticket.footer}"),
             "correlation_id": ticket.marker,
             "correlation_display": "AgentGov",
         }
@@ -297,16 +331,18 @@ class ServiceNow(Desk):
             phase = NEW
         return Seen(state_name or state or "?", phase, assignee or None, close_code or None)
 
-    def note(self, remote: Remote, text: str) -> None:
-        self.call("PATCH", self._path(remote.remote_id), body={"work_notes": text})
+    def note(self, remote: Remote, text: str, link: str | None = None) -> None:
+        notes = _snow_text(_with_link(text, link))
+        self.call("PATCH", self._path(remote.remote_id), body={"work_notes": notes})
 
     def set_priority(self, remote: Remote, fields: dict[str, Any]) -> None:
         self.call("PATCH", self._path(remote.remote_id), body=fields)
 
-    def resolve(self, remote: Remote, text: str) -> None:
-        body = {**desks.resolve_fields(self.kind, self.settings), "work_notes": text}
+    def resolve(self, remote: Remote, text: str, link: str | None = None) -> None:
+        notes = _snow_text(_with_link(text, link))
+        body = {**desks.resolve_fields(self.kind, self.settings), "work_notes": notes}
         if self.table == desks.INCIDENT:
-            body.setdefault("close_notes", text)
+            body.setdefault("close_notes", notes)
         self.call(
             "PATCH",
             self._path(remote.remote_id),
@@ -347,7 +383,7 @@ class Jira(Desk):
             "project": {"key": str(ticket.group)},
             "issuetype": {"name": self.settings.get("issue_type") or "Task"},
             "summary": ticket.summary[:250],
-            "description": ticket.description,
+            "description": f"{_jira_text(ticket.description)}\n\n{ticket.footer}",
             "labels": [*labels, "agentgov", ticket.marker],
         }
         try:
@@ -390,13 +426,13 @@ class Jira(Desk):
             phase = NEW
         return Seen(str(status.get("name") or "?"), phase, assignee, resolution)
 
-    def note(self, remote: Remote, text: str) -> None:
+    def note(self, remote: Remote, text: str, link: str | None = None) -> None:
         self.call(
             "POST",
             f"/rest/api/2/issue/{quote(remote.key, safe='')}/comment",
             # Internal on a Jira Service Management project: the customer doesn't see it.
             body={
-                "body": text,
+                "body": _with_link(_jira_text(text), link),
                 "properties": [{"key": "sd.public.comment", "value": {"internal": True}}],
             },
         )
@@ -404,7 +440,7 @@ class Jira(Desk):
     def set_priority(self, remote: Remote, fields: dict[str, Any]) -> None:
         self.call("PUT", f"/rest/api/2/issue/{quote(remote.key, safe='')}", body={"fields": fields})
 
-    def resolve(self, remote: Remote, text: str) -> None:
+    def resolve(self, remote: Remote, text: str, link: str | None = None) -> None:
         if self.read(remote).phase != DONE:
             path = f"/rest/api/2/issue/{quote(remote.key, safe='')}/transitions"
             options = (self.call("GET", path) or {}).get("transitions") or []
@@ -428,7 +464,7 @@ class Jira(Desk):
             if resolve_fields:
                 body["fields"] = resolve_fields
             self.call("POST", path, body=body)
-        self.note(remote, text)
+        self.note(remote, text, link)
 
     def test(self) -> str:
         me = self.call("GET", "/rest/api/2/myself") or {}
@@ -460,7 +496,7 @@ class Freshservice(Desk):
             **extra,
             **ticket.priority,
             "subject": ticket.summary[:255],
-            "description": _html(ticket.description),
+            "description": _html(f"{ticket.description}\n\n{ticket.footer}"),
             "status": 2,
             "tags": [*tags, "agentgov", ticket.marker],
         }
@@ -504,23 +540,23 @@ class Freshservice(Desk):
         assignee = self._agent(responder) if responder else None
         return Seen(FRESHSERVICE_STATUSES.get(status, str(status)), phase, assignee, None)
 
-    def note(self, remote: Remote, text: str) -> None:
+    def note(self, remote: Remote, text: str, link: str | None = None) -> None:
         self.call(
             "POST",
             f"/api/v2/tickets/{remote.remote_id}/notes",
-            body={"body": _html(text), "private": True},
+            body={"body": _html(_with_link(text, link)), "private": True},
         )
 
     def set_priority(self, remote: Remote, fields: dict[str, Any]) -> None:
         self.call("PUT", f"/api/v2/tickets/{remote.remote_id}", body=fields)
 
-    def resolve(self, remote: Remote, text: str) -> None:
+    def resolve(self, remote: Remote, text: str, link: str | None = None) -> None:
         self.call(
             "PUT",
             f"/api/v2/tickets/{remote.remote_id}",
             body=desks.resolve_fields(self.kind, self.settings),
         )
-        self.note(remote, text)
+        self.note(remote, text, link)
 
     def test(self) -> str:
         self.call("GET", "/api/v2/tickets", params={"per_page": "1"})

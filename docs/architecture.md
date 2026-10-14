@@ -196,13 +196,18 @@ last row a transaction locks, so two transactions that lock the same rows in ano
 take turns rather than deadlock. Each edit's entry says what it changed, from what to what
 (`details.changes`; text longer than a thousand characters by its length and SHA-256), and
 a policy's holds the policy as it then became, so the ledger keeps every version that was in
-force. `GET /v1/ledger/verify` recomputes the chain and reports the first broken entry
-(edited, deleted or truncated). A chain rewritten with every hash worked out again would
-still link up, so it also checks the entries against the checkpoints made before, and each
-checkpoint's time-stamp against its statement. The overview's integrity badge checks new entries as they
-arrive and re-verifies the whole chain every five minutes. `GET /v1/ledger/export`
-streams the ledger as JSON Lines for offline verification
-(`agentgov ledger verify --file`). Every day the chain's head is kept as a checkpoint,
+force. An entry's values are taken as their columns store them (text for a number, a
+time without a zone as UTC), so what is hashed is what is stored. `GET /v1/ledger/verify`
+recomputes the chain and reports every broken entry (edited, deleted or truncated: the
+first fifty, and how many more), then checks the head, where the chain starts and the
+checkpoints, whatever broke before them. A chain rewritten with every hash worked out
+again would still link up, so it also checks the entries against the checkpoints made
+before, each checkpoint's time-stamp against its statement and the authority's signature,
+and the time-stamps the ledger recorded. The chain ends at its head: a checkpoint beyond it
+breaks it, and a row stored past it isn't the ledger's, so nothing lists, exports, packs,
+counts or sends it. The overview's integrity badge checks new entries as they arrive and
+re-verifies the whole chain every five minutes. `GET /v1/ledger/export` streams the ledger
+as JSON Lines for offline verification (`agentgov ledger verify --file`). Every day the chain's head is kept as a checkpoint,
 which a time-stamping authority signs when one is set (RFC 3161), and which goes into a
 transparency log (Sigstore Rekor) when one is set; with a retention period,
 older entries are archived, checked link by link, before they leave the database, and the
@@ -225,6 +230,7 @@ SIEMs that collect read the same events from `GET /v1/secops/events`.
 | Gateway → model provider | The provider's API key, which only the gateway (and its config sidecar) can read, from a file; the agent's token is never forwarded |
 | Gateway → agent serving A2A | The caller's token is never forwarded; the agent called gets a delegation and who handed it the work in headers AgentGov sets on every call it passes on. AgentGov doesn't own the network: only the gateway should reach agents' A2A endpoints (a NetworkPolicy in Kubernetes), or the agents refuse calls without a delegation; AgentGov looks for calls around the gateway and tells the agents' owners ([calls around the gateway](agent-to-agent.md#calls-around-the-gateway)) |
 | Agent → agent (delegation) | A JWT for the agent called only (its name and ID), signed by the processors (ES256) with a key derived from the service token, whose public half the control plane publishes (`/v1/delegations/jwks`), lasting an hour; checked by AgentGov on each call that carries it (signature, expiry, holder, and the same person as the caller's token), and by agents that check it, on the calls they take |
+| Gateway → collector | Traces where agents send theirs (`:4317`); the access logs that meter model calls to a receiver of their own (`:4319`), which takes only a certificate from AgentGov's authority with mutual TLS, and only the gateway in Kubernetes (network policy) ([usage](models.md#usage-cost-and-budgets)) |
 | Gateway → processor | Mutual TLS: each shows a certificate from AgentGov's own authority, cert-manager or SPIRE ([production](production.md#mutual-tls-between-components)); for tool calls (gRPC), model calls (the webhook), calls between agents (external authorization) and their answers (external processing, gRPC). When the processor can't be reached, agentgateway refuses the call or lets it through as `AGENTGOV_GATEWAY_FAILURE_MODE` says (`failureMode: failClosed` or `failOpen`; `deny` or `allow` for external authorization) |
 | Processor, control plane → OPA | Mutual TLS: OPA asks every caller for a certificate from AgentGov's authority (with SPIRE, the processor's or the control plane's, by their SPIFFE IDs) |
 | Processor, control plane → Granite Guardian | Inside your network, like Presidio; they send it the text it judges, with its API key if it has one |

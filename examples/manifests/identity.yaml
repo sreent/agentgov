@@ -16,8 +16,8 @@ spec:
   issuer: http://workload-issuer:9200
   description: Stand-in Kubernetes cluster (demo server in examples/identity/workload-issuer).
   status: approved
-  # The gateway takes its tokens itself too, without Keycloak, for the gateway's audience
-  # (docs/agent-identity.md#straight-to-the-gateway):
+  # The gateway takes its tokens itself too, without Keycloak, for the gateway's address as
+  # their audience (docs/agent-identity.md#straight-to-the-gateway):
   # gateway: true
 # Other kinds:
 #

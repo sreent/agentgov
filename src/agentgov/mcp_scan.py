@@ -9,24 +9,32 @@ which compares it with the approved tool servers and raises findings for the
 rest.
 
 Configuration files hold credentials (API keys in environment variables, tokens
-in headers or arguments). Nothing of them leaves the machine: environment
-variables and headers are reported by name only, URLs without their query and
-user information, and arguments that look like credentials are replaced.
+in headers, arguments or a URL's path). None of them is reported: environment
+variables and headers by name only; a server's address by its scheme, host and
+port, with a short hash of its path, where some services put the credential;
+and in arguments, URLs without their user information, query or fragment, the
+values of options that take a credential, a header or an environment variable
+(``-e NAME=value``), and whatever looks like a key or a token, as <redacted>.
+AgentGov sanitises a report again with these rules before it keeps it.
 """
 
 from __future__ import annotations
 
+import hashlib
+import itertools
 import json
+import math
 import os
 import platform
 import re
 import sys
 import tomllib
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from agentgov.processor import detectors
 
@@ -41,7 +49,18 @@ _SECRET_WORDS = {"key", "apikey", "pass", "pwd", "auth", "authorization", "beare
 _SECRET_IN_WORD = ("token", "secret", "passw")
 # Options whose value is an HTTP header, "Name: value" (mcp-remote's --header).
 _HEADER_FLAGS = {"--header", "--headers", "--http-header", "-H"}
+# Options whose value is an environment variable, NAME=value (docker run's -e).
+_ENV_FLAGS = {"-e", "--env"}
 _BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+\S+")
+# What reads as a key or a token rather than a word, a path or a version: a UUID, or a run
+# of letters and digits at least 20 long that switches between them often, with at least
+# 3 bits of entropy a character.
+_UUID = re.compile(r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b")
+_RUN = re.compile(r"[A-Za-z0-9]{20,}")
+_SWITCHES = 4
+_BITS = 3.0
+# What an address keeps of a path: a short hash.
+_PATH_HASH = re.compile(r"^[0-9a-f]{12}$")
 
 
 def _secret_flag(arg: str) -> bool:
@@ -167,13 +186,51 @@ def _servers(source: Source, data: Any) -> Iterator[tuple[str, dict[str, Any]]]:
 # ------------------------------------------------------------- sanitising
 
 
-def clean_url(url: str) -> str:
-    """The URL without its user information, query or fragment, which can hold secrets."""
+def _host(parts: SplitResult) -> str:
+    """A URL's host and port, without its user information."""
+    host = (parts.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"  # an IPv6 address
+    try:
+        port = parts.port
+    except ValueError:
+        port = None  # not a port
+    return f"{host}:{port}" if port else host
+
+
+def _random(run: str) -> bool:
+    switches = sum(a.isdigit() != b.isdigit() for a, b in itertools.pairwise(run))
+    if switches < _SWITCHES:
+        return False
+    bits = -sum(n / len(run) * math.log2(n / len(run)) for n in Counter(run).values())
+    return bits >= _BITS
+
+
+def redact_random(text: str) -> str:
+    """``text`` with what reads as a key or a token in it as <redacted>."""
+    text = _UUID.sub(REDACTED, text)
+    return _RUN.sub(lambda m: REDACTED if _random(m.group()) else m.group(), text)
+
+
+def address(url: str) -> str:
+    """A server's address, as reported: its scheme, host and port, and a short hash of its
+    path (``https://mcp.example.com#3f2a1b9c4d5e``), so that two servers on one host stay
+    apart while what the path holds stays on the machine. An address is its own address."""
     parts = urlsplit(url.strip())
-    host = parts.hostname or ""
-    if parts.port:
-        host = f"{host}:{parts.port}"
-    return urlunsplit((parts.scheme.lower(), host.lower(), parts.path, "", ""))
+    base = urlunsplit((parts.scheme.lower(), _host(parts), "", "", ""))
+    path = parts.path.rstrip("/")
+    if path:
+        return f"{base}#{hashlib.sha256(path.encode()).hexdigest()[:12]}"
+    if not parts.query and _PATH_HASH.match(parts.fragment):
+        return f"{base}#{parts.fragment}"
+    return base
+
+
+def clean_url(url: str) -> str:
+    """A URL in an argument: without its user information, query or fragment, which can
+    hold secrets, and with what reads as a key or a token in its path redacted."""
+    parts = urlsplit(url.strip())
+    return urlunsplit((parts.scheme.lower(), _host(parts), redact_random(parts.path), "", ""))
 
 
 def _header(value: str) -> str:
@@ -182,8 +239,21 @@ def _header(value: str) -> str:
     return f"{name.strip()}: {REDACTED}" if sep else REDACTED
 
 
+def _env(value: str) -> str:
+    """An environment variable with its value left out: "NAME=<redacted>"."""
+    name, sep, _ = value.partition("=")
+    return f"{name}={REDACTED}" if sep else value
+
+
+def _clean_word(arg: str) -> str:
+    if detectors.find_secrets((), arg):
+        return REDACTED
+    return clean_url(arg) if "://" in arg else redact_random(arg)
+
+
 def clean_args(args: list[Any]) -> list[str]:
-    """Command-line arguments without the credentials in them."""
+    """Command-line arguments without the credentials in them. Cleaning them again changes
+    nothing."""
     out: list[str] = []
     expect: str | None = None  # what the previous option says this argument is
     for raw in args:
@@ -194,6 +264,11 @@ def clean_args(args: list[Any]) -> list[str]:
             continue
         if expect == "header":
             out.append(_header(arg))
+            # "Name:" alone: its value is the next argument (a command line split at spaces).
+            expect = "secret" if arg.rstrip().endswith(":") else None
+            continue
+        if expect == "env":
+            out.append(_env(arg))
             expect = None
             continue
         option = arg.split("=", 1)[0]
@@ -203,6 +278,13 @@ def clean_args(args: list[Any]) -> list[str]:
             else:
                 out.append(arg)
                 expect = "header"
+            continue
+        if option in _ENV_FLAGS:
+            if "=" in arg:
+                out.append(f"{option}={_env(arg.split('=', 1)[1])}")
+            else:
+                out.append(arg)
+                expect = "env"
             continue
         if _secret_flag(arg):
             if "=" in arg:
@@ -214,16 +296,7 @@ def clean_args(args: list[Any]) -> list[str]:
         if _BEARER.search(arg):
             out.append(_BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}", arg))
             continue
-        if (
-            detectors.find_secrets((), arg)
-            or urlsplit(arg).password
-            or ("://" in arg and urlsplit(arg).query)
-        ):
-            out.append(
-                clean_url(arg) if "://" in arg and not detectors.find_secrets((), arg) else REDACTED
-            )
-            continue
-        out.append(arg)
+        out.append(_clean_word(arg))
     return out
 
 
@@ -260,8 +333,9 @@ def _image(args: list[str]) -> str | None:
 
 def identity_of(url: str | None, command: list[str]) -> str:
     """How AgentGov recognises the same server on another machine, or in the registry:
-    ``url:<url>``, ``npm:<package>``, ``pypi:<package>``, ``oci:<image>`` or
-    ``command:<command line>``."""
+    ``url:<address>``, ``npm:<package>``, ``pypi:<package>``, ``oci:<image>`` or
+    ``command:<command line>``, from its address (see :func:`address`) or its cleaned
+    command line."""
     if url:
         return f"url:{url.rstrip('/')}"
     if not command:
@@ -284,12 +358,25 @@ def identity_of(url: str | None, command: list[str]) -> str:
     return "command:" + " ".join([program, *args])[:300]
 
 
+def command_line(line: str) -> list[str]:
+    """A command line written as one string (as an identity names it), as its arguments:
+    what spans arguments there (Bearer <token>) is redacted first."""
+    return _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}", line).split(" ")
+
+
+def clean_identity(identity: str) -> str:
+    """An identity as reported, with its address as :func:`address` gives it. Cleaning it
+    again changes nothing."""
+    kind, _, value = identity.partition(":")
+    return f"url:{address(value)}" if kind == "url" else identity
+
+
 def sighting(source: Source, name: str, spec: dict[str, Any]) -> Sighting:
     url = spec.get("url") or spec.get("serverUrl") or spec.get("httpUrl")
     kind = str(spec.get("type") or spec.get("transport") or "").lower()
     if url:
         transport = "sse" if kind == "sse" or str(url).rstrip("/").endswith("/sse") else "http"
-        url = clean_url(str(url))
+        url = address(str(url))
         command: list[str] = []
     else:
         transport = "stdio"

@@ -6,10 +6,15 @@ keeping that evidence for as long as it is needed, proving it existed unchanged,
 handing it to the people who assess compliance:
 
 * **Checkpoints** keep the chain's head every day, and a **time-stamping authority** signs
-  each one with its own time (RFC 3161), so that nobody, AgentGov's administrators
-  included, can rewrite the history before it unnoticed. A **transparency log** (Sigstore's
-  Rekor) can publish each one too, so that AgentGov can't show different checkpoints to
-  different people.
+  each one with its own time (RFC 3161): history rewritten before a checkpoint no longer
+  matches its time-stamp, and the ledger records each time-stamp, so one taken away or
+  replaced shows too. Whoever can write to the database can still work out every hash
+  after a change again and have the checkpoints signed anew, at a later time: that shows
+  in the ledger's head kept outside the database, in time-stamps and evidence packs kept
+  outside AgentGov, and in a transparency log, and verification warns of time-stamps
+  given long after their entries. A **transparency log** (Sigstore's Rekor) can publish
+  each checkpoint too, so that AgentGov can't show different checkpoints to different
+  people.
 * **Retention**: the ledger keeps every entry, or keeps them for a period and then
   archives them, checked link by link, before they leave the database. Operational records
   whose history is in the ledger go after a period of their own.
@@ -33,8 +38,13 @@ agentgov ledger checkpoint seq=1042 hash=9f2c…e1
 
 The authority's answer proves that the chain up to that entry existed, as it is, at the
 time it gives. AgentGov keeps the answer whole, and checks that it covers the hash it sent,
-with its nonce. Anyone can verify it with OpenSSL, against the authority's certificate,
-without AgentGov:
+with its nonce, and that the authority signed it: against the authority's certificates in
+`AGENTGOV_LEDGER_TSA_CA_FILE` (a PEM file with its root, and any intermediate
+certificates). Without them, it checks the signature against the certificate the answer
+carries, which shows the answer whole, not who signed it: the Ledger page, **Features** →
+*What AgentGov can reach*, verification and the EU AI Act report say so. An answer that
+doesn't check out isn't kept: the checkpoint waits for the next try. Anyone can verify it
+with OpenSSL, against the authority's certificate, without AgentGov:
 
 ```bash
 agentgov ledger proof 1042 -o proof/
@@ -48,10 +58,21 @@ openssl ts -verify -data proof/checkpoint-1042.txt -in proof/checkpoint-1042.tsr
 | DigiCert | `http://timestamp.digicert.com` | the system's CA bundle, such as `/etc/ssl/certs/ca-certificates.crt` |
 | Sectigo | `http://timestamp.sectigo.com` | the system's CA bundle (it asks for 15 seconds between requests) |
 
-Your organisation's own authority works too. A refused or failed request is kept on the
-checkpoint and tried again each hour; until then, the checkpoint vouches only for itself.
-The control plane needs to reach the authority over the network
+Give AgentGov the certificates you verify with in `AGENTGOV_LEDGER_TSA_CA_FILE` (for
+FreeTSA, its `cacert.pem` and `tsa.crt` in one file); the answers are signed, so an
+authority reached over plain HTTP is checked like any other. Your organisation's own
+authority works too. A refused or failed request, or an answer that doesn't check out, is
+kept on the checkpoint and tried again each hour; until then, the checkpoint vouches only
+for itself. The control plane needs to reach the authority over the network
 ([requirements](requirements.md)).
+
+The ledger records each time-stamp (`ledger.timestamped`: the checkpoint, its hash, the
+time-stamp's SHA-256 and the time it gives): verification reports a checkpoint whose
+time-stamp is gone, or isn't the one recorded, or that was time-stamped twice. A time-stamp
+proves the chain existed at the time it gives, not before: one given later than its entry
+by more than a checkpoint period and two hourly rounds (the retention job's, which makes
+the checkpoint and tries the authority again) vouches only from then, and verification
+says so, as a warning.
 
 ## A transparency log
 
@@ -105,8 +126,13 @@ archive, `ledger-<first>-<last>.jsonl.gz`, and checked as they are written: each
 link to the one before it and match its hash, or nothing is archived and an issue for the
 default team says why. Only then does a checkpoint record the archive and its SHA-256, and
 the entries leave the database; the chain there goes on from that checkpoint, and an entry
-`ledger.archived` names the archive. Entries that an active destination hasn't been sent
-yet stay, while security operations are on ([security operations](secops.md)).
+`ledger.archived` names the archive, the entries in it, the hash it ends with and the one
+it goes on from. So the chain itself says where it may start: verification refuses a chain
+in the database that starts later without one (its entries were removed, not archived),
+or that still holds entries before where it starts. An archive is never written over: one
+already there with other entries in it stops archiving, with the same issue. Entries that
+an active destination hasn't been sent yet stay, while security operations are on
+([security operations](secops.md)).
 
 The minimum of 183 days follows the EU AI Act, which asks providers and deployers of
 high-risk AI systems to keep the logs under their control for at least six months
@@ -120,13 +146,17 @@ agentgov ledger verify --file ledger-000000000001-000000050000.jsonl.gz \
 ```
 
 checks archives offline, in order: each entry, and that each archive goes on from the one
-before. `--follows HASH` names the hash the first must follow, such as a checkpoint's.
-Exports (`agentgov ledger export`) check the same way. That shows entries edited, removed or
-out of order, but not a ledger rewritten with every hash worked out again, which links up
-just the same: add `--checkpoints FOLDER`, a folder of checkpoint statements (`N.txt`, as
-the evidence pack holds them, with their time-stamps `N.tsr`), and each checkpoint the
-entries reach must name its entry's hash, and each time-stamp must cover its statement.
-Entries after the last checkpoint aren't vouched for until the next one.
+before. `--follows HASH` names the hash the first must follow, such as a checkpoint's, or
+the one its `ledger.archived` entry says it goes on from. Exports (`agentgov ledger
+export`) check the same way. That shows entries edited, removed or out of order, but not a
+ledger rewritten with every hash worked out again, which links up just the same: add
+`--checkpoints FOLDER`, a folder of checkpoint statements (`N.txt`, as the evidence pack
+holds them, with their time-stamps `N.tsr`), and each checkpoint the entries reach must
+name its entry's hash, and each time-stamp must cover its statement and carry the
+authority's signature, checked against its certificates with `--tsa-ca FILE` (without
+them, against the certificate it carries, which the output says). Time-stamped
+checkpoints the files don't reach are listed, so that whoever checks knows what else to
+check them with. Entries after the last checkpoint aren't vouched for until the next one.
 
 **Operational records.** With `AGENTGOV_DATA_RETENTION_DAYS`, the records whose history
 is in the ledger go once older than that: agents' daily activity and model usage, risk
@@ -253,7 +283,7 @@ A zip for the last N days:
 | File | What it is |
 |---|---|
 | `reports/*.json`, `report.md` | The three frameworks' reports, as data and as a document, each starting with what AgentGov saw |
-| `ledger.jsonl` | The ledger's entries in the period, as AgentGov wrote them: `agentgov ledger verify --pack <the pack, or its folder>` checks them, link by link and against the checkpoints, which show a ledger rewritten with every hash worked out again |
+| `ledger.jsonl` | The ledger's entries in the period, as AgentGov wrote them, up to the chain's head: `agentgov ledger verify --pack <the pack, or its folder> [--tsa-ca FILE]` checks them, link by link and against the checkpoints, which show a ledger rewritten with every hash worked out again; the time-stamps' signatures, and the time-stamps the ledger recorded; that the entries start where the chain did, when the ones before were archived (`ledger.archived`); that no checkpoint is beyond them; and each checkpoint's entry in the transparency log, with the keys in the pack (compare them with the log's published ones) |
 | `checkpoints.json`, `checkpoints/*.txt`, `*.tsr` | The checkpoints, their archives, and each time-stamp with its statement, for `openssl ts -verify` |
 | `checkpoints/*.sigstore.json`, `transparency-log/` | Each checkpoint's entry in the transparency log, as a Sigstore bundle, with AgentGov's key, the log's, and a trusted root with the log, for `cosign verify-blob` or `agentgov ledger verify-log-entry` |
 | `inventory.json` | The agents, with their owners, sponsors, teams, status, risk and attestations |
@@ -267,9 +297,9 @@ A zip for the last N days:
 | Where | How |
 |---|---|
 | Admin UI | **Ledger**: **Verify chain**, *Checkpoints and retention* (**Make a checkpoint**, each time-stamp and log entry to download); **Compliance**: a framework and a period, and **Evidence pack**; **Register**: the classification register, by category, **Classify** or **Change** on each agent, **Download CSV**; an agent's page → *Classification*; **Agents** → tick them → **Classify…** |
-| CLI | `agentgov ledger checkpoints`, `checkpoint`, `proof SEQ`, `verify-log-entry`, `retention [--run]`, `verify [--file F ...]`; `agentgov transparency-key [--log] DIR`; `agentgov evidence report [--framework F] [--days N] [--json]`, `agentgov evidence pack [--days N] [-o FILE]`; `agentgov evidence register [--csv]`, `agentgov agents classify REF [REF ...] --category C --role R [--basis B] [--purpose P]` (`--clear`: no longer classified) |
+| CLI | `agentgov ledger checkpoints`, `checkpoint`, `proof SEQ`, `verify-log-entry`, `retention [--run]`, `verify [--file F ...] [--pack P] [--tsa-ca FILE]`; `agentgov transparency-key [--log] DIR`; `agentgov evidence report [--framework F] [--days N] [--json]`, `agentgov evidence pack [--days N] [-o FILE]`; `agentgov evidence register [--csv]`, `agentgov agents classify REF [REF ...] --category C --role R [--basis B] [--purpose P]` (`--clear`: no longer classified) |
 | API | `GET`/`POST /v1/ledger/checkpoints`, `GET /v1/ledger/checkpoints/{seq}/timestamp`, `GET /v1/ledger/checkpoints/{seq}/log-entry`, `GET /v1/ledger/transparency-log`, `GET /v1/ledger/retention`, `POST /v1/ledger/retention/run`; `GET /v1/evidence/frameworks`, `GET /v1/evidence/report?framework=&days=`, `GET /v1/evidence/pack?days=`; `GET /v1/evidence/register`, `PUT`/`DELETE /v1/agents/{ref}/classification`, `POST /v1/agents/bulk` with `action: classify` and `fields` |
-| Helm chart | `controlPlane.ledgerArchive` (a volume for the archives, and the retention), `controlPlane.env.AGENTGOV_LEDGER_TSA_URL`, `controlPlane.transparencyLog` (the log, a Secret with AgentGov's key, the log's key) ([Kubernetes](deploy/kubernetes.md)) |
+| Helm chart | `controlPlane.ledgerArchive` (a volume for the archives, and the retention), `controlPlane.timestamping` (the authority, and its certificates), `controlPlane.transparencyLog` (the log, a Secret with AgentGov's key, the log's key) ([Kubernetes](deploy/kubernetes.md)) |
 
 Everyone who reads AgentGov (administrators, approvers, the security team, auditors) sees
 the reports and the register, and downloads the pack; administrators make checkpoints and
@@ -299,7 +329,8 @@ evidence pack for the day.
 
 | Entry | When |
 |---|---|
-| `ledger.archived` | Entries were archived, then removed: the range, the archive and its SHA-256 |
+| `ledger.archived` | Entries were archived, then removed: the range, the archive and its SHA-256, the hash it ends with and the one it goes on from |
+| `ledger.timestamped` | A checkpoint was time-stamped: the checkpoint, its hash, the time-stamp's SHA-256, the time it gives, and whether its signature was checked against the authority's certificates |
 | `retention.pruned` | Operational records past their retention were removed: how many of each |
 | `agent.classified` | An agent was classified, or its classification changed or was cleared: what it was and what it is |
 | `ledger.rewound` (critical) | An administrator accepted that the database lost ledger entries (a restore): which, and when AgentGov had written them ([backing up and restoring](backup.md#a-rewound-ledger)) |

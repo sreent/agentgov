@@ -42,9 +42,10 @@ def person_of(claims: dict[str, Any]) -> dict[str, Any] | None:
     """The person the agent acts for, or None when it acts on its own.
 
     ``claims`` holds ``subject``, ``username``, ``email``, ``groups``, ``roles``, ``act``
-    and ``sign_in``, as the gateway passes them. The person is ``{"id", "username",
-    "email", "groups", "roles", "via", "actor"}``: ``via`` says how the agent got their
-    token, ``actor`` (with delegation) the client the person delegated to."""
+    and ``sign_in``, as the gateway passes them, and ``client_id``, the client the token
+    was issued to. The person is ``{"id", "username", "email", "groups", "roles", "via",
+    "actor"}``: ``via`` says how the agent got their token, ``actor`` (with delegation) the
+    client the person delegated to."""
     subject = claims.get("subject")
     if not subject:
         return None
@@ -52,7 +53,7 @@ def person_of(claims: dict[str, Any]) -> dict[str, Any] | None:
     username = claims.get("username")
     if isinstance(act, dict) and act:
         via = DELEGATION
-    elif username and str(username).startswith(SERVICE_ACCOUNT_PREFIX):
+    elif username and _own_account(str(username), claims.get("client_id")):
         return None  # the agent's own service account
     elif claims.get("sign_in") in (True, "true"):
         via = SIGN_IN
@@ -71,6 +72,15 @@ def person_of(claims: dict[str, Any]) -> dict[str, Any] | None:
     if via == DELEGATION:
         person["actor"] = str(act.get("client_id") or act.get("sub") or "") or None
     return {k: v for k, v in person.items() if v is not None}
+
+
+def _own_account(username: str, client_id: Any) -> bool:
+    """Whether ``username`` is the service account of the client the token was issued to
+    (Keycloak names it after the client, in lower case): a person whose username only starts
+    the same way is a person."""
+    if not client_id:
+        return username.startswith(SERVICE_ACCOUNT_PREFIX)
+    return username.lower() == f"{SERVICE_ACCOUNT_PREFIX}{client_id}".lower()
 
 
 def name_of(person: dict[str, Any] | None) -> str | None:

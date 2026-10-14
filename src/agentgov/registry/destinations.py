@@ -23,6 +23,9 @@ credential; for Splunk, the HTTP Event Collector's token; for OpenTelemetry and 
 HTTP headers to send (one per line, ``Authorization: Bearer ...``), and the URL itself for
 inputs whose URL is the credential; for a service desk, headers or the user name and
 password, email address and API token, or API key it signs in with (registry.desks).
+
+Where the deployment lists the hosts credentials may go to (AGENTGOV_CREDENTIAL_HOSTS), a
+destination's URL must be on one of them: when it is set, and again when AgentGov sends.
 """
 
 from __future__ import annotations
@@ -132,13 +135,34 @@ class SecretError(Exception):
     """The secret file is missing or unusable (the message never holds its contents)."""
 
 
+class HostNotListed(SecretError):
+    """The destination's host isn't one AGENTGOV_CREDENTIAL_HOSTS lists: nothing goes there."""
+
+
+def _not_listed(url: str) -> str:
+    host = urlsplit(url).hostname or url
+    return (
+        f"AGENTGOV_CREDENTIAL_HOSTS doesn't list {host}: AgentGov sends credentials only to "
+        "the hosts it lists"
+    )
+
+
 def _http_url(value: str) -> bool:
     parts = urlsplit(value)
     return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
 def credentials(settings: Settings, destination: Destination) -> Credentials:
-    """Read the destination's secret file, when it sends."""
+    """Read the destination's secret file, when it sends; refused for a host that
+    AGENTGOV_CREDENTIAL_HOSTS doesn't list."""
+    found = _read_credentials(settings, destination)
+    target = found.url or destination.url
+    if target and not settings.credentials_may_go_to(target):
+        raise HostNotListed(_not_listed(target))
+    return found
+
+
+def _read_credentials(settings: Settings, destination: Destination) -> Credentials:
     path = secret_path(settings, destination.name)
     try:
         text = path.read_text(encoding="utf-8").strip()
@@ -218,7 +242,9 @@ def _events(value: Any, kind: str) -> list[str]:
     return events
 
 
-def _apply(destination: Destination, data: dict[str, Any]) -> list[str]:
+def _apply(
+    destination: Destination, data: dict[str, Any], settings: Settings | None = None
+) -> list[str]:
     kind = destination.kind
     changed = []
     for key in FIELDS:
@@ -255,13 +281,17 @@ def _apply(destination: Destination, data: dict[str, Any]) -> list[str]:
         if getattr(destination, key) != value:
             setattr(destination, key, value)
             changed.append(key)
-    _check(destination)
+    _check(destination, settings)
     return changed
 
 
-def _check(destination: Destination) -> None:
-    """What each kind of destination needs, and takes."""
+def _check(destination: Destination, settings: Settings | None = None) -> None:
+    """What each kind of destination needs, and takes; with ``settings``, a URL on a host
+    AGENTGOV_CREDENTIAL_HOSTS lists."""
     kind = destination.kind
+    url = destination.url
+    if settings is not None and url and not settings.credentials_may_go_to(url):
+        raise ValidationError(f"url: {_not_listed(url)}")
     if kind in CHAT and destination.url:
         raise ValidationError(
             f"a {kind} webhook's URL is its credential: put it in the destination's secret "
@@ -303,7 +333,9 @@ def _known(data: dict[str, Any], also: tuple[str, ...]) -> None:
         )
 
 
-def create(session: Session, data: dict[str, Any], *, actor: str) -> Destination:
+def create(
+    session: Session, data: dict[str, Any], *, actor: str, settings: Settings | None = None
+) -> Destination:
     _known(data, ("name", "kind", "status", "backfill"))
     name = validation.slug(data.get("name"), "name")
     if session.scalar(select(Destination).where(Destination.name == name)):
@@ -332,7 +364,7 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Destination
         failures=0,
         created_by=actor,
     )
-    _apply(destination, data)
+    _apply(destination, data, settings)
     session.add(destination)
     session.flush()
     if kind in DESK and not backfill:
@@ -364,12 +396,13 @@ def update(
     *,
     actor: str,
     version: int | None = None,
+    settings: Settings | None = None,
 ) -> list[str]:
     start_edit(session, destination, version, f"destination {destination.name}")
     _known(data, ("name", "kind"))
     if "kind" in data and data["kind"] != destination.kind:
         raise ValidationError("a destination's kind can't change: add another destination")
-    changed = _apply(destination, data)
+    changed = _apply(destination, data, settings)
     if changed and destination.kind in DESK:
         # Tickets the desk refused may go now: try them again.
         from agentgov.registry import tickets
@@ -423,6 +456,12 @@ def replay(session: Session, destination: Destination, after: Any, *, actor: str
     last = head(session)
     if after > last:
         raise ValidationError(f"the ledger ends at entry {last}")
+    if after >= destination.cursor:
+        # Moved on, it would skip entries the SIEM hasn't had: they would never reach it.
+        raise ValidationError(
+            f"replay goes back: {destination.name} has had the ledger up to entry "
+            f"{destination.cursor}, so after is less than that"
+        )
     previous, destination.cursor = destination.cursor, after
     destination.retry_at = None
     ledger.append(

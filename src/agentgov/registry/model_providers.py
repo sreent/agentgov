@@ -2,8 +2,10 @@
 
 Each approved provider is a gateway route, ``/llm/<name>``, where agents call it
 with their own AgentGov token instead of the provider's API key. The gateway
-holds the key: it reads it from a file mounted into it (``key_file``), so the key
-never enters AgentGov's database, its API or its ledger.
+holds the key: it reads it from a file mounted into it (``key_file``, in the model
+keys directory), so the key never enters AgentGov's database, its API or its ledger.
+An openai-compatible provider's ``base_url`` is where the gateway sends the key: on a
+host AGENTGOV_CREDENTIAL_HOSTS lists, where the deployment lists them.
 
 Agents may call the models their blueprint and their own ``model_access`` grant
 (provider plus model globs), within a daily token budget if one is set.
@@ -12,6 +14,7 @@ Agents may call the models their blueprint and their own ``model_access`` grant
 from __future__ import annotations
 
 import fnmatch
+import posixpath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -19,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
+from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
 from agentgov.models import BLOCKED, MODEL_PROVIDER_KINDS, Agent, ModelProvider
 from agentgov.registry import validation
@@ -48,6 +52,23 @@ def key_file(provider: ModelProvider) -> str:
     return provider.key_file or f"{KEY_DIR}/{provider.name}"
 
 
+def in_key_dir(path: str) -> bool:
+    """Whether ``path`` is a file in the model keys directory: the gateway reads nothing
+    else as a provider's key, so another file it holds (its own TLS key, say) can't be."""
+    return posixpath.normpath(path).startswith(f"{KEY_DIR}/")
+
+
+def refused(provider: ModelProvider, settings: Settings) -> str | None:
+    """Why the gateway mustn't send this provider's key, if it mustn't."""
+    path = key_file(provider)
+    if not in_key_dir(path):
+        return f"its key_file, {path}, isn't in {KEY_DIR}"
+    if provider.base_url and not settings.credentials_may_go_to(provider.base_url):
+        host = urlsplit(provider.base_url).hostname
+        return f"AGENTGOV_CREDENTIAL_HOSTS doesn't list its base_url's host, {host}"
+    return None
+
+
 def _prices(value: Any) -> dict[str, dict[str, float]]:
     if value is None:
         return {}
@@ -71,7 +92,9 @@ def _prices(value: Any) -> dict[str, dict[str, float]]:
     return prices
 
 
-def _apply(provider: ModelProvider, data: dict[str, Any]) -> list[str]:
+def _apply(
+    provider: ModelProvider, data: dict[str, Any], settings: Settings | None = None
+) -> list[str]:
     changed = []
     for key in FIELDS:
         if key not in data:
@@ -88,9 +111,12 @@ def _apply(provider: ModelProvider, data: dict[str, Any]) -> list[str]:
                         "base_url must be an http(s) URL, such as http://vllm:8000"
                     )
         elif key == "key_file":
-            value = value or None
-            if value is not None and not str(value).startswith("/"):
-                raise ValidationError("key_file must be an absolute path inside the gateway")
+            value = posixpath.normpath(str(value)) if value else None
+            if value is not None and not in_key_dir(value):
+                raise ValidationError(
+                    f"key_file must be a file in {KEY_DIR}, where the gateway reads model "
+                    "providers' keys"
+                )
         elif key == "trust_level":
             value = validation.trust_level(value)
         elif key == "prices":
@@ -108,10 +134,18 @@ def _apply(provider: ModelProvider, data: dict[str, Any]) -> list[str]:
         raise ValidationError(
             f"base_url is only for openai-compatible providers, not {provider.kind}"
         )
+    url = provider.base_url
+    if settings is not None and url and not settings.credentials_may_go_to(url):
+        raise ValidationError(
+            f"base_url: AGENTGOV_CREDENTIAL_HOSTS doesn't list {urlsplit(url).hostname}: the "
+            "gateway sends a provider's key only to the hosts it lists"
+        )
     return changed
 
 
-def create(session: Session, data: dict[str, Any], *, actor: str) -> ModelProvider:
+def create(
+    session: Session, data: dict[str, Any], *, actor: str, settings: Settings | None = None
+) -> ModelProvider:
     name = validation.slug(data.get("name"), "name")
     if session.scalar(select(ModelProvider).where(ModelProvider.name == name)):
         raise Conflict(f"model provider {name!r} already exists")
@@ -126,7 +160,7 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> ModelProvid
         labels={},
         created_by=actor,
     )
-    _apply(provider, data)
+    _apply(provider, data, settings)
     session.add(provider)
     session.flush()
     ledger.append(
@@ -147,9 +181,10 @@ def update(
     *,
     actor: str,
     version: int | None = None,
+    settings: Settings | None = None,
 ) -> list[str]:
     start_edit(session, provider, version, f"model provider {provider.name}")
-    changed = _apply(provider, data)
+    changed = _apply(provider, data, settings)
     if changed:
         edited(provider)
         ledger.append(

@@ -115,6 +115,7 @@ def _person(meta: dict[str, str]) -> dict[str, Any] | None:
             "roles": _json(meta.get("roles")),
             "act": _json(meta.get("act")),
             "sign_in": _json(meta.get("sign_in")),
+            "client_id": meta.get("client_id"),
         }
     )
 

@@ -2079,7 +2079,7 @@ async function manyDone(result, verb, noun) {
 const AGENTS_AT_ONCE = {
   approve: { verb: 'Approved', text: 'Each becomes active and can call the tools its blueprint and grants allow. Each needs a sponsor at least: those without one stay pending.' },
   block: { verb: 'Blocked', text: 'This is the kill switch. The gateway refuses every call from them as soon as OPA loads the updated policy bundle, usually within seconds. You can unblock them later.' },
-  unblock: { verb: 'Unblocked', text: 'Calls from them will be evaluated against policy again.' },
+  unblock: { verb: 'Unblocked', text: 'Each goes back to what it was when it was blocked: active, with its calls evaluated against policy again, waiting for approval, or unmanaged.' },
   delete: { verb: 'Deleted', text: 'They leave the inventory and policy denies all of their calls. Deleted agents can be restored.' },
   restore: { verb: 'Restored', text: 'They come back as pending approval. Approve them to make them active again.' },
 };
@@ -2346,9 +2346,20 @@ const PLATFORM_LIFECYCLE = {
   adopt: (p) => ({ text: `Adopting brings this ${p} agent under governance as a pending registration. Give it an owner and at least one sponsor, then approve it.` }),
 };
 
+// Unblocked, an agent is what it was when it was blocked: one that waited for approval waits
+// again, and an unmanaged one is still unmanaged.
+const UNBLOCKED_TO = {
+  pending: 'It goes back to waiting for an administrator\u2019s approval, as it was when it was blocked: its calls are refused until then.',
+  discovered: 'It goes back to being unmanaged, as it was when it was blocked.',
+};
+
 function lifecycleSpec(a, action) {
   const p = platformOf(a);
-  return p && PLATFORM_LIFECYCLE[action] ? { ...LIFECYCLE[action], ...PLATFORM_LIFECYCLE[action](p) } : LIFECYCLE[action];
+  const spec = p && PLATFORM_LIFECYCLE[action] ? { ...LIFECYCLE[action], ...PLATFORM_LIFECYCLE[action](p) } : LIFECYCLE[action];
+  const back = action === 'unblock' ? UNBLOCKED_TO[a.blocked_from] : null;
+  if (!back) return spec;
+  // Not active again: say what it is, rather than that its calls are evaluated again.
+  return { ...spec, text: p ? `${spec.text} ${back}` : back };
 }
 
 const ACTIONS_BY_STATUS = {
@@ -2412,12 +2423,13 @@ function agentHeader(a) {
     agentToolbar(a));
 }
 
-// Sponsors attest their own agents, whatever their role (signed in, or with an approver's
-// key named after them); admins any agent.
+// Sponsors attest their own agents, whatever their role: signed in as themselves, by the
+// email address their provider vouches for (me.person; an API key is nobody); admins any agent.
 function mayAttest(a) {
   if (!ATTESTABLE.has(a.status)) return false;
-  const sponsor = (a.sponsors || []).some((s) => String(s).toLowerCase() === String(me?.name || '').toLowerCase());
-  return can('admin', a) || (sponsor && (me?.via === 'session' || can('approve', a)));
+  const person = String(me?.person || '').toLowerCase();
+  const sponsor = Boolean(person) && (a.sponsors || []).some((s) => String(s).toLowerCase() === person);
+  return can('admin', a) || sponsor;
 }
 
 function agentToolbar(a) {
@@ -4202,7 +4214,7 @@ async function serverAction(ts, action) {
   const specs = {
     approve: { title: `Approve ${ts.name}?`, text: 'Agents whose grants cover this server can call its tools through the gateway.', confirm: 'Approve server', tone: 'primary', icon: 'check', done: `Approved ${ts.name}.` },
     block: { title: `Block ${ts.name}?`, text: "Every agent's calls to this server are refused once OPA loads the updated bundle. Its catalog is kept, and you can unblock it later.", confirm: 'Block server', tone: 'danger', icon: 'power', done: `Blocked ${ts.name}. Calls to it are refused.` },
-    unblock: { title: `Unblock ${ts.name}?`, text: 'Calls to this server will be evaluated against policy again.', confirm: 'Unblock server', tone: 'primary', icon: 'undo', done: `Unblocked ${ts.name}.` },
+    unblock: { title: `Unblock ${ts.name}?`, text: ts.blocked_from === 'pending' ? 'It goes back to waiting for an administrator\u2019s approval, as it was when it was blocked.' : 'Calls to this server will be evaluated against policy again.', confirm: 'Unblock server', tone: 'primary', icon: 'undo', done: `Unblocked ${ts.name}.` },
   };
   const spec = specs[action];
   const ok = await ask({ title: spec.title, text: spec.text, confirm: spec.confirm, tone: spec.tone, iconName: spec.icon });
@@ -6332,12 +6344,23 @@ async function renderLedger({ params }) {
     try {
       const v = await api('v1/ledger/verify');
       const origin = v.from ? `the checkpoint at entry #${fmt(v.from)} (the entries before it are archived)` : 'the genesis entry';
+      // What doesn't break the chain but limits what its checkpoints prove.
+      const warnings = (v.warnings || []).length
+        ? h('ul', { class: 'small' }, v.warnings.map((w) => h('li', {}, `${cap(w)}.`)))
+        : null;
+      const problems = v.problems || [];
+      const more = v.more_problems ? h('p', { class: 'small' }, `And ${plural(v.more_problems, 'more problem')}.`) : null;
       banner.replaceChildren(v.valid
-        ? callout('good', 'shield-check', h('span', {}, h('strong', {}, 'Chain intact. '),
-          `Recomputed ${plural(v.checked - (v.from || 0), 'hash', 'hashes')} from ${origin}; nothing was edited, removed or reordered. Head `,
-          h('code', { class: 'hash', title: v.head }, shortHash(v.head)), '.'))
-        : callout('critical', 'octagon', h('span', {}, h('strong', {}, `Chain broken at entry #${v.broken_at}. `),
-          `${cap(v.problem)}. The ${plural(v.checked, 'entry', 'entries')} before it verified; entries from #${v.broken_at} on can't be trusted.`)));
+        ? callout(warnings ? 'warning' : 'good', warnings ? 'triangle' : 'shield-check', h('div', { class: 'stack' },
+          h('span', {}, h('strong', {}, 'Chain intact. '),
+            `Recomputed ${plural(v.checked - (v.from || 0), 'hash', 'hashes')} from ${origin}; nothing was edited, removed or reordered. Head `,
+            h('code', { class: 'hash', title: v.head }, shortHash(v.head)), '.'),
+          warnings))
+        : callout('critical', 'octagon', h('div', { class: 'stack' },
+          h('span', {}, h('strong', {}, v.broken_at ? `Chain broken at entry #${v.broken_at}. ` : 'Chain broken. '),
+            `${plural(problems.length + (v.more_problems || 0), 'problem')}, each checked whatever broke before it: entries from the first on can't be trusted.`),
+          h('ul', { class: 'small' }, problems.map((p) => h('li', {}, p.seq ? `#${fmt(p.seq)}: ` : '', `${cap(p.problem)}.`))),
+          more, warnings)));
     } catch (err) {
       banner.replaceChildren(callout('critical', 'alert-circle', err.message));
     } finally {
@@ -6769,7 +6792,14 @@ function checkpointsCard(kept, points) {
         ['Ledger', kept.ledger_retention_days ? `${plural(kept.ledger_retention_days, 'day')} in the database, then archived` : 'Every entry kept in the database'],
         ['Chain in the database', kept.chain_from ? `From the checkpoint at entry #${fmt(kept.chain_from)}` : 'From the genesis entry'],
         ['Checkpoints', kept.checkpoint_hours ? `Every ${plural(kept.checkpoint_hours, 'hour')}` : 'On demand'],
-        ['Time-stamping authority', kept.tsa_url ? h('code', {}, kept.tsa_url) : h('span', { class: 'muted' }, 'None')],
+        ['Time-stamping authority', kept.tsa_url
+          ? h('span', {}, h('code', {}, kept.tsa_url), kept.tsa_ca
+            ? ' · its signature checked against its certificates'
+            : h('span', { class: 'muted' }, " · its certificates not given (AGENTGOV_LEDGER_TSA_CA_FILE): each time-stamp is checked against the one it carries"))
+          : h('span', { class: 'muted' }, 'None')],
+        ['Head kept outside the database', kept.witness_file
+          ? h('code', {}, kept.witness_file)
+          : h('span', { class: 'muted' }, 'Nowhere: a database restored from an older backup goes unnoticed (AGENTGOV_LEDGER_WITNESS_FILE)')],
         ['Transparency log', kept.rekor_url ? h('code', {}, kept.rekor_url) : h('span', { class: 'muted' }, 'None')],
         ['Operational records', kept.data_retention_days ? `${plural(kept.data_retention_days, 'day')}` : 'Kept'],
       ]),
@@ -6896,8 +6926,8 @@ async function issuerForm(i) {
   const editing = Boolean(i);
   const oidcOnly = (field) => !editing || i.kind === 'oidc' ? field : null;
   const info = await getInfo();
-  // The audience of the tokens agents call the gateway with themselves.
-  const audience = info?.audience || 'agentgov-gateway';
+  // The audience of the tokens agents call the gateway with themselves: its address.
+  const audience = info?.issuer_audience || info?.audience || 'agentgov-gateway';
   const gatewayHint = (kind) => kind === 'oidc'
     ? `Agents then call the gateway with their own token, without Keycloak: one for the audience above, else ${audience}. AgentGov fetches the issuer's keys for the gateway.`
     : `Agents then call the gateway with their own service account token, without Keycloak: a projected one for the audience ${audience}. AgentGov fetches the cluster's keys for the gateway.`;
@@ -7946,11 +7976,39 @@ function failureLine(settings) {
   return parts.length ? h('div', { class: 'cell-sub' }, `${parts.join('. ')}.`) : null;
 }
 
+// Where destinations' credentials and model providers' keys may go (AGENTGOV_CREDENTIAL_HOSTS).
+function credentialHosts(hosts) {
+  if (hosts?.length) return h('div', {}, plainChip('Listed hosts only', { tone: 'good', iconName: 'lock' }), h('div', { class: 'cell-sub break' }, hosts.join(', ')));
+  return h('div', {}, plainChip('Any host', { tone: 'warning', iconName: 'triangle' }),
+    h('div', { class: 'cell-sub' }, "An administrator can send destinations' credentials and model providers' keys to any host, by changing a URL. List the hosts they may go to in AGENTGOV_CREDENTIAL_HOSTS."));
+}
+
+// What vouches for the evidence ledger outside its database: the authority's time-stamps,
+// checked against its certificates, and the head kept in a file a restore doesn't touch.
+function ledgerChecks(lg) {
+  if (!lg) return null;
+  const stamps = lg.time_stamps || {};
+  const kept = lg.witness || {};
+  const chips = [
+    stamps.configured
+      ? plainChip(stamps.ok ? 'Time-stamps: authority checked' : 'Time-stamps: authority not checked', { tone: stamps.ok ? 'good' : 'warning', iconName: stamps.ok ? 'check' : 'triangle', title: stamps.detail || null })
+      : plainChip('Time-stamps: none', { title: stamps.detail || null }),
+    kept.configured
+      ? plainChip('Head kept outside the database', { tone: 'good', iconName: 'check' })
+      : plainChip('Head not kept outside the database', { tone: 'warning', iconName: 'triangle', title: kept.detail || null }),
+  ];
+  return h('div', {},
+    h('div', { class: 'chip-row' }, chips),
+    ...[stamps, kept].filter((c) => !c.ok && c.detail).map((c) => h('div', { class: 'cell-sub' }, c.detail)));
+}
+
 function componentsCard(view) {
   const cp = view.control_plane || {};
   const processors = view.processors || [];
   const rows = [
     ['Control plane', h('div', { class: 'chip-row' }, ['opa', 'keycloak'].map((n) => checkChip(n, cp[n])))],
+    'credential_hosts' in view ? ['Credentials go to', credentialHosts(view.credential_hosts)] : null,
+    view.ledger ? ['Evidence ledger', ledgerChecks(view.ledger)] : null,
     ...processors.map((p) => [
       h('span', {}, 'Governance processor ', h('code', {}, p.instance)),
       h('div', {},
@@ -8828,7 +8886,7 @@ function sightingsCard(groups, features) {
     : emptyState('No reports yet', h('span', {}, 'Developers, or your device management, run ', h('code', {}, command), ' with an API key of the registrar role.'));
   return card({
     title: "Set up on developers' machines",
-    sub: 'The MCP servers in VS Code, Copilot, Claude, Cursor and other clients, as developers report them, against the approved tool servers. Credentials never leave their machines.',
+    sub: 'The MCP servers in VS Code, Copilot, Claude, Cursor and other clients, as developers report them, against the approved tool servers. Credentials never leave their machines: an address comes by its host, with a hash of its path.',
     actions: [copyable(command, 'scan command')],
     flush: Boolean(groups.length),
     body: [
@@ -8839,12 +8897,13 @@ function sightingsCard(groups, features) {
 }
 
 // A tool server registration started from what developers set up: their address, or
-// the package they run.
+// the package they run. An address is reported by host, with a hash of its path, which
+// the administrator completes.
 function registerDraft(g) {
   const [kind, ...rest] = g.identity.split(':');
   const value = rest.join(':');
   const name = (g.names[0] || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
-  if (kind === 'url') return { name, url: g.url || value, gateway: false, developers: true };
+  if (kind === 'url') return { name, url: (g.url || value).split('#')[0], gateway: false, developers: true };
   if (['npm', 'pypi', 'oci'].includes(kind)) return { name, gateway: false, developers: true, packages: [{ registry_type: kind, identifier: value }] };
   return null;
 }

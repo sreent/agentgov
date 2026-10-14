@@ -89,7 +89,7 @@ can (`least-privilege`'s telemetry check below, `calls-around-gateway`, `mcp-dis
 | `tool-integrity` | off, monitor, **enforce** | Quarantines tools whose descriptions hide instructions. Tools that changed since approval are held until an administrator reviews them |
 | `risk-based-access` | off, monitor, **enforce** | Refuses agents at critical risk, and blocks agents whose risk score reaches `AGENTGOV_AUTO_BLOCK_RISK_SCORE`. Monitor lets them through, and the automatic block raises an `agent.would_auto_block` issue instead. Risk is always scored and shown |
 | `token-budgets` | off, monitor, **enforce** | Refuses model calls from agents that have used their daily token budget, their own or their blueprint's, until the day ends (UTC). Off, budgets aren't checked; usage is still metered |
-| `unknown-callers` | monitor, **enforce** | Refuses callers without a registered agent's identity. Monitor lets them through and records them; with `discovery` on, they are added to the inventory. Calls to models need a valid token in either mode, since the gateway pays for them with the provider's key |
+| `unknown-callers` | monitor, **enforce** | Refuses callers without a registered agent's identity. Monitor lets them through and records them; with `discovery` on, they are added to the inventory. Calls to models need a valid token in either mode, since the gateway pays for them with the provider's key, and a token from an identity issuer the gateway trusts needs to name a registered agent too ([workload identities](agent-identity.md#straight-to-the-gateway)) |
 
 ### Detection
 
@@ -197,7 +197,7 @@ in a row, or three minutes, whichever is longer, is out of touch and doesn't cou
 | `a2a-masking` | `data-protection` off, or Presidio missing or unreachable: inactive, since nothing finds the personal data to mask |
 | `traffic-classifier` | no Granite Guardian where the processor runs: inactive; unreachable: limited, since the rules decide alone, or failing where calls wait for it with `AGENTGOV_GUARDIAN_FAILURE_MODE=closed` |
 | `external-decision-point` | no `AGENTGOV_AUTHZEN_URL` where the processor runs: inactive; unreachable: failing while enforced with `AGENTGOV_AUTHZEN_FAILURE_MODE=closed`, limited otherwise |
-| `token-budgets` | no `AGENTGOV_GATEWAY_OTLP_ENDPOINT`: inactive, since usage isn't metered |
+| `token-budgets` | neither `AGENTGOV_GATEWAY_USAGE_ENDPOINT` nor `AGENTGOV_GATEWAY_OTLP_ENDPOINT`: inactive, since usage isn't metered; only the latter: limited, since whatever sends traces there could report usage too ([usage](models.md#usage-cost-and-budgets)) |
 | `authzen-decision-point`, `copilot-studio-threat-detection` | OPA unreachable from the control plane: failing |
 | `connector-allowlist` | Copilot Studio threat detection off: inactive, since calls aren't checked as they run; in monitor mode: limited; an empty allowlist: inactive; OPA unreachable from the control plane: failing |
 | `developer-sign-in`, `identity-assertions`, `approvals-by-person` | Keycloak's keys unreachable from the control plane: limited |
@@ -210,11 +210,19 @@ in a row, or three minutes, whichever is longer, is out of touch and doesn't cou
 A mode a feature can't use yet, for want of a setting, makes it inactive too, and says
 which setting.
 
+*What AgentGov can reach* also says what vouches for the evidence ledger outside its
+database ([evidence](evidence.md)): whether the checkpoints' time-stamps are checked
+against the authority's certificates (`AGENTGOV_LEDGER_TSA_CA_FILE`), and whether a file
+keeps the ledger's head (`AGENTGOV_LEDGER_WITNESS_FILE`). Without that file, a database
+restored from an older backup, or entries removed from its end, go unnoticed, and a chain
+rewritten with every hash worked out again shows only as checkpoints that vouch from later
+than their entries ([backing up and restoring](backup.md#a-rewound-ledger)).
+
 | | Where |
 |---|---|
 | Admin UI | **Features**: a status on each feature that isn't fully working, with why, and **What AgentGov can reach** |
 | CLI | `agentgov features list` (its `status` column), `agentgov components` |
-| API | `status` and `problems` in `GET /v1/features`; `GET /v1/components` |
+| API | `status` and `problems` in `GET /v1/features`; `GET /v1/components` (the ledger's in `ledger`) |
 
 ## When something is down
 
@@ -252,7 +260,13 @@ the features' defaults, in which most controls are enforced.
 While the control plane is down, calls are still decided: each processor keeps their
 records, up to 10,000, and sends them once it is back. Should more pile up, the oldest are
 lost, and the ledger says how many with a warning (`decisions.dropped`) as soon as the
-control plane is back: the gap is in the evidence, not hidden.
+control plane is back: the gap is in the evidence, not hidden. The control plane stores
+each record on its own, its text cleaned of what a database can't hold (NUL, halves of
+surrogate pairs) and cut to a few thousand characters: one it still can't store is left
+out, logged, and counted in a `decisions.dropped` of its own, rather than failing the
+others. A batch the control plane refuses as it is isn't sent again either: its records
+count as lost. When the processor stops, it waits ten seconds at most for what it holds to
+go.
 
 The Features page shows what each processor does when something is down, beside what it
 can reach.
@@ -295,8 +309,9 @@ blueprint an exception names can't be deleted until the exception changes.
 An administrator can also exempt one agent: its label `agentgov/exempt-controls` names the
 controls (`least-privilege,tool-integrity`), or all of them (`*`), that are monitored for
 it while they are enforced for others. Labels under `agentgov/`, this one and
-`agentgov/exempt-rules`, are set by administrators only: registering an agent with one
-takes the administrator role.
+`agentgov/exempt-rules`, are set by administrators for every team only, and so is
+`pii-access`, which lets an agent have personal data unmasked ([policies](policies.md)):
+registering an agent with one takes the administrator role.
 
 Every change to a control's exceptions is a `feature.changed` entry in the ledger, a
 warning when it weakens the control for some agents. A feature the deployment pins
@@ -306,7 +321,9 @@ monitors the exceptions that enforce a control.
 
 Scopes match what an agent's registration says (its blueprint, team, environment and
 labels), and registrars choose those when they register an agent: with
-`registration-approval` on, an administrator sees them before the agent is active. The
+`registration-approval` on, an administrator sees them before the agent is active. After
+that, a role for one team can't edit its agents into an exception whose mode is weaker
+([roles for one team](administration.md#roles-for-one-team)). The
 gateway can't tell agents apart, so it is set up for the strictest mode any agent has:
 `AGENTGOV_GATEWAY_FAILURE_MODE=modes` refuses what it can't check while a control is
 enforced for any agent, and the Features page judges each feature by the strictest mode

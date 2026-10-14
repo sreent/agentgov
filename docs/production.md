@@ -89,6 +89,7 @@ certificate authority. With them, every hop inside AgentGov is TLS in both direc
 | Gateway → processor: tool calls (gRPC), model calls (the webhook), calls between agents (external authorization) and their answers (external processing, gRPC) | The processor asks for the gateway's certificate; the gateway checks the processor's |
 | Processor → OPA, control plane → OPA | OPA asks every caller for a certificate (its health checks too) |
 | Processor, OPA, the gateway's config sidecar, the collector → control plane | They call the control plane's internal port (8443), which asks for a certificate |
+| Gateway → collector: the access logs that meter model calls | The collector's receiver for them (4319) asks for a certificate; the gateway checks the collector's ([usage](models.md#usage-cost-and-budgets)) |
 
 Nothing else on the network can pose as the processor that decides on tool calls, or as
 OPA, or reach either. On its internal port the control plane takes a component's
@@ -134,7 +135,7 @@ A renewed certificate takes effect without a restart, within a minute or so:
 |---|---|
 | Control plane, processor, the gateway's config sidecar | They read their files every `AGENTGOV_TLS_RELOAD_SECONDS`. Once the certificate and its key fit together (a writer may have written one, not yet the other), the next connections get the new one: the servers present it from the next handshake (gRPC too), and new connections to other components present it |
 | OPA | `--tls-cert-refresh-period=1m` for the certificate it serves; the one it shows the control plane, to fetch its bundles, is read for each new connection |
-| OpenTelemetry Collector | `reload_interval: 1m` on its exporter's certificate |
+| OpenTelemetry Collector | `reload_interval: 1m` on its exporter's certificate, and on the one its receiver for the gateway's access logs serves |
 | agentgateway | It reads the certificate it shows the processor only as it loads its configuration: the config sidecar adds the certificate's fingerprint to the configuration, so a renewed one rewrites it, and agentgateway loads it, and the certificate, again |
 
 Connections already open keep their certificate until they close. A new authority (a new
@@ -173,9 +174,12 @@ processor takes the gateway (`AGENTGOV_TLS_PEERS`, which the chart sets), and OP
 processor and the control plane, by their SPIFFE IDs (a `system.authz` policy, with
 `--authorization=basic`). A caller from the trust domain that isn't one of them is turned
 away: as its connection opens at the control plane and the processor's webhook, and at
-each call to the processor's gRPC services and to OPA. SPIRE gives a component's identity
-to the pods with its labels in the release's namespace, so, as with certificates in
-Secrets, whoever may run pods there may get one: keep the namespace to AgentGov.
+each call to the processor's gRPC services and to OPA. The collector's receiver for the
+gateway's access logs can't name its callers: any certificate from the trust domain gets
+in, so there the chart's network policy (`networkPolicy.enabled`) keeps it to the gateway.
+SPIRE gives a component's identity to the pods with its labels in the release's namespace,
+so, as with certificates in Secrets, whoever may run pods there may get one: keep the
+namespace to AgentGov.
 
 SPIRE signs SVIDs with an authority of its own, or under an upstream authority of yours
 (its `UpstreamAuthority` plugins), and spiffe-helper writes that root as `ca.crt`. An

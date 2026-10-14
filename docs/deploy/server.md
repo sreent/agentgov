@@ -83,7 +83,7 @@ AgentGov's realm. `docker-compose.server.yml` changes the evaluation stack
 | Secrets | Defaults everybody knows | Yours, from `.env`: it doesn't start without them |
 | Keycloak | Development mode; the realm with the demo's people and app | Production mode, behind Caddy; the realm at your addresses, without them (`agentgov keycloak-realm`) |
 | The demo's tool server, model, agents and stand-ins | Running | Not running |
-| The ledger checkpoints' time-stamps | From the demo's stand-in | From an authority you name in `AGENTGOV_LEDGER_TSA_URL`, such as `https://freetsa.org/tsr`, or none ([evidence](../evidence.md)) |
+| The ledger checkpoints' time-stamps | From the demo's stand-in | From an authority you name in `AGENTGOV_LEDGER_TSA_URL`, such as `https://freetsa.org/tsr`, checked against its certificates in `AGENTGOV_LEDGER_TSA_CA_FILE`, or none ([evidence](../evidence.md)) |
 | After a reboot | Stopped | Started again |
 | HTTPS | None | Caddy, with `COMPOSE_PROFILES=https` |
 

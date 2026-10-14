@@ -83,7 +83,7 @@ file, which is how [CONTRIBUTING.md](../CONTRIBUTING.md) develops it.
 | `features`, `featurePreset` | `AGENTGOV_FEATURES`, `AGENTGOV_FEATURE_PRESET` |
 | `peopleApps` (and the demo app, with `keycloak.demoUsers`) | `AGENTGOV_PEOPLE_APP_CLIENTS` |
 | `presidio.enabled` | `AGENTGOV_PRESIDIO_URL` |
-| `otelCollector.enabled` | `AGENTGOV_GATEWAY_OTLP_ENDPOINT` |
+| `otelCollector.enabled` | `AGENTGOV_GATEWAY_OTLP_ENDPOINT`, `AGENTGOV_GATEWAY_USAGE_ENDPOINT` |
 | `opa.enabled` | `AGENTGOV_OPA_URL` |
 | `gateway.enabled` | `AGENTGOV_PROCESSOR_ADDRESS`, `AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS`, and the processor's and the sidecar's `AGENTGOV_CONTROL_PLANE_URL` |
 | always | `AGENTGOV_DESTINATION_SECRETS_DIR` |
@@ -176,6 +176,7 @@ never in a values file you share.
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_DESTINATION_SECRETS_DIR` | `/destination-secrets` | Where destinations' credentials are: a file per destination, named after it (a mounted secret). Never in the database. |
+| `AGENTGOV_CREDENTIAL_HOSTS` | empty | The hosts credentials may go to, comma-separated: destinations' (SIEMs, chats and service desks, with what AgentGov sends them) and openai-compatible model providers' (the gateway sends those). `*.example.com` is any host under example.com. Empty: any host, so an administrator can send these credentials anywhere by changing a URL. |
 | `AGENTGOV_DELIVERY_INTERVAL_SECONDS` | `10` | How often destinations are sent what is new in the ledger (also as soon as it is written, on the replica that wrote it). 0 turns delivery off. |
 
 ### Issues
@@ -203,6 +204,7 @@ never in a values file you share.
 | `AGENTGOV_LEDGER_WITNESS_FILE` | — | A file where the control plane keeps the ledger's head outside the database, to notice a database restored from an older backup or rolled back ([backup](backup.md)): on storage that restoring the database doesn't touch. By default ledger-head.json in `AGENTGOV_LEDGER_ARCHIVE_DIR`, when that is set; `off` keeps none. |
 | `AGENTGOV_LEDGER_CHECKPOINT_HOURS` | `24` | Hours between ledger checkpoints: the chain's head, kept, and time-stamped when a time-stamping authority is set. 0 makes them only on demand. |
 | `AGENTGOV_LEDGER_TSA_URL` | — | An RFC 3161 time-stamping authority, such as `https://freetsa.org/tsr`. It signs each checkpoint with its own time, which proves the chain existed then, unchanged since. |
+| `AGENTGOV_LEDGER_TSA_CA_FILE` | — | The authority's certificates (PEM: its root, and any intermediate ones), which each time-stamp's signature is checked against, when it comes and whenever the ledger is verified. Unset, a time-stamp is checked against the certificate it carries, which shows it whole, not that the authority signed it. |
 | `AGENTGOV_LEDGER_REKOR_URL` | — | A transparency log, Sigstore's Rekor v2: its public shard (such as `https://log2025-1.rekor.sigstore.dev`) or a rekor-tiles of your own. Each checkpoint is signed with `AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE` and added to it, where anyone can see that it was published: AgentGov can't later show another checkpoint for the same entry without the log holding both. What the log publishes, for good, is the statement's SHA-256, the signature and AgentGov's public key. |
 | `AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE` | — | AgentGov's key for the log: an ECDSA P-256 private key (PEM). `agentgov transparency-key DIR` makes one. |
 | `AGENTGOV_LEDGER_REKOR_LOG_KEY_FILE` | — | The log's public key (PEM, Ed25519), to check each answer's proof that the log holds the entry. Unset, entries are kept unchecked. |
@@ -220,7 +222,7 @@ never in a values file you share.
 | `AGENTGOV_KEYCLOAK_ISSUER` | — | Issuer that appears in agent tokens (Keycloak's frontend URL + realm). |
 | `AGENTGOV_KEYCLOAK_JWKS_URL` | — | JWKS URL the gateway uses to validate agent tokens. |
 | `AGENTGOV_IDENTITY_FULL_SYNC_SECONDS` | `900` | Seconds between passes that sync every agent with Keycloak, which also repair what was changed in Keycloak itself. The passes between, every minute and after each change, sync only the agents whose clients should change. 0: every pass is full. |
-| `AGENTGOV_GATEWAY_AUDIENCE` | `agentgov-gateway` | Audience every agent token carries; the gateway requires it. So do the tokens of the identity issuers the gateway trusts, unless an issuer names an audience of its own. |
+| `AGENTGOV_GATEWAY_AUDIENCE` | `agentgov-gateway` | Audience every agent token Keycloak issues carries; the gateway requires it. The tokens of the identity issuers the gateway trusts carry the gateway's address instead (`AGENTGOV_GATEWAY_PUBLIC_URL`), unless an issuer names an audience of its own. |
 | `AGENTGOV_ISSUER_KEYS_INTERVAL_SECONDS` | `300` | Seconds between fetches of the signing keys of the identity issuers the gateway trusts, which rotate them ([agent-identity](agent-identity.md#straight-to-the-gateway)). 0: only when an issuer is added or changed, or an administrator asks. |
 | `AGENTGOV_PEOPLE_APP_CLIENTS` | empty | Keycloak clients of the apps people sign in to and use agents from (comma-separated client IDs). Each agent that acts for people has a client scope named after its client ID, which these apps may request: the person's token is then one the agent can exchange for a token of its own, on the person's behalf. |
 | `AGENTGOV_ASSERTION_LIFETIME_SECONDS` | `300` | Seconds the identity assertions (ID-JAG) AgentGov gives agents for MCP servers outside the gateway last, at most 300: the agent trades one for an access token at once ([acting-for-people](acting-for-people.md#mcp-servers-outside-the-gateway)). |
@@ -325,13 +327,14 @@ AgentGov reads the agents on AWS, Google Cloud, Salesforce, Databricks and Micro
 | Variable | Default | What it does |
 |---|---|---|
 | `AGENTGOV_GATEWAY_CONFIG_PATH` | — | Where the generated agentgateway config is written (shared volume). |
-| `AGENTGOV_GATEWAY_PUBLIC_URL` | `http://localhost:8080` | The gateway's address as agents reach it, which the app and the API show. |
+| `AGENTGOV_GATEWAY_PUBLIC_URL` | `http://localhost:8080` | The gateway's address as agents reach it, which the app and the API show; also the audience of the tokens of the identity issuers the gateway trusts (unless an issuer names one), so that one install's are no good at another's. |
 | `AGENTGOV_MCP_REGISTRY_NAMESPACE` | empty | The namespace of tool servers' names in the MCP registry (`<namespace>/<name>`); by default the control plane's host name reversed, such as com.contoso.agentgov. |
 | `AGENTGOV_GATEWAY_PORT` | `8080` | The port agentgateway listens on, in the configuration generated for it. |
 | `AGENTGOV_PROCESSOR_ADDRESS` | `processor:50051` | Where agentgateway reaches the governance processor for tool calls (gRPC). |
 | `AGENTGOV_PROCESSOR_WEBHOOK_ADDRESS` | `processor:8091` | ...and for model calls and calls between agents (HTTP). |
 | `AGENTGOV_GATEWAY_FAILURE_MODE` | `modes` | When a call through the gateway can't be checked (OPA can't decide, or the governance processor can't be reached or fails): `closed` refuses it; `open` lets it through unchecked, and recorded where the processor can; `modes` refuses it only while a control at the gateway is enforced, so that controls in monitor mode never stop a call. Set it alike where the control plane (which configures the gateway) and the processor run. |
 | `AGENTGOV_GATEWAY_OTLP_ENDPOINT` | — | OTLP/gRPC endpoint for gateway traces, e.g. `http://otel-collector:4317`. |
+| `AGENTGOV_GATEWAY_USAGE_ENDPOINT` | — | OTLP/gRPC endpoint for the gateway's access logs of model calls, which meter tokens and cost: a receiver of the collector's own, which takes them from the gateway alone (with `AGENTGOV_TLS_DIR`, the gateway shows its certificate), e.g. otel-collector:4319. Unset, they go with the traces to `AGENTGOV_GATEWAY_OTLP_ENDPOINT`, where whatever can send traces (agents do) can report model usage too. |
 | `AGENTGOV_GATEWAY_IPV6` | `false` | agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts. |
 | `AGENTGOV_TRACE_URL` | — | Link to a trace in your trace viewer, with {trace_id} where the W3C trace ID goes, such as `http://localhost:16686/trace/{trace_id}` for Jaeger. Ledger entries recorded at the gateway then link to their trace. |
 

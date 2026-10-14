@@ -108,6 +108,14 @@ controlPlane:
     # Several replicas need ReadWriteMany (a file share such as Azure Files, Filestore or
     # EFS): any of them may archive.
     accessMode: ReadWriteOnce
+  # Have a time-stamping authority (RFC 3161), such as https://freetsa.org/tsr, sign the
+  # ledger's checkpoints (docs/evidence.md), and check each time-stamp against its
+  # certificates (PEM: its root, and any intermediate ones), for example with --set-file.
+  # Without them, a time-stamp is checked only against the certificate it carries. Empty
+  # url: none.
+  timestamping:
+    url: ""
+    certificates: ""
   # Put the ledger's checkpoints in a transparency log too (docs/evidence.md): Sigstore's
   # public Rekor, such as https://log2025-1.rekor.sigstore.dev, or a rekor-tiles of yours.
   # AgentGov signs each checkpoint with its key, from a Secret (key.pem, ECDSA P-256:
@@ -240,7 +248,8 @@ presidio:
 
 otelCollector:
   # Receives agents' and the gateway's traces (OTLP :4317 gRPC, :4318 HTTP) for
-  # discovery and activity.
+  # discovery and activity, and the gateway's access logs of model calls (:4319, from
+  # the gateway alone), which meter tokens and cost.
   enabled: true
   image:
     repository: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib

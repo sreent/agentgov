@@ -4,8 +4,9 @@
   Who may reach what. The control plane, the gateway, the collector and Keycloak
   serve people, agents and outside services, so they accept connections from
   anywhere; OPA, the processor, Presidio and PostgreSQL only from AgentGov's own
-  parts. Egress is left open: MCP servers, Microsoft's APIs, model providers
-  can be anywhere.
+  parts, and the collector's port for the gateway's access logs (model usage) only
+  from the gateway. Egress is left open: MCP servers, Microsoft's APIs, model
+  providers can be anywhere.
 */}}
 {{- $parts := splitList " " (include "agentgov.parts" .) }}
 {{- $internal := list
@@ -13,7 +14,8 @@
   (dict "component" "processor" "ports" (list 50051 8091) "from" (list "gateway") "enabled" .Values.gateway.enabled)
   (dict "component" "presidio" "ports" (list 3000) "from" (list "processor") "enabled" (and .Values.presidio.enabled .Values.gateway.enabled))
   (dict "component" "postgresql" "ports" (list 5432) "from" (list "control-plane" "keycloak") "enabled" .Values.postgresql.enabled)
-  (dict "component" "control-plane" "ports" (list 8443) "from" (without $parts "control-plane") "enabled" (and .Values.internalTLS.enabled (gt (len $parts) 1)) "suffix" "-internal") }}
+  (dict "component" "control-plane" "ports" (list 8443) "from" (without $parts "control-plane") "enabled" (and .Values.internalTLS.enabled (gt (len $parts) 1)) "suffix" "-internal")
+  (dict "component" "otel-collector" "ports" (list 4319) "from" (list "gateway") "enabled" (and .Values.otelCollector.enabled .Values.gateway.enabled) "suffix" "-usage") }}
 {{- range $internal }}
 {{- if .enabled }}
 ---

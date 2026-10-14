@@ -325,10 +325,11 @@ class TestApi:
             "method": "workload-identity",
             "issuer": "cluster",
             "subject": SA,
+            # Its token for the gateway's address: not one every install's gateway takes.
             "gateway": {
                 "url": "http://localhost:8080",
                 "issuer": CLUSTER_URL,
-                "audience": "agentgov-gateway",
+                "audience": "http://localhost:8080",
             },
         }
         # Neither Keycloak nor the gateway takes the other's tokens.
@@ -359,7 +360,10 @@ class TestGatewayConfig:
             assert keycloak["jwks"] == {"url": SETTINGS.keycloak_jwks_url}
             # The keys AgentGov fetched, written in: the gateway never fetches them.
             assert json.loads(cluster["jwks"]) == {"keys": [KEY]}
-            assert cluster["audiences"] == [SETTINGS.gateway_audience]
+            # Their tokens are for this gateway (its address), or the audience the issuer
+            # names; Keycloak's, AgentGov's own, carry the gateway's audience.
+            assert keycloak["audiences"] == [SETTINGS.gateway_audience]
+            assert cluster["audiences"] == [SETTINGS.gateway_public_url]
             assert entra["audiences"] == ["api://ag"]
 
     def test_only_agentgovs_own_tokens_name_the_agent_and_the_person(self) -> None:
@@ -590,6 +594,34 @@ class TestProcessor:
         assert cp.records[0]["identity"]["agent_id"] == "agt_1"
         # A subject alone (AgentGov's own tokens') names a person, not a workload.
         assert "subject" not in TestProcessor._model_identity({"x-agentgov-subject": "u-1"})
+
+    def test_providers_keys_are_spent_for_agents_alone(self) -> None:
+        """While unknown callers are monitored, a model call from a subject of a trusted
+        issuer that names no agent is refused all the same: anyone the issuer gives a token
+        to could otherwise spend the provider's key. AgentGov's own tokens pass, recorded."""
+
+        def unknown(inp: dict[str, Any]) -> dict[str, Any]:
+            return {"effect": "deny", "reasons": ["Caller is not a registered agent"]}
+
+        stranger = {
+            "x-agentgov-issuer": CLUSTER_URL,
+            "x-agentgov-subject": "sa:stranger",
+            "x-agentgov-provider": "openai",
+        }
+        opa = WorkloadOpa(unknown, modes={"unknown-callers": "monitor"})
+        result, cp = check(opa, prompt(user("hello")), headers=stranger)
+        assert result != {"action": {}} and "not a registered agent" in json.dumps(result)
+        assert [r["effect"] for r in cp.records] == ["deny"]
+        # Still found, for someone to adopt.
+        assert [p["subject"] for kind, p in cp.calls if kind == "observe"] == ["sa:stranger"]
+        own = {
+            "x-agentgov-issuer": KEYCLOAK,
+            "x-agentgov-client-id": "svc",
+            "x-agentgov-provider": "openai",
+        }
+        opa = WorkloadOpa(unknown, modes={"unknown-callers": "monitor"})
+        result, cp = check(opa, prompt(user("hello")), headers=own)
+        assert result == {"action": {}} and [r["effect"] for r in cp.records] == ["allow"]
 
     @staticmethod
     def _model_identity(headers: dict[str, str]) -> dict[str, Any]:

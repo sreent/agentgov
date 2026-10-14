@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,6 +32,9 @@ class TestAuth:
 
     def test_rejects_unknown_tokens(self, client) -> None:
         assert client.get("/v1/agents", headers={"Authorization": "Bearer nope"}).status_code == 401
+        # Whatever is in it: a token that isn't ASCII is no token either.
+        odd = {"Authorization": "Bearer caf\xe9".encode("latin-1")}
+        assert client.get("/v1/agents", headers=odd).status_code == 401
 
     def test_service_token_cannot_read_the_registry(self, client) -> None:
         assert client.get("/v1/agents", headers=SERVICE).status_code == 403
@@ -66,6 +70,8 @@ class TestAuth:
             "teams": {},
             "actor": "admin:bootstrap",
             "via": "token",
+            # Nobody's owner or sponsor: only a person signed in as themselves is.
+            "person": None,
             "microsoft": False,
             # What is sent to people themselves (docs/issues.md, docs/acting-for-people.md).
             "inbox": {"issues": True, "approvals": False},
@@ -125,20 +131,19 @@ class TestRoles:
         )
 
     def test_only_sponsors_or_admins_attest(self, client) -> None:
+        """Sponsors attest signed in as themselves (tests/test_sso.py): an API key is nobody,
+        whatever its name."""
         seed(client, sponsors=["alice@example.com"])
-        assert (
-            client.post(
-                "/v1/agents/support-bot/attest", json={}, headers=key(client, "approver", "mallory")
-            ).status_code
-            == 403
-        )
+        for name in ("mallory", "alice@example.com"):
+            refused = client.post(
+                "/v1/agents/support-bot/attest", json={}, headers=key(client, "approver", name)
+            )
+            assert refused.status_code == 403, name
         resp = client.post(
-            "/v1/agents/support-bot/attest",
-            json={"note": "still needed"},
-            headers=key(client, "approver", "alice@example.com"),
+            "/v1/agents/support-bot/attest", json={"note": "still needed"}, headers=ADMIN
         )
         assert resp.status_code == 200
-        assert resp.json()["attestation"]["attested_by"] == "approver:alice@example.com"
+        assert resp.json()["attestation"]["attested_by"] == "admin:bootstrap"
 
     def test_auditor_reads_ledger(self, client) -> None:
         seed(client)
@@ -589,6 +594,61 @@ class TestIntegrations:
         )
         assert odd.status_code == 422
 
+    def test_a_record_the_ledger_cant_take_doesnt_lose_its_batch(self, client) -> None:
+        """One record the database couldn't store as it came (NUL in a tool's name, half a
+        surrogate pair, a list where an object goes) failed its whole batch, which the
+        processor then sent again for ever: each record is stored on its own, cleaned, and
+        those that still can't be are counted in the ledger as lost."""
+        call = {"phase": "request", "method": "tools/call", "identity": {"client_id": "a"}}
+        records = [
+            {**call, "resource": "crm/get\u0000x", "effect": "deny"},
+            {**call, "method": "m" * 300, "resource": "crm/x\ud800", "effect": "deny"},
+            {**call, "agent": ["not", "an", "object"], "effect": "allow"},
+            "not a record",
+            {**call, "resource": "crm/get_customer", "effect": "allow"},
+        ]
+        resp = client.post(
+            "/v1/internal/decisions",
+            content=json.dumps({"records": records}),
+            headers={**SERVICE, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"stored": 3, "rejected": 2}
+        entries = client.get("/v1/ledger", params={"type": "decision.*"}, headers=ADMIN).json()
+        assert {e["resource"] for e in entries} == {
+            "crm/get\ufffdx",
+            "crm/x\ufffd",
+            "crm/get_customer",
+        }
+        [lost] = client.get(
+            "/v1/ledger", params={"type": "decisions.dropped"}, headers=ADMIN
+        ).json()
+        assert lost["details"] == {"count": 2, "rejected": 2}
+        assert client.get("/v1/ledger/verify", headers=ADMIN).json()["valid"] is True
+        # OPA's decision logs, the same: an agent's own OPA sends what the agent gives it.
+        odd = {"path": "agentos/allow", "result": True, "input": {"tool_name": {"a": 1}}}
+        resp = client.post("/v1/opa/logs", json=[odd, "not an event"], headers=SERVICE)
+        assert resp.json() == {"stored": 1, "skipped": 1}
+        assert client.get("/v1/ledger/verify", headers=ADMIN).json()["valid"] is True
+
+    def test_records_lost_are_recorded_whatever_becomes_of_the_batch(
+        self, client, monkeypatch
+    ) -> None:
+        from agentgov.registry import decisions
+
+        def fails(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("the database went away")
+
+        monkeypatch.setattr(decisions, "record_mcp_decisions", fails)
+        with pytest.raises(RuntimeError):
+            client.post(
+                "/v1/internal/decisions", json={"records": [{}], "dropped": 5}, headers=SERVICE
+            )
+        [entry] = client.get(
+            "/v1/ledger", params={"type": "decisions.dropped"}, headers=ADMIN
+        ).json()
+        assert entry["details"]["count"] == 5
+
     def test_opa_decision_logs_keep_only_agents_own_decisions(self, client) -> None:
         """OPA can still send the decisions the processor and the control plane asked for
         (a bundle from before it dropped them), and what-if questions: none is an agent's
@@ -673,12 +733,43 @@ class TestIntegrations:
         assert client.get("/v1/agents/shadow", headers=ADMIN).json()["status"] == "discovered"
 
     def test_discovery_import(self, client) -> None:
-        resp = client.post(
-            "/v1/discovery/import",
-            json={"source": "agt", "items": [{"name": "found-bot"}]},
+        seed(client)
+        scan = {"source": "agt", "items": [{"name": "found-bot"}, {"name": "support-bot"}]}
+        # A registrar reads no agents: it is told how many it sent, not which there are.
+        resp = client.post("/v1/discovery/import", json=scan, headers=key(client, "registrar"))
+        assert resp.json() == {"received": 2}
+        assert client.get("/v1/agents/found-bot", headers=ADMIN).json()["status"] == "discovered"
+        # A registered agent is no scanner's to mark as seen.
+        assert client.get("/v1/agents/support-bot", headers=ADMIN).json()["last_seen_at"] is None
+        again = client.post("/v1/discovery/import", json=scan, headers=ADMIN)
+        assert again.json() == {"created": 0, "matched": 2}
+        assert client.get("/v1/agents/support-bot", headers=ADMIN).json()["last_seen_at"] is None
+        # Discovery off, a scan finds no agents.
+        client.put("/v1/features/discovery", json={"mode": "off"}, headers=ADMIN)
+        scan = {"items": [{"name": "late-bot"}]}
+        assert client.post("/v1/discovery/import", json=scan, headers=ADMIN).json() == {
+            "created": 0,
+            "matched": 0,
+        }
+        assert client.get("/v1/agents/late-bot", headers=ADMIN).status_code == 404
+
+    def test_registrations_say_where_agents_come_from_themselves(self, client) -> None:
+        """An agent registered through the API is a registered one: platform:* is for the
+        connectors that find agents on platforms."""
+        made = client.post(
+            "/v1/agents",
+            json={"name": "x-bot", "sponsors": ["a"], "source": "platform:aws"},
             headers=key(client, "registrar"),
         )
-        assert resp.json() == {"created": 1, "matched": 0}
+        assert made.status_code == 422 and "source" in made.json()["detail"]
+        doc = {
+            "apiVersion": "agentgov/v1alpha1",
+            "kind": "Agent",
+            "metadata": {"name": "y-bot"},
+            "spec": {"sponsors": ["a"], "owner": "cx", "source": "platform:aws"},
+        }
+        client.post("/v1/apply", json={"documents": [doc]}, headers=ADMIN).raise_for_status()
+        assert client.get("/v1/agents/y-bot", headers=ADMIN).json()["source"] == "registered"
 
 
 class TestManifestsOverHttp:

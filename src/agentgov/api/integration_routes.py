@@ -34,7 +34,12 @@ from agentgov.registry.errors import NotFound, ValidationError
 from agentgov.telemetry import decode_protobuf, ingest
 
 router = APIRouter()
+# What components read: the service role, and administrators.
 service = require("service")
+# What components report (decisions, observations, OPA's decision logs, telemetry): the
+# service role alone, so that what the evidence ledger says the data plane did comes from
+# the data plane (with mutual TLS, from components with AgentGov's certificates).
+component = require("service", admin=False)
 
 
 def _rt(request: Request) -> Any:
@@ -90,7 +95,7 @@ async def gateway_config(request: Request, _: Principal = Depends(service)) -> R
 
 
 @router.post("/v1/opa/logs", tags=["opa"])
-async def opa_decision_logs(request: Request, _: Principal = Depends(service)) -> dict[str, int]:
+async def opa_decision_logs(request: Request, _: Principal = Depends(component)) -> dict[str, int]:
     rt = _rt(request)
     events = await _json_body(request)
     if not isinstance(events, list):
@@ -104,7 +109,7 @@ async def opa_decision_logs(request: Request, _: Principal = Depends(service)) -
 
 
 @router.post("/v1/opa/status", tags=["opa"])
-async def opa_status(request: Request, _: Principal = Depends(service)) -> dict[str, str]:
+async def opa_status(request: Request, _: Principal = Depends(component)) -> dict[str, str]:
     rt = _rt(request)
     status = await _json_body(request) or {}
     errors = {
@@ -140,9 +145,11 @@ async def opa_status(request: Request, _: Principal = Depends(service)) -> dict[
 
 @router.post("/v1/internal/approvals/check", tags=["internal"])
 def internal_approval_check(
-    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(service)
+    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(component)
 ) -> dict[str, Any]:
     rt = _rt(request)
+    if not isinstance(body.get("agent_id"), str) or not body["agent_id"]:
+        raise ValidationError("agent_id is required: the agent asking")
     # The person the agent acts for, if it acts for one.
     person = body.get("user") if isinstance(body.get("user"), dict) else None
     with rt.db.session() as s:
@@ -168,24 +175,27 @@ def internal_approval_check(
 
 @router.post("/v1/internal/decisions", tags=["internal"])
 def internal_decisions(
-    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(service)
+    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(component)
 ) -> dict[str, int]:
     rt = _rt(request)
     records = body.get("records") or []
     if not isinstance(records, list):
         raise ValidationError("records must be a list")
     dropped = body.get("dropped") or 0
-    if not isinstance(dropped, int) or dropped < 0:
+    if isinstance(dropped, bool) or not isinstance(dropped, int) or dropped < 0:
         raise ValidationError("dropped must be a count")
-    with rt.db.session() as s:
-        if dropped:
+    if dropped:
+        # In a transaction of its own: recorded whatever becomes of the batch.
+        with rt.db.session() as s:
             decisions.record_dropped(s, dropped)
-        return {"stored": decisions.record_mcp_decisions(s, rt.settings, records)}
+    with rt.db.session() as s:
+        stored, rejected = decisions.record_mcp_decisions(s, rt.settings, records)
+    return {"stored": stored, **({"rejected": rejected} if rejected else {})}
 
 
 @router.post("/v1/internal/components", tags=["internal"])
 def internal_components(
-    request: Request, body: Any = Body(...), _: Principal = Depends(service)
+    request: Request, body: Any = Body(...), _: Principal = Depends(component)
 ) -> dict[str, Any]:
     """A governance processor's report of what it can reach (agentgov.health). The answer
     gives it the features' modes, which it otherwise reads from OPA: it then knows them
@@ -197,7 +207,7 @@ def internal_components(
 
 @router.post("/v1/internal/catalog", tags=["internal"])
 def internal_catalog(
-    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(service)
+    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(component)
 ) -> dict[str, Any]:
     rt = _rt(request)
     with rt.db.session() as s:
@@ -212,7 +222,7 @@ def internal_catalog(
 
 @router.post("/v1/internal/observe", tags=["internal"])
 def internal_observe(
-    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(service)
+    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(component)
 ) -> dict[str, Any]:
     with _rt(request).db.session() as s:
         agent = discovery.observe(
@@ -265,11 +275,11 @@ async def _otlp(request: Request, signal: str = "traces") -> Response:
 
 
 @router.post("/v1/otlp/v1/traces", tags=["telemetry"])
-async def otlp_traces(request: Request, _: Principal = Depends(service)) -> Response:
+async def otlp_traces(request: Request, _: Principal = Depends(component)) -> Response:
     return await _otlp(request)
 
 
 @router.post("/v1/otlp/v1/logs", tags=["telemetry"])
-async def otlp_logs(request: Request, _: Principal = Depends(service)) -> Response:
+async def otlp_logs(request: Request, _: Principal = Depends(component)) -> Response:
     """agentgateway's access logs, through the OpenTelemetry Collector: model usage."""
     return await _otlp(request, "logs")

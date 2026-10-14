@@ -24,6 +24,9 @@ ON, OFF = "on", "off"
 MODES = (ON, OFF)
 # In a finding's details: dismissed because its type is off (and so back when it is on).
 SUPPRESSED = "suppressed_by_type"
+# What says the evidence ledger lost entries (agentgov.witness) or can't be archived
+# (agentgov.retention): never off, so that nobody quiets them while covering what happened.
+ALWAYS_ON = ("ledger.rewound", "ledger.archive_failed")
 ACTOR = "system:finding-types"
 TYPE = re.compile(r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)+$")
 
@@ -33,12 +36,13 @@ def effective(session: Session, type_: str, severity: str) -> tuple[str, bool]:
     row = session.get(FindingType, type_)
     if row is None:
         return severity, False
-    return row.severity or severity, row.mode == OFF
+    return row.severity or severity, row.mode == OFF and type_ not in ALWAYS_ON
 
 
 def off_types(session: Session) -> set[str]:
     """The types turned off here."""
-    return set(session.scalars(select(FindingType.type).where(FindingType.mode == OFF)))
+    off = set(session.scalars(select(FindingType.type).where(FindingType.mode == OFF)))
+    return off - set(ALWAYS_ON)
 
 
 def suppress(finding: Finding, now: Any = None) -> None:
@@ -63,6 +67,11 @@ def configure(session: Session, type_: Any, data: Any, *, actor: str) -> dict[st
     mode = data.get("mode")
     if "mode" in data and mode not in MODES:
         raise ValidationError(f"mode is on or off (got {mode!r})")
+    if mode == OFF and type_ in ALWAYS_ON:
+        raise ValidationError(
+            f"{type_} can't be turned off: it says the evidence ledger lost entries or can't "
+            "be archived"
+        )
     severity = data.get("severity")
     if "severity" in data and severity is not None and severity not in SEVERITIES:
         raise ValidationError(f"severity is one of {', '.join(SEVERITIES)}, or null")

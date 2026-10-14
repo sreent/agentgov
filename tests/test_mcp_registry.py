@@ -10,12 +10,12 @@ from urllib.parse import quote
 import pytest
 from sqlalchemy import select
 
-from agentgov import cli
+from agentgov import cli, ids, mcp_scan
 from agentgov.config import Settings
 from agentgov.gateway import render
-from agentgov.models import Finding, ToolServer
+from agentgov.models import Finding, McpSighting, ToolServer
 from agentgov.opa.bundle import registry_snapshot
-from agentgov.registry import manifests, mcp_registry, toolservers
+from agentgov.registry import manifests, mcp_registry, mcp_sightings, toolservers
 from agentgov.registry.errors import Conflict, ValidationError
 from tests.conftest import ADMIN
 from tests.test_api import key
@@ -249,7 +249,7 @@ class TestSightings:
             "servers": 4, "approved": 2, "bypass": 1, "blocked": 0, "unapproved": 1,
         }  # fmt: skip
         view = {g["identity"]: g for g in client.get("/v1/mcp/sightings", headers=ADMIN).json()}
-        direct = view["url:http://crm:9000/mcp"]
+        direct = view[f"url:{mcp_scan.address('http://crm:9000/mcp')}"]
         assert (direct["status"], direct["server"]) == ("bypass", "crm")
         assert view["npm:@playwright/mcp"]["status"] == "approved"
         assert view["command:python3 notes.py"]["status"] == "unapproved"
@@ -270,7 +270,7 @@ class TestSightings:
             "/v1/mcp/sightings", json=scanned(GATEWAY_CRM), headers=ADMIN
         ).raise_for_status()
         view = client.get("/v1/mcp/sightings", headers=ADMIN).json()
-        assert [g["identity"] for g in view] == [GATEWAY_CRM["identity"]]
+        assert [g["identity"] for g in view] == [f"url:{mcp_scan.address(GATEWAY_CRM['url'])}"]
         mcp_findings = [
             f for f in client.get("/v1/findings", headers=ADMIN).json()
             if f["type"].startswith("mcp.") and f["status"] == "open"
@@ -306,6 +306,72 @@ class TestSightings:
             assert finding.status == "resolved"
         view = client.get("/v1/mcp/sightings", headers=ADMIN).json()
         assert (view[0]["status"], view[0]["server"]) == ("approved", "notes")
+
+    def test_what_an_older_scanner_sent_is_kept_sanitised(self, client, listed) -> None:
+        secret_path = "/mcp/sk-ak-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c/sse"
+        zapier = f"https://actions.zapier.com{secret_path}"
+        older = [
+            {"name": "zapier", "client": "claude-desktop", "transport": "sse", "url": zapier,
+             "identity": f"url:{zapier}"},
+            {"name": "remote", "client": "claude-desktop", "transport": "stdio",
+             "command": ["npx", "-y", "mcp-remote", zapier], "identity": "npm:mcp-remote",
+             "headers": ["Authorization: Bearer abc123"]},
+            {"name": "pg", "client": "cursor", "transport": "stdio",
+             "command": ["docker", "run", "-e", "PGPASSWORD=hunter2hunter2", "mcp/postgres"],
+             "identity": "oci:mcp/postgres", "env": ["PGPASSWORD=hunter2hunter2"]},
+        ]  # fmt: skip
+        client.post("/v1/mcp/sightings", json=scanned(*older), headers=ADMIN).raise_for_status()
+        kept = json.dumps(
+            [client.get(path, headers=ADMIN).json() for path in
+             ("/v1/mcp/sightings", "/v1/findings", "/v1/ledger")]
+        )  # fmt: skip
+        for secret in ("9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", "hunter2", "abc123"):
+            assert secret not in kept
+        view = {g["identity"]: g for g in client.get("/v1/mcp/sightings", headers=ADMIN).json()}
+        address = mcp_scan.address(zapier)
+        assert address.startswith("https://actions.zapier.com#")
+        assert view[f"url:{address}"]["url"] == address
+        assert view["npm:mcp-remote"]["command"][-1] == (
+            "https://actions.zapier.com/mcp/sk-ak-<redacted>/sse"
+        )
+        assert view["oci:mcp/postgres"]["command"][-2] == "PGPASSWORD=<redacted>"
+        # Addresses still match the approved servers'.
+        github = {"name": "github", "client": "vscode", "transport": "http",
+                  "url": mcp_scan.address("https://api.githubcopilot.com/mcp/"),
+                  "identity": "x"}  # fmt: skip
+        client.post("/v1/mcp/sightings", json=scanned(github), headers=ADMIN).raise_for_status()
+        [seen] = client.get("/v1/mcp/sightings", headers=ADMIN).json()
+        assert (seen["status"], seen["server"]) == ("approved", "github")
+
+    def test_an_identity_alone_is_sanitised_once(self, client, settings) -> None:
+        """A report that names a command line by its identity only: cleaned as one, and
+        the same at every refresh after."""
+        alone = {"name": "x", "client": "cursor", "transport": "stdio",
+                 "identity": "command:mcp-remote -H Authorization: Bearer abc123"}  # fmt: skip
+        client.post("/v1/mcp/sightings", json=scanned(alone), headers=ADMIN).raise_for_status()
+        [seen] = client.get("/v1/mcp/sightings", headers=ADMIN).json()
+        assert "abc123" not in json.dumps(seen)
+        assert seen["command"][:3] == ["mcp-remote", "-H", "Authorization: <redacted>"]
+        rt = client.app.state.rt
+        for _ in range(2):
+            with rt.db.session() as s:
+                mcp_sightings.refresh(s, settings)
+            assert client.get("/v1/mcp/sightings", headers=ADMIN).json() == [seen]
+
+    def test_what_was_kept_before_is_sanitised(self, client, settings) -> None:
+        rt = client.app.state.rt
+        secret = "https://actions.zapier.com/mcp/sk-ak-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c/sse"
+        with rt.db.session() as s:
+            now = ids.utcnow()
+            s.add(McpSighting(
+                id=ids.new_id(ids.SIGHTING), machine="laptop-1", os_user="alice", name="zapier",
+                client="cursor", scope="user", identity=f"url:{secret}", transport="sse",
+                url=secret, command=[], env=[], headers=[], first_seen_at=now,
+                last_seen_at=now, reported_by="registrar:mdm",
+            ))  # fmt: skip
+        with rt.db.session() as s:
+            mcp_sightings.refresh(s, settings)
+        assert "9f8e7d6c" not in json.dumps(client.get("/v1/mcp/sightings", headers=ADMIN).json())
 
     def test_bad_reports_and_the_switch(self, client, listed) -> None:
         bad = client.post("/v1/mcp/sightings", json={"machine": "", "servers": []}, headers=ADMIN)

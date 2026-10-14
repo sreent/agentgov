@@ -233,7 +233,7 @@ def findings(
                 if action == "acknowledge":
                     issues.acknowledge(session, finding, actor=actor)
                 elif action == "dismiss":
-                    findings_svc.dismiss(session, finding, reason=reason, actor=actor, until=when)
+                    issues.dismiss(session, finding, reason=reason, actor=actor, until=when, by=by)
                 elif action == "accept":
                     issues.accept(
                         session,

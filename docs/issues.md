@@ -109,10 +109,12 @@ them and sends what is due every `AGENTGOV_ISSUES_INTERVAL_SECONDS` (60).
 | Resolve, dismiss | The same | As for any issue. Dismiss is for issues that are wrong, and says why ([dismissing an issue](#dismissing-an-issue)): to live with a real one, accept its risk |
 | Reopen | The same | It starts its chain over |
 
-The people responsible for an agent acknowledge its issues, but don't accept its risks:
-someone who isn't accountable for the agent signs that off. AgentGov refuses an acceptance
-from the agent's owner, its sponsors and the people in its team (its own or its
-blueprint's), whatever their role.
+The people responsible for an agent acknowledge its issues, but don't accept its risks, nor
+dismiss them, which makes them go to nobody as well: someone who isn't accountable for the
+agent signs that off. AgentGov refuses an acceptance or a dismissal from the agent's owner,
+its sponsors and the people in its team (its own or its blueprint's), whatever their role,
+one at a time or many at once. Resolving stays theirs: a resolved issue that still holds is
+raised again at the next check.
 
 Raised again after it was resolved, or when its accepted risk runs out, an issue starts its
 chain over, from the first step.
@@ -183,14 +185,17 @@ the `person` role ([who can sign in](administration.md#who-can-sign-in)).
 
 Each email and chat message about an issue is tried until it goes: again five seconds after
 it fails, then twice as long after each failure, up to ten minutes, and given up after about
-an hour. Each one sent
+an hour. An email that can't be written at all is given up on at once, and the others still
+go. Each one sent
 is a `finding.notified` entry in the ledger, and each one given up on a
 `finding.notification_failed` warning. The control-plane replica that leads sends them
 ([production](production.md#several-replicas)), and claims each message for a minute
 before it sends it, so none goes twice while the lead moves. The issue's page lists its
 messages and how each went.
 
-An email's subject reads `[AgentGov] Medium issue about agent support-bot: …`. It says why
+An email's subject reads `[AgentGov] Medium issue about agent support-bot: …`, on one line:
+line breaks and other control characters in an issue's title, which can carry names agents,
+platforms and developers give, are spaces there. It says why
 it came (as the agent's owner, one of its sponsors, or the team it escalates to), what its
 people can do there, and links to the issue in AgentGov. A chat gets a card with the same,
 and an **Answer in AgentGov** button.
@@ -261,6 +266,9 @@ organisation that doesn't act on some of them, or judges them otherwise, says so
   hand stays dismissed.
 * **A severity of its own.** For what the type finds from then on, and what it found that is
   still open; `default` (null) goes back to its checks' own.
+
+Two types can't be turned off: `ledger.rewound` and `ledger.archive_failed`, which say the
+evidence ledger lost entries or can't be archived ([evidence](evidence.md)).
 
 ```console
 $ agentgov issues type platform.shared_with_everyone --severity low
@@ -366,7 +374,7 @@ the issues shown as a spreadsheet: who each is with, how often it was seen, who 
 | `finding.dismissed` | Dismissed by hand, with why (and until when), or because its type was turned off |
 | `finding_type.changed` | A type was turned off or on, or given a severity |
 | `finding.notified` | A message went, to whom and how |
-| `finding.notification_failed` (warning) | A message was given up on after retrying |
+| `finding.notification_failed` (warning) | A message was given up on after retrying, or at once if it couldn't be written |
 | `issues.digest_sent` | The day's digest went to an address or a chat, with how many issues it listed ([a daily digest](#a-daily-digest)) |
 | `issues.digest_failed` (warning) | The day's digest couldn't be sent, after retrying |
 | `team.created`, `team.updated`, `team.deleted` | A team changed |

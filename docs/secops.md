@@ -44,10 +44,14 @@ the UI, `agentgov secops level contain`, `PUT /v1/features/security-operations` 
 change is a `feature.changed` entry in the ledger.
 
 Administrators and approvers do what their roles allow whatever the level: the level only
-limits the `secops` role. Some things it never does at any level: delete or edit anything,
-change policies, blueprints or grants, approve agents or tool servers, or decide requests
-sent to the person an agent acted for. Everything it does is in the ledger under its name,
-`secops:<key or person>`, and an administrator can undo all of it (unblock, reopen).
+limits the `secops` role, held for every team or for one team's agents (`secops@sales`,
+[roles for one team](administration.md#roles-for-one-team)) alike. Some things it never does
+at any level: delete or edit anything, change policies, blueprints or grants, approve
+agents or tool servers, or decide requests sent to the person an agent acted for. Unblocking
+approves nothing either: an agent or a tool server is then what it was when it was blocked,
+and one that waited for an administrator's approval waits again. Everything it does is in
+the ledger under its name, `secops:<key or person>`, and an administrator can undo all of
+it (unblock, reopen).
 
 ## The secops role
 
@@ -120,6 +124,15 @@ The page and `agentgov destinations list` say when a destination's file is missi
 workflow in the channel from the template *Send webhook alerts to a channel* (Office 365
 connectors are retired), and take the URL it gives.
 
+An administrator can't read a credential, but could send one elsewhere, by changing a
+destination's `url` to a host of their own. To keep credentials with the services they are
+for, list the hosts destinations may reach in `AGENTGOV_CREDENTIAL_HOSTS`
+(`splunk.example.com,*.service-now.com,hooks.slack.com`, say; `*.example.com` is any host
+under example.com). AgentGov then refuses a `url` on another host, and checks again each
+time it sends, the URL in a secret file too: a destination set up before the list, or whose
+host it no longer lists, gets nothing, and its error says why. While the list is empty, the
+**Features** page says that credentials can go to any host.
+
 ### Delivery
 
 Each destination has a cursor: the last ledger entry it got. The control plane sends it
@@ -137,7 +150,8 @@ hasn't got yet stay in the database until it has ([evidence](evidence.md#retenti
   [posture check](features.md) raises a `destination.failing` issue (high), which the
   other destinations hear about; it resolves once sending works again.
 * **Pause** stops sending; **Resume** sends what it missed. **Replay** sends a SIEM the
-  ledger again from after an entry you choose (`0`: from its start).
+  ledger again from after an entry you choose (`0`: from its start), before where it has
+  got to: it only goes back, so that no entry is skipped.
 * **Test** sends a test event or message now, whatever the level, and records the
   outcome (`destination.tested`).
 * With the feature off nothing is sent; destinations keep their place, and turning it on

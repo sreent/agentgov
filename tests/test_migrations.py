@@ -127,6 +127,28 @@ def test_the_control_plane_can_leave_migrating_to_a_job(settings: Settings, tmp_
         rt.db.dispose()
 
 
+def test_what_was_blocked_before_is_read_from_the_ledger(db: Database, settings: Settings) -> None:
+    """Agents and tool servers blocked before AgentGov kept what they were (0032) are given it
+    from their blocks' ledger entries: unblocked, a pending one waits for approval again."""
+    from agentgov.registry import agents, toolservers
+
+    migrations.upgrade(db.engine)
+    with db.session() as s:
+        made = agents.register(s, settings, {"name": "new-bot", "sponsors": ["a"]}, actor="t")
+        agents.transition(s, settings, made, "block", actor="t")
+        ts = toolservers.create(
+            s, {"name": "byo", "url": "http://byo/mcp"}, actor="t", approve=False
+        )
+        toolservers.set_status(s, ts, "block", actor="t")
+    with migrations._migrating(db.engine) as connection:
+        command.downgrade(migrations._config(connection), "0031")
+    assert "blocked_from" not in {c["name"] for c in inspect(db.engine).get_columns("agents")}
+    migrations.upgrade(db.engine)
+    with db.session() as s:
+        assert s.get(models.Agent, made.id).blocked_from == "pending"
+        assert s.get(models.ToolServer, ts.id).blocked_from == "pending"
+
+
 def test_foreign_keys_are_enforced_again_after_migrating(db: Database) -> None:
     migrations.upgrade(db.engine)
     with db.engine.connect() as connection:

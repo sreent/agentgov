@@ -44,8 +44,8 @@ sequenceDiagram
 | Field | Meaning |
 |---|---|
 | `kind` | `openai`, `anthropic`, `gemini`, or `openai-compatible` for anything that speaks OpenAI's API, such as vLLM, Ollama or LiteLLM |
-| `base_url` | For `openai-compatible` only: the server's OpenAI API base, such as `http://vllm:8000/v1` |
-| `key_file` | Where the gateway reads the provider's API key. Default `/model-keys/<name>` |
+| `base_url` | For `openai-compatible` only: the server's OpenAI API base, such as `http://vllm:8000/v1`. The gateway sends the provider's key there, so where the deployment lists the hosts credentials may go to (`AGENTGOV_CREDENTIAL_HOSTS`), its host must be one of them |
+| `key_file` | Where the gateway reads the provider's API key: a file in `/model-keys`. Default `/model-keys/<name>` |
 | `trust_level` | `verified` means personal data may be sent to the provider. Otherwise it is masked before the prompt leaves |
 | `prices` | USD per million tokens, per model glob: `{"gpt-4.1*": {"input": 2, "output": 8}}`. Usage is priced with them |
 | `labels` | Your own key/value pairs, which policies can read |
@@ -60,8 +60,18 @@ its route from the gateway.
 The key never enters AgentGov's database, API or ledger: the gateway reads it from a file,
 named after the provider, which the deployment puts there ([files, not
 settings](configuration.md#files-not-settings)): `deploy/compose/model-keys/<name>` with
-Compose, a Secret with one key per provider with Helm (`modelKeys`), or any file the gateway
-can read, named in the provider's `key_file`.
+Compose, a Secret with one key per provider with Helm (`modelKeys`), or another file in
+`/model-keys`, named in the provider's `key_file`. The gateway reads no other file as a key,
+so a provider can't be given a file the gateway holds for something else, such as its own
+TLS key.
+
+An administrator can't read a key, but could have the gateway send one elsewhere: an
+`openai-compatible` provider's `base_url` is where its key goes, and its `key_file` can name
+another provider's. To keep keys with the providers they are for, list the hosts they may
+go to in `AGENTGOV_CREDENTIAL_HOSTS` (`api.groq.com,vllm`, say): AgentGov then refuses a
+`base_url` on any other host, and a provider set up before the list, or whose host it no
+longer lists, answers 503 with a message that says why, without its key. While the list is
+empty, the **Features** page says that keys can go to any host.
 
 Until its key is there, a provider's route answers 503 with a message that says so, and
 the gateway serves the rest of its routes as usual. The route starts working within a few
@@ -134,6 +144,14 @@ agent from its token. The logs go over OTLP through the OpenTelemetry Collector 
 control plane, which adds them up per agent, UTC day, provider and model and prices them
 with the provider's prices. Streamed calls are counted too: the gateway asks the provider
 for their usage.
+
+What the logs say is billed to agents and counts against their budgets, so they go to a
+receiver of their own on the collector (`AGENTGOV_GATEWAY_USAGE_ENDPOINT`, port 4319 in
+the Compose stack and the chart), not the one agents send their traces to: with mutual TLS
+between components it takes only a certificate from AgentGov's authority, the gateway's,
+and in Kubernetes the chart's network policy lets only the gateway reach it. Without one,
+anything that can send traces could report usage for an agent and use up its budget; the
+*Token budgets* feature says so.
 
 | | How |
 |---|---|

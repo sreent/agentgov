@@ -196,6 +196,7 @@ class ModelGuard:
                 "roles": people.header_json(headers.get(ROLES)),
                 "act": people.header_json(headers.get(ACT)),
                 "sign_in": people.header_json(headers.get(SIGN_IN)),
+                "client_id": people.header_text(headers.get(CLIENT_ID)),
             }
         )
 
@@ -350,6 +351,15 @@ class ModelGuard:
 
         if agent is None and modes["unknown-callers"] == "monitor":
             self.p._spawn(self.p._observe_unknown(identity, f"llm/{provider}", "chat"))
+            if identity.get("issuer") and not identity.get("client_id"):
+                # Another issuer's token names an agent by its workload identity alone (the
+                # gateway passes a client only from AgentGov's own): one that names none
+                # isn't an agent's, and the gateway spends providers' keys for agents alone.
+                reasons = list(decision.get("reasons") or []) or [
+                    "Caller is not a registered agent"
+                ]
+                finish("deny", reasons, decision_id=decision_id)
+                return refuse(403, reasons)
             finish(
                 "allow", ["monitor mode: caller is not a registered agent"], decision_id=decision_id
             )

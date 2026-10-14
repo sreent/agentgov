@@ -24,7 +24,7 @@ import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from agentgov import ids
+from agentgov import ids, timestamping
 from agentgov.config import FAILURE_SETTINGS, Settings
 from agentgov.models import (
     ApprovedConnector,
@@ -81,6 +81,44 @@ def control_plane_checks(settings: Settings, *, verify: Any = True) -> dict[str,
     if settings.keycloak_jwks_url:
         out["keycloak"] = probe(settings.keycloak_jwks_url, verify=verify, any_answer=False)
     return out
+
+
+def ledger_checks(settings: Settings) -> dict[str, dict[str, Any]]:
+    """What vouches for the evidence ledger outside its database (docs/evidence.md): its
+    checkpoints' time-stamps, checked against the authority's certificates; and its head,
+    kept in a file that restoring the database doesn't touch (docs/backup.md)."""
+    stamps = check(
+        False,
+        detail="No time-stamping authority (AGENTGOV_LEDGER_TSA_URL): the checkpoints vouch "
+        "only for themselves.",
+    )
+    if settings.ledger_tsa_url:
+        trust = timestamping.trust(settings.ledger_tsa_ca_file)
+        if trust.error:
+            stamps = check(True, False, f"AGENTGOV_LEDGER_TSA_CA_FILE: {trust.error}")
+        elif not trust.roots:
+            stamps = check(
+                True,
+                False,
+                "The authority isn't checked: without AGENTGOV_LEDGER_TSA_CA_FILE, each "
+                "time-stamp is checked against the certificate it carries, which shows it "
+                "whole, not who signed it.",
+            )
+        else:
+            stamps = check(True, True)
+    kept = (
+        check(True, True)
+        if settings.witness_file()
+        else check(
+            False,
+            detail="Nothing outside the database keeps the ledger's head "
+            "(AGENTGOV_LEDGER_WITNESS_FILE, or AGENTGOV_LEDGER_ARCHIVE_DIR): a database restored "
+            "from an older backup, or entries removed from its end, go unnoticed, and a chain "
+            "rewritten with its hashes worked out again shows only as checkpoints that vouch "
+            "from later than their entries.",
+        )
+    )
+    return {"time_stamps": stamps, "witness": kept}
 
 
 class Cached:
@@ -458,12 +496,24 @@ def _specific(key: str, mode: str, s: Situation) -> list[tuple[str, str]]:
                     f"{_with(down.get('detail', ''))}: calls go through without its answer.",
                 )
             )
-    elif key == "token-budgets" and not s.settings.gateway_otlp_endpoint:
+    elif key == "token-budgets" and not (
+        s.settings.gateway_usage_endpoint or s.settings.gateway_otlp_endpoint
+    ):
         out.append(
             (
                 INACTIVE,
                 "Usage isn't metered, so budgets never run out: the gateway sends no access "
-                "logs (AGENTGOV_GATEWAY_OTLP_ENDPOINT).",
+                "logs (AGENTGOV_GATEWAY_USAGE_ENDPOINT, or AGENTGOV_GATEWAY_OTLP_ENDPOINT).",
+            )
+        )
+    elif key == "token-budgets" and not s.settings.gateway_usage_endpoint:
+        out.append(
+            (
+                LIMITED,
+                "Usage is reported where agents send their traces: an agent, or anything "
+                "else that can send there, could report usage for another and use up its "
+                "budget. Give the gateway's access logs a receiver of their own "
+                "(AGENTGOV_GATEWAY_USAGE_ENDPOINT).",
             )
         )
     elif key in ("authzen-decision-point", "copilot-studio-threat-detection"):

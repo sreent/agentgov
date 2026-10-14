@@ -8,15 +8,23 @@ import io
 from typing import Any
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
+from agentgov.config import Settings
 from agentgov.registry import findings
-from tests.conftest import ADMIN
+from tests.conftest import ADMIN, SSO
 from tests.test_api import key
 from tests.test_issue_answers import person
 from tests.test_issues import _raise, _rt, agent  # noqa: F401 (the agent fixture)
 from tests.test_people import import_studio, studio
 from tests.test_secops import level
+
+
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """Single sign-on, for the people who answer issues (tests.test_issue_answers.person)."""
+    return settings.with_overrides(**SSO)
 
 
 def register(
@@ -213,6 +221,21 @@ class TestFindings:
         assert at_once(client, "findings", body, soc).status_code == 403
         level(client, "triage")
         assert at_once(client, "findings", body, soc).json()["done"][0]["status"] == "accepted"
+
+    def test_nor_dismiss_them(self, client, agent) -> None:  # noqa: F811
+        """Dismissing an issue makes it go away as accepting its risk does: those accountable
+        for the agent don't, one at a time or many at once. Resolving stays theirs."""
+        a = _raise(client, agent["id"])
+        alice = person(client, "alice@example.com", role="approver")
+        body = {"action": "dismiss", "findings": [a], "reason": "Not real", "until": 30}
+        out = at_once(client, "findings", body, alice).json()
+        assert out["done"] == [] and "sponsor" in out["left"][0]["why"]
+        one = client.post(f"/v1/findings/{a}/dismiss", json={"reason": "Not real"}, headers=alice)
+        assert one.status_code == 403 and "sponsor" in one.json()["detail"]
+        dana = person(client, "dana@example.com", role="approver")
+        assert at_once(client, "findings", body, dana).json()["done"][0]["status"] == "dismissed"
+        assert client.post(f"/v1/findings/{a}/reopen", headers=alice).status_code == 200
+        assert client.post(f"/v1/findings/{a}/resolve", headers=alice).status_code == 200
 
 
 class TestTheCli:

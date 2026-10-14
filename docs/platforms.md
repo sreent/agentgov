@@ -358,9 +358,11 @@ refresh token is kept in the database for as long as the AgentGov session lasts
 the admin, and a restart doesn't sign them out of Microsoft. It is sealed (AES-256-GCM)
 with a key derived from the app's client secret and bound to its session, so the
 database alone doesn't give it away; it never reaches the ledger, and it is useless
-without the client secret anyway. Signing out, an admin ending the session on the
-**Access** page, or the session running out deletes it. Access tokens stay in each
-replica's memory until they expire.
+without the client secret anyway. A backup of the database and the client secret together
+do give it away, though, for as long as Microsoft takes it
+([deploying safely](../SECURITY.md#deploying-safely)). Signing out, an admin ending the
+session on the **Access** page, or the session running out deletes it. Access tokens stay
+in each replica's memory until they expire.
 
 A new client secret makes the sealed sign-ins unreadable: admins stay signed in to
 AgentGov, but they need to sign in again to act in Microsoft, and AgentGov says so.

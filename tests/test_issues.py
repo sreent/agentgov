@@ -418,6 +418,66 @@ class TestSending:
             assert "finding.notification_failed" in _types(s)
             assert issues.notifications(s, findings.get(s, fid))[0]["status"] == "failed"
 
+    def test_a_title_that_breaks_stays_one_line(self, client, agent) -> None:
+        """Titles carry names agents, platforms and developers give: a line break in one
+        can't end the subject and start a header of its own."""
+        rt = _rt(client)
+        outbox: list[Any] = []
+        settings, notifier = self._notifier(client, smtp=lambda: _SMTP(outbox))
+        with rt.db.session() as s:
+            findings.raise_finding(
+                s,
+                type="mcp.unapproved_server",
+                severity="medium",
+                subject="url:https://x.example",
+                agent_id=agent["id"],
+                # A control character too (not NUL: PostgreSQL stores no text with one).
+                title="Developers use x\r\nBcc: mallory@evil.example\x07",
+            )
+            issues.route(s, settings)
+        assert notifier.run() == {"sent": 1, "failed": 0}
+        (message,) = outbox
+        assert message["Bcc"] is None
+        assert message["Subject"] == (
+            "[AgentGov] Medium issue about agent support-bot: Developers use x "
+            "Bcc: mallory@evil.example"
+        )
+
+    def test_a_message_that_cant_be_written_fails_alone(
+        self, client, agent, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agentgov import notify
+
+        class Unwritable(notify.EmailMessage):
+            def __setitem__(self, name: str, value: Any) -> None:
+                if "has no owner" in str(value):
+                    raise ValueError("can't be a header")
+                super().__setitem__(name, value)
+
+        monkeypatch.setattr(notify, "EmailMessage", Unwritable)
+        rt = _rt(client)
+        outbox: list[Any] = []
+        settings, notifier = self._notifier(client, smtp=lambda: _SMTP(outbox))
+        fid = _raise(client, agent["id"])
+        with rt.db.session() as s:
+            findings.raise_finding(
+                s,
+                type="agent.stale",
+                severity="medium",
+                subject=agent["id"],
+                agent_id=agent["id"],
+                title="Agent support-bot wasn't seen for 30 days",
+            )
+            issues.route(s, settings)
+        # The other one goes, in the same round; this one is given up on at once.
+        assert notifier.run() == {"sent": 1, "failed": 1}
+        assert "wasn't seen" in outbox[0]["Subject"]
+        with rt.db.session() as s:
+            (failed,) = issues.notifications(s, findings.get(s, fid))
+            assert failed["status"] == "failed" and "can't be a header" in failed["last_error"]
+            assert "finding.notification_failed" in _types(s)
+        assert notifier.run() == {"sent": 0, "failed": 0}
+
     def test_teams_chats_get_a_message(self, client, agent, tmp_path: Path) -> None:
         rt = _rt(client)
         posted: list[httpx.Request] = []

@@ -141,6 +141,9 @@ class Agent(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(16), default=PENDING, index=True)
     status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Blocked, what it was before (pending, active, discovered): unblocking gives that back,
+    # so that blocking then unblocking approves nothing.
+    blocked_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     blueprint_id: Mapped[str | None] = mapped_column(
         ForeignKey("blueprints.id", ondelete="SET NULL"), nullable=True, index=True
@@ -239,6 +242,8 @@ class ToolServer(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     owner: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="approved")
+    # Blocked, what it was before (pending or approved): unblocking gives that back.
+    blocked_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
     trust_level: Mapped[str] = mapped_column(String(16), default="unverified")
     data_classification: Mapped[str] = mapped_column(String(16), default="internal")
     labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -484,6 +489,9 @@ class AdminSession(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     subject: Mapped[str] = mapped_column(String(255))
     name: Mapped[str] = mapped_column(String(255))
+    # The email address the provider vouches for, if it vouches for one: who the person is as
+    # owners, sponsors and teams name people (a name it doesn't vouch for is nobody's).
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     roles: Mapped[list[Any]] = mapped_column(JSON, default=list)
     id_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The ID token's sid: the provider's logout tokens name the session they end by it.

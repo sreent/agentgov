@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 import subprocess
@@ -12,7 +13,13 @@ import yaml
 from fastapi.testclient import TestClient
 
 from agentgov.config import Settings
-from agentgov.gateway import render, to_yaml, with_available_keys, write_if_changed
+from agentgov.gateway import (
+    identity_headers,
+    render,
+    to_yaml,
+    with_available_keys,
+    write_if_changed,
+)
 from agentgov.models import Agent, ModelProvider, ToolServer
 
 IMAGE = "ghcr.io/agentgateway/agentgateway:v1.6.0"
@@ -79,6 +86,24 @@ def routes(config: dict) -> dict[str, dict]:
     return {r["name"]: r for r in config["binds"][0]["listeners"][0]["routes"]}
 
 
+def test_a_key_goes_only_where_it_may() -> None:
+    """Set before the rules were, or before the deployment listed the hosts: the gateway
+    doesn't send the key, and says why."""
+    odd = ModelProvider(name="odd", kind="openai", status="approved", key_file="/tls/tls.key")
+    listed = SETTINGS.with_overrides(credential_hosts="api.groq.com")
+    got = routes(render([], listed, providers=[*providers(), odd]))
+    assert got["llm-groq"]["policies"]["backendAuth"] == {"key": {"file": "/model-keys/groq"}}
+    for name, why in (("vllm", "doesn't list its base_url's host, vllm"), ("odd", "/tls/tls.key")):
+        policies = got[f"llm-{name}"]["policies"]
+        assert "backendAuth" not in policies
+        assert policies["directResponse"]["status"] == 503
+        assert why in policies["directResponse"]["body"]
+    # No list: any host, as before.
+    assert (
+        "backendAuth" in routes(render([], SETTINGS, providers=providers()))["llm-vllm"]["policies"]
+    )
+
+
 def test_one_route_per_reviewed_server() -> None:
     config = render(servers(), SETTINGS)
     assert set(routes(config)) == {"mcp-crm", "mcp-hr", "agentgov-health"}  # pending excluded
@@ -105,6 +130,19 @@ def test_every_route_is_authenticated_and_governed() -> None:
     assert processor["metadata"]["groups"] == "jwt.groups"
     assert processor["metadata"]["act"] == "jwt.act"
     assert "authorization" in processor["requestHeaders"]["disallowed"]
+
+
+def test_callers_cannot_send_agentgovs_headers_on() -> None:
+    """The gateway drops, as a request arrives, every header that only AgentGov sets: the
+    ones the processor is told (computed from the token) and the ones a called agent is."""
+    config = render(servers(), SETTINGS, providers=providers())
+    listener = config["binds"][0]["listeners"][0]
+    dropped = set(listener["policies"]["transformations"]["request"]["remove"])
+    told = set(identity_headers(SETTINGS)) | {"x-agentgov-issuer", "x-agentgov-path"}
+    assert told | {"x-agentgov-provider", "x-agentgov-model"} <= dropped
+    assert {"x-agentgov-caller", "x-agentgov-on-behalf-of", "x-agentgov-chain"} <= dropped
+    # The delegation goes on, for the processor to check (it is signed).
+    assert "x-agentgov-delegation" not in dropped
 
 
 def test_monitor_mode_relaxes_authentication() -> None:
@@ -193,6 +231,8 @@ class TestModelRoutes:
             assert webhook["headers"]["x-agentgov-subject"] == "jwt.sub"
             assert webhook["headers"]["x-agentgov-groups"] == "toJson(jwt.groups)"
             assert webhook["headers"]["x-agentgov-act"] == "toJson(jwt.act)"
+            # The agent's trace, for the decisions recorded.
+            assert webhook["headers"]["traceparent"] == 'request.headers["traceparent"]'
 
     def test_a_token_is_always_needed_for_a_model(self) -> None:
         # The gateway spends the provider's key: callers without a valid token never get
@@ -237,6 +277,26 @@ def test_tracing_and_ipv6() -> None:
     assert config["config"]["enableIpv6"] is False
 
 
+def test_usage_goes_to_a_receiver_of_its_own() -> None:
+    """The access logs that meter model calls go where only the gateway sends (with mutual
+    TLS, showing its certificate); the traces, where agents send theirs too."""
+    alone = dataclasses.replace(SETTINGS, gateway_usage_endpoint="otel-collector:4319")
+    logs = render([], alone)["frontendPolicies"]["accessLog"]["otlp"]
+    assert logs == {"host": "otel-collector:4319", "protocol": "grpc"}
+    mutual = dataclasses.replace(alone, tls_dir="/tls")
+    config = render([], mutual)["frontendPolicies"]
+    tls = config["accessLog"]["otlp"]["policies"]["backendTLS"]
+    assert (tls["cert"], tls["root"], tls["hostname"]) == (
+        "/tls/tls.crt",
+        "/tls/ca.crt",
+        "otel-collector",
+    )
+    assert config["tracing"]["host"] == "otel-collector:4317"
+    # Without a receiver of their own, they go with the traces (as before).
+    shared = render([], SETTINGS)["frontendPolicies"]["accessLog"]["otlp"]
+    assert shared == {"host": "otel-collector:4317", "protocol": "grpc"}
+
+
 def test_atomic_write(tmp_path: Path) -> None:
     target = tmp_path / "gw" / "config.yaml"
     content = to_yaml(render(servers(), SETTINGS))
@@ -275,7 +335,7 @@ def test_agentgateway_accepts_generated_config(tmp_path: Path) -> None:
         servers(),
         SETTINGS,
         {"a2a-masking": "enforce", "developer-sign-in": "on"},
-        providers=providers("/cfg/keys"),
+        providers=providers(),
         agents=a2a_agents(),
     )
     routes = {r["name"]: r for r in config["binds"][0]["listeners"][0]["routes"]}
@@ -302,6 +362,8 @@ def test_agentgateway_accepts_generated_config(tmp_path: Path) -> None:
             "--rm",
             "-v",
             f"{tmp_path}:/cfg:ro",
+            "-v",
+            f"{tmp_path / 'keys'}:/model-keys:ro",
             IMAGE,
             "-f",
             "/cfg/config.yaml",
@@ -358,9 +420,13 @@ class TestServedConfig:
         assert "mcp-crm" in Path(path).read_text()
 
     def test_the_sidecar_publishes_a_provider_once_its_key_is_there(
-        self, settings, tmp_path: Path
+        self, settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from agentgov.api.app import create_app
+        from agentgov.registry import model_providers
+
+        # The model keys directory, here.
+        monkeypatch.setattr(model_providers, "KEY_DIR", str(tmp_path / "keys"))
 
         # Agents' tokens can be checked: the gateway spends a provider's key on no others.
         checked = settings.with_overrides(

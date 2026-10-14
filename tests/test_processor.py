@@ -12,7 +12,7 @@ from google.protobuf import struct_pb2
 
 from agentgov.config import Settings
 from agentgov.opa.client import OpaError
-from agentgov.processor.control_plane import DecisionRecorder
+from agentgov.processor.control_plane import ControlPlaneError, DecisionRecorder
 from agentgov.processor.presidio import PresidioError
 from agentgov.processor.proto import ext_mcp_pb2 as pb
 from agentgov.processor.proto import ext_mcp_pb2_grpc as pb_grpc
@@ -542,6 +542,24 @@ class TestPeople:
         _, cp = run(opa, request=call_request("get", {}, **claims))
         assert "user" not in opa.inputs[0][1]
         assert cp.records[0]["user"] is None
+        # Keycloak names a client's service account after it, in lower case.
+        opa = FakeOpa()
+        claims = {
+            "client_id": "Agent-Bot",
+            "subject": "sa-1",
+            "username": "service-account-agent-bot",
+        }
+        run(opa, request=call_request("get", {}, **claims))
+        assert "user" not in opa.inputs[0][1]
+
+    def test_a_person_named_like_a_service_account_is_a_person(self) -> None:
+        """Only the service account of the client the token was issued to is the agent's
+        own: a person whose username starts the same way is a person, whom policy sees."""
+        opa = FakeOpa()
+        claims = {"subject": "u-9", "username": "service-account-billing", "email": "m@x.com"}
+        _, cp = run(opa, request=call_request("get", {}, **claims))
+        assert opa.inputs[0][1]["user"]["username"] == "service-account-billing"
+        assert cp.records[0]["user"]["id"] == "u-9"
 
     def test_tools_are_listed_for_the_person(self) -> None:
         opa = FakeOpa(visible=["get"])
@@ -605,3 +623,46 @@ class TestLostRecords:
         asyncio.run(go())
         assert [r["n"] for r in cp.records] == [3, 4, 5]  # the oldest went
         assert (recorder.dropped, recorder.reported, cp.dropped) == (3, 3, 3)
+
+    def test_a_batch_the_control_plane_refuses_isnt_sent_for_ever(self) -> None:
+        """Refused as it is (4xx), a batch would be refused again: its records are lost, and
+        the next batch says how many. Nothing else that goes wrong stops the recorder."""
+
+        class Refusing(FakeControlPlane):
+            async def record_decisions(self, records, *, dropped=0):
+                if any(r.get("bad") for r in records):
+                    raise ControlPlaneError("/v1/internal/decisions returned 422", status=422)
+                if any(r.get("odd") for r in records):
+                    raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+                return await super().record_decisions(records, dropped=dropped)
+
+        cp = Refusing()
+        recorder = DecisionRecorder(cp, batch=1)  # type: ignore[arg-type]
+
+        async def go() -> None:
+            recorder.start()
+            for record in ({"n": 0}, {"bad": True}, {"odd": True}, {"n": 1}):
+                recorder.record(record)
+            await asyncio.wait_for(recorder.stop(), 5)
+
+        asyncio.run(go())
+        assert [r.get("n") for r in cp.records] == [0, 1]
+        assert (recorder.dropped, recorder.reported, cp.dropped) == (2, 2, 2)
+
+    def test_stopping_doesnt_wait_for_ever(self) -> None:
+        """With the control plane out of reach, what is left when the processor stops is
+        lost, and logged: the shutdown doesn't hang on it."""
+
+        class Down(FakeControlPlane):
+            async def record_decisions(self, records, *, dropped=0):
+                raise ControlPlaneError("control plane unreachable")
+
+        recorder = DecisionRecorder(Down(), batch=2)  # type: ignore[arg-type]
+
+        async def go() -> None:
+            for n in range(5):
+                recorder.record({"n": n})
+            await asyncio.wait_for(recorder.flush(timeout=0.2), 5)
+
+        asyncio.run(go())
+        assert recorder.dropped == 5

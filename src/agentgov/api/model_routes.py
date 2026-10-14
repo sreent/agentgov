@@ -34,8 +34,10 @@ def create_provider(
     """Approve a model provider; agents call it at ``/llm/<name>`` once the gateway can
     read its API key (``key_file``)."""
     known_fields(body, {"name", *model_providers.FIELDS}, "a model provider")
-    with request.app.state.rt.db.session() as s:
-        return model_providers.to_dict(model_providers.create(s, body, actor=principal.actor))
+    rt = request.app.state.rt
+    with rt.db.session() as s:
+        provider = model_providers.create(s, body, actor=principal.actor, settings=rt.settings)
+        return model_providers.to_dict(provider)
 
 
 @router.get("/providers/{ref}")
@@ -52,9 +54,17 @@ def update_provider(
     principal: Principal = Depends(admin),
 ) -> dict[str, Any]:
     known_fields(body, model_providers.FIELDS, "a model provider's edit")
-    with request.app.state.rt.db.session() as s:
+    rt = request.app.state.rt
+    with rt.db.session() as s:
         provider = model_providers.get(s, ref)
-        model_providers.update(s, provider, body, actor=principal.actor, version=if_match(request))
+        model_providers.update(
+            s,
+            provider,
+            body,
+            actor=principal.actor,
+            version=if_match(request),
+            settings=rt.settings,
+        )
         return model_providers.to_dict(provider)
 
 

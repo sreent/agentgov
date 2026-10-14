@@ -37,7 +37,8 @@ from agentgov.registry import (
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
 
-# action -> (allowed source states, target state)
+# action -> (allowed source states, target state). Unblocking gives back what blocking found
+# (Agent.blocked_from): active, as here, for an agent blocked before that was kept.
 TRANSITIONS: dict[str, tuple[frozenset[str], str]] = {
     "approve": (frozenset({PENDING}), ACTIVE),
     "block": (frozenset({PENDING, ACTIVE, DISCOVERED}), BLOCKED),
@@ -47,6 +48,9 @@ TRANSITIONS: dict[str, tuple[frozenset[str], str]] = {
     "adopt": (frozenset({DISCOVERED}), PENDING),
 }
 ACTIVATING = {"approve", "unblock"}
+# Where an agent registered through the API or a manifest comes from (connectors' agents come
+# from platform:<platform>, those seen in traffic from discovered:<how>).
+REGISTERED = "registered"
 # What an agent's risk counts that an edit can change.
 RISKY_FIELDS = {"owner", "sponsors", "risk_tier", "blueprint", "permissions"}
 
@@ -163,10 +167,14 @@ def may_call(caller: Agent, target: Agent) -> bool:
     )
 
 
-def a2a_view(session: Session, settings: Settings, agent: Agent) -> dict[str, Any]:
+def a2a_view(
+    session: Session, settings: Settings, agent: Agent, *, reached: set[str] | None = None
+) -> dict[str, Any]:
     """Agent to agent: where it is called through the gateway, whom it may call, and who
-    may call it."""
-    others = [a for a in list_agents(session) if a.id != agent.id]
+    may call it (of the agents ``reached``, by ID, for a role for some teams only)."""
+    others = [
+        a for a in list_agents(session) if a.id != agent.id and (reached is None or a.id in reached)
+    ]
     route = a2a_route(agent)
     gateway = settings.gateway_public_url.rstrip("/")
     unpublished = _unpublished(session, agent)
@@ -304,16 +312,21 @@ def workload_identity(agent: Agent) -> dict[str, str] | None:
 # Labels under this prefix change what AgentGov does to an agent (agentgov/exempt-rules,
 # agentgov/exempt-controls): only administrators set them.
 RESERVED_LABELS = "agentgov/"
+# Labels the built-in policies read as an allowance (agentgov/policies): pii-access lets the
+# agent have personal data unmasked. Only administrators set them too.
+ENTITLEMENTS = ("pii-access",)
+RESERVED_WORDS = f"labels under {RESERVED_LABELS} and {', '.join(ENTITLEMENTS)}"
+
+
+def reserved(key: Any) -> bool:
+    """Whether only administrators set, change or remove the label ``key``."""
+    return str(key).startswith(RESERVED_LABELS) or str(key) in ENTITLEMENTS
 
 
 def reserved_changes(old: Any, new: Any) -> list[str]:
-    """The labels under RESERVED_LABELS that ``new`` adds, removes or changes from ``old``."""
+    """The reserved labels that ``new`` adds, removes or changes from ``old``."""
     old, new = dict(old or {}), dict(new or {})
-    return sorted(
-        k
-        for k in set(old) | set(new)
-        if str(k).startswith(RESERVED_LABELS) and old.get(k) != new.get(k)
-    )
+    return sorted(k for k in set(old) | set(new) if reserved(k) and old.get(k) != new.get(k))
 
 
 def register(
@@ -326,17 +339,15 @@ def register(
     admin: bool = True,
 ) -> Agent:
     """Register an agent. It starts ``pending`` unless ``approve`` is set. Only an
-    administrator (``admin``) sets the labels that exempt it from rules or controls."""
+    administrator (``admin``) sets the reserved labels: those that exempt it from rules or
+    controls, and those the policies read as an allowance. Where it comes from, the server
+    says: registered (connectors and discovery make the others)."""
     name = validation.slug(data.get("name"), "name")
-    reserved = sorted(
-        k
-        for k in (data.get("labels") or {} if isinstance(data.get("labels"), dict) else {})
-        if str(k).startswith(RESERVED_LABELS)
-    )
-    if reserved and not admin:
+    labels = data.get("labels")
+    held = sorted(k for k in labels if reserved(k)) if isinstance(labels, dict) else []
+    if held and not admin:
         raise ValidationError(
-            f"label(s) {', '.join(reserved)}: labels under {RESERVED_LABELS} are set by "
-            "administrators"
+            f"label(s) {', '.join(held)}: {RESERVED_WORDS} are set by administrators"
         )
     if session.scalar(select(Agent).where(Agent.name == name)):
         raise Conflict(f"agent {name!r} already exists")
@@ -344,7 +355,7 @@ def register(
         id=ids.new_id(ids.AGENT),
         name=name,
         status=PENDING,
-        source=str(data.get("source") or "registered"),
+        source=REGISTERED,
         client_id=client_id_for(name),
         created_by=actor,
         sponsors=[],
@@ -436,12 +447,16 @@ def transition(
     allowed, target = TRANSITIONS[action]
     if agent.status not in allowed:
         raise InvalidTransition(f"cannot {action} an agent that is {agent.status}")
-    if action in ACTIVATING:
+    if action == "unblock":
+        # As it was when it was blocked: blocking then unblocking approves nothing.
+        target = agent.blocked_from or target
+    if action in ACTIVATING and target == ACTIVE:
         _check_activation(agent)
     if action == "delete" and agent.status == DELETED:
         raise InvalidTransition("agent is already deleted")
     previous = agent.status
     agent.status = target
+    agent.blocked_from = previous if target == BLOCKED else None
     agent.status_reason = reason
     now = ids.utcnow()
     if target == ACTIVE and agent.attestation_expires_at is None:
@@ -619,6 +634,8 @@ def to_dict(agent: Agent) -> dict[str, Any]:
         "description": agent.description,
         "status": agent.status,
         "status_reason": agent.status_reason,
+        # Blocked, what unblocking gives back.
+        "blocked_from": agent.blocked_from,
         "blueprint": agent.blueprint.name if agent.blueprint else None,
         "owner": agent.owner,
         "sponsors": agent.sponsors or [],

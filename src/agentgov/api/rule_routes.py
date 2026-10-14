@@ -11,6 +11,7 @@ from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
 from agentgov.api.versions import if_match
 from agentgov.registry import access_packages, agents, rules
+from agentgov.registry.errors import NotFound
 from agentgov.runtime import JOB_WAIT_SECONDS
 
 router = APIRouter(prefix="/v1", tags=["management rules"])
@@ -99,7 +100,8 @@ def agent_rules(
     agent's owner and sponsors."""
     with _rt(request).db.session() as s:
         agent = agents.get(s, ref)
-        responsible = principal.name.lower() in access_packages.responsible(s, agent)
+        person = principal.person
+        responsible = person is not None and person.lower() in access_packages.responsible(s, agent)
         if not reach.roles_at(s, principal, agent) & set(READ_ROLES) and not responsible:
-            raise HTTPException(403, f"role {principal.role!r} may not do this")
+            raise NotFound(f"agent {ref!r} not found")  # out of their reach
         return rules.for_agent(s, agent)

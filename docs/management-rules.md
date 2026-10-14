@@ -93,7 +93,11 @@ failed sync can't vouch for (unverified) don't. Rules' own issues never count.
 
 A scope names teams and blueprints that are there: a misspelt one, which would match no
 agent, is refused. A team or blueprint a rule names, in its scope or as the owner it gives
-agents, can't be deleted while the rule does.
+agents, can't be deleted while the rule does. A role for one team can't edit its agents out
+of a rule's scope (with another environment or label, say): administrators for every team
+do that ([roles for one team](administration.md#roles-for-one-team)). Where an agent runs is
+AgentGov's to say, not its registration's: one registered through the API or a manifest
+runs at the `gateway`.
 
 An agent labelled `agentgov/exempt-rules` is left out of the rules it names (`inactive-agents,
 stale-registrations`), or of all of them (`*`); only administrators set labels under

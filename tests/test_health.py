@@ -149,14 +149,23 @@ def test_presidio_down_refuses_calls_while_enforced_and_closed(client) -> None:
 
 
 def test_token_budgets_need_the_gateways_access_logs(settings: Settings) -> None:
-    for endpoint, status in ((None, "inactive"), ("http://otel-collector:4317", "active")):
-        app = create_app(settings.with_overrides(gateway_otlp_endpoint=endpoint), background=False)
+    traces, usage = "http://otel-collector:4317", "otel-collector:4319"
+    for endpoints, status, problem in (
+        ((None, None), "inactive", "budgets never run out"),
+        # Where agents send traces too, any of them could report usage for another.
+        ((traces, None), "limited", "use up its budget"),
+        ((traces, usage), "active", None),
+        ((None, usage), "active", None),
+    ):
+        names = ("gateway_otlp_endpoint", "gateway_usage_endpoint")
+        overrides = dict(zip(names, endpoints, strict=True))
+        app = create_app(settings.with_overrides(**overrides), background=False)
         with TestClient(app) as client:
             report(client, processor())
             found = feature(client, "token-budgets")
             assert found["status"] == status
-            if endpoint is None:
-                assert "budgets never run out" in found["problems"][0]
+            if problem:
+                assert problem in found["problems"][0]
 
 
 def test_the_traffic_classifier_and_your_decision_point(settings: Settings) -> None:
@@ -301,3 +310,38 @@ def test_the_cli_says_what_stops_a_feature(client, monkeypatch) -> None:
     report(client, processor(presidio={"configured": False, "ok": False}))
     out = ok(runner.invoke(cli.app, ["components"]))
     assert "processor-0" in out and "not set up" in out and "reachable" in out
+
+
+def test_what_vouches_for_the_ledger_outside_its_database(
+    settings: Settings, tmp_path, monkeypatch
+) -> None:
+    """Said where AgentGov says what works: whether the time-stamps are checked against the
+    authority's certificates, and whether a file outside the database keeps the ledger's
+    head, without which a restore, or entries removed from the end, go unnoticed."""
+    with TestClient(create_app(settings, background=False)) as client:
+        ledger = client.get("/v1/components", headers=ADMIN).json()["ledger"]
+        assert ledger["time_stamps"]["configured"] is False
+        assert ledger["witness"]["configured"] is False
+        assert "restored from an older backup" in ledger["witness"]["detail"]
+        monkeypatch.setattr(cli, "_client", lambda: _Shared(client, "test-admin"))
+        listed = ok(runner.invoke(cli.app, ["components"]))
+        assert "witness" in listed and "not set up" in listed
+    stamped = settings.with_overrides(
+        ledger_tsa_url="https://tsa.test/", ledger_witness_file=str(tmp_path / "head.json")
+    )
+    with TestClient(create_app(stamped, background=False)) as client:
+        ledger = client.get("/v1/components", headers=ADMIN).json()["ledger"]
+        assert (ledger["time_stamps"]["configured"], ledger["time_stamps"]["ok"]) == (True, False)
+        assert "The authority isn't checked" in ledger["time_stamps"]["detail"]
+        assert ledger["witness"] == {"configured": True, "ok": True, "detail": ""}
+        kept = client.get("/v1/ledger/retention", headers=ADMIN).json()
+        assert (kept["tsa_ca"], kept["witness_file"]) == (False, str(tmp_path / "head.json"))
+    ca = tmp_path / "tsa-ca.pem"
+    from tests.timestamps import authority
+
+    ca.write_bytes(authority().pem)
+    with TestClient(
+        create_app(stamped.with_overrides(ledger_tsa_ca_file=str(ca)), background=False)
+    ) as client:
+        stamps = client.get("/v1/components", headers=ADMIN).json()["ledger"]["time_stamps"]
+        assert (stamps["configured"], stamps["ok"]) == (True, True)

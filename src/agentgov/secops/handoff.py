@@ -8,9 +8,10 @@
 * decide: it also approves and denies the approval requests sent to approvers.
 
 Each level includes the ones before it. The secops role is for the security team's tools
-(an API key for a SIEM or SOAR) and analysts (a single sign-on role); administrators and
-approvers act as always, whatever the level. Everything the role does is in the ledger
-under its name, and administrators can undo it.
+(an API key for a SIEM or SOAR) and analysts (a single sign-on role), for every team or for
+one team's agents (secops@sales), at the same level; administrators and approvers act as
+always, whatever the level. Everything the role does is in the ledger under its name, and
+administrators can undo it.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from agentgov.identity import sso
 from agentgov.registry import features
 from agentgov.registry.errors import Forbidden
 
@@ -41,11 +43,17 @@ def at_least(session: Session, needed: str) -> bool:
     return LEVELS.index(level(session)) >= LEVELS.index(needed)
 
 
+def _held(principal: Any) -> set[str]:
+    """The roles the principal holds, for every team or for some: secops@sales is the secops
+    role, which the hand-off applies to as it does for every team."""
+    return {sso.split_role(role)[0] for role in principal.roles}
+
+
 def acting_as_secops(principal: Any, *also: str) -> bool:
-    """Whether the principal acts only through the secops role (not as an administrator, nor
-    with another role in ``also`` that may do this anyway)."""
-    roles = principal.roles
-    return ROLE in roles and not roles & ({"admin"} | set(also))
+    """Whether the principal acts only through the secops role, for every team or for some (not
+    as an administrator, nor with another role in ``also`` that may do this anyway, either of
+    those for every team)."""
+    return ROLE in _held(principal) and not principal.roles & ({"admin"} | set(also))
 
 
 def check(session: Session, principal: Any, needed: str, *, also: tuple[str, ...] = ()) -> None:
@@ -63,9 +71,13 @@ def check(session: Session, principal: Any, needed: str, *, also: tuple[str, ...
 
 def check_kill_switch(session: Session, principal: Any, action: str) -> None:
     """Block and unblock: what the secops role may do to agents, tool servers, model
-    providers and identity issuers, from contain on. Nothing else of theirs."""
+    providers and identity issuers, from contain on. Nothing else of theirs, and nothing at
+    all of anyone's but administrators' (``principal`` as it is where the agent is, for an
+    agent: reach.here)."""
     if principal.is_admin:
         return
+    if ROLE not in _held(principal):
+        raise Forbidden(f"role {principal.role!r} may not do this")
     if action not in ("block", "unblock"):
         raise Forbidden(f"role {principal.role!r} may block and unblock, nothing else here")
     check(session, principal, CONTAIN)

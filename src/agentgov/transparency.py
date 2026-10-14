@@ -77,11 +77,20 @@ def load_signing_key(path: str | Path) -> ec.EllipticCurvePrivateKey:
 def load_log_key(path: str | Path) -> ed25519.Ed25519PublicKey:
     """The log's public key (PEM): Ed25519, as Rekor v2's logs sign their checkpoints."""
     try:
-        key = serialization.load_pem_public_key(Path(path).read_bytes())
-    except (OSError, ValueError, TypeError) as exc:
+        data = Path(path).read_bytes()
+    except OSError as exc:
         raise TransparencyError(f"the log's key in {path} can't be read: {exc}") from None
+    return parse_log_key(data, str(path))
+
+
+def parse_log_key(data: bytes, where: str) -> ed25519.Ed25519PublicKey:
+    """The log's public key from its PEM (``where`` it came from, for errors)."""
+    try:
+        key = serialization.load_pem_public_key(data)
+    except (ValueError, TypeError) as exc:
+        raise TransparencyError(f"the log's key in {where} can't be read: {exc}") from None
     if not isinstance(key, ed25519.Ed25519PublicKey):
-        raise TransparencyError(f"the log's key in {path} isn't an Ed25519 public key")
+        raise TransparencyError(f"the log's key in {where} isn't an Ed25519 public key")
     return key
 
 

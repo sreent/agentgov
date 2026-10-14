@@ -152,7 +152,11 @@ def retention_view(request: Request, _: Principal = Depends(read)) -> dict[str, 
             "archive_dir": bool(settings.ledger_archive_dir),
             "checkpoint_hours": settings.ledger_checkpoint_hours,
             "tsa_url": settings.ledger_tsa_url,
+            # Whether its time-stamps are checked against the authority's certificates.
+            "tsa_ca": bool(settings.ledger_tsa_ca_file),
             "rekor_url": settings.ledger_rekor_url,
+            # Where the ledger's head is kept outside the database, if anywhere.
+            "witness_file": settings.witness_file(),
             "data_retention_days": settings.data_retention_days,
             "chain_from": floor,
             "chain_from_hash": floor_hash if floor else None,

@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy import select
 
+from agentgov import ledger
 from agentgov.api.auth import READ_ROLES, Principal, require
 from agentgov.api.versions import if_match
 from agentgov.models import LedgerEntry
@@ -72,7 +73,7 @@ def secops_events(
             )
         entries = s.scalars(
             select(LedgerEntry)
-            .where(LedgerEntry.seq > after)
+            .where(LedgerEntry.seq > after, ledger.in_chain())
             .order_by(LedgerEntry.seq)
             .limit(limit)
         ).all()
@@ -124,7 +125,7 @@ def create_destination(
     credential goes in its secret file."""
     rt = _rt(request)
     with rt.db.session() as s:
-        destination = destinations.create(s, body, actor=principal.actor)
+        destination = destinations.create(s, body, actor=principal.actor, settings=rt.settings)
         return destinations.to_dict(destination, rt.settings, destinations.head(s))
 
 
@@ -147,7 +148,14 @@ def update_destination(
     rt = _rt(request)
     with rt.db.session() as s:
         destination = destinations.get(s, ref)
-        destinations.update(s, destination, body, actor=principal.actor, version=if_match(request))
+        destinations.update(
+            s,
+            destination,
+            body,
+            actor=principal.actor,
+            version=if_match(request),
+            settings=rt.settings,
+        )
         return destinations.to_dict(destination, rt.settings, destinations.head(s))
 
 

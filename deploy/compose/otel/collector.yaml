@@ -8,6 +8,18 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+  # The gateway's access logs, on a receiver of their own: what they say is billed to
+  # agents and counts against their budgets, so it takes only certificates from AgentGov's
+  # authority (the gateway's), not whatever can send traces.
+  otlp/gateway:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4319
+        tls:
+          cert_file: /tls/tls.crt
+          key_file: /tls/tls.key
+          client_ca_file: /tls/ca.crt
+          reload_interval: 1m
 
 processors:
   batch:
@@ -43,6 +55,6 @@ service:
       processors: [batch]
       exporters: [otlp_http/agentgov]
     logs:
-      receivers: [otlp]
+      receivers: [otlp/gateway]
       processors: [filter/model_calls, batch]
       exporters: [otlp_http/agentgov]

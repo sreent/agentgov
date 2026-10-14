@@ -58,7 +58,9 @@ token:
                       which the processor couldn't read.
 
 Agents carry their delegation (``X-AgentGov-Delegation``) on the calls they make for the
-work they were handed, to tools and models too: the processor reads it there as well.
+work they were handed, to tools and models too: the processor reads it there as well. The
+listener drops every other header named as AgentGov's that a caller sends (``DROPPED``),
+before any route's policies: only AgentGov sets those.
 
 agentgateway watches the file and reloads it, so it only has to be rewritten
 atomically when tool servers or model providers change. The control plane serves
@@ -179,6 +181,24 @@ OWN_HEADERS = frozenset(
 )
 
 
+# The headers named as AgentGov's that only AgentGov sets. Those a caller sends never reach
+# the processor (agentgateway passes it only those it computes from the token), and the
+# gateway drops them as a request arrives, before any route's checks: so no agent, tool
+# server or model provider called takes a caller's for AgentGov's, even for a call let
+# through unchecked (the processor's answer sets who called an agent, after the drop). The
+# delegation a caller carries goes on, for the processor to check: it is signed.
+DROPPED = (
+    *sorted(PERSON_HEADERS.keys() | OWN_HEADERS),
+    "x-agentgov-issuer",
+    "x-agentgov-provider",
+    "x-agentgov-model",
+    "x-agentgov-path",
+    chains.CALLER_HEADER,
+    chains.PERSON_HEADER,
+    chains.CHAIN_HEADER,
+)
+
+
 def _own(expression: str, settings: Settings, issuers: Any, *, empty: str = "null") -> str | None:
     """``expression``, a claim only AgentGov's own tokens are believed for: as it is while
     the gateway takes no one else's; else only for Keycloak's tokens (``empty`` for the
@@ -223,8 +243,9 @@ def identity_headers(settings: Settings, issuers: Any = ()) -> dict[str, str]:
 
 
 def processor_tls(settings: Settings, address: str, *, grpc: bool = False) -> dict[str, Any]:
-    """agentgateway's TLS to the processor (with AGENTGOV_TLS_DIR): it checks the
-    processor's certificate against AgentGov's authority, and shows its own."""
+    """agentgateway's TLS to the processor, or another of AgentGov's components (with
+    AGENTGOV_TLS_DIR): it checks the component's certificate against AgentGov's authority,
+    and shows its own."""
     folder = settings.gateway_tls_dir.rstrip("/")
     tls: dict[str, Any] = {
         "cert": f"{folder}/tls.crt",
@@ -315,6 +336,13 @@ AI_PROVIDERS = {
 CHAT_PATH = "/v1/chat/completions"
 
 
+def issuer_audience(issuer: Any, settings: Settings) -> str:
+    """The audience the gateway takes a trusted identity issuer's tokens for: the issuer's
+    own, else the gateway's address. Not one every install shares: a token one install's
+    gateway receives, from an issuer another install trusts too, isn't good there."""
+    return issuer.audience or settings.gateway_public_url.rstrip("/")
+
+
 def _providers(settings: Settings, issuers: Any) -> list[dict[str, Any]]:
     """Whose tokens the gateway takes: Keycloak's, then those of each identity issuer it
     trusts, for the audience the issuer's tokens carry, with its keys written in (the
@@ -332,7 +360,7 @@ def _providers(settings: Settings, issuers: Any) -> list[dict[str, Any]]:
         providers.append(
             {
                 "issuer": issuer.issuer,
-                "audiences": [issuer.audience or settings.gateway_audience],
+                "audiences": [issuer_audience(issuer, settings)],
                 "jwks": json.dumps({"keys": issuer.gateway_keys}, sort_keys=True),
             }
         )
@@ -358,6 +386,21 @@ def model_route_for(
     provider: ModelProvider, settings: Settings, modes: dict[str, str], issuers: Any = ()
 ) -> dict[str, Any]:
     name = provider.name
+    matches = [{"path": {"exact": f"/llm/{name}{CHAT_PATH}"}}]
+    why = model_providers.refused(provider, settings)
+    if why:
+        # Set before the rules were, or the deployment's list changed since: no key goes.
+        message = f"The gateway doesn't send {name}'s key: {why}"
+        return {
+            "name": f"llm-{name}",
+            "matches": matches,
+            "policies": {
+                "directResponse": {
+                    "body": json.dumps({"error": {"message": message}}),
+                    "status": 503,
+                }
+            },
+        }
     backend: dict[str, Any] = {"name": name, "provider": {AI_PROVIDERS[provider.kind]: {}}}
     policies: dict[str, Any] = {}
     if provider.kind == "openai-compatible" and provider.base_url:
@@ -375,6 +418,8 @@ def model_route_for(
         "x-agentgov-model": "llmRequest.model",
         # The delegation the agent carries, when another agent handed it the work.
         chains.HEADER: f'request.headers["{chains.HEADER}"]',
+        # The agent's trace, which the decisions recorded link to.
+        "traceparent": 'request.headers["traceparent"]',
     }
     webhook = {
         "host": settings.processor_webhook_address,
@@ -412,7 +457,6 @@ def model_route_for(
             },
         }
     )
-    matches = [{"path": {"exact": f"/llm/{name}{CHAT_PATH}"}}]
     # The gateway spends the provider's key on the caller's behalf: only for callers whose
     # token it has checked, whatever the mode of unknown callers, and not at all when it
     # can't check tokens.
@@ -609,19 +653,33 @@ def render(
         }
     )
     config: dict[str, Any] = {"config": {"enableIpv6": settings.gateway_ipv6}}
+    frontend: dict[str, Any] = {}
     if settings.gateway_otlp_endpoint:
-        endpoint = urlsplit(settings.gateway_otlp_endpoint)
-        host = endpoint.netloc or endpoint.path
-        config["frontendPolicies"] = {
-            "tracing": {"host": host, "protocol": "grpc", "randomSampling": "true"},
-            # Access logs carry each model call's tokens; the agent comes from its token.
-            "accessLog": {
-                "add": _access_log_fields(settings, trusted),
-                "otlp": {"host": host, "protocol": "grpc"},
-            },
-        }
-    config["binds"] = [{"port": settings.gateway_port, "listeners": [{"routes": routes}]}]
+        host = _host(settings.gateway_otlp_endpoint)
+        frontend["tracing"] = {"host": host, "protocol": "grpc", "randomSampling": "true"}
+    usage = settings.gateway_usage_endpoint or settings.gateway_otlp_endpoint
+    if usage:
+        # Access logs carry each model call's tokens; the agent comes from its token. To a
+        # receiver of their own, they come from the gateway alone (what they say is billed).
+        otlp: dict[str, Any] = {"host": _host(usage), "protocol": "grpc"}
+        if settings.gateway_usage_endpoint and settings.tls_dir:
+            tls = processor_tls(settings, _host(usage), grpc=True)
+            otlp["policies"] = {"backendTLS": tls}
+        frontend["accessLog"] = {"add": _access_log_fields(settings, trusted), "otlp": otlp}
+    if frontend:
+        config["frontendPolicies"] = frontend
+    listener = {
+        "policies": {"transformations": {"request": {"remove": list(DROPPED)}}},
+        "routes": routes,
+    }
+    config["binds"] = [{"port": settings.gateway_port, "listeners": [listener]}]
     return config
+
+
+def _host(endpoint: str) -> str:
+    """An endpoint's host and port, as agentgateway takes them, from a URL or as they are."""
+    url = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}")
+    return url.netloc or url.path
 
 
 def _access_log_fields(settings: Settings, issuers: Any) -> dict[str, str]:

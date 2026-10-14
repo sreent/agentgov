@@ -4,7 +4,9 @@
 {{- $config := include "agentgov.otelConfig" . }}
 # Agents and the gateway send OTLP here. GenAI spans go to the control plane, which
 # uses them for discovery (shadow agents), activity and detective controls; so do the
-# gateway's access logs of model calls, which meter tokens and cost.
+# gateway's access logs of model calls, which meter tokens and cost: on a port of their
+# own, which only the gateway may reach (and, with internal TLS, only with a certificate
+# from AgentGov's authority).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -58,6 +60,7 @@ spec:
           ports:
             - {name: otlp-grpc, containerPort: 4317}
             - {name: otlp-http, containerPort: 4318}
+            - {name: otlp-usage, containerPort: 4319}
             - {name: health, containerPort: 13133}
           readinessProbe:
             httpGet: {path: /, port: health}
@@ -91,6 +94,7 @@ spec:
   ports:
     - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc, appProtocol: grpc}
     - {name: otlp-http, port: 4318, targetPort: otlp-http}
+    - {name: otlp-usage, port: 4319, targetPort: otlp-usage, appProtocol: grpc}
 {{- end }}
 
 {{- define "agentgov.otelConfig" -}}
@@ -101,6 +105,19 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+  # The gateway's access logs: what they say is billed to agents and counts against their
+  # budgets, so they have a receiver of their own, not one agents send traces to.
+  otlp/gateway:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4319
+        {{- if .Values.internalTLS.enabled }}
+        tls:
+          cert_file: /tls/tls.crt
+          key_file: /tls/tls.key
+          client_ca_file: /tls/ca.crt
+          reload_interval: 1m
+        {{- end }}
 processors:
   batch:
     timeout: 2s
@@ -135,7 +152,7 @@ service:
       processors: [batch]
       exporters: [otlp_http/agentgov]
     logs:
-      receivers: [otlp]
+      receivers: [otlp/gateway]
       processors: [filter/model_calls, batch]
       exporters: [otlp_http/agentgov]
 {{- end -}}

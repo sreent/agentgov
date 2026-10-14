@@ -22,7 +22,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agentgov import ids
+from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock
 from agentgov.models import (
@@ -486,6 +486,34 @@ def accountable(session: Session, agent: Agent, name: str | None) -> str | None:
     return None
 
 
+def _not_accountable(session: Session, finding: Finding, by: str | None, does: str) -> None:
+    """Refuse ``by``, the person answering an issue, what someone accountable for its agent
+    mustn't do: someone else signs that off."""
+    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
+    why = accountable(session, agent, by) if agent is not None else None
+    if why:
+        raise Forbidden(
+            f"{why[0].upper()}{why[1:]}: someone who isn't accountable for it {does} "
+            "(another approver, an administrator or the security team)"
+        )
+
+
+def dismiss(
+    session: Session,
+    finding: Finding,
+    *,
+    reason: Any,
+    actor: str,
+    until: datetime | None = None,
+    by: str | None = None,
+) -> Finding:
+    """Dismiss an issue that is wrong (findings.dismiss). It then goes to nobody, as one whose
+    risk was accepted: ``by``, the person dismissing it, mustn't be accountable for its agent
+    either."""
+    _not_accountable(session, finding, by, "dismisses its issues")
+    return findings.dismiss(session, finding, reason=reason, actor=actor, until=until)
+
+
 def accept(
     session: Session,
     finding: Finding,
@@ -501,13 +529,7 @@ def accept(
     lock(session, finding)
     if finding.status not in ("open", "accepted"):
         raise InvalidTransition(f"finding is {finding.status}: only open findings are accepted")
-    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
-    why = accountable(session, agent, by) if agent is not None else None
-    if why:
-        raise Forbidden(
-            f"{why[0].upper()}{why[1:]}: someone who isn't accountable for it accepts its "
-            "risks (another approver, an administrator or the security team)"
-        )
+    _not_accountable(session, finding, by, "accepts its risks")
     reason = str(reason or "").strip()
     if not reason:
         raise ValidationError("say why the risk is acceptable (reason)")
@@ -534,7 +556,7 @@ def accept(
 # ---------------------------------------------------------------- what people see
 
 
-def for_person(session: Session, name: str, *, status: str | None = None) -> list[Finding]:
+def for_person(session: Session, name: str | None, *, status: str | None = None) -> list[Finding]:
     """The issues that reached this person (by any name they go by: their email address,
     user principal name or user name), or one of the teams they are in."""
     names = directory_people.aliases(session, name)
@@ -547,7 +569,7 @@ def for_person(session: Session, name: str, *, status: str | None = None) -> lis
     return [f for f in session.scalars(stmt) if names & involved(session, f, directory)]
 
 
-def may_act(session: Session, finding: Finding, name: str) -> bool:
+def may_act(session: Session, finding: Finding, name: str | None) -> bool:
     """Whether the issue reached the person, by any name they go by (their email address,
     or the user principal name they sign in with)."""
     return bool(directory_people.aliases(session, name) & involved(session, finding))
@@ -571,7 +593,11 @@ def history(session: Session, finding: Finding, limit: int = 200) -> list[Ledger
     """What happened to it, newest first, from the ledger."""
     rows = session.scalars(
         select(LedgerEntry)
-        .where(LedgerEntry.type.like("finding.%"), LedgerEntry.resource == finding.subject)
+        .where(
+            LedgerEntry.type.like("finding.%"),
+            LedgerEntry.resource == finding.subject,
+            ledger.in_chain(),
+        )
         .order_by(LedgerEntry.seq.desc())
         .limit(limit * 5)
     )

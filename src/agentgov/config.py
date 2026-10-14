@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import ipaddress
 import os
 import re
 from dataclasses import dataclass
@@ -97,6 +98,19 @@ GOOGLE_ISSUER = "https://accounts.google.com"
 # A Keycloak realm's issuer: https://sso.example.com/realms/<realm>
 KEYCLOAK_REALM = re.compile(r"/realms/[^/]+$")
 _DOMAIN = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+# A host name (a service's short name too, such as splunk), or *. and a domain.
+_HOST_PATTERN = re.compile(
+    r"^(?=.{1,253}$)(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+
+
+def _ip_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _coerce(raw: str, target: str) -> Any:
@@ -163,6 +177,11 @@ class Settings:
     # Where destinations' credentials are: a file per destination, named after it (a
     # mounted secret). Never in the database.
     destination_secrets_dir: str = "/destination-secrets"
+    # The hosts credentials may go to, comma-separated: destinations' (SIEMs, chats and
+    # service desks, with what AgentGov sends them) and openai-compatible model providers'
+    # (the gateway sends those). `*.example.com` is any host under example.com. Empty: any
+    # host, so an administrator can send these credentials anywhere by changing a URL.
+    credential_hosts: str = ""
     # How often destinations are sent what is new in the ledger (also as soon as it is
     # written, on the replica that wrote it). 0 turns delivery off.
     delivery_interval_seconds: int = 10
@@ -220,6 +239,11 @@ class Settings:
     # An RFC 3161 time-stamping authority, such as https://freetsa.org/tsr. It signs each
     # checkpoint with its own time, which proves the chain existed then, unchanged since.
     ledger_tsa_url: str | None = None
+    # The authority's certificates (PEM: its root, and any intermediate ones), which each
+    # time-stamp's signature is checked against, when it comes and whenever the ledger is
+    # verified. Unset, a time-stamp is checked against the certificate it carries, which
+    # shows it whole, not that the authority signed it.
+    ledger_tsa_ca_file: str | None = None
     # A transparency log, Sigstore's Rekor v2: its public shard (such as
     # https://log2025-1.rekor.sigstore.dev) or a rekor-tiles of your own. Each checkpoint is
     # signed with AGENTGOV_LEDGER_REKOR_SIGNING_KEY_FILE and added to it, where anyone can
@@ -258,8 +282,9 @@ class Settings:
     # was changed in Keycloak itself. The passes between, every minute and after each
     # change, sync only the agents whose clients should change. 0: every pass is full.
     identity_full_sync_seconds: int = 900
-    # Audience every agent token carries; the gateway requires it. So do the tokens of the
-    # identity issuers the gateway trusts, unless an issuer names an audience of its own.
+    # Audience every agent token Keycloak issues carries; the gateway requires it. The tokens
+    # of the identity issuers the gateway trusts carry the gateway's address instead
+    # (AGENTGOV_GATEWAY_PUBLIC_URL), unless an issuer names an audience of its own.
     gateway_audience: str = "agentgov-gateway"
     # Seconds between fetches of the signing keys of the identity issuers the gateway
     # trusts, which rotate them (docs/agent-identity.md#straight-to-the-gateway). 0: only
@@ -513,7 +538,9 @@ class Settings:
     # --- agentgateway (enforcement) ---------------------------------------------
     # Where the generated agentgateway config is written (shared volume).
     gateway_config_path: str | None = None
-    # The gateway's address as agents reach it, which the app and the API show.
+    # The gateway's address as agents reach it, which the app and the API show; also the
+    # audience of the tokens of the identity issuers the gateway trusts (unless an issuer
+    # names one), so that one install's are no good at another's.
     gateway_public_url: str = "http://localhost:8080"
     # The namespace of tool servers' names in the MCP registry ("<namespace>/<name>"); by
     # default the control plane's host name reversed, such as com.contoso.agentgov.
@@ -533,6 +560,12 @@ class Settings:
     gateway_failure_mode: str = "modes"
     # OTLP/gRPC endpoint for gateway traces, e.g. http://otel-collector:4317.
     gateway_otlp_endpoint: str | None = None
+    # OTLP/gRPC endpoint for the gateway's access logs of model calls, which meter tokens and
+    # cost: a receiver of the collector's own, which takes them from the gateway alone (with
+    # AGENTGOV_TLS_DIR, the gateway shows its certificate), e.g. otel-collector:4319. Unset,
+    # they go with the traces to AGENTGOV_GATEWAY_OTLP_ENDPOINT, where whatever can send
+    # traces (agents do) can report model usage too.
+    gateway_usage_endpoint: str | None = None
     # agentgateway binds IPv6 sockets by default, which fails on IPv4-only hosts.
     gateway_ipv6: bool = False
     # Link to a trace in your trace viewer, with {trace_id} where the W3C trace ID
@@ -638,6 +671,7 @@ class Settings:
             raise ValueError("AGENTGOV_GATEWAY_FAILURE_MODE must be 'modes', 'open' or 'closed'")
         if self.delivery_interval_seconds < 0:
             raise ValueError("AGENTGOV_DELIVERY_INTERVAL_SECONDS must be 0 (off) or more")
+        self.credential_host_list()
         if self.issues_interval_seconds < 0:
             raise ValueError("AGENTGOV_ISSUES_INTERVAL_SECONDS must be 0 (off) or more")
         if self.issues_notify_severity not in ("info", "low", "medium", "high", "critical"):
@@ -1073,6 +1107,31 @@ class Settings:
                 )
             pairs.setdefault(value, set()).add(role)
         return pairs
+
+    def credential_host_list(self) -> list[str]:
+        """AGENTGOV_CREDENTIAL_HOSTS, lowercase: hosts, IP addresses, and *.domain."""
+        hosts = [h.strip().lower().rstrip(".") for h in self.credential_hosts.split(",")]
+        for host in hosts:
+            if host and not (_HOST_PATTERN.match(host) or _ip_address(host)):
+                raise ValueError(
+                    f"AGENTGOV_CREDENTIAL_HOSTS: {host!r} is not a host, an IP address or *.domain"
+                )
+        return [h for h in hosts if h]
+
+    def credentials_may_go_to(self, url: str | None) -> bool:
+        """Whether a credential may go to ``url``'s host: any while AGENTGOV_CREDENTIAL_HOSTS
+        is empty, else only those it lists."""
+        listed = self.credential_host_list()
+        if not listed:
+            return True
+        try:
+            host = (urlsplit(url or "").hostname or "").rstrip(".")
+        except ValueError:
+            return False
+        return bool(host) and any(
+            host.endswith(entry[1:]) if entry.startswith("*.") else host == entry
+            for entry in listed
+        )
 
     def oidc_domains(self) -> list[str]:
         """AGENTGOV_OIDC_ALLOWED_DOMAINS, lowercase."""

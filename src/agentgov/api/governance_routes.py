@@ -38,6 +38,7 @@ from agentgov.registry import (
     approvals,
     bulk,
     discovery,
+    features,
     finding_types,
     findings,
     inbox,
@@ -250,7 +251,7 @@ def my_issues(
     if status not in (None, "all", *findings.STATUSES):
         raise ValidationError(f"status is {', '.join(findings.STATUSES)} or all")
     with _rt(request).db.session() as s:
-        return [findings.to_dict(f) for f in issues.for_person(s, principal.name, status=status)]
+        return [findings.to_dict(f) for f in issues.for_person(s, principal.person, status=status)]
 
 
 @router.get("/findings/{finding_id}", tags=["findings"])
@@ -261,7 +262,7 @@ def get_finding(
     what happened to it. For everyone who reads AgentGov, and the people it reached."""
     with _rt(request).db.session() as s:
         finding = findings.get(s, finding_id)
-        mine = issues.may_act(s, finding, principal.name)
+        mine = issues.may_act(s, finding, principal.person)
         if not _where(s, principal, finding).roles & set(READ_ROLES) and not mine:
             raise HTTPException(403, f"role {principal.role!r} may not do this")
         agent = s.get(Agent, finding.agent_id) if finding.agent_id else None
@@ -286,7 +287,7 @@ def acknowledge_finding(
     with _rt(request).db.session() as s:
         finding = findings.get(s, finding_id)
         here = _where(s, principal, finding)
-        if not _triages(s, here) and not issues.may_act(s, finding, principal.name):
+        if not _triages(s, here) and not issues.may_act(s, finding, principal.person):
             raise HTTPException(
                 403, "the people it went to, approvers and administrators acknowledge it"
             )
@@ -315,7 +316,7 @@ def accept_finding(
             reason=body.get("reason"),
             until=body.get("until"),
             actor=principal.actor,
-            by=principal.name,
+            by=principal.person,
         )
         return findings.to_dict(accepted)
 
@@ -323,9 +324,12 @@ def accept_finding(
 # ------------------------------------------------- answers from the people it reached
 
 
-def _theirs(session: Any, finding: Any, principal: Principal, what: str) -> None:
-    if not issues.may_act(session, finding, principal.name):
+def _theirs(session: Any, finding: Any, principal: Principal, what: str) -> str:
+    """The person ``principal`` is (Principal.person), if the issue reached them."""
+    person = principal.person
+    if not person or not issues.may_act(session, finding, person):
         raise HTTPException(403, f"the people it went to {what}")
+    return person
 
 
 @router.post("/findings/{finding_id}/not-mine", tags=["findings"])
@@ -340,13 +344,13 @@ def decline_finding(
     rt = _rt(request)
     with rt.db.session() as s:
         finding = findings.get(s, finding_id)
-        _theirs(s, finding, principal, "say it isn't theirs")
+        person = _theirs(s, finding, principal, "say it isn't theirs")
         went_to = issues.decline(
             s,
             rt.settings,
             finding,
             actor=principal.actor,
-            name=principal.name,
+            name=person,
             reason=body.get("reason"),
         )
         return {**findings.to_dict(finding), "went_to": went_to}
@@ -366,12 +370,12 @@ def ask_for_exception(
         raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
     with _rt(request).db.session() as s:
         finding = findings.get(s, finding_id)
-        _theirs(s, finding, principal, "ask to accept its risk")
+        person = _theirs(s, finding, principal, "ask to accept its risk")
         asked = issues.ask_exception(
             s,
             finding,
             actor=principal.actor,
-            name=principal.name,
+            name=person,
             reason=body.get("reason"),
             until=body.get("until"),
         )
@@ -443,14 +447,14 @@ def bulk_findings(
             here = principal if not some else replace(principal, roles=at(f.agent_id))
             if _triages(s, here):
                 return True
-            return action == "acknowledge" and issues.may_act(s, f, principal.name)
+            return action == "acknowledge" and issues.may_act(s, f, principal.person)
 
         return bulk.findings(
             s,
             body.get("findings"),
             action,
             actor=principal.actor,
-            by=principal.name,
+            by=principal.person,
             reason=body.get("reason"),
             until=body.get("until"),
             may=None if triages else may,
@@ -473,12 +477,13 @@ def dismiss_finding(
         finding = findings.get(s, finding_id)
         _triage(s, principal, finding)
         until = body.get("until")
-        dismissed = findings.dismiss(
+        dismissed = issues.dismiss(
             s,
             finding,
             reason=body.get("reason"),
             actor=principal.actor,
             until=issues.parse_until(until) if until not in (None, "") else None,
+            by=principal.person,
         )
         return findings.to_dict(dismissed)
 
@@ -528,7 +533,12 @@ def list_ledger(
     """The newest entries first: for someone with roles for some teams only, those about
     their agents."""
     with _rt(request).db.session() as s:
-        stmt = select(LedgerEntry).order_by(LedgerEntry.seq.desc()).limit(min(max(limit, 1), 500))
+        stmt = (
+            select(LedgerEntry)
+            .where(ledger.in_chain())
+            .order_by(LedgerEntry.seq.desc())
+            .limit(min(max(limit, 1), 500))
+        )
         reached = reach.agent_ids(s, principal, *READ_ROLES)
         if reached is not None:
             stmt = stmt.where(LedgerEntry.agent_id.in_(reached))
@@ -552,8 +562,9 @@ def list_ledger(
 
 @router.get("/ledger/verify", tags=["ledger"])
 def verify_ledger(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
-        return ledger.verify(s)
+    rt = _rt(request)
+    with rt.db.session() as s:
+        return ledger.verify(s, settings=rt.settings)
 
 
 @router.get("/ledger/export", tags=["ledger"])
@@ -563,7 +574,7 @@ def export_ledger(request: Request, _: Principal = Depends(read)) -> StreamingRe
 
     def lines() -> Iterator[bytes]:
         with db.session() as s:
-            for entry in ledger.iter_entries(s):
+            for entry in ledger.iter_entries(s, until=ledger.head_seq(s)):
                 yield (json.dumps(ledger.to_dict(entry), sort_keys=True) + "\n").encode()
 
     return StreamingResponse(lines(), media_type="application/x-ndjson")
@@ -636,7 +647,9 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
         decisions = s.execute(
             select(LedgerEntry.decision, func.count())
             .where(
-                LedgerEntry.type == "decision.request", LedgerEntry.ts >= now - timedelta(hours=24)
+                LedgerEntry.type == "decision.request",
+                LedgerEntry.ts >= now - timedelta(hours=24),
+                ledger.in_chain(),
             )
             .group_by(LedgerEntry.decision)
         ).all()
@@ -646,6 +659,7 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
             .where(
                 LedgerEntry.type.like("decision.%"),
                 LedgerEntry.decision.in_(("deny", "require_approval")),
+                ledger.in_chain(),
             )
             .order_by(LedgerEntry.seq.desc())
             .limit(10)
@@ -736,7 +750,9 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
         since = ids.utcnow() - timedelta(days=30)
         usage_rows = s.execute(
             select(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision, func.count())
-            .where(LedgerEntry.type == "decision.request", LedgerEntry.ts >= since)
+            .where(
+                LedgerEntry.type == "decision.request", LedgerEntry.ts >= since, ledger.in_chain()
+            )
             .group_by(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision)
         ).all()
         usage: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
@@ -746,7 +762,11 @@ def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
         # Calls between agents, by caller and the called agent's name.
         a2a_rows = s.execute(
             select(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision, func.count())
-            .where(LedgerEntry.type == "decision.a2a.request", LedgerEntry.ts >= since)
+            .where(
+                LedgerEntry.type == "decision.a2a.request",
+                LedgerEntry.ts >= since,
+                ledger.in_chain(),
+            )
             .group_by(LedgerEntry.agent_id, LedgerEntry.resource, LedgerEntry.decision)
         ).all()
         a2a_usage: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
@@ -883,9 +903,19 @@ def import_discovery(
     body: dict[str, Any] = Body(...),
     principal: Principal = Depends(require("registrar", "service")),
 ) -> dict[str, Any]:
-    """Import scanner output, e.g. the Agent Governance Toolkit's agent-discovery JSON."""
+    """Import scanner output, e.g. the Agent Governance Toolkit's agent-discovery JSON. A
+    registrar, which reads no agents, is told how many it sent; an administrator or a
+    component, how many were there already and how many are new."""
     items = body.get("items") or body.get("agents") or []
     if not isinstance(items, list):
         raise ValidationError("items must be a list")
     with _rt(request).db.session() as s:
-        return discovery.import_scan(s, items, source=str(body.get("source") or "scanner"))
+        counts = discovery.import_scan(
+            s,
+            items,
+            source=str(body.get("source") or "scanner"),
+            discover=features.is_on(s, "discovery"),
+        )
+    if not principal.roles & {"admin", "service"}:
+        return {"received": len(items)}
+    return counts

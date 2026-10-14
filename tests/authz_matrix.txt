@@ -1,0 +1,230 @@
+# Who gets through each route of AgentGov's API. tests/test_authz_matrix.py checks it
+# and `python -m tests.test_authz_matrix` writes it: review a change here as a change
+# in who may do what. Everyone not listed is refused (401 or 403), or, for an object
+# out of their reach, told it doesn't exist (404).
+#
+# Principals: anyone person admin approver secops auditor registrar service admin@sales approver@sales secops@sales auditor@sales registrar@sales.
+# person: someone signed in without a role (here the owner and sponsor of sales-bot).
+# role@sales: a role for team sales only. (sales) and (hr): the route is given
+# an object of team sales, or of another team.
+#
+# Public routes, not listed: GET /, GET /.well-known/authzen-configuration, GET /.well-known/oauth-authorization-server, GET /healthz, GET /oauth2/jwks, GET /readyz, GET /registry/v0.1/servers, GET /registry/v0.1/servers/{name:path}/versions, GET /registry/v0.1/servers/{name:path}/versions/{version}, GET /v1/delegations/jwks, GET /v1/info, POST /integrations/copilot-studio/analyze-tool-execution, POST /integrations/copilot-studio/validate, POST /oauth2/token.
+
+GET /v1/access                                                         admin approver secops auditor
+GET /v1/access-assignments                                             admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/access-assignments/{assignment_id} (hr)                        admin approver secops auditor
+GET /v1/access-assignments/{assignment_id} (sales)                     person admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/access-packages                                                person admin approver secops auditor registrar service admin@sales approver@sales secops@sales auditor@sales registrar@sales
+GET /v1/access-packages/{ref}                                          person admin approver secops auditor registrar service admin@sales approver@sales secops@sales auditor@sales registrar@sales
+GET /v1/agents                                                         admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/agents/{ref} (hr)                                              admin approver secops auditor
+GET /v1/agents/{ref} (sales)                                           admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/agents/{ref}/a2a (hr)                                          admin approver secops auditor
+GET /v1/agents/{ref}/a2a (sales)                                       admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/agents/{ref}/access-packages (hr)                              admin approver secops auditor
+GET /v1/agents/{ref}/access-packages (sales)                           person admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/agents/{ref}/entra-access-packages (hr)                        admin approver secops auditor
+GET /v1/agents/{ref}/entra-access-packages (sales)                     admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/agents/{ref}/instructions (hr)                                 admin approver secops auditor
+GET /v1/agents/{ref}/instructions (sales)                              admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/agents/{ref}/risk (hr)                                         admin approver secops auditor
+GET /v1/agents/{ref}/risk (sales)                                      admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/agents/{ref}/rules (hr)                                        admin approver secops auditor
+GET /v1/agents/{ref}/rules (sales)                                     person admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/apikeys                                                        admin approver secops auditor
+GET /v1/approvals                                                      admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/approvals/{approval_id} (hr)                                   admin approver secops auditor
+GET /v1/approvals/{approval_id} (sales)                                admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/blueprints                                                     admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/blueprints/{ref}                                               admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/components                                                     admin approver secops auditor
+GET /v1/destinations                                                   admin approver secops auditor
+GET /v1/destinations/{ref}                                             admin approver secops auditor
+GET /v1/evidence/frameworks                                            admin approver secops auditor
+GET /v1/evidence/pack                                                  admin approver secops auditor
+GET /v1/evidence/register                                              admin approver secops auditor
+GET /v1/evidence/report                                                admin approver secops auditor
+GET /v1/export                                                         admin approver secops auditor
+GET /v1/feature-presets                                                admin approver secops auditor
+GET /v1/features                                                       admin approver secops auditor
+GET /v1/features/{key}                                                 admin approver secops auditor
+GET /v1/finding-types                                                  admin approver secops auditor
+GET /v1/findings                                                       admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/findings/{finding_id} (hr)                                     admin approver secops auditor
+GET /v1/findings/{finding_id} (sales)                                  person admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/gateway/config                                                 admin service
+GET /v1/graph                                                          admin approver secops auditor
+GET /v1/identity-issuers                                               admin approver secops auditor
+GET /v1/identity-issuers/{ref}                                         admin approver secops auditor
+GET /v1/inbox                                                          person admin approver secops auditor registrar service admin@sales approver@sales secops@sales auditor@sales registrar@sales
+GET /v1/ledger                                                         admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/ledger/checkpoints                                             admin approver secops auditor
+GET /v1/ledger/checkpoints/{seq}/log-entry                             admin approver secops auditor
+GET /v1/ledger/checkpoints/{seq}/timestamp                             admin approver secops auditor
+GET /v1/ledger/export                                                  admin approver secops auditor
+GET /v1/ledger/retention                                               admin approver secops auditor
+GET /v1/ledger/transparency-log                                        admin approver secops auditor
+GET /v1/ledger/verify                                                  admin approver secops auditor
+GET /v1/ledger/witness                                                 admin approver secops auditor
+GET /v1/mcp/managed-settings                                           admin approver secops auditor
+GET /v1/mcp/registry                                                   admin approver secops auditor
+GET /v1/mcp/sightings                                                  admin approver secops auditor
+GET /v1/me                                                             person admin approver secops auditor registrar service admin@sales approver@sales secops@sales auditor@sales registrar@sales
+GET /v1/me/approvals                                                   person admin approver secops auditor registrar service admin@sales approver@sales secops@sales auditor@sales registrar@sales
+GET /v1/me/issues                                                      person admin approver secops auditor registrar service admin@sales approver@sales secops@sales auditor@sales registrar@sales
+GET /v1/models/providers                                               admin approver secops auditor
+GET /v1/models/providers/{ref}                                         admin approver secops auditor
+GET /v1/models/usage                                                   admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/opa/bundles/agentgov.tar.gz                                    admin service
+GET /v1/overview                                                       admin approver secops auditor
+GET /v1/platforms                                                      admin approver secops auditor
+GET /v1/platforms/connector-policy                                     admin
+GET /v1/platforms/connectors                                           admin approver secops auditor
+GET /v1/platforms/entra-access-packages                                admin approver secops auditor
+GET /v1/policies                                                       admin approver secops auditor
+GET /v1/policies/{ref}                                                 admin approver secops auditor
+GET /v1/replicas                                                       admin approver secops auditor
+GET /v1/rules                                                          admin approver secops auditor
+GET /v1/rules/{ref}                                                    admin approver secops auditor
+GET /v1/rules/{ref}/preview                                            admin approver secops auditor
+GET /v1/secops                                                         admin approver secops auditor
+GET /v1/secops/events                                                  admin approver secops auditor
+GET /v1/start                                                          admin approver secops auditor
+GET /v1/teams                                                          admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/teams/{ref} (hr)                                               admin approver secops auditor
+GET /v1/teams/{ref} (sales)                                            admin approver secops auditor admin@sales approver@sales secops@sales auditor@sales
+GET /v1/tickets                                                        admin approver secops auditor
+GET /v1/toolservers                                                    admin approver secops auditor
+GET /v1/toolservers/{ref}                                              admin approver secops auditor
+POST /access/v1/evaluation                                             admin approver secops auditor service
+POST /access/v1/evaluations                                            admin approver secops auditor service
+POST /v1/access-assignments (hr)                                       admin approver registrar
+POST /v1/access-assignments (sales)                                    person admin approver registrar admin@sales approver@sales registrar@sales
+POST /v1/access-assignments/{assignment_id}/{action} (hr)              admin approver
+POST /v1/access-assignments/{assignment_id}/{action} (sales)           admin approver admin@sales approver@sales
+POST /v1/access-packages                                               admin
+PATCH /v1/access-packages/{ref}                                        admin
+POST /v1/access/grants                                                 admin
+POST /v1/access/people/{subject:path}/sign-out                         admin
+POST /v1/agents                                                        admin registrar admin@sales registrar@sales
+POST /v1/agents/adopt                                                  admin admin@sales
+POST /v1/agents/bulk                                                   admin approver secops admin@sales approver@sales secops@sales
+PATCH /v1/agents/{ref} (hr)                                            admin
+PATCH /v1/agents/{ref} (sales)                                         admin admin@sales
+POST /v1/agents/{ref}/attest (hr)                                      admin
+POST /v1/agents/{ref}/attest (sales)                                   person admin admin@sales
+PUT /v1/agents/{ref}/classification (hr)                               admin approver
+PUT /v1/agents/{ref}/classification (sales)                            admin approver admin@sales approver@sales
+POST /v1/agents/{ref}/credentials (hr)                                 admin
+POST /v1/agents/{ref}/credentials (sales)                              admin admin@sales
+POST /v1/agents/{ref}/entra-access-packages/assign (hr)                admin
+POST /v1/agents/{ref}/entra-access-packages/assign (sales)             admin
+PUT /v1/agents/{ref}/instructions (hr)                                 admin
+PUT /v1/agents/{ref}/instructions (sales)                              admin admin@sales
+POST /v1/agents/{ref}/instructions/rescan (hr)                         admin
+POST /v1/agents/{ref}/instructions/rescan (sales)                      admin admin@sales
+POST /v1/agents/{ref}/platform/block (hr)                              admin
+POST /v1/agents/{ref}/platform/block (sales)                           admin
+POST /v1/agents/{ref}/platform/unblock (hr)                            admin
+POST /v1/agents/{ref}/platform/unblock (sales)                         admin
+POST /v1/agents/{ref}/risk/refresh (hr)                                admin
+POST /v1/agents/{ref}/risk/refresh (sales)                             admin admin@sales
+POST /v1/agents/{ref}/{action} (hr)                                    admin secops
+POST /v1/agents/{ref}/{action} (sales)                                 admin secops admin@sales secops@sales
+POST /v1/apikeys                                                       admin
+POST /v1/apply                                                         admin
+POST /v1/approvals/{approval_id}/{verdict} (hr)                        admin approver secops
+POST /v1/approvals/{approval_id}/{verdict} (sales)                     admin approver secops admin@sales approver@sales secops@sales
+POST /v1/blueprints                                                    admin
+PATCH /v1/blueprints/{ref}                                             admin
+POST /v1/destinations                                                  admin
+PATCH /v1/destinations/{ref}                                           admin
+POST /v1/destinations/{ref}/{action}                                   admin
+POST /v1/discovery/import                                              admin registrar service
+POST /v1/feature-presets/{name}                                        admin
+PUT /v1/features/{key}                                                 admin
+PUT /v1/finding-types/{type_}                                          admin
+POST /v1/findings/bulk                                                 admin approver secops admin@sales approver@sales secops@sales
+POST /v1/findings/{finding_id}/accept (hr)                             admin approver secops
+POST /v1/findings/{finding_id}/accept (sales)                          admin approver secops admin@sales approver@sales secops@sales
+POST /v1/findings/{finding_id}/acknowledge (hr)                        admin approver secops
+POST /v1/findings/{finding_id}/acknowledge (sales)                     person admin approver secops admin@sales approver@sales secops@sales
+POST /v1/findings/{finding_id}/dismiss (hr)                            admin approver secops
+POST /v1/findings/{finding_id}/dismiss (sales)                         admin approver secops admin@sales approver@sales secops@sales
+POST /v1/findings/{finding_id}/exception (hr)                          nobody
+POST /v1/findings/{finding_id}/exception (sales)                       person
+POST /v1/findings/{finding_id}/exception/decline (hr)                  admin approver secops
+POST /v1/findings/{finding_id}/exception/decline (sales)               admin approver secops admin@sales approver@sales secops@sales
+POST /v1/findings/{finding_id}/not-mine (hr)                           nobody
+POST /v1/findings/{finding_id}/not-mine (sales)                        person
+POST /v1/findings/{finding_id}/recheck (hr)                            admin approver secops
+POST /v1/findings/{finding_id}/recheck (sales)                         person admin approver secops admin@sales approver@sales secops@sales
+POST /v1/findings/{finding_id}/{action} (hr)                           admin approver secops
+POST /v1/findings/{finding_id}/{action} (sales)                        admin approver secops admin@sales approver@sales secops@sales
+POST /v1/identity-issuers                                              admin
+PATCH /v1/identity-issuers/{ref}                                       admin
+POST /v1/identity-issuers/{ref}/keys                                   admin
+POST /v1/identity-issuers/{ref}/{action}                               admin secops
+POST /v1/instructions/check                                            admin approver secops auditor registrar
+POST /v1/internal/approvals/check                                      service
+POST /v1/internal/catalog                                              service
+POST /v1/internal/components                                           service
+POST /v1/internal/decisions                                            service
+POST /v1/internal/observe                                              service
+POST /v1/ledger/checkpoints                                            admin
+POST /v1/ledger/retention/run                                          admin
+POST /v1/ledger/witness/accept                                         admin
+POST /v1/mcp/sightings                                                 admin registrar
+POST /v1/models/providers                                              admin
+PATCH /v1/models/providers/{ref}                                       admin
+POST /v1/models/providers/{ref}/{action}                               admin secops
+POST /v1/opa/logs                                                      service
+POST /v1/opa/status                                                    service
+POST /v1/otlp/v1/logs                                                  service
+POST /v1/otlp/v1/traces                                                service
+POST /v1/platforms/connector-policy                                    admin
+PUT /v1/platforms/connectors/{connector_id}/approval                   admin
+POST /v1/platforms/copilot-studio/import                               admin
+POST /v1/platforms/copilot-studio/sync                                 admin
+POST /v1/platforms/entra-users/import                                  admin
+POST /v1/platforms/microsoft-365/sync                                  admin
+POST /v1/platforms/sync                                                admin
+POST /v1/platforms/{source}/sync                                       admin
+POST /v1/policies                                                      admin
+POST /v1/policies/evaluate                                             admin approver secops auditor
+PUT /v1/policies/{ref}                                                 admin
+POST /v1/posture/scan                                                  admin
+POST /v1/rules                                                         admin
+POST /v1/rules/evaluate                                                admin
+POST /v1/rules/preview                                                 admin approver secops auditor
+PATCH /v1/rules/{ref}                                                  admin
+PUT /v1/start                                                          admin
+POST /v1/teams                                                         admin
+PATCH /v1/teams/{ref} (hr)                                             admin
+PATCH /v1/teams/{ref} (sales)                                          admin
+POST /v1/toolservers                                                   admin registrar
+PATCH /v1/toolservers/{ref}                                            admin
+POST /v1/toolservers/{ref}/tools/{tool}/approve                        admin
+POST /v1/toolservers/{ref}/{action}                                    admin secops
+DELETE /v1/access-packages/{ref}                                       admin
+DELETE /v1/access/grants/{email}/{role}                                admin
+DELETE /v1/access/sessions/{session_id}                                admin
+DELETE /v1/agents/{ref} (hr)                                           admin
+DELETE /v1/agents/{ref} (sales)                                        admin
+DELETE /v1/agents/{ref}/classification (hr)                            admin approver
+DELETE /v1/agents/{ref}/classification (sales)                         admin approver admin@sales approver@sales
+DELETE /v1/agents/{ref}/entra-access-packages/{assignment_id} (hr)     admin
+DELETE /v1/agents/{ref}/entra-access-packages/{assignment_id} (sales)  admin
+DELETE /v1/agents/{ref}/instructions (hr)                              admin
+DELETE /v1/agents/{ref}/instructions (sales)                           admin admin@sales
+DELETE /v1/apikeys/{key_id}                                            admin
+DELETE /v1/blueprints/{ref}                                            admin
+DELETE /v1/destinations/{ref}                                          admin
+DELETE /v1/identity-issuers/{ref}                                      admin
+DELETE /v1/models/providers/{ref}                                      admin
+DELETE /v1/platforms/connectors/{connector_id}/approval                admin
+DELETE /v1/policies/{ref}                                              admin
+DELETE /v1/rules/{ref}                                                 admin
+DELETE /v1/teams/{ref} (hr)                                            admin
+DELETE /v1/teams/{ref} (sales)                                         admin
+DELETE /v1/toolservers/{ref}                                           admin

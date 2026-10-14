@@ -24,10 +24,13 @@ start first, each once the one before is ready, and `up` returns when every pod
 is ready. Network policies, ingresses and the scheduler are Kubernetes' own: the
 kind check (scripts/ci.sh --kind) covers them where kind runs.
 
-  chart-on-docker.py up RENDERED.yaml [--demo]   start (--demo: the demo MCP server, model,
+  chart-on-docker.py up RENDERED.yaml [--demo] [--tsa=DIR]
+                                                 start (--demo: the demo MCP server, model,
                                                  workload identity issuer, the sink that
-                                                 stands in for the security team's tools,
-                                                 and the agent other agents call)
+                                                 stands in for the security team's tools
+                                                 and a time-stamping authority, with the
+                                                 key and certificate in DIR, and the agent
+                                                 other agents call)
   chart-on-docker.py secret RENDERED.yaml KEY    print KEY's value from the chart's Secrets
   chart-on-docker.py logs                        state and recent logs, for failures
   chart-on-docker.py down                        remove everything it started
@@ -349,7 +352,7 @@ def wait_ready(workload: dict[str, Any], replica: int = 0) -> None:
     sys.exit(f"{pod}: not ready after {READY_SECONDS} seconds")
 
 
-def up(rendered: str, demo: bool) -> None:
+def up(rendered: str, demo: bool, tsa: str | None = None) -> None:
     docs = load(rendered)
     sh("docker", "network", "create", "--label", LABEL, NETWORK)
     workloads = [d for d in docs if d["kind"] in ("Deployment", "StatefulSet")]
@@ -382,10 +385,12 @@ def up(rendered: str, demo: bool) -> None:
            "--network", NETWORK, "--network-alias", "workload-issuer", "-p", "9200:9200",
            "-e", "ISSUER=http://workload-issuer:9200", "agentgov-demo-issuer:local")  # fmt: skip
         # The security team's SIEM, Splunk, Slack and Teams (scripts/ci.sh gives the chart
-        # their URLs and token as destinationSecrets).
+        # their URLs and token as destinationSecrets), and the time-stamping authority, with
+        # the key whose certificate the chart was given (controlPlane.timestamping).
+        signing = ["-v", f"{Path(tsa).resolve()}:/tsa:ro", "-e", "TSA_DIR=/tsa"] if tsa else []
         sh("docker", "run", "-d", "--name", "agentgov-demo-sink", "--label", LABEL,
            "--network", NETWORK, "--network-alias", "demo-sink", "-p", "127.0.0.1:9300:9300",
-           "-e", "HEC_TOKEN=demo-hec-token", "agentgov-demo-sink:local")  # fmt: skip
+           "-e", "HEC_TOKEN=demo-hec-token", *signing, "agentgov-demo-sink:local")  # fmt: skip
         # The agent other agents call over A2A, through the gateway (agents.yaml).
         sh("docker", "run", "-d", "--name", "agentgov-demo-billing-agent", "--label", LABEL,
            "--network", NETWORK, "--network-alias", "billing-agent",
@@ -419,8 +424,11 @@ def down() -> None:
 
 def main(argv: list[str]) -> None:
     match argv:
-        case ["up", rendered, *flags] if set(flags) <= {"--demo"}:
-            up(rendered, demo="--demo" in flags)
+        case ["up", rendered, *flags] if all(
+            f == "--demo" or f.startswith("--tsa=") for f in flags
+        ):
+            tsa = next((f.removeprefix("--tsa=") for f in flags if f.startswith("--tsa=")), None)
+            up(rendered, demo="--demo" in flags, tsa=tsa)
         case ["secret", rendered, key]:
             # The Secret that holds the key, of the several the chart renders (the
             # components' certificates and the bundle-signing key are Secrets too).

@@ -17,12 +17,13 @@ from sqlalchemy import select
 
 from agentgov import ids, ledger
 from agentgov.api.app import create_app
+from agentgov.api.auth import Principal
 from agentgov.config import Settings
 from agentgov.models import Destination, LedgerEntry
 from agentgov.registry import destinations, findings, manifests, posture
-from agentgov.registry.errors import ValidationError
+from agentgov.registry.errors import Forbidden, ValidationError
 from agentgov.runtime import Runtime
-from agentgov.secops import delivery, formats, ocsf
+from agentgov.secops import delivery, formats, handoff, ocsf
 from tests.conftest import ADMIN, SERVICE, seed
 from tests.test_api import key
 from tests.test_cli import _Shared, ok, runner
@@ -381,6 +382,55 @@ class TestHandoff:
         blocked = client.get("/v1/ledger", params={"type": "agent.block"}, headers=ADMIN).json()
         assert blocked[0]["actor"] == "secops:soc"
 
+    def test_blocking_then_unblocking_approves_nothing(self, client) -> None:
+        """Unblocked, an agent or a tool server is as it was when it was blocked: one that
+        waited for an administrator's approval waits again."""
+        registrar = key(client, "registrar", "ci")
+        made = client.post(
+            "/v1/agents",
+            json={"name": "new-bot", "sponsors": ["a@example.com"], "owner": "cx"},
+            headers=registrar,
+        ).json()
+        ts = client.post(
+            "/v1/toolservers", json={"name": "byo", "url": "http://byo/mcp"}, headers=registrar
+        ).json()
+        assert (made["status"], ts["status"]) == ("pending", "pending")
+        soc = key(client, "secops", "soc")
+        level(client, "contain")
+        for path in ("/v1/agents/new-bot", "/v1/toolservers/byo"):
+            assert client.post(f"{path}/approve", headers=soc).status_code == 403, path
+            assert client.post(f"{path}/block", headers=soc).json()["status"] == "blocked"
+            assert client.post(f"{path}/unblock", headers=soc).json()["status"] == "pending"
+        waiting = {
+            k["kind"]: k["count"] for k in client.get("/v1/inbox", headers=ADMIN).json()["kinds"]
+        }
+        assert (waiting["agents"], waiting["toolservers"]) == (1, 1)
+
+    def test_security_for_one_team_is_held_to_the_hand_off(self, client) -> None:
+        """Security for one team (secops@sales) is security: the hand-off applies to it. And
+        only administrators and security use the kill switch: anyone else is refused."""
+        rt = client.app.state.rt  # type: ignore[attr-defined]
+
+        def who(*roles: str) -> Principal:
+            return Principal("x", roles[0], frozenset(roles))
+
+        with rt.db.session() as s:
+            assert handoff.acting_as_secops(who("secops@sales"))
+            with pytest.raises(Forbidden, match="triage"):
+                handoff.check(s, who("secops@sales"), handoff.TRIAGE)
+            for roles in (("secops@sales",), ("approver",), ("auditor",), ("admin@sales",)):
+                with pytest.raises(Forbidden):
+                    handoff.check_kill_switch(s, who(*roles), "block")
+            handoff.check_kill_switch(s, who("admin"), "block")
+        level(client, "contain")
+        with rt.db.session() as s:
+            handoff.check_kill_switch(s, who("secops@sales"), "unblock")
+            with pytest.raises(Forbidden, match="nothing else"):
+                handoff.check_kill_switch(s, who("secops@sales"), "approve")
+            for roles in (("approver",), ("registrar",), ("admin@sales", "auditor")):
+                with pytest.raises(Forbidden):
+                    handoff.check_kill_switch(s, who(*roles), "block")
+
     def test_decide_lets_it_decide_approvers_requests(self, client) -> None:
         agent = seed(client)
         check = {
@@ -549,6 +599,11 @@ class TestDestinations:
         assert (
             client.post("/v1/destinations/siem/resume", headers=ADMIN).json()["status"] == "active"
         )
+        # Replay sends again what was sent: it goes back, never on past what wasn't.
+        with client.app.state.rt.db.session() as s:  # type: ignore[attr-defined]
+            s.scalar(select(Destination).where(Destination.name == "siem")).cursor = 5
+        forward = client.post("/v1/destinations/siem/replay", json={"after": 8}, headers=ADMIN)
+        assert forward.status_code == 422 and "goes back" in forward.text
         replayed = client.post("/v1/destinations/siem/replay", json={"after": 3}, headers=ADMIN)
         assert replayed.json()["delivery"]["cursor"] == 3
         assert client.post("/v1/destinations/soc/replay", json={}, headers=ADMIN).status_code == 422
@@ -700,6 +755,30 @@ class TestDelivery:
         sent = sink.json()["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
         assert [r["body"]["kvlistValue"]["values"] for r in sent]
         assert len(sent) == 1
+
+    def test_rows_past_the_head_are_never_sent(self, secops, sink, secrets) -> None:
+        """A row stored past the chain's head isn't the ledger's: sent, it would also move the
+        SIEM's place past every entry still to come."""
+        from tests.test_ledger import past_the_head
+
+        destination(
+            secops, name="collector", kind="otlp", url="http://otel-collector:4318", backfill=True
+        )
+        seed(secops)
+        level(secops, "inform")
+        rt = rt_of(secops)
+        past_the_head(rt)
+        head = secops.get("/v1/ledger/verify", headers=ADMIN).json()["checked"]
+        assert rt.delivery.run() == {"collector": {"sent": head}}
+        assert (
+            secops.get("/v1/destinations/collector", headers=ADMIN).json()["delivery"]["cursor"]
+            == head
+        )
+        events = secops.get("/v1/secops/events", params={"limit": 500}, headers=ADMIN).json()
+        assert events["next"] == head
+        # What happens next still goes.
+        secops.post("/v1/toolservers/crm/block", headers=ADMIN).raise_for_status()
+        assert rt.delivery.run() == {"collector": {"sent": 1}}
 
     def test_splunk_and_webhooks(self, secops, sink, secrets) -> None:
         destination(
@@ -1023,6 +1102,8 @@ class TestCli:
         assert "no secret file" in listing and "siem" in listing
         ok(agentgov("destinations", "pause", "siem"))
         ok(agentgov("destinations", "resume", "siem"))
+        with secops.app.state.rt.db.session() as s:  # sent up to entry 4, say
+            s.scalar(select(Destination).where(Destination.name == "siem")).cursor = 4
         assert "from after entry 0" in ok(agentgov("destinations", "replay", "siem", "--yes"))
         failed = agentgov("destinations", "test", "soc")
         assert failed.exit_code != 0 and "no secret file" in failed.output
@@ -1053,3 +1134,70 @@ def test_siem_events_skip_what_was_not_chosen(rt) -> None:
             3002
         ]
         assert delivery.siem_events(s, entries, ["changes"], "high") == []
+
+
+class TestCredentialHosts:
+    """With AGENTGOV_CREDENTIAL_HOSTS, destinations reach the hosts it lists, and no other."""
+
+    @pytest.fixture
+    def listed(self, settings: Settings, sink: Sink, secrets: Path) -> Iterator[TestClient]:
+        settings = settings.with_overrides(
+            destination_secrets_dir=str(secrets),
+            public_url="https://agentgov.example.com",
+            credential_hosts="otel-collector, *.slack.com",
+        )
+        rt = Runtime(settings, destinations_http=httpx.Client(transport=httpx.MockTransport(sink)))
+        with TestClient(create_app(settings, runtime=rt, background=False)) as client:
+            yield client
+
+    REFUSED = "AGENTGOV_CREDENTIAL_HOSTS doesn't list siem.evil.example"
+
+    def test_a_url_on_another_host_is_refused(self, listed: TestClient) -> None:
+        body = {"name": "siem", "kind": "webhook", "url": "https://siem.evil.example/in"}
+        refused = listed.post("/v1/destinations", json=body, headers=ADMIN)
+        assert refused.status_code == 422 and self.REFUSED in refused.json()["detail"]
+        destination(listed, name="collector", kind="otlp", url="http://otel-collector:4318")
+        moved = listed.patch("/v1/destinations/collector", json={"url": body["url"]}, headers=ADMIN)
+        assert moved.status_code == 422 and self.REFUSED in moved.json()["detail"]
+        doc = {
+            "apiVersion": manifests.API_VERSION,
+            "kind": "Destination",
+            "metadata": {"name": "siem"},
+            "spec": {"kind": "webhook", "url": body["url"]},
+        }
+        applied = listed.post("/v1/apply", json={"documents": [doc]}, headers=ADMIN)
+        assert self.REFUSED in applied.text
+        assert listed.get("/v1/components", headers=ADMIN).json()["credential_hosts"] == [
+            "otel-collector",
+            "*.slack.com",
+        ]
+
+    def test_nothing_goes_to_a_host_not_listed(
+        self, listed: TestClient, sink: Sink, secrets: Path
+    ) -> None:
+        rt = rt_of(listed)
+        with rt.db.session() as s:
+            # Set up before the deployment listed the hosts.
+            for data in (
+                {"name": "siem", "kind": "webhook", "url": "https://siem.evil.example/in"},
+                {"name": "soc", "kind": "slack", "events": ["blocks"]},
+            ):
+                destinations.create(s, data, actor="admin:test")
+        (secrets / "siem").write_text("Authorization: Bearer t0ken\n")
+        (secrets / "soc").write_text("https://hooks.evil.example/services/T0/B0/x\n")
+        agent = seed(listed)
+        listed.post(f"/v1/agents/{agent['id']}/block", headers=ADMIN).raise_for_status()
+        level(listed, "inform")
+        outcome = rt.delivery.run()
+        assert self.REFUSED in outcome["siem"]["error"]
+        assert "doesn't list hooks.evil.example" in outcome["soc"]["error"]
+        tested = listed.post("/v1/destinations/soc/test", headers=ADMIN).json()
+        assert not tested["ok"] and "hooks.evil.example" in tested["error"]
+        assert sink.requests == []
+        # A host it lists gets them.
+        (secrets / "soc").write_text("https://hooks.slack.com/services/T0/B0/x\n")
+        assert listed.post("/v1/destinations/soc/test", headers=ADMIN).json()["ok"]
+        assert [r.url.host for r in sink.requests] == ["hooks.slack.com"]
+
+    def test_any_host_while_none_is_listed(self, client: TestClient) -> None:
+        assert client.get("/v1/components", headers=ADMIN).json()["credential_hosts"] == []

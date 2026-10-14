@@ -152,7 +152,7 @@ class Delivery:
                 return None  # another replica has it
             entries = s.scalars(
                 select(LedgerEntry)
-                .where(LedgerEntry.seq > row.cursor)
+                .where(LedgerEntry.seq > row.cursor, ledger.in_chain())
                 .order_by(LedgerEntry.seq)
                 .limit(BATCH)
             ).all()
