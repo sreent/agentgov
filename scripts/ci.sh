@@ -462,11 +462,28 @@ build_demo_images() {
 # plane and the processor ask for a second opinion (docs/detection.md).
 DEMO_GUARDIAN_URL=http://demo-model:9100/guardian/v1
 
+# The demo sink stands in for the authority that time-stamps the ledger's checkpoints, with
+# a key and certificate made before the chart is rendered: the control plane checks its
+# time-stamps against the certificate, as it would a real authority's.
+DEMO_TSA_DIR=$ROOT/.venv/demo-tsa
+
+demo_tsa() {
+  [ -f "$DEMO_TSA_DIR/tsa.crt" ] && return 0
+  mkdir -p "$DEMO_TSA_DIR" &&
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$DEMO_TSA_DIR/tsa.key" \
+      -out "$DEMO_TSA_DIR/tsa.crt" -days 3650 -subj "/CN=AgentGov demo time-stamping authority" \
+      -addext extendedKeyUsage=critical,timeStamping 2>/dev/null &&
+    # The sink runs as a user of its own.
+    chmod 755 "$DEMO_TSA_DIR" && chmod 644 "$DEMO_TSA_DIR/tsa.key" "$DEMO_TSA_DIR/tsa.crt"
+}
+
 # What the demo needs from the chart: the destinations' secrets
 # (examples/manifests/secops.yaml), the sink's Slack and Teams webhook URLs and its Splunk
-# token; and the sink as the authority that time-stamps the ledger's checkpoints.
+# token; and the sink as the authority that time-stamps the ledger's checkpoints, with its
+# certificate (demo_tsa makes it).
 DEMO_DESTINATION_SECRETS=(
-  --set controlPlane.env.AGENTGOV_LEDGER_TSA_URL=http://demo-sink:9300/tsa
+  --set controlPlane.timestamping.url=http://demo-sink:9300/tsa
+  --set-file controlPlane.timestamping.certificates="$DEMO_TSA_DIR/tsa.crt"
   --set destinationSecrets.values.soc-slack=http://demo-sink:9300/slack/T0000/B0000/demo-only
   --set destinationSecrets.values.soc-teams=http://demo-sink:9300/teams/workflows/demo-only
   --set destinationSecrets.values.soc-splunk=demo-hec-token
@@ -631,7 +648,7 @@ chart_on_docker() {
     echo "ports in use: ${busy[*]}; stop what uses them first"
     return 1
   fi
-  build_demo_images || return 1
+  build_demo_images && demo_tsa || return 1
   rendered=$(mktemp)
   # Keycloak in production mode here (Compose runs it in development mode), and two
   # control-plane replicas: the demo's requests alternate between them.
@@ -640,7 +657,7 @@ chart_on_docker() {
     --set controlPlane.replicas=2 --set guardian.url="$DEMO_GUARDIAN_URL" \
     --set modelKeys.keys.demo=demo-model-key "${DEMO_DESTINATION_SECRETS[@]}" >"$rendered" || return 1
   python scripts/chart-on-docker.py down
-  if python scripts/chart-on-docker.py up "$rendered" --demo; then
+  if python scripts/chart-on-docker.py up "$rendered" --demo --tsa="$DEMO_TSA_DIR"; then
     AGENTGOV_TOKEN=$(python scripts/chart-on-docker.py secret "$rendered" admin-token)
     AGENTGOV_DEMO_PASSWORD=$(python scripts/chart-on-docker.py secret "$rendered" demo-password)
     export AGENTGOV_URL=http://localhost:8000 AGENTGOV_TOKEN AGENTGOV_DEMO_PASSWORD
@@ -759,7 +776,7 @@ kind_end_to_end() {
   fi
   setup_chart_tools && setup_kind_tools || return 1
   kind delete cluster --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
-  build_demo_images || return 1
+  build_demo_images && demo_tsa || return 1
   kind create cluster --name "$KIND_CLUSTER" --wait 180s || return 1
   for image in agentgov-demo-crm:local agentgov-demo-model:local agentgov-demo-issuer:local \
     agentgov-demo-sink:local agentgov-demo-billing:local \
@@ -781,6 +798,8 @@ kind_end_to_end() {
   fi
   if [ "$rc" = 0 ]; then
     kubectl create namespace "$KIND_NAMESPACE" >/dev/null &&
+      kubectl -n "$KIND_NAMESPACE" create secret generic demo-tsa \
+        --from-file="$DEMO_TSA_DIR/tsa.key" --from-file="$DEMO_TSA_DIR/tsa.crt" >/dev/null &&
       kubectl -n "$KIND_NAMESPACE" apply -f - >/dev/null <<'EOF' || rc=1
 apiVersion: apps/v1
 kind: Deployment
@@ -857,7 +876,9 @@ spec:
           image: "agentgov-demo-sink:local"
           imagePullPolicy: Never
           ports: [{containerPort: 9300}]
-          env: [{name: HEC_TOKEN, value: demo-hec-token}]
+          env: [{name: HEC_TOKEN, value: demo-hec-token}, {name: TSA_DIR, value: /tsa}]
+          volumeMounts: [{name: tsa, mountPath: /tsa, readOnly: true}]
+      volumes: [{name: tsa, secret: {secretName: demo-tsa}}]
 ---
 apiVersion: v1
 kind: Service

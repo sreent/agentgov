@@ -69,8 +69,10 @@ services:
       # No demo app: the apps people use agents from, if any (docs/acting-for-people.md).
       AGENTGOV_PEOPLE_APP_CLIENTS: ${AGENTGOV_PEOPLE_APP_CLIENTS:-}
       # No stand-in authority: one that time-stamps the ledger's checkpoints, if any, such as
-      # https://freetsa.org/tsr (docs/evidence.md).
+      # https://freetsa.org/tsr, and its certificates, mounted in an override
+      # (docs/evidence.md).
       AGENTGOV_LEDGER_TSA_URL: ${AGENTGOV_LEDGER_TSA_URL:-}
+      AGENTGOV_LEDGER_TSA_CA_FILE: ${AGENTGOV_LEDGER_TSA_CA_FILE:-}
 
   rekor:
     <<: *restart

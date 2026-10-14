@@ -142,6 +142,16 @@ spec:
             - name: AGENTGOV_LEDGER_ARCHIVE_DIR
               value: /ledger-archive
             {{- end }}
+            {{- with $v.timestamping }}
+            {{- if .url }}
+            - name: AGENTGOV_LEDGER_TSA_URL
+              value: {{ .url | quote }}
+            {{- if .certificates }}
+            - name: AGENTGOV_LEDGER_TSA_CA_FILE
+              value: /timestamping/ca.crt
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- with $v.transparencyLog }}
             {{- if .url }}
             - name: AGENTGOV_LEDGER_REKOR_URL
@@ -198,6 +208,11 @@ spec:
             - name: ledger-archive
               mountPath: /ledger-archive
             {{- end }}
+            {{- if and $v.timestamping.url $v.timestamping.certificates }}
+            - name: timestamping
+              mountPath: /timestamping
+              readOnly: true
+            {{- end }}
             {{- if $v.transparencyLog.url }}
             - name: transparency
               mountPath: /transparency
@@ -232,6 +247,11 @@ spec:
         - name: ledger-archive
           persistentVolumeClaim:
             claimName: {{ $v.ledgerArchive.existingClaim | default (printf "%s-ledger-archive" $name) }}
+        {{- end }}
+        {{- if and $v.timestamping.url $v.timestamping.certificates }}
+        - name: timestamping
+          configMap:
+            name: {{ $name }}-timestamping
         {{- end }}
         {{- if $v.transparencyLog.url }}
         {{- if not $v.transparencyLog.signingKeySecret }}
@@ -290,6 +310,20 @@ spec:
   resources:
     requests:
       storage: {{ $v.ledgerArchive.size }}
+{{- end }}
+{{- if and .Values.controlPlane.timestamping.url .Values.controlPlane.timestamping.certificates }}
+---
+# The time-stamping authority's certificates, which its time-stamps are checked against (no
+# secret).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agentgov.name" (list . "control-plane") }}-timestamping
+  labels:
+    {{- include "agentgov.labels" (list . "control-plane") | nindent 4 }}
+data:
+  ca.crt: |
+    {{- .Values.controlPlane.timestamping.certificates | nindent 4 }}
 {{- end }}
 {{- if and .Values.controlPlane.transparencyLog.url .Values.controlPlane.transparencyLog.logKey }}
 ---

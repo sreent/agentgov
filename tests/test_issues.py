@@ -431,7 +431,8 @@ class TestSending:
                 severity="medium",
                 subject="url:https://x.example",
                 agent_id=agent["id"],
-                title="Developers use x\r\nBcc: mallory@evil.example\x00",
+                # A control character too (not NUL: PostgreSQL stores no text with one).
+                title="Developers use x\r\nBcc: mallory@evil.example\x07",
             )
             issues.route(s, settings)
         assert notifier.run() == {"sent": 1, "failed": 0}

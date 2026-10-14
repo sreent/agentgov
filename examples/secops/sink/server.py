@@ -12,7 +12,9 @@ hands off, as a SIEM, Slack and Microsoft Teams would, and shows what arrived.
                                      /slack/T0000/B0000/demo-only
 
 It also stands in for a time-stamping authority (RFC 3161), for the ledger's checkpoints
-(docs/evidence.md), with the openssl command and a key it makes when it first signs:
+(docs/evidence.md), with the openssl command: with the key and certificate in TSA_DIR
+(tsa.key, tsa.crt), so that AgentGov can be given the certificate to check its time-stamps
+against, or else a key it makes when it first signs:
 
     POST /tsa                        a TimeStampReq; answers a TimeStampResp
     GET  /tsa/cert                   its certificate, to verify its time-stamps with
@@ -24,9 +26,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -58,18 +62,26 @@ tsa_home: str | None = None
 
 
 def tsa() -> str:
-    """The stand-in authority's key, certificate and configuration, made once."""
+    """The stand-in authority's key, certificate and configuration, made once: the key and
+    certificate from TSA_DIR when it is set, else new ones."""
     global tsa_home
     if tsa_home is None:
         home = tempfile.mkdtemp(prefix="tsa-")
-        subprocess.run(
-            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-             "-keyout", f"{home}/tsa.key", "-out", f"{home}/tsa.crt", "-days", "3650",
-             "-subj", "/CN=AgentGov demo time-stamping authority",
-             "-addext", "extendedKeyUsage=critical,timeStamping"],
-            check=True, capture_output=True,
-        )  # fmt: skip
-        Path(home, "serial").write_text("01\n")
+        given = os.environ.get("TSA_DIR")
+        if given:
+            for name in ("tsa.key", "tsa.crt"):
+                shutil.copyfile(Path(given, name), Path(home, name))
+        else:
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                 "-keyout", f"{home}/tsa.key", "-out", f"{home}/tsa.crt", "-days", "3650",
+                 "-subj", "/CN=AgentGov demo time-stamping authority",
+                 "-addext", "extendedKeyUsage=critical,timeStamping"],
+                check=True, capture_output=True,
+            )  # fmt: skip
+        # Time-stamps' serial numbers are unique to the authority: from the time, so that
+        # a restart with the same key doesn't give one again.
+        Path(home, "serial").write_text(f"{time.time_ns():x}\n")
         Path(home, "tsa.cnf").write_text(TSA_CONFIG.format(dir=home))
         tsa_home = home
     return tsa_home
