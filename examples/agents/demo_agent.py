@@ -155,6 +155,23 @@ def wait_for_gateway(*routes: str, timeout: float = 60) -> None:
             time.sleep(1)
 
 
+def wait_for_policies(timeout: float = 120) -> None:
+    """OPA takes its policies from the control plane a few seconds after it starts, and
+    counts as ready before then: with mutual TLS between the components, Kubernetes can't
+    ask it whether it has them. Until it does, the processor refuses every call."""
+    deadline, waiting = time.monotonic() + timeout, False
+    while True:
+        opa = admin("GET", "/v1/components")["control_plane"]["opa"]
+        if opa["ok"] or not opa["configured"]:
+            return
+        if time.monotonic() > deadline:
+            raise SystemExit(f"OPA doesn't have its policies: {opa['detail']}")
+        if not waiting:
+            print(f"{DIM}waiting for OPA to load its policies{RESET}")
+            waiting = True
+        time.sleep(2)
+
+
 async def call(client: Client, tool: str, args: dict[str, Any]) -> tuple[bool, Any]:
     """Call a tool and return ``(allowed, payload_or_message)``.
 
@@ -1705,6 +1722,7 @@ def back_channel_logout() -> None:
 
 def main() -> None:
     wait_for_gateway("/mcp/crm", MODEL_ROUTE, A2A_ROUTE)
+    wait_for_policies()
     step("1. Registration: a new agent is requested, approved and given an identity")
     name, creds, token = register_agent()
     try:
