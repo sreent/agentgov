@@ -577,7 +577,9 @@ end_to_end() {
 inventory_end_to_end() {
   local compose=(docker compose -p agentgov-ci-inventory -f deploy/compose/docker-compose.inventory.yml)
   local rc=0
-  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  # Compose reads the stack's admin token for every command, down and logs too: without
+  # one, they fail (quietly, here) and leave a stack running. Any token does to remove it.
+  AGENTGOV_ADMIN_TOKEN=any "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   if port_in_use 8000; then
     echo "port 8000 in use. Stop the stack that has it first"
     return 1
@@ -589,6 +591,7 @@ inventory_end_to_end() {
   fi
   local token
   token=$(python -c 'import secrets; print(secrets.token_hex(16))')
+  compose=(env AGENTGOV_ADMIN_TOKEN="$token" "${compose[@]}")
   # With HTTPS in front from Caddy's own authority (docs/deploy/server.md), when ports 80
   # and 443 are free. Every compose command below sees it.
   local https=0 COMPOSE_PROFILES= AGENTGOV_PUBLIC_URL= AGENTGOV_CERTIFICATES=
@@ -599,7 +602,7 @@ inventory_end_to_end() {
   else
     echo "${yellow}ports 80 or 443 in use: without HTTPS in front${reset}"
   fi
-  if ! AGENTGOV_ADMIN_TOKEN=$token "${compose[@]}" up -d --no-build --wait --wait-timeout 300 >/dev/null; then
+  if ! "${compose[@]}" up -d --no-build --wait --wait-timeout 300 >/dev/null; then
     "${compose[@]}" logs --no-color --tail 100 || true
     "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
     return 1
