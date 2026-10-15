@@ -34,9 +34,16 @@ def configure() -> None:
         # As with FastAPI: the control plane answers whatever host it is called by.
         ALLOWED_HOSTS=["*"],
         ROOT_URLCONF="agentgov.web.urls",
-        INSTALLED_APPS=[],
+        # The database's tables, as Django models (agentgov.db.models).
+        INSTALLED_APPS=["agentgov.db"],
         MIDDLEWARE=[],
+        # The databases are added as they are opened (agentgov.db), and the models use the
+        # one whose transaction is open.
         DATABASES={},
+        DATABASE_ROUTERS=["agentgov.db.Router"],
+        # Index names longer than Oracle's 30 characters, the existing indexes': AgentGov
+        # runs on SQLite and PostgreSQL (63).
+        SILENCED_SYSTEM_CHECKS=["models.E034"],
         USE_TZ=True,
         # The routes bound what they read themselves, as they did with FastAPI.
         DATA_UPLOAD_MAX_MEMORY_SIZE=None,

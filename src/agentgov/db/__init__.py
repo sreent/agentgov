@@ -281,6 +281,28 @@ _threads = threading.local()
 _LIVE: weakref.WeakSet[Database] = weakref.WeakSet()
 
 
+class Router:
+    """Django's ORM on the database whose transaction is open in this thread
+    (Database.transaction): the models name no database of their own, and are used only
+    in a transaction."""
+
+    def db_for_read(self, model: Any, **hints: Any) -> str:
+        return _open_alias()
+
+    def db_for_write(self, model: Any, **hints: Any) -> str:
+        return _open_alias()
+
+    def allow_relation(self, a: Any, b: Any, **hints: Any) -> bool:
+        return True
+
+
+def _open_alias() -> str:
+    open_: list[str] | None = getattr(_threads, "open", None)
+    if not open_:
+        raise RuntimeError("Django's models are used in a transaction (Database.transaction)")
+    return open_[-1]
+
+
 def _forget_disposed() -> None:
     """This thread's Django connection handlers for databases since disposed of."""
     seen: set[str] | None = getattr(_threads, "aliases", None)
@@ -409,12 +431,17 @@ class Database:
         if seen is None:
             seen = _threads.aliases = set()
         seen.add(self.alias)
+        open_: list[str] | None = getattr(_threads, "open", None)
+        if open_ is None:
+            open_ = _threads.open = []
+        open_.append(self.alias)
         tx = self._local.transaction = Transaction(self)
         try:
             with django_transaction.atomic(using=self.alias):
                 yield tx
                 self._before_commit(tx)
         finally:
+            open_.pop()
             self._local.transaction = None
             tx._close()
             self._release()

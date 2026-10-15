@@ -77,8 +77,11 @@ The data layer:
   SQLAlchemy sessions the modules still use ride on Django's connection, in the same
   transaction, so modules can move one at a time. Connections are pooled, in psycopg's pool on
   PostgreSQL (15 a process, as SQLAlchemy's was) and in one of AgentGov's on SQLite.
-- [ ] Django models for every table, unmanaged, with a test that compares them with the
-  migrated schema.
+- [x] Django models for every table, unmanaged, with a test that compares them with the
+  migrated schema (`agentgov.db.models`, `tests/test_django_models.py`): the columns,
+  keys, constraints, indexes and defaults, and the values each ORM writes, read by the
+  other. Times are UTC without a zone and JSON is in `json` columns, as SQLAlchemy made
+  them (`agentgov.db.fields`); Django's ORM uses the database whose transaction is open.
 - [ ] The modules, the ledger first, each with its tests.
 - [ ] Django's migrations: the first one matches the last Alembic revision; a release runs
   both; then Alembic goes.
