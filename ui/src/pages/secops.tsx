@@ -375,8 +375,8 @@ async function destinationForm(d: Destination | null) {
       const name = editing ? d.name : (values.name || '<name>');
       return <p className="hint" id="dest-secret-hint">{`Secret file: ${d?.secret?.file || `<destination secrets>/${name}`}. ${DEST_SECRET[kindOf(values)]}`}</p>;
     },
-    // A new one's minimum severity follows its kind (and starts again from it as its name is typed).
-    onChange: editing ? undefined : (values, changed) => (changed === 'kind' || changed === 'name'
+    // A new one's minimum severity follows its kind, and only its kind.
+    onChange: editing ? undefined : (values, changed) => (changed === 'kind'
       ? { min_severity: destFamily(values.kind) === 'siem' ? 'info' : 'high' }
       : undefined),
     submit: (v) => {

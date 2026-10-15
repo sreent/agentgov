@@ -19,13 +19,20 @@ const INSTRUCTION_SOURCES: Record<string, string> = {
   'microsoft-foundry': 'From Microsoft Foundry',
 };
 
+/** Which of an agent's instructions: "registered instructions", "instructions from Microsoft 365". */
+function whichInstructions(x: any): string {
+  if (x.source === 'registered') return 'registered instructions';
+  const label = INSTRUCTION_SOURCES[x.source] || `From ${x.source_name || x.source}`;
+  return `instructions ${label.charAt(0).toLowerCase()}${label.slice(1)}`;
+}
+
 function classifierLine(c: any, settings: any): ReactNode {
   if (c.state === 'unchecked') {
     return (
       <Callout tone="neutral" icon="minus">
         <span>
           {'Not checked: instruction checks were off when these arrived. They are checked once instruction checks are on ('}
-          <a href="#/features">Features</a>{')).'}
+          <a href="#/features">Features</a>{').'}
         </span>
       </Callout>
     );
@@ -142,7 +149,7 @@ async function editInstructions(a: any, current: any) {
 
 async function forgetInstructions(a: any, x: any) {
   const done = await ask({
-    title: `Forget ${(INSTRUCTION_SOURCES[x.source] || x.source).toLowerCase()} instructions?`,
+    title: `Forget the ${whichInstructions(x)}?`,
     text: x.source === 'registered'
       ? 'The registered instructions are removed. An issue about them is resolved.'
       : 'AgentGov forgets this copy. If the source reports the instructions again, they come back and are checked again.',
@@ -150,7 +157,7 @@ async function forgetInstructions(a: any, x: any) {
     submit: () => api(`v1/agents/${encodeURIComponent(a.id)}/instructions?source=${encodeURIComponent(x.source)}`, { method: 'DELETE' }),
   });
   if (!done) return;
-  toast(`Forgot ${a.name}'s ${x.source} instructions.`);
+  toast(`Forgot ${a.name}'s ${whichInstructions(x)}.`);
   void refreshBadges();
   await refresh();
 }

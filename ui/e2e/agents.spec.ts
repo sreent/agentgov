@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { dialog, event, expect, pageHeading, signIn, test, unique } from './fixtures';
+import { dialog, event, expect, menu, pageHeading, signIn, test, unique } from './fixtures';
 
 test('registers an agent, approves it, blocks and unblocks it', async ({ page }) => {
   const name = unique('ui-agent');
@@ -80,6 +80,17 @@ test('finds agents by name, status and owner', async ({ page }) => {
   await expect(list.getByRole('link', { name: 'support-bot', exact: true })).toBeHidden();
   await status.getByRole('button', { name: /^All \d+$/ }).click();
   await expect(list.getByRole('link', { name: 'support-bot', exact: true })).toBeVisible();
+});
+
+test('a search typed just before leaving leaves the next page alone', async ({ page }) => {
+  await signIn(page, undefined, '/agents');
+  await page.getByRole('searchbox', { name: 'Search agents' }).fill('billing');
+  // Away before the search runs: it waits for the typing to stop.
+  await menu(page, 'Overview').click();
+  await expect(pageHeading(page, 'Overview')).toBeVisible();
+  await page.waitForTimeout(1_000);
+  await expect(page).toHaveURL(/#\/overview$/);
+  await expect(pageHeading(page, 'Overview')).toBeVisible();
 });
 
 test('sorts the list by a column', async ({ page }) => {

@@ -351,7 +351,8 @@ function findingGroups(rows: Finding[], agentsById: Map<string, any>, card: (f: 
     groups.get(key)!.push(f);
   }
   // Not about one agent: about a platform, say.
-  const nameOf = (list: Finding[]): string => agentsById.get(list[0].agent_id)?.name || PLATFORM_SOURCES[list[0].subject] || list[0].subject || '';
+  const nameOf = (list: Finding[]): string => agentsById.get(list[0].agent_id)?.name || list[0].agent_name
+    || PLATFORM_SOURCES[list[0].subject] || list[0].subject || '';
   const worst = (list: Finding[]) => Math.min(...list.map((f) => SEVERITY_ORDER.indexOf(f.severity)));
   return [...groups.entries()]
     .sort(([, a], [, b]) => worst(a) - worst(b) || b.length - a.length || nameOf(a).localeCompare(nameOf(b)))
@@ -363,7 +364,7 @@ function findingGroups(rows: Finding[], agentsById: Map<string, any>, card: (f: 
         const all = list.every((f) => choose.selected.has(f.id));
         box = (
           <ChooseBox checked={all} mixed={!all && list.some((f) => choose.selected.has(f.id))}
-            label={`Choose the ${plural(list.length, 'issue')} about ${nameOf(list)}`}
+            label={`Choose the ${plural(list.length, 'issue')} ${nameOf(list) ? `about ${nameOf(list)}` : 'not about an agent'}`}
             onChoose={(on) => choose.onSelect(list.map((f) => f.id), on)} />
         );
       }
@@ -395,7 +396,7 @@ function findingCsv(agentsById: Map<string, any>): CsvColumns<Finding> {
   return [
     ['Severity', (f) => f.severity],
     ['Status', (f) => f.status],
-    ['Agent', (f) => agentsById.get(f.agent_id)?.name || f.subject],
+    ['Agent', (f) => agentsById.get(f.agent_id)?.name || f.agent_name || f.subject],
     ['Title', (f) => f.title],
     ['Type', (f) => f.type],
     ['Category', (f) => f.category],
@@ -694,7 +695,9 @@ function FindingCard({ f, agentsById, act, yours = false, choose = null }: {
   const tone = toneOf('severity', f.severity);
   const agent = f.agent_id ? agentsById.get(f.agent_id) : null;
   const headingId = `finding-title-${f.id}`;
-  const subject = f.agent_id && !isPerson() ? <AgentLink id={f.agent_id} name={agent?.name || f.subject} /> : <code>{agent?.name || f.subject}</code>;
+  // People without a role can't list agents: their issues come with the agent's name.
+  const name = agent?.name || f.agent_name || f.subject;
+  const subject = f.agent_id && !isPerson() ? <AgentLink id={f.agent_id} name={name} /> : <code>{name}</code>;
   const asked = f.details?.exception_request;
   return (
     <article className="card finding" data-tone={tone} aria-labelledby={headingId} tabIndex={-1}>

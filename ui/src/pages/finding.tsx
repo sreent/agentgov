@@ -125,7 +125,7 @@ function FindingAttestCard({ f }: { f: Finding }) {
       title: 'Attest this agent?',
       text: 'Confirm that it is still needed and that its access is still right. Its sponsors do this.',
       iconName: 'shield-check', confirm: 'Attest',
-      fields: [{ id: 'note', label: 'Note (optional)', type: 'textarea', hint: 'Recorded in the evidence ledger.' }],
+      fields: [{ id: 'note', label: 'Note', type: 'textarea', hint: 'Recorded in the evidence ledger.' }],
     });
     if (!values) return;
     const updated = await api(`v1/agents/${encodeURIComponent(f.agent_id)}/attest`, { method: 'POST', body: values.note ? { note: values.note } : {} });
@@ -149,30 +149,31 @@ function FindingAccessCard({ f, row, packages }: { f: Finding; row: any; package
   const pk = packages.find((x) => x.name === row.package);
   const agent = { id: row.agent_id, name: row.agent_name };
   const held = ['active', 'expired'].includes(row.status);
-  const after = guarded(async (done: unknown) => {
-    if (done) {
+  // Renewing, keeping, removing or revoking it: what fails says so; what is done shows.
+  const act = (run: () => Promise<unknown>) => guarded(async () => {
+    if (await run()) {
       void refreshBadges();
       await refresh();
     }
   });
   const buttons = held ? [
     pk && f.type !== 'access.review_due' ? (
-      <button key="renew" type="button" className="btn btn--sm btn--primary" onClick={async () => after(await requestPackage(agent, packages, pk))}>
+      <button key="renew" type="button" className="btn btn--sm btn--primary" onClick={act(() => requestPackage(agent, packages, pk))}>
         <Icon name="refresh" />Renew
       </button>
     ) : null,
     f.type === 'access.review_due' ? (
-      <button key="keep" type="button" className="btn btn--sm btn--primary" onClick={async () => after(await reviewAssignment(row, true))}>
+      <button key="keep" type="button" className="btn btn--sm btn--primary" onClick={act(() => reviewAssignment(row, true))}>
         <Icon name="check" />Keep it
       </button>
     ) : null,
     f.type === 'access.review_due' ? (
-      <button key="remove" type="button" className="btn btn--sm btn--danger-quiet" onClick={async () => after(await reviewAssignment(row, false))}>
+      <button key="remove" type="button" className="btn btn--sm btn--danger-quiet" onClick={act(() => reviewAssignment(row, false))}>
         <Icon name="ban" />Remove it
       </button>
     ) : null,
     can('approve', f) || can('contain', f) ? (
-      <button key="revoke" type="button" className="btn btn--sm btn--danger-quiet" onClick={async () => after(await assignmentAction(row, 'revoke'))}>
+      <button key="revoke" type="button" className="btn btn--sm btn--danger-quiet" onClick={act(() => assignmentAction(row, 'revoke'))}>
         <Icon name="ban" />Revoke
       </button>
     ) : null,

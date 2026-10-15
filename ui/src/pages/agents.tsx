@@ -1,7 +1,7 @@
 // The agents: every agent the control plane knows about, found by name, status, where it
 // runs, risk and owner, sorted by a column, and chosen several at once for one action.
 
-import { useMemo, useRef, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, type ReactElement } from 'react';
 import { manyDone } from '../components/bulk';
 import { ask } from '../components/dialog';
 import { useSynced } from '../components/hooks';
@@ -145,6 +145,15 @@ function AgentsView({ data }: { data: AgentsData }) {
   const searchBox = useRef<HTMLInputElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const searchSeq = useRef(0);
+  // Gone (another page shown): what finishes later changes nothing, the address least of all.
+  const shown = useRef(true);
+  useEffect(() => {
+    shown.current = true;
+    return () => {
+      shown.current = false;
+      clearTimeout(timer.current);
+    };
+  }, []);
   const selecting = canSome('admin') || canSome('contain') || canSome('approve');
 
   const view = useMemo(() => {
@@ -201,25 +210,29 @@ function AgentsView({ data }: { data: AgentsData }) {
       const q = (searchBox.current?.value ?? text).trim();
       try {
         const next = await loadAgents(q);
-        if (mine !== searchSeq.current) return;
+        if (!shown.current || mine !== searchSeq.current) return;
         const s = { ...latest.current, q };
         setState(s);
         setAgents(next);
         sync(s);
       } catch (err: any) {
-        toast(err.message, { tone: 'critical' });
+        if (shown.current) toast(err.message, { tone: 'critical' });
       }
     }, 250);
   };
 
-  const clearFilters = async () => {
+  // Every agent shown again; a search not yet run is dropped.
+  const clearFilters = guarded(async () => {
+    clearTimeout(timer.current);
+    const mine = ++searchSeq.current;
     setSearch('');
     const next = await loadAgents('');
+    if (!shown.current || mine !== searchSeq.current) return;
     const s = { ...latest.current, status: 'all', owner: '', risk: '', source: '', q: '' };
     setState(s);
     setAgents(next);
     sync(s);
-  };
+  });
 
   const adoptable = rows.filter((a) => a.status === 'discovered');
   return (
