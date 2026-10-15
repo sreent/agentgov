@@ -2,6 +2,7 @@
 // submit resolves to), or null when it is cancelled.
 
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
+import { flushSync } from 'react-dom';
 import { cx } from '../lib/format';
 import { Icon } from './Icon';
 
@@ -202,8 +203,12 @@ function DialogView({ req }: { req: Request }) {
       finish(req, out);
       return;
     }
-    setWorking(true);
-    setError(null);
+    // Busy before submit runs, as a check that fails at once leaves it the same way as one
+    // that fails later.
+    flushSync(() => {
+      setWorking(true);
+      setError(null);
+    });
     try {
       const result = await opts.submit(out);
       finish(req, result ?? out);
