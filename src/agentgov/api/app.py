@@ -1,4 +1,5 @@
-"""FastAPI application factory for the control plane."""
+"""The control plane's ASGI application: Django (agentgov.web) for the routes that have
+moved to it, FastAPI for the rest until all have (docs/adr/0007-django.md)."""
 
 from __future__ import annotations
 
@@ -11,16 +12,19 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
+from starlette.datastructures import URL
 from starlette.responses import Response
-from starlette.types import Scope
+from starlette.routing import Match
+from starlette.types import Receive, Scope, Send
 
-from agentgov import __version__
+from agentgov import __version__, web
 from agentgov.api import (
     access_routes,
     assertion_routes,
@@ -41,11 +45,11 @@ from agentgov.api import (
     secops_routes,
     sso_routes,
 )
-from agentgov.api.auth import Principal, describe, signed_in
 from agentgov.config import Settings
-from agentgov.identity import chains
 from agentgov.registry.errors import RegistryError
 from agentgov.runtime import Runtime
+from agentgov.web.api import api as web_api
+from agentgov.web.api import routes as web_routes
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +105,7 @@ class _UiFiles(StaticFiles):
 
 def create_app(
     settings: Settings | None = None, *, runtime: Runtime | None = None, background: bool = True
-) -> FastAPI:
+) -> ControlPlane:
     settings = settings or Settings.from_env()
     if not settings.admin_token and settings.dev_mode:
         settings = settings.with_overrides(admin_token="agt-dev-" + secrets.token_urlsafe(16))
@@ -146,62 +150,6 @@ def create_app(
             status_code=422, content={"detail": message or "invalid request", "errors": errors}
         )
 
-    @app.get("/healthz", tags=["health"])
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.get("/readyz", tags=["health"])
-    def readyz() -> dict[str, Any]:
-        with rt.db.session() as s:
-            s.execute(text("SELECT 1"))
-        return {"status": "ready", "version": __version__}
-
-    delegation_keys = chains.keys(settings.key_secret)
-
-    @app.get("/v1/info", tags=["health"])
-    def info() -> dict[str, Any]:
-        return {
-            "version": __version__,
-            "gateway_url": settings.gateway_public_url,
-            "identity_provider": "keycloak" if settings.keycloak_enabled else None,
-            "token_endpoint": (
-                settings.keycloak_issuer.rstrip("/") + "/protocol/openid-connect/token"
-                if settings.keycloak_issuer
-                else None
-            ),
-            "audience": settings.gateway_audience,
-            # What the tokens of the identity issuers the gateway trusts carry, unless an
-            # issuer names an audience of its own.
-            "issuer_audience": settings.gateway_public_url.rstrip("/"),
-            "opa": bool(settings.opa_url),
-            "sso": {"enabled": settings.sso_enabled, "login_url": "/auth/login"},
-            # Signed-in administrators can act in Microsoft 365 through AgentGov.
-            "microsoft_admin_actions": settings.microsoft_admin_actions,
-            # IBM Granite Guardian, for agent instructions and traffic (docs/detection.md).
-            "classifier": {
-                "enabled": bool(settings.guardian_url),
-                "model": settings.guardian_model if settings.guardian_url else None,
-            },
-            # Where agents find the keys to check the delegations AgentGov gives them.
-            "delegation_jwks": "/v1/delegations/jwks" if delegation_keys else None,
-            # The transparency log the ledger's checkpoints go into (docs/evidence.md).
-            "transparency_log": settings.ledger_rekor_url,
-        }
-
-    @app.get("/v1/delegations/jwks", tags=["health"])
-    def delegation_jwks() -> Response:
-        """The public keys of the delegations AgentGov gives the agents it calls through the
-        gateway: an agent that checks the one each call carries refuses calls around the
-        gateway (docs/agent-to-agent.md#calls-around-the-gateway). No secret."""
-        return JSONResponse(
-            chains.jwks(delegation_keys), headers={"Cache-Control": "public, max-age=300"}
-        )
-
-    @app.get("/v1/me", tags=["system"])
-    def whoami(principal: Principal = Depends(signed_in)) -> dict[str, Any]:
-        """The caller's identity and roles, so clients can tailor what they offer."""
-        return describe(rt, principal)
-
     app.include_router(registry_routes.router)
     app.include_router(package_routes.router)
     app.include_router(rule_routes.router)
@@ -229,4 +177,60 @@ def create_app(
     def root() -> RedirectResponse:
         return RedirectResponse("/ui/")
 
-    return app
+    def openapi() -> dict[str, Any]:
+        # Every route, whichever framework serves it.
+        if app.openapi_schema is None:
+            schema = get_openapi(
+                title=app.title, version=app.version, description=app.description, routes=app.routes
+            )
+            moved = web_api.get_openapi_schema(path_prefix="")
+            schema["paths"] = {**schema.get("paths", {}), **moved.get("paths", {})}
+            app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = openapi  # type: ignore[method-assign]
+    return ControlPlane(app)
+
+
+class ControlPlane:
+    """The ASGI app: Django serves the routes that have moved to it (agentgov.web), FastAPI
+    the rest, and FastAPI's lifespan starts and stops the runtime."""
+
+    def __init__(self, fastapi: FastAPI) -> None:
+        self.fastapi = fastapi
+        self.state = fastapi.state
+        self.django = web.handler()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            path = scope["path"]
+            if web.serves(path):
+                await self.django({**scope, web.RUNTIME: self.state.rt}, receive, send)
+                return
+            other = path[:-1] if path.endswith("/") else path + "/"
+            if path != "/" and web.serves(other) and not self._fastapi_serves(scope):
+                # As FastAPI answered a path with its last slash, or without, that it served
+                # the other way.
+                url = URL(scope={**scope, "path": other})
+                await RedirectResponse(str(url))(scope, receive, send)
+                return
+        await self.fastapi(scope, receive, send)
+
+    def _fastapi_serves(self, scope: Scope) -> bool:
+        return any(r.matches(scope)[0] != Match.NONE for r in self.fastapi.router.routes)
+
+
+def api_routes(app: ControlPlane) -> list[tuple[str, str]]:
+    """Every API route, as (method, path), whichever framework serves it."""
+
+    def flat(found: list[Any]) -> Any:
+        for route in found:
+            if type(route).__name__ == "_IncludedRouter":
+                yield from flat(route.original_router.routes)
+            else:
+                yield route
+
+    out = {
+        (m, r.path) for r in flat(app.fastapi.routes) if isinstance(r, APIRoute) for m in r.methods
+    }
+    return sorted(out | set(web_routes()))

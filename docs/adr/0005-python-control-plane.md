@@ -1,6 +1,7 @@
 # ADR 0005: Python for the control plane and processor
 
-Status: accepted (2026-10-09)
+Status: accepted (2026-10-09). Its FastAPI and SQLAlchemy are being replaced by Django
+([ADR 0007](0007-django.md)); Python stays.
 
 ## Context
 

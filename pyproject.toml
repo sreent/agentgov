@@ -33,6 +33,11 @@ classifiers = [
   "Topic :: System :: Monitoring",
 ]
 dependencies = [
+  # The API, moving from FastAPI to Django and Django Ninja (docs/adr/0007-django.md):
+  # Django 5.2 is the long-term release that runs on Python 3.11, and agentgov.web's
+  # threaded views build on Ninja's path views, so its minor version is held.
+  "django>=5.2.18,<6",
+  "django-ninja>=1.7.1,<1.8",
   "fastapi>=0.115",
   "uvicorn[standard]>=0.47",
   "pydantic>=2.7",
