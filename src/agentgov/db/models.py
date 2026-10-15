@@ -9,6 +9,8 @@ migrations take over.
 
 from __future__ import annotations
 
+from typing import Any
+
 from django.db.models import (
     SET_NULL,
     AutoField,
@@ -29,7 +31,74 @@ from agentgov.db.fields import JSONField, UTCDateTimeField
 from agentgov.ids import utcnow
 
 
-class Blueprint(Model):
+class Row(Model):
+    """A row of one of the tables, written as SQLAlchemy wrote one: ``save()`` writes the
+    fields that changed since it was read, and the time it was updated with them, rather
+    than every field. Two transactions that change different fields of one row (a job its
+    last sighting, a person its description) keep both changes; a save that changed
+    nothing writes nothing. A JSON value counts as changed when another is set, not when
+    the one there is changed in place."""
+
+    class Meta:
+        abstract = True
+
+    @classmethod
+    def from_db(cls, db: str | None, field_names: Any, values: Any) -> Any:
+        row = super().from_db(db, field_names, values)
+        row._stored = row._values()
+        return row
+
+    def _values(self) -> dict[str, Any]:
+        """The fields loaded, as they are now."""
+        return {
+            f.attname: self.__dict__[f.attname]
+            for f in self._meta.concrete_fields
+            if f.attname in self.__dict__
+        }
+
+    def changed(self) -> list[str]:
+        """The fields set to another value since the row was read or last saved."""
+        stored: dict[str, Any] = self.__dict__.get("_stored", {})
+        keys = {f.attname for f in self._meta.pk_fields}
+        return [
+            name
+            for name, value in self._values().items()
+            if name not in keys and (name not in stored or value != stored[name])
+        ]
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        if (
+            "_stored" in self.__dict__
+            and not self._state.adding
+            and not args
+            and kwargs.get("update_fields") is None
+            and not kwargs.get("force_insert")
+        ):
+            fields = self.changed()
+            if fields:
+                fields += [
+                    f.attname
+                    for f in self._meta.concrete_fields
+                    if getattr(f, "auto_now", False) and f.attname not in fields
+                ]
+            kwargs["update_fields"] = fields
+        super().save(*args, **kwargs)
+        self._stored = self._values()
+
+    def refresh_from_db(self, *args: Any, **kwargs: Any) -> None:
+        fields = kwargs.get("fields", args[1] if len(args) > 1 else None)
+        deferred = self.get_deferred_fields()
+        super().refresh_from_db(*args, **kwargs)
+        read = (
+            set(fields)
+            if fields is not None
+            else {f.attname for f in self._meta.concrete_fields} - deferred
+        )
+        stored = self.__dict__.setdefault("_stored", {})
+        stored.update({name: value for name, value in self._values().items() if name in read})
+
+
+class Blueprint(Row):
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=128)
     description = TextField(default="")
@@ -69,7 +138,7 @@ class Blueprint(Model):
         ]
 
 
-class Agent(Model):
+class Agent(Row):
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=200)
     description = TextField(default="")
@@ -164,7 +233,7 @@ class Agent(Model):
         ]
 
 
-class ToolServer(Model):
+class ToolServer(Row):
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=64)
     # The server's own MCP endpoint. A server only for developers may have none ("")
@@ -214,7 +283,7 @@ class ToolServer(Model):
         ]
 
 
-class ModelProvider(Model):
+class ModelProvider(Row):
     """A model provider agents call through the gateway, at ``/llm/<name>``.
 
     Its API key never enters AgentGov: the gateway reads it from ``key_file``, a
@@ -248,7 +317,7 @@ class ModelProvider(Model):
         ]
 
 
-class IdentityIssuer(Model):
+class IdentityIssuer(Row):
     """An identity provider whose tokens agents may authenticate with instead of a client
     secret: a Kubernetes cluster, a SPIFFE trust domain, or an OpenID Connect issuer such
     as Microsoft Entra ID, Okta, AWS or GitHub Actions.
@@ -297,7 +366,7 @@ class IdentityIssuer(Model):
         ]
 
 
-class Destination(Model):
+class Destination(Row):
     """Where AgentGov hands its evidence and alerts to the security team: a SIEM, through
     OpenTelemetry logs, an HTTP input or Splunk's HTTP Event Collector, or a Teams or Slack
     channel. Its credential (a token, or the chat's webhook URL) is a file the control plane
@@ -340,7 +409,7 @@ class Destination(Model):
         ]
 
 
-class ModelUsage(Model):
+class ModelUsage(Row):
     """Model calls through the gateway, per agent, UTC day, provider and model.
 
     ``agent_id`` is empty for callers the gateway could not identify (only possible
@@ -366,7 +435,7 @@ class ModelUsage(Model):
         ]
 
 
-class Policy(Model):
+class Policy(Row):
     """An organisation Rego module, shipped to OPA alongside the built-in library."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -386,7 +455,7 @@ class Policy(Model):
         ]
 
 
-class FindingType(Model):
+class FindingType(Row):
     """How findings of one type are handled here (``agentgov.registry.finding_types``):
     raised or not, and how severe. Types nobody configured have no row."""
 
@@ -402,7 +471,7 @@ class FindingType(Model):
         db_table = "finding_types"
 
 
-class FeatureSetting(Model):
+class FeatureSetting(Row):
     """The mode chosen for one of AgentGov's features (``agentgov.registry.features``).
 
     Features nobody chose a mode for have no row and run in their default mode.
@@ -423,7 +492,7 @@ class FeatureSetting(Model):
         db_table = "feature_settings"
 
 
-class ApiKey(Model):
+class ApiKey(Row):
     """Scoped keys for people and automation (approvers, auditors, CI pipelines)."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -447,7 +516,7 @@ class ApiKey(Model):
         ]
 
 
-class AdminSession(Model):
+class AdminSession(Row):
     """An administrator signed in through single sign-on.
 
     The browser holds a random token in an HttpOnly cookie; only its hash is
@@ -481,7 +550,7 @@ class AdminSession(Model):
         ]
 
 
-class RoleGrant(Model):
+class RoleGrant(Row):
     """An AgentGov role given to a person in AgentGov rather than by the identity provider:
     for providers whose tokens carry no groups (Google's), and the first administrators.
     It applies when they sign in with this email address, which the provider vouches for.
@@ -507,7 +576,7 @@ class RoleGrant(Model):
         ]
 
 
-class LoginState(Model):
+class LoginState(Row):
     """A sign-in in flight: state, nonce and PKCE verifier, used once and short-lived."""
 
     state = CharField(max_length=64, primary_key=True)
@@ -523,7 +592,7 @@ class LoginState(Model):
         ]
 
 
-class CliLogin(Model):
+class CliLogin(Row):
     """A sign-in for the command line (``agentgov login``), used once and short-lived.
 
     The CLI listens on a loopback port and proves with PKCE that it started the
@@ -549,7 +618,7 @@ class CliLogin(Model):
         ]
 
 
-class MicrosoftGrant(Model):
+class MicrosoftGrant(Row):
     """A signed-in administrator's Microsoft sign-in, which AgentGov acts with in Microsoft
     365 and Power Platform (agentgov.identity.delegation): the refresh token, sealed with a
     key derived from the client secret, kept for as long as the AgentGov session lasts."""
@@ -568,7 +637,7 @@ class MicrosoftGrant(Model):
         ]
 
 
-class PlatformAgent(Model):
+class PlatformAgent(Row):
     """An agent as the platform that runs it reports it (Microsoft 365, Copilot Studio).
 
     These agents never call tools through AgentGov's gateway, so AgentGov
@@ -593,7 +662,7 @@ class PlatformAgent(Model):
         ]
 
 
-class PlatformSync(Model):
+class PlatformSync(Row):
     """The outcome of the latest sync or import from each platform."""
 
     source = CharField(max_length=64, primary_key=True)
@@ -607,7 +676,7 @@ class PlatformSync(Model):
         db_table = "platform_syncs"
 
 
-class ComponentReport(Model):
+class ComponentReport(Row):
     """What one instance of a component (a governance processor) last said it can reach:
     OPA, Presidio, Granite Guardian, a decision point of your own (agentgov.health)."""
 
@@ -628,7 +697,7 @@ class ComponentReport(Model):
         db_table = "component_reports"
 
 
-class Person(Model):
+class Person(Row):
     """Someone in Microsoft Entra ID whom a platform names as an agent's maker or owner, by
     object ID (registry.people): as the directory last said, or a list uploaded from it."""
 
@@ -657,7 +726,7 @@ class Person(Model):
         ]
 
 
-class IntegrationState(Model):
+class IntegrationState(Row):
     """Where an integration with another service got to, between runs (a cursor, a
     pending query, the permissions an app was granted)."""
 
@@ -670,7 +739,7 @@ class IntegrationState(Model):
         db_table = "integration_state"
 
 
-class AgentInstructions(Model):
+class AgentInstructions(Row):
     """What an agent is instructed to do (its system prompt), from one source, and
     what scanning found in it. Credentials in the text are redacted before storing."""
 
@@ -697,7 +766,7 @@ class AgentInstructions(Model):
         ]
 
 
-class ApprovedConnector(Model):
+class ApprovedConnector(Row):
     """A Power Platform connector the organisation allows its agents to use."""
 
     connector_id = CharField(max_length=200, primary_key=True)
@@ -710,7 +779,7 @@ class ApprovedConnector(Model):
         db_table = "approved_connectors"
 
 
-class ApprovalRequest(Model):
+class ApprovalRequest(Row):
     """Human-in-the-loop approval for one specific tool call."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -747,7 +816,7 @@ class ApprovalRequest(Model):
         ]
 
 
-class Finding(Model):
+class Finding(Row):
     """A posture or threat finding, open until resolved or dismissed."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -798,7 +867,7 @@ class Finding(Model):
         ]
 
 
-class Team(Model):
+class Team(Row):
     """People and chat channels that can own agents, and that issues escalate to."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -827,7 +896,7 @@ class Team(Model):
         ]
 
 
-class AccessPackage(Model):
+class AccessPackage(Row):
     """Grants an agent can hold for a while: requested, approved, and expiring
     (docs/access-packages.md)."""
 
@@ -859,7 +928,7 @@ class AccessPackage(Model):
         ]
 
 
-class AccessAssignment(Model):
+class AccessAssignment(Row):
     """An access package for an agent: asked for, then held until it expires, is revoked
     or is renewed (each renewal is an assignment of its own)."""
 
@@ -892,7 +961,7 @@ class AccessAssignment(Model):
         ]
 
 
-class ManagementRule(Model):
+class ManagementRule(Row):
     """Conditions on agents, and what to do about the agents that meet them for long enough:
     raise an issue, give them an owner, block them, delete them or revoke their access
     packages, after telling their people (docs/management-rules.md)."""
@@ -927,7 +996,7 @@ class ManagementRule(Model):
         ]
 
 
-class RuleMatch(Model):
+class RuleMatch(Row):
     """An agent a management rule matches, from when it started to match: when its people
     were told, and what the rule did or would have done. Gone once the agent no longer
     matches."""
@@ -955,7 +1024,7 @@ class RuleMatch(Model):
         ]
 
 
-class Notification(Model):
+class Notification(Row):
     """A message about an issue to someone's email address or a team's chat, which the
     control plane sends and retries (docs/issues.md)."""
 
@@ -989,7 +1058,7 @@ class Notification(Model):
         ]
 
 
-class Ticket(Model):
+class Ticket(Row):
     """An issue's ticket in a service desk (docs/tickets.md): AgentGov opens it, keeps it in
     step with the issue, and reads back what happens to it there."""
 
@@ -1033,7 +1102,7 @@ class Ticket(Model):
         ]
 
 
-class RiskSignal(Model):
+class RiskSignal(Row):
     """Runtime evidence feeding an agent's risk score; decays after a window."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -1050,7 +1119,7 @@ class RiskSignal(Model):
         ]
 
 
-class AgentActivity(Model):
+class AgentActivity(Row):
     """Daily usage counters per agent, from gateway decisions and telemetry."""
 
     agent_id = CharField(max_length=32)
@@ -1067,7 +1136,7 @@ class AgentActivity(Model):
         db_table = "agent_activity"
 
 
-class LedgerEntry(Model):
+class LedgerEntry(Row):
     """Append-only, hash-chained evidence ledger.
 
     ``hash = sha256(prev_hash || canonical_json(entry))``, so modifying or
@@ -1108,7 +1177,7 @@ class LedgerEntry(Model):
         ]
 
 
-class LedgerHead(Model):
+class LedgerHead(Row):
     """Single row holding the tip of the hash chain.
 
     Appenders update this row first, which takes a write lock (row lock on
@@ -1124,7 +1193,7 @@ class LedgerHead(Model):
         db_table = "ledger_head"
 
 
-class LedgerCheckpoint(Model):
+class LedgerCheckpoint(Row):
     """A point of the ledger's hash chain kept for good (docs/evidence.md): made every so
     often, time-stamped by a time-stamping authority when one is set (RFC 3161), and,
     once the entries up to it are archived and removed, where the chain goes on from."""
@@ -1161,7 +1230,7 @@ class LedgerCheckpoint(Model):
         db_table = "ledger_checkpoints"
 
 
-class McpSighting(Model):
+class McpSighting(Row):
     """An MCP server set up in one client on one developer's machine, as last reported
     by ``agentgov mcp scan --report``. Credentials never arrive here: environment
     variables and headers are reported by name only."""

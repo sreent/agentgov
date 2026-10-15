@@ -37,12 +37,10 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 import jwt
-from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.models import AdminSession, CliLogin, LoginState, RoleGrant
+from agentgov.db.models import AdminSession, CliLogin, LoginState, RoleGrant
 
 log = logging.getLogger(__name__)
 
@@ -546,27 +544,27 @@ class OIDCClient:
 # --------------------------------------------------------------------- sessions
 
 
-def with_given_roles(session: Session, who: Identity) -> Identity:
+def with_given_roles(tx: db.Where, who: Identity) -> Identity:
     """Add the roles given to the person in AgentGov (agentgov.registry.access), by the
     email address the provider vouches for."""
     if not who.email:
         return who
-    given = set(session.scalars(select(RoleGrant.role).where(RoleGrant.email == who.email.lower())))
+    given = set(RoleGrant.objects.filter(email=who.email.lower()).values_list("role", flat=True))
     if not given:
         return who
     return replace(who, roles=ordered(given | set(who.roles)), given=tuple(ordered(given)))
 
 
-def without_role(session: Session, settings: Settings) -> str | None:
+def without_role(tx: db.Where, settings: Settings) -> str | None:
     """What someone gets who signs in with no role given to them: the person role, to see
     what is sent to them, while issues or approvals go to people; None if they are refused
     then (AGENTGOV_OIDC_REQUIRE_ROLE)."""
-    if settings.oidc_require_role or not people_may_sign_in(session):
+    if settings.oidc_require_role or not people_may_sign_in(tx):
         return None
     return PERSON
 
 
-def admit(session: Session, settings: Settings, who: Identity) -> Identity | None:
+def admit(tx: db.Where, settings: Settings, who: Identity) -> Identity | None:
     """Who signed in, with the roles they sign in with, or None if they may not sign in.
 
     Their AgentGov roles, if they have one, for every team or for one. Otherwise the person
@@ -577,31 +575,31 @@ def admit(session: Session, settings: Settings, who: Identity) -> Identity | Non
     held = [role for role in ordered(who.roles) if role != PERSON]
     if held:
         return replace(who, roles=held)
-    if not people_may_sign_in(session):
+    if not people_may_sign_in(tx):
         return None
     if PERSON in who.roles:
         return replace(who, roles=[PERSON])
-    if without_role(session, settings) is None:
+    if without_role(tx, settings) is None:
         return None
     return replace(who, roles=[])
 
 
-def people_may_sign_in(session: Session) -> bool:
+def people_may_sign_in(tx: db.Where) -> bool:
     """Whether people without an AgentGov role may sign in, to see what was sent to them."""
     from agentgov.registry import features
 
-    return any(features.is_on(session, name) for name in PERSON_FEATURES)
+    return any(features.is_on(db.orm(tx), name) for name in PERSON_FEATURES)
 
 
-def purge_expired(session: Session) -> None:
+def purge_expired(tx: db.Where) -> None:
     now = ids.utcnow()
-    session.execute(delete(LoginState).where(LoginState.expires_at < now))
-    session.execute(delete(CliLogin).where(CliLogin.expires_at < now))
-    session.execute(delete(AdminSession).where(AdminSession.expires_at < now))
+    LoginState.objects.filter(expires_at__lt=now).delete()
+    CliLogin.objects.filter(expires_at__lt=now).delete()
+    AdminSession.objects.filter(expires_at__lt=now).delete()
 
 
 def begin_login(
-    session: Session,
+    tx: db.Where,
     client: OIDCClient,
     *,
     cli_port: int | None = None,
@@ -613,36 +611,37 @@ def begin_login(
     browser goes back to the CLI on that loopback port, and the CLI must present
     the verifier for that PKCE challenge to collect its session.
     """
-    purge_expired(session)
+    purge_expired(tx)
     state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     expires_at = ids.utcnow() + LOGIN_TTL
-    session.add(LoginState(state=state, nonce=nonce, code_verifier=verifier, expires_at=expires_at))
+    LoginState.objects.create(
+        state=state, nonce=nonce, code_verifier=verifier, expires_at=expires_at
+    )
     if cli_port is not None and cli_challenge is not None:
-        session.add(
-            CliLogin(state=state, port=cli_port, challenge=cli_challenge, expires_at=expires_at)
+        CliLogin.objects.create(
+            state=state, port=cli_port, challenge=cli_challenge, expires_at=expires_at
         )
     return state, client.authorization_url(state, nonce, verifier)
 
 
-def consume_login(session: Session, state: str) -> tuple[str, str]:
+def consume_login(tx: db.Where, state: str) -> tuple[str, str]:
     """Take the sign-in attempt for ``state`` (each completes once): ``(nonce, verifier)``."""
-    login = session.get(LoginState, state)
+    login = LoginState.objects.filter(pk=state).first()
     if login is None or login.expires_at < ids.utcnow():
         raise SSOError("expired", "sign-in expired or was already completed")
-    session.delete(login)
+    login.delete()
     return login.nonce, login.code_verifier
 
 
-def cli_port(session: Session, state: str) -> int | None:
+def cli_port(tx: db.Where, state: str) -> int | None:
     """The CLI's loopback port, if ``agentgov login`` started this sign-in."""
-    login = session.get(CliLogin, state)
-    return login.port if login is not None else None
+    return CliLogin.objects.filter(pk=state).values_list("port", flat=True).first()
 
 
-def cli_signed_in(session: Session, state: str, who: Identity) -> str:
+def cli_signed_in(tx: db.Where, state: str, who: Identity) -> str:
     """The person signed in for the CLI: keep who they are; returns the one-time code."""
-    login = session.get(CliLogin, state)
+    login = CliLogin.objects.filter(pk=state).first()
     if login is None:
         raise SSOError("expired", "sign-in expired or was already completed")
     code = secrets.token_urlsafe(32)
@@ -657,37 +656,37 @@ def cli_signed_in(session: Session, state: str, who: Identity) -> str:
         "given": list(who.given),
     }
     login.expires_at = ids.utcnow() + CLI_CODE_TTL
+    login.save()
     return code
 
 
-def collect_cli_login(
-    session: Session, code: str, verifier: str
-) -> tuple[str | None, Identity | None]:
+def collect_cli_login(tx: db.Where, code: str, verifier: str) -> tuple[str | None, Identity | None]:
     """Who signed in for a one-time code, if ``verifier`` matches its PKCE challenge.
 
     Returns the sign-in's state (``None`` for an unknown code) and who signed in
     (``None`` unless the code is current and the verifier right). Each code works
     once: it is used up even when the verifier is wrong.
     """
-    login = session.scalar(select(CliLogin).where(CliLogin.code_hash == token_hash(code)))
+    login = CliLogin.objects.filter(code_hash=token_hash(code)).first()
     if login is None:
         return None, None
-    session.delete(login)
+    state = login.state
+    login.delete()
     if login.identity is None or login.expires_at < ids.utcnow():
-        return login.state, None
+        return state, None
     if not hmac.compare_digest(pkce_challenge(verifier), login.challenge):
-        return login.state, None
+        return state, None
     identity = dict(login.identity)
     identity["given"] = tuple(identity.get("given") or ())
-    return login.state, Identity(**identity)
+    return state, Identity(**identity)
 
 
 def start_session(
-    session: Session, settings: Settings, who: Identity, *, client: str = "browser"
+    tx: db.Where, settings: Settings, who: Identity, *, client: str = "browser"
 ) -> tuple[str, AdminSession]:
     """Create the session for a signed-in person; returns its token and record."""
     token = secrets.token_urlsafe(32)
-    record = AdminSession(
+    record = AdminSession.objects.create(
         id=ids.new_id(ids.SESSION),
         token_hash=token_hash(token),
         subject=who.subject,
@@ -698,9 +697,8 @@ def start_session(
         provider_session=who.provider_session,
         expires_at=ids.utcnow() + timedelta(hours=settings.session_hours),
     )
-    session.add(record)
     ledger.append(
-        session,
+        tx,
         type="admin.login",
         actor=f"sso:{who.name}",
         details={
@@ -714,9 +712,9 @@ def start_session(
     return token, record
 
 
-def record_denied(session: Session, who: Identity, *, reason: str = "no AgentGov role") -> None:
+def record_denied(tx: db.Where, who: Identity, *, reason: str = "no AgentGov role") -> None:
     ledger.append(
-        session,
+        tx,
         type="admin.login_denied",
         actor=f"sso:{who.name}",
         severity="warning",
@@ -725,51 +723,49 @@ def record_denied(session: Session, who: Identity, *, reason: str = "no AgentGov
     )
 
 
-def lookup(session: Session, token: str) -> AdminSession | None:
-    record = session.scalar(
-        select(AdminSession).where(AdminSession.token_hash == token_hash(token))
-    )
+def lookup(tx: db.Where, token: str) -> AdminSession | None:
+    record = AdminSession.objects.filter(token_hash=token_hash(token)).first()
     if record is None or record.expires_at <= ids.utcnow():
         return None
     return record
 
 
-def end_session(session: Session, token: str) -> str | None:
+def end_session(tx: db.Where, token: str) -> str | None:
     """Sign out; returns the ID token for the provider logout, if the session existed."""
-    record = lookup(session, token)
+    record = lookup(tx, token)
     if record is None:
         return None
     id_token = record.id_token
     ledger.append(
-        session,
+        tx,
         type="admin.logout",
         actor=f"sso:{record.name}",
         details={"session_id": record.id},
     )
-    session.delete(record)
+    record.delete()
     return id_token or ""
 
 
-def end_provider_sessions(session: Session, claims: dict[str, Any]) -> list[str]:
+def end_provider_sessions(tx: db.Where, claims: dict[str, Any]) -> list[str]:
     """End the sessions a logout token names: those from its provider session (sid), or,
     when it names only a person (sub), all of theirs. Returns the IDs of those ended."""
     sid, sub = claims.get("sid"), claims.get("sub")
-    query = select(AdminSession)
+    named = AdminSession.objects.all()
     if isinstance(sid, str):
-        query = query.where(AdminSession.provider_session == sid)
+        named = named.filter(provider_session=sid)
         if isinstance(sub, str):
-            query = query.where(AdminSession.subject == sub)
+            named = named.filter(subject=sub)
     else:
-        query = query.where(AdminSession.subject == sub)
+        named = named.filter(subject=sub)
     ended = []
-    for record in session.scalars(query.order_by(AdminSession.id)):
+    for record in named.order_by("id"):
         ledger.append(
-            session,
+            tx,
             type="admin.logout",
             actor=f"sso:{record.name}",
             reason="the identity provider ended the session",
             details={"session_id": record.id, "by": "identity provider"},
         )
-        session.delete(record)
         ended.append(record.id)
+    AdminSession.objects.filter(id__in=ended).delete()
     return ended

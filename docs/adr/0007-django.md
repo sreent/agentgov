@@ -86,9 +86,13 @@ The data layer:
   queries on Django's ORM in the caller's transaction, and takes the transaction or, from a
   module still on SQLAlchemy, its session (`agentgov.db.Where`). Django's queries see what
   the session holds: it writes it first, as it does before its own queries (not before
-  Django's savepoint statements, nor in its `no_autoflush` blocks). Moved so far: the
-  ledger, its retention and its witness (`agentgov.ledger`, `agentgov.retention`,
-  `agentgov.witness`).
+  Django's savepoint statements, nor in its `no_autoflush` blocks). A model's `save()`
+  writes the fields that changed since the row was read, as SQLAlchemy did: two
+  transactions that change different fields of one row (a job and a person) keep both
+  changes. Moved so far: the ledger, its retention and its witness (`agentgov.ledger`,
+  `agentgov.retention`, `agentgov.witness`); sign-in, access and API keys
+  (`agentgov.identity.sso`, `agentgov.identity.delegation`, `agentgov.registry.access`,
+  `agentgov.registry.apikeys`, and the views and authentication that use them).
 - [ ] Django's migrations: the first one matches the last Alembic revision; a release runs
   both; then Alembic goes.
 

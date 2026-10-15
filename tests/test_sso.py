@@ -20,14 +20,13 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import update
 from starlette.testclient import TestClient
 
 from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.db.models import AdminSession, CliLogin
 from agentgov.identity.sso import LOGOUT_EVENT, display_name, roles_from_claims
-from agentgov.models import AdminSession, CliLogin
 from agentgov.registry import findings
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN, SERVICE, seed
@@ -395,8 +394,8 @@ class TestRefusals:
     def test_expired_sessions_are_rejected(self, sso, provider) -> None:
         sign_in(sso, provider, roles=["agentgov-admin"])
         rt = sso.app.state.rt
-        with rt.db.session() as s:
-            s.execute(update(AdminSession).values(expires_at=ids.utcnow() - timedelta(seconds=1)))
+        with rt.db.transaction():
+            AdminSession.objects.update(expires_at=ids.utcnow() - timedelta(seconds=1))
         assert sso.get("/v1/me").status_code == 401
 
 
@@ -774,8 +773,8 @@ class TestCliSignIn:
 
     def test_the_code_expires(self, sso, provider) -> None:
         verifier, back = cli_sign_in(sso, provider, roles=["agentgov-admin"])
-        with sso.app.state.rt.db.session() as s:
-            s.execute(update(CliLogin).values(expires_at=ids.utcnow() - timedelta(seconds=1)))
+        with sso.app.state.rt.db.transaction():
+            CliLogin.objects.update(expires_at=ids.utcnow() - timedelta(seconds=1))
         code = at_the_cli(back)["code"]
         resp = sso.post("/auth/cli/token", json={"code": code, "verifier": verifier})
         assert resp.status_code == 400 and "expired" in resp.json()["detail"]

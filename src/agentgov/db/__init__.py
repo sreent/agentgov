@@ -131,6 +131,12 @@ def transaction_of(where: Where) -> Transaction:
     return found
 
 
+def orm(where: Where) -> Session:
+    """The SQLAlchemy session of the transaction ``where`` names, for the modules still on
+    SQLAlchemy."""
+    return transaction_of(where).orm()
+
+
 def lock(session: Session, instance: Any) -> None:
     """Lock ``instance``'s row until the transaction ends, and read it afresh: decisions on
     the same thing (two approvers deciding one request at once, say) take turns, and the

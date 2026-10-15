@@ -149,8 +149,8 @@ def _principal(request: Request) -> Principal | None:
         if settings.service_token and hmac.compare_digest(token, settings.service_token):
             return Principal("internal", "service")
         try:
-            with rt.db.session() as session:
-                key = apikeys.authenticate(session, token, max_days=settings.api_key_max_days)
+            with rt.db.transaction() as tx:
+                key = apikeys.authenticate(tx, token, max_days=settings.api_key_max_days)
                 if key is not None:
                     return Principal(key.name, key.role, via="api_key")
         except apikeys.Expired as exc:
@@ -180,8 +180,8 @@ def session_principal(request: Request) -> Principal | None:
 def _signed_in(rt: Any, token: str | None) -> Principal | None:
     if not token or not rt.settings.sso_enabled:
         return None
-    with rt.db.session() as session:
-        record = sso.lookup(session, token)
+    with rt.db.transaction() as tx:
+        record = sso.lookup(tx, token)
         if record is None:
             return None
         # For every team, then for one (approver@sales).
@@ -189,7 +189,7 @@ def _signed_in(rt: Any, token: str | None) -> Principal | None:
         if not roles:
             # Someone without an AgentGov role, there for the requests and issues sent to
             # them: given the person role, or, while anyone may sign in, with none at all.
-            if not sso.people_may_sign_in(session):
+            if not sso.people_may_sign_in(tx):
                 return None
             if sso.PERSON not in (record.roles or []) and rt.settings.oidc_require_role:
                 return None
@@ -201,7 +201,7 @@ def _signed_in(rt: Any, token: str | None) -> Principal | None:
             frozenset(roles),
             via="session",
             session_id=record.id,
-            microsoft=delegations is not None and delegations.has(record.id, session=session),
+            microsoft=delegations is not None and delegations.has(record.id, tx=tx),
             subject=record.subject,
             email=record.email,
         )

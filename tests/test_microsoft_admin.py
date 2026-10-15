@@ -18,8 +18,9 @@ from starlette.testclient import TestClient
 from agentgov import cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.db.models import MicrosoftGrant
 from agentgov.identity.delegation import Delegations
-from agentgov.models import Finding, MicrosoftGrant
+from agentgov.models import Finding
 from agentgov.registry import platforms
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
@@ -254,8 +255,8 @@ def entra_client(
 
 def grants(rt: Runtime) -> list[str]:
     """The sessions AgentGov holds a Microsoft sign-in for."""
-    with rt.db.session() as s:
-        return list(s.scalars(select(MicrosoftGrant.session_id)))
+    with rt.db.transaction():
+        return list(MicrosoftGrant.objects.values_list("session_id", flat=True))
 
 
 def admin_signs_in(client: TestClient, entra: FakeEntra) -> None:
@@ -446,8 +447,8 @@ class TestQuarantine:
         admin_signs_in(entra_client, entra)
         rt = entra_client.app.state.rt
         [token] = entra.refresh_tokens
-        with rt.db.session() as s:
-            [row] = s.scalars(select(MicrosoftGrant))
+        with rt.db.transaction():
+            [row] = MicrosoftGrant.objects.all()
             sealed, session_id = row.sealed, row.session_id
         assert token not in sealed and token not in base64.b64decode(sealed).decode("latin-1")
         assert rt.delegations._open(session_id, sealed) == token

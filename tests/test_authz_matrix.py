@@ -29,14 +29,14 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids, migrations
 from agentgov.api.app import api_routes, create_app
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.models import AdminSession, ApiKey, ApprovalRequest
+from agentgov.db.models import AdminSession, ApiKey
+from agentgov.models import ApprovalRequest
 from agentgov.registry import findings, issues, model_usage
 from agentgov.runtime import Runtime
 from tests.test_models import access_log, logs
@@ -244,11 +244,9 @@ def seed(client: TestClient, provider: FakeProvider) -> Seeded:
     person = cli_session(client, provider, sub="pat", email="pat@example.com", roles=[])
     seeded.tokens["person"] = person["token"]
     cli_session(client, provider, sub="decoy", email="decoy@example.com", roles=[])
-    with rt.db.session() as s:
-        seeded.decoy_key = s.scalars(select(ApiKey.id).where(ApiKey.name == "decoy")).one()
-        seeded.decoy_session = s.scalars(
-            select(AdminSession.id).where(AdminSession.subject == "decoy")
-        ).one()
+    with rt.db.transaction():
+        seeded.decoy_key = ApiKey.objects.get(name="decoy").id
+        seeded.decoy_session = AdminSession.objects.get(subject="decoy").id
     return seeded
 
 

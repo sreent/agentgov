@@ -97,8 +97,8 @@ def login(
     except sso.SSOError as exc:
         log.warning("cannot sign in: %s", exc)
         return _back_to_cli(cli_port, error=exc.code) if cli_port else _back_to_ui(exc.code)
-    with runtime(request).db.session() as s:
-        state, url = sso.begin_login(s, client, cli_port=cli_port, cli_challenge=cli_challenge)
+    with runtime(request).db.transaction() as tx:
+        state, url = sso.begin_login(tx, client, cli_port=cli_port, cli_challenge=cli_challenge)
     resp = redirect_response(url, status_code=302)
     # Binds the callback to this browser. Lax: it must survive the provider's redirect.
     set_cookie(
@@ -139,8 +139,8 @@ def callback(
     bound = bool(state) and request.COOKIES.get(LOGIN_COOKIE) == state
     port = None
     if bound:
-        with rt.db.session() as s:
-            port = sso.cli_port(s, state or "")
+        with rt.db.transaction() as tx:
+            port = sso.cli_port(tx, state or "")
 
     def failed(code: str) -> HttpResponse:
         return _back_to_cli(port, error=code) if port else _back_to_ui(code)
@@ -151,8 +151,8 @@ def callback(
     if not bound or not code or not state:
         return failed("state")
     try:
-        with rt.db.session() as s:
-            nonce, verifier = sso.consume_login(s, state)
+        with rt.db.transaction() as tx:
+            nonce, verifier = sso.consume_login(tx, state)
         # Network calls happen outside database transactions.
         tokens = client.redeem(code, verifier)
         who = client.identify(tokens, nonce)
@@ -160,21 +160,21 @@ def callback(
         log.warning("sign-in failed: %s", exc)
         return failed(exc.code)
     refresh_token = tokens.get("refresh_token") if rt.delegations is not None else None
-    with rt.db.session() as s:
-        admitted = sso.admit(s, rt.settings, sso.with_given_roles(s, who))
+    with rt.db.transaction() as tx:
+        admitted = sso.admit(tx, rt.settings, sso.with_given_roles(tx, who))
         if admitted is None:
-            sso.record_denied(s, who)
+            sso.record_denied(tx, who)
             return failed("no_role")
         # Without an AgentGov role, they see the approval requests and the issues sent to
         # them, and nothing else.
         who = admitted
         if port:
             try:
-                one_time = sso.cli_signed_in(s, state, who)
+                one_time = sso.cli_signed_in(tx, state, who)
             except sso.SSOError as exc:
                 return failed(exc.code)
         else:
-            token, record = sso.start_session(s, rt.settings, who)
+            token, record = sso.start_session(tx, rt.settings, who)
             session_id, expires_at = record.id, record.expires_at
     if port:
         # The CLI collects its session at /auth/cli/token. Until then, the
@@ -222,16 +222,16 @@ def cli_token(request: HttpRequest, body: CliCode = Body(...)) -> dict[str, Any]
     """Give ``agentgov login`` its session: the one-time code and the PKCE verifier."""
     _client(request)
     rt = runtime(request)
-    with rt.db.session() as s:
-        state, who = sso.collect_cli_login(s, body.code, body.verifier)
+    with rt.db.transaction() as tx:
+        state, who = sso.collect_cli_login(tx, body.code, body.verifier)
     if who is None:
         if state and rt.delegations is not None:
             rt.delegations.forget(state)
         raise HTTPException(
             400, "sign-in expired, was already completed, or was started by another program"
         )
-    with rt.db.session() as s:
-        token, record = sso.start_session(s, rt.settings, who, client="cli")
+    with rt.db.transaction() as tx:
+        token, record = sso.start_session(tx, rt.settings, who, client="cli")
         session_id, expires_at = record.id, record.expires_at
     microsoft = False
     if rt.delegations is not None and state:
@@ -260,10 +260,10 @@ def logout(request: HttpRequest) -> HttpResponse:
         if not bearer and request.headers.get(CSRF_HEADER) != "1":
             raise HTTPException(403, "cross-site request refused: send the X-AgentGov-CSRF header")
         rt = runtime(request)
-        with rt.db.session() as s:
-            record = sso.lookup(s, token)
+        with rt.db.transaction() as tx:
+            record = sso.lookup(tx, token)
             session_id = record.id if record is not None else None
-            id_token = sso.end_session(s, token)
+            id_token = sso.end_session(tx, token)
         if session_id and rt.delegations is not None:
             rt.delegations.forget(session_id)
         if id_token is not None:
@@ -307,8 +307,8 @@ def _logout_refused(why: str) -> HttpResponse:
 def _end_provider_sessions(request: HttpRequest, client: sso.OIDCClient, token: str) -> list[str]:
     claims = client.validate_logout(token)  # may fetch the provider's keys
     rt = runtime(request)
-    with rt.db.session() as s:
-        ended = sso.end_provider_sessions(s, claims)
+    with rt.db.transaction() as tx:
+        ended = sso.end_provider_sessions(tx, claims)
     if rt.delegations is not None:
         for session_id in ended:
             rt.delegations.forget(session_id)

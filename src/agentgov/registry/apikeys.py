@@ -14,11 +14,8 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
-from agentgov.models import ApiKey
+from agentgov import db, ids, ledger
+from agentgov.db.models import ApiKey
 from agentgov.registry import findings
 from agentgov.registry.errors import NotFound, ValidationError
 
@@ -86,7 +83,7 @@ def lifetime(value: Any, *, max_days: int = 0) -> int | None:
 
 
 def create(
-    session: Session,
+    tx: db.Where,
     *,
     name: str,
     role: str,
@@ -98,12 +95,12 @@ def create(
     for that team's agents only (auditor@sales)."""
     from agentgov.registry import access
 
-    role = access.team_role(session, role, team, ROLES)
+    role = access.team_role(tx, role, team, ROLES)
     if not name or not isinstance(name, str):
         raise ValidationError("name is required")
     token = "agk_" + secrets.token_urlsafe(32)
     now = ids.utcnow()
-    key = ApiKey(
+    key = ApiKey.objects.create(
         id=ids.new_id(ids.API_KEY),
         name=name,
         role=role,
@@ -112,10 +109,8 @@ def create(
         created_at=now,
         expires_at=now + timedelta(days=days) if days else None,
     )
-    session.add(key)
-    session.flush()
     ledger.append(
-        session,
+        tx,
         type="apikey.created",
         actor=actor,
         resource=f"apikey/{key.id}",
@@ -124,29 +119,30 @@ def create(
     return key, token
 
 
-def revoke(session: Session, key_id: str, *, actor: str) -> ApiKey:
-    key = session.get(ApiKey, key_id)
+def revoke(tx: db.Where, key_id: str, *, actor: str) -> ApiKey:
+    key = ApiKey.objects.filter(pk=key_id).first()
     if key is None:
         raise NotFound(f"api key {key_id} not found")
     if key.revoked_at is None:
         key.revoked_at = ids.utcnow()
+        key.save()
         ledger.append(
-            session,
+            tx,
             type="apikey.revoked",
             actor=actor,
             resource=f"apikey/{key.id}",
             details={"name": key.name, "role": key.role},
         )
         # Revoked, it no longer needs replacing: what said it expires is over.
-        findings.resolve_key(session, f"{EXPIRING}:{key.id}", actor=actor)
+        findings.resolve_key(db.orm(tx), f"{EXPIRING}:{key.id}", actor=actor)
     return key
 
 
-def authenticate(session: Session, token: str, *, max_days: int = 0) -> ApiKey | None:
+def authenticate(tx: db.Where, token: str, *, max_days: int = 0) -> ApiKey | None:
     """The key ``token`` is, if it works; raises Expired for one that has expired."""
     if not token.startswith("agk_"):
         return None
-    key = session.scalar(select(ApiKey).where(ApiKey.key_hash == _hash(token)))
+    key = ApiKey.objects.filter(key_hash=_hash(token)).first()
     if key is None or key.revoked_at is not None:
         return None
     now = ids.utcnow()
@@ -154,6 +150,7 @@ def authenticate(session: Session, token: str, *, max_days: int = 0) -> ApiKey |
     if when is not None and when <= now:
         raise Expired(key, when)
     key.last_used_at = now
+    key.save()
     return key
 
 
@@ -169,8 +166,8 @@ def expiring(key: ApiKey, max_days: int = 0, now: datetime | None = None) -> dat
     return when
 
 
-def list_all(session: Session) -> list[ApiKey]:
-    return list(session.scalars(select(ApiKey).order_by(ApiKey.created_at.desc())))
+def list_all(tx: db.Where) -> list[ApiKey]:
+    return list(ApiKey.objects.order_by("-created_at"))
 
 
 def to_dict(key: ApiKey, max_days: int = 0) -> dict[str, Any]:

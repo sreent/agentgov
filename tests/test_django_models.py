@@ -221,3 +221,54 @@ def test_keys_of_several_columns_and_foreign_keys(database_url: str) -> None:
     with db.session() as s:
         usage = s.get(models.ModelUsage, ("agt_1", "2026-10-15", "openai", "gpt"))
         assert usage is not None and usage.input_tokens == 5
+
+
+# --------------------------------------------------------------------------- saving
+
+
+def test_a_save_writes_the_fields_that_changed(database_url: str) -> None:
+    """As SQLAlchemy did: two transactions that change different fields of one row keep
+    both changes, a save that changed nothing writes nothing, and the time the row was
+    updated moves with a change."""
+    db = Database(database_url)
+    teams = django_models.Team.objects
+    with db.transaction():
+        teams.create(id="tm_1", name="support")
+    with db.transaction():
+        first = teams.get(pk="tm_1")
+    with db.transaction():
+        second = teams.get(pk="tm_1")
+    made = first.updated_at
+    with db.transaction():
+        first.description = "first-line support"
+        first.save()
+    with db.transaction():
+        second.members = ["alice@example.com"]
+        second.save()
+    with db.transaction():
+        team = teams.get(pk="tm_1")
+        assert (team.description, team.members) == ("first-line support", ["alice@example.com"])
+        assert team.updated_at > made
+        updated = team.updated_at
+        team.save()
+        team.name = "support"  # what it was
+        team.save()
+    with db.transaction():
+        assert teams.get(pk="tm_1").updated_at == updated
+
+
+def test_a_row_read_in_part_or_again_writes_what_changed(database_url: str) -> None:
+    db = Database(database_url)
+    teams = django_models.Team.objects
+    with db.transaction():
+        teams.create(id="tm_1", name="support", description="before")
+    with db.transaction():
+        team = teams.only("id", "name").get(pk="tm_1")
+        team.description = "set without reading it"
+        team.save()
+    with db.transaction():
+        team = teams.get(pk="tm_1")
+        assert team.description == "set without reading it"
+        teams.filter(pk="tm_1").update(name="renamed meanwhile")
+        team.refresh_from_db()
+        assert team.name == "renamed meanwhile" and team.changed() == []
