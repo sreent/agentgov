@@ -152,7 +152,8 @@ function DialogView({ req }: { req: Request }) {
       .find((el) => !el.closest('[hidden]'));
     (first || form.current!.querySelector<HTMLElement>('button[type="submit"]'))?.focus();
     return () => {
-      if (dlg.open) dlg.close();
+      // Not dlg.close(): its close event would cancel the dialog when React runs this effect
+      // again (in development). Taken out of the page, it closes without one.
       // Back to the control that opened it, if it is still there.
       const opener = req.opener as HTMLElement | null;
       if (opener?.isConnected) opener.focus();
