@@ -58,8 +58,10 @@ The HTTP layer, a group at a time (`src/agentgov/web`):
   operations, access packages. Their routes under an agent's path (`/v1/agents/{ref}/...`)
   move with the registry's, whose `POST /v1/agents/{ref}/{action}` takes those paths too.
 - [x] Evidence (downloads and archives), platforms, the registry, governance.
-- [ ] What other components call: OPA's bundles and decision logs, the gateway's
-  configuration, telemetry, Copilot Studio, AuthZEN, assertions.
+- [x] What other components call: OPA's bundles and decision logs, the gateway's
+  configuration, telemetry, Copilot Studio, AuthZEN, assertions. Copilot Studio's endpoint
+  faces the internet: its caller is still checked from the headers before anything reads
+  the body (`agentgov.web.asgi`), since Django reads every body whole before a view runs.
 - [ ] Single sign-on (cookies, redirects, back-channel logout).
 - [ ] The admin UI's files; then FastAPI goes, and the app runs the runtime itself.
 

@@ -44,8 +44,9 @@ def configure() -> None:
         LOGGING_CONFIG=None,
     )
     django.setup(set_prefix=False)
-    # Django logs every 4xx answer as a warning: refused calls are the API working.
-    logging.getLogger("django.request").setLevel(logging.ERROR)
+    # Django logs every 4xx and 5xx answer: refused calls are the API working, and the server
+    # logs what fails, as it did with FastAPI (agentgov.web.asgi).
+    logging.getLogger("django.request").setLevel(logging.CRITICAL)
 
 
 # Before anything here imports Django Ninja, which reads the settings as it loads.
@@ -56,12 +57,11 @@ configure()
 def handler() -> Any:
     """Django's ASGI handler, which serves the routes that have moved (agentgov.web.urls)."""
     configure()
-    from django.core.handlers.asgi import ASGIHandler
-
     # The routes, registered now: before the first request, for whatever lists them.
     from agentgov.web import urls  # noqa: F401
+    from agentgov.web.asgi import Handler
 
-    return ASGIHandler()
+    return Handler()
 
 
 @lru_cache(maxsize=4096)

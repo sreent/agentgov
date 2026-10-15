@@ -26,10 +26,6 @@ from starlette.types import Receive, Scope, Send
 
 from agentgov import __version__, web
 from agentgov.api import (
-    assertion_routes,
-    authzen_routes,
-    copilot_studio_routes,
-    integration_routes,
     sso_routes,
 )
 from agentgov.config import Settings
@@ -137,11 +133,7 @@ def create_app(
             status_code=422, content={"detail": message or "invalid request", "errors": errors}
         )
 
-    app.include_router(integration_routes.router)
     app.include_router(sso_routes.router)
-    app.include_router(copilot_studio_routes.router)
-    app.include_router(authzen_routes.router)
-    app.include_router(assertion_routes.router)
 
     app.mount("/ui", _UiFiles(directory=UI_DIR, html=True, check_dir=False), name="ui")
 

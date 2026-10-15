@@ -71,4 +71,9 @@ def require(*roles: str, admin: bool = True) -> Callable[[HttpRequest], Principa
     return guard(auth.require(*roles, admin=admin))
 
 
+def arequire(*roles: str, admin: bool = True) -> Callable[[HttpRequest], Awaitable[Principal]]:
+    """``require``, for async routes."""
+    return aguard(auth.require(*roles, admin=admin))
+
+
 signed_in = guard(auth.signed_in)

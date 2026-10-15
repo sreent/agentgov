@@ -1,5 +1,5 @@
 """Identity assertions (ID-JAG) for MCP servers outside the gateway: AgentGov as the issuer
-(agentgov.identity.assertions, agentgov.api.assertion_routes)."""
+(agentgov.identity.assertions, agentgov.web.assertions)."""
 
 from __future__ import annotations
 
@@ -22,13 +22,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import select
 
-from agentgov.api import assertion_routes
 from agentgov.config import Settings
 from agentgov.identity import assertions
 from agentgov.models import LedgerEntry
 from agentgov.registry import agents, blueprints, features, toolservers
 from agentgov.registry.errors import ValidationError
 from agentgov.secops import ocsf
+from agentgov.web import assertions as assertion_routes
 from tests.conftest import ADMIN, requires_opa
 from tests.test_opa import _decide
 

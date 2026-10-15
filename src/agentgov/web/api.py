@@ -34,6 +34,8 @@ from agentgov import __version__
 from agentgov.registry.errors import RegistryError
 
 log = logging.getLogger(__name__)
+# Where an answer keeps the exception it reports (a 500).
+FAILED = "_agentgov_failed"
 _Answer = TypeVar("_Answer", bound=HttpResponseBase)
 
 # The views' threads: Django runs a sync view under ASGI in one thread for every request,
@@ -198,10 +200,7 @@ class ThreadedPathView(PathView):
             else:
                 run = sync_to_async(operation.run, thread_sensitive=False, executor=VIEWS)
                 response = await run(request, *args, **kwargs)
-            if _has_body(response) and not response.has_header("Content-Length"):
-                # As FastAPI sent every answer it had whole (Django leaves it to middleware).
-                response["Content-Length"] = str(len(response.content))
-            return response
+            return sized(response)
 
         view.csrf_exempt = True  # type: ignore[attr-defined]  # the API checks its own (auth)
         view.path_view = self  # type: ignore[attr-defined]
@@ -253,9 +252,14 @@ def _matching(patterns: list[Any], path: str) -> Iterator[Found]:
             yield hit.func, hit.kwargs
 
 
-def _has_body(response: HttpResponseBase) -> bool:
+def sized(response: _Answer) -> _Answer:
+    """``response`` with its length, as FastAPI sent every answer it had whole (Django
+    leaves that to middleware)."""
     status = response.status_code
-    return not response.streaming and status >= 200 and status not in (204, 304)
+    has_body = not response.streaming and status >= 200 and status not in (204, 304)
+    if has_body and not response.has_header("Content-Length"):
+        response["Content-Length"] = str(len(response.content))  # type: ignore[attr-defined]
+    return response
 
 
 class Router(NinjaRouter):
@@ -345,10 +349,11 @@ def _field_error(error: dict[str, Any]) -> dict[str, Any]:
 
 
 def _server_error(request: HttpRequest, exc: Exception) -> HttpResponse:
-    log.exception("%s %s failed", request.method, request.path, exc_info=exc)
-    return HttpResponse(
-        b"Internal Server Error", status=500, content_type="text/plain; charset=utf-8"
-    )
+    response = text_response("Internal Server Error", 500)
+    # Raised again once the answer has gone (agentgov.web.asgi), as FastAPI did: for the
+    # server to log, and test clients to raise.
+    setattr(response, FAILED, exc)
+    return response
 
 
 class API(NinjaAPI):

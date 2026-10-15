@@ -12,9 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from django.http import HttpRequest, HttpResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,51 +20,48 @@ from agentgov import ids, ledger
 from agentgov.identity import assertions, people
 from agentgov.models import Agent, ToolServer
 from agentgov.registry import features
+from agentgov.web.api import HTTPException, Router, json_response
+from agentgov.web.auth import runtime
 
-router = APIRouter(tags=["identity assertions"])
+router = Router(tags=["identity assertions"])
 FEATURE = "identity-assertions"
 POLICY = "agentgov/idjag/decision"
 NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 _tokens_lock = threading.Lock()
 
 
-def _rt(request: Request) -> Any:
-    return request.app.state.rt
-
-
-def _on(request: Request) -> None:
-    with _rt(request).db.session() as s:
+def _on(request: HttpRequest) -> None:
+    with runtime(request).db.session() as s:
         if not features.is_on(s, FEATURE):
             raise HTTPException(404, "AgentGov doesn't give identity assertions here")
 
 
 @router.get(assertions.METADATA_PATH)
-def metadata(request: Request) -> dict[str, Any]:
+def metadata(request: HttpRequest) -> dict[str, Any]:
     """AgentGov's metadata as the issuer of identity assertions."""
     _on(request)
-    return assertions.metadata(_rt(request).settings.public_url)
+    return assertions.metadata(runtime(request).settings.public_url)
 
 
 @router.get(assertions.JWKS_PATH)
-def jwks(request: Request) -> JSONResponse:
+def jwks(request: HttpRequest) -> HttpResponse:
     """The public key authorization servers check AgentGov's assertions with. Served with
     the feature off too, while assertions given before may still be traded."""
-    key = assertions.signing_key(_rt(request).settings.key_secret)
-    return JSONResponse(assertions.jwks(key), headers={"Cache-Control": "public, max-age=300"})
+    key = assertions.signing_key(runtime(request).settings.key_secret)
+    return json_response(assertions.jwks(key), headers={"Cache-Control": "public, max-age=300"})
 
 
 @router.post(assertions.TOKEN_PATH)
-async def token(request: Request) -> JSONResponse:
+def token(request: HttpRequest) -> HttpResponse:
     """An identity assertion for an MCP server outside the gateway, for the agent whose
     token this is, or the person it got the token for (OAuth 2.0 Token Exchange)."""
     _on(request)
-    body = await request.body()
     kind = request.headers.get("content-type") or ""
     try:
-        answer = await run_in_threadpool(_exchange, _rt(request), body, kind)
+        answer = _exchange(runtime(request), request.body, kind)
     except assertions.Refused as refused:
-        return JSONResponse(refused.body(), status_code=refused.status, headers=NO_STORE)
-    return JSONResponse(answer, headers=NO_STORE)
+        return json_response(refused.body(), refused.status, headers=NO_STORE)
+    return json_response(answer, headers=NO_STORE)
 
 
 def _subject_tokens(rt: Any) -> assertions.SubjectTokens:
