@@ -10,7 +10,9 @@ deploy
 docs
 examples
 tests
-# The admin UI's packages and test output (ui/)
+# The admin UI's packages, builds and test output: the image builds it from ui/ itself
 ui/node_modules
+ui/dist
 ui/test-results
 ui/playwright-report
+src/agentgov/ui

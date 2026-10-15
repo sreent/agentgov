@@ -21,7 +21,8 @@ export default defineConfig(({ command }) => ({
   base: command === 'build' ? './' : '/ui/',
   plugins: [react()],
   build: {
-    outDir: 'dist',
+    // Into the package, which serves it (src/agentgov/api/app.py): not in git.
+    outDir: '../src/agentgov/ui',
     emptyOutDir: true,
     target: 'es2022',
     // React in a file of its own: it stays cached when a new version of AgentGov changes

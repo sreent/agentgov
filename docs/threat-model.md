@@ -92,7 +92,7 @@ or someone who got its credentials.
 | Learn a developer's secrets from the MCP servers their machine reports | The scanner reports a server's scheme, host and port and a hash of the rest, and option values redacted; the control plane sanitises again before keeping it | `tests/test_mcp_scan.py`, `tests/test_mcp_registry.py` |
 | Turn the calls-around-the-gateway test on cloud metadata or the control plane's machine, or hold it up | It calls only addresses an agent may be at, the one it checked, for ten seconds and 64 KiB at most | `tests/test_reachability.py` |
 | Stop notifications with a title that breaks an email's header | Headers are one line; an email that can't be written fails alone | `tests/test_issues.py` |
-| Run script in the admin UI | The UI only sets text, and its content security policy allows scripts from itself alone | `tests/test_api.py` |
+| Run script in the admin UI | The UI renders what the API returns as text only (React, and a lint rule against setting HTML), and its content security policy allows scripts from itself alone | `tests/test_api.py`, `ui/eslint.config.js` |
 
 ## Promises
 

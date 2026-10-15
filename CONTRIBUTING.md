@@ -40,10 +40,10 @@ the docs:
 
 ## Development setup
 
-You need Python 3.11 or later; Docker for the image and end-to-end checks; Node.js 22 or
-later for the admin UI's browser tests. The first run of `scripts/ci.sh` creates `.venv`
-with the development dependencies and downloads the pinned
-[OPA](https://www.openpolicyagent.org) binary into it:
+You need Python 3.11 or later; Node.js 22 or later for the admin UI; Docker for the image
+and end-to-end checks. The first run of `scripts/ci.sh` creates `.venv` with the development
+dependencies and downloads the pinned [OPA](https://www.openpolicyagent.org) binary into it,
+and installs the admin UI's packages into `ui/node_modules`:
 
 ```bash
 scripts/ci.sh --setup && . .venv/bin/activate
@@ -52,7 +52,11 @@ scripts/ci.sh --setup && . .venv/bin/activate
 Claude Code cloud sessions do this automatically (`.claude/hooks/session-start.sh`).
 
 For API or UI work, run the control plane on its own, against a local SQLite file
-([the control plane alone](docs/deploy/local.md#the-control-plane-alone)). For end-to-end
+([the control plane alone](docs/deploy/local.md#the-control-plane-alone)). The admin UI is
+React and TypeScript in `ui`, built with [Vite](https://vite.dev) into the package
+(`src/agentgov/ui`, which isn't in git): `cd ui && npm run build` builds it there, and
+`npm run dev` serves it at http://localhost:5173/ui/, reloading as you edit, in front of the
+control plane at `AGENTGOV_URL` (by default http://127.0.0.1:8000). For end-to-end
 work, use the [Compose stack](docs/deploy/local.md#docker-compose), and rebuild the parts
 that run AgentGov's image after a change:
 
@@ -67,8 +71,9 @@ request. Run it before you open one:
 
 ```bash
 scripts/ci.sh             # ruff, the docs, the Compose files, opa fmt/check/test, pytest,
-                          # the admin UI in a browser, the Helm chart, the image
-scripts/ci.sh --ui-only   # only the admin UI in a browser
+                          # the admin UI (types, lint, build, in a browser), the Helm chart,
+                          # the image
+scripts/ci.sh --ui-only   # only the admin UI
 scripts/ci.sh --e2e       # also: the demo and ledger verification against the Compose
                           # stack and against the Helm chart's pods run with Docker,
                           # and the inventory stack
@@ -96,20 +101,24 @@ and the admin UI in a browser (its report, traces and the control plane's log ar
 an artifact when a test fails). The `e2e` workflow runs the end-to-end check for pull
 requests that change code or the deployment.
 
-### The admin UI in a browser
+### The admin UI
 
-The tests in `ui/e2e` drive the admin UI's main flows in Chromium with
+`npm run check` in `ui` checks the types of the build's and the tests' code and lints all of
+it ([ESLint](https://eslint.org), with React's rules of hooks, and no HTML set from data: what
+the API returns is rendered as text); `npm run build` checks the app's types and builds it into
+the package. The tests in `ui/e2e` then drive the admin UI's main flows in Chromium with
 [Playwright](https://playwright.dev): signing in and out, the menu and every page it opens,
 registering, approving, blocking and unblocking agents and tool servers, the approvals
 inbox, issues (dismissed, reopened, risk accepted, resolved several at once), API keys,
 what an auditor and a role for one team see, the ledger and its chain, the compliance
 report and evidence pack, and features' modes. They run against a control plane of their
 own, started for them on port 8765 with the examples' manifests applied
-(`scripts/ui-test-server.py`), and fail on any script error in the page. Install the
-packages and Chromium once, then run them:
+(`scripts/ui-test-server.py`), which serves the build in the package, and fail on any script
+error in the page. Install the packages and Chromium once, build, then run them:
 
 ```bash
 cd ui && npm ci && npx playwright install chromium
+npm run build
 npx playwright test                 # all of them; --headed to watch, --ui to step through
 npx playwright test e2e/agents.spec.ts
 npx playwright show-report          # after a failure: each failed test's trace
@@ -156,8 +165,7 @@ tests its URL, as a role that may create databases:
 | `src/agentgov/mcp_scan.py` | The MCP servers set up on a developer's machine (`agentgov mcp scan`) |
 | `src/agentgov/models.py`, `src/agentgov/migrations` | The database schema and its migrations (Alembic) |
 | `src/agentgov/config.py`, `src/agentgov/cli.py` | The settings, and the `agentgov` command |
-| `src/agentgov/ui` | Admin UI (static files, no build step) |
-| `ui` | The admin UI's browser tests (`e2e`, Playwright) |
+| `ui` | The admin UI: React and TypeScript (`src`: a module per page in `pages`, the sign-in page and the menu in `shell`, and what pages share in `components` and `lib`), built with Vite into `src/agentgov/ui` (not in git), and its browser tests (`e2e`, Playwright) |
 | `deploy/compose`, `deploy/helm` | The Compose stack and the Helm chart (keep the chart's realm file in step with Compose's: CI compares them) |
 | `deploy/kubernetes` | Values and manifests for the cloud guides |
 | `examples` | Manifests, a demo MCP server, model, workload identity issuer and agent other agents call, a stand-in for the security team's tools, a developer's machine, and the demo agent |

@@ -3,10 +3,22 @@
 #   docker run ... agentgov server      # control plane API, UI, OPA bundle server
 #   docker run ... agentgov processor   # agentgateway ExtMcp policy server
 ARG PYTHON_IMAGE=python:3.12-slim
+ARG NODE_IMAGE=node:22-slim
 ARG OPA_IMAGE=openpolicyagent/opa:1.21.1-static
 
 # The opa binary validates organisation Rego policies before they are distributed.
 FROM ${OPA_IMAGE} AS opa
+
+# The admin UI (ui/), built into the package's agentgov/ui. Its files are the same for every
+# platform, so it is built once, on the build machine's.
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS ui
+WORKDIR /src/ui
+COPY ui/package.json ui/package-lock.json ./
+RUN --mount=type=secret,id=extra_ca,required=false \
+    if [ -f /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca; fi; \
+    npm ci --no-audit --no-fund
+COPY ui ./
+RUN npm run build
 
 FROM ${PYTHON_IMAGE}
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -14,6 +26,7 @@ COPY --from=opa /opa /usr/local/bin/opa
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
+COPY --from=ui /src/src/agentgov/ui ./src/agentgov/ui
 # An optional build secret "extra_ca" lets builds behind TLS-inspecting proxies trust them:
 #   docker build --secret id=extra_ca,src=/path/to/ca.pem .
 RUN --mount=type=secret,id=extra_ca,required=false \

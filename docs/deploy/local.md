@@ -363,11 +363,17 @@ of your own instead, see [Kubernetes](kubernetes.md).
 
 For work on the API or the admin UI, the control plane runs on its own, against a SQLite
 file (`agentgov.db`) in the folder it starts in. Keycloak, OPA and the gateway are optional:
-their parts stay idle while they aren't configured.
+their parts stay idle while they aren't configured. The admin UI is built into the package
+from `ui` (with Node.js 22 or later); until it is, `/ui` says how to build it.
 
 ```bash
 pip install -e ".[dev]"
+(cd ui && npm ci && npm run build)            # the admin UI, into src/agentgov/ui
 AGENTGOV_ADMIN_TOKEN=dev agentgov server      # then open http://localhost:8000/ui
 ```
+
+For work on the admin UI, `cd ui && npm run dev` serves it at http://localhost:5173/ui/ and
+reloads it as you edit, sending API calls to the control plane at `AGENTGOV_URL` (by default
+http://127.0.0.1:8000).
 
 [CONTRIBUTING.md](../../CONTRIBUTING.md) has the rest of the development setup.

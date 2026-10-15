@@ -19,7 +19,7 @@
 #   scripts/ci.sh --postgres  also run the tests on PostgreSQL (a throwaway container)
 #   scripts/ci.sh --keep      leave the end-to-end stack running afterwards
 #   scripts/ci.sh --setup     only prepare the toolchain (.venv, opa, and the admin UI's
-#                             packages if Node.js is installed)
+#                             packages and build if Node.js is installed)
 #
 # Python dependencies go into .venv, and opa (and, for the chart, helm,
 # kubeconform, kind and kubectl) into .venv/bin; they are fetched on first use. Docker
@@ -372,10 +372,12 @@ setup_ui() {
   fi
 }
 
-# ui_tests: the admin UI's main flows in Chromium (ui/e2e), with Playwright, against a
-# control plane of their own on port 8765 (scripts/ui-test-server.py).
+# ui_tests: the admin UI: its types and lint, its build into the package (src/agentgov/ui),
+# then its main flows in Chromium (ui/e2e), with Playwright, against a control plane of
+# their own on port 8765 (scripts/ui-test-server.py) that serves that build.
 ui_tests() {
   setup_ui || return 1
+  (cd ui && npm run --silent check && npm run --silent build) || return 1
   # As in CI: a control plane started for the run, never one already running.
   if (cd ui && CI=1 npx playwright test); then return 0; fi
   echo "The report, with a trace of each failed test: cd ui && npx playwright show-report"
@@ -469,7 +471,10 @@ lint_chart() {
 image_smoke() {
   docker_build agentgov:ci . &&
     docker run --rm agentgov:ci version &&
-    first_line docker run --rm --entrypoint opa agentgov:ci version
+    first_line docker run --rm --entrypoint opa agentgov:ci version &&
+    # The admin UI the image's Node stage built, in the package.
+    docker run --rm --entrypoint python agentgov:ci -c \
+      "from importlib.resources import files; assert (files('agentgov') / 'ui' / 'index.html').is_file(); print('admin UI built in')"
 }
 
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -996,7 +1001,8 @@ setup_opa || { echo "${red}opa setup failed${reset}"; exit 1; }
 echo "$(python --version), $(first_line opa version), ruff $(ruff --version | cut -d' ' -f2)"
 if [ "$setup_only" = 1 ]; then
   if command -v npm >/dev/null 2>&1; then
-    setup_ui || echo "${yellow}could not install the admin UI's packages${reset}"
+    { setup_ui && (cd ui && npm run --silent build >/dev/null); } ||
+      echo "${yellow}could not install or build the admin UI${reset}"
   fi
   exit 0
 fi
@@ -1034,8 +1040,8 @@ if [ "$tests" = 1 ]; then
   fi
 fi
 if [ "$ui" = 1 ]; then
-  if command -v npm >/dev/null 2>&1; then run "Admin UI (browser tests)" ui_tests; else
-    skip "Admin UI (browser tests)" "no Node.js"
+  if command -v npm >/dev/null 2>&1; then run "Admin UI (lint, build, browser tests)" ui_tests; else
+    skip "Admin UI (lint, build, browser tests)" "no Node.js"
   fi
 fi
 if [ "$chart" = 1 ]; then
