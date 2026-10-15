@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from starlette.responses import Response
@@ -62,10 +62,40 @@ UI_HEADERS = {
 }
 
 
+# The admin UI, built from ui/ into the package (npm run build there).
+UI_DIR = Path(str(resources.files("agentgov") / "ui"))
+
+# What /ui/ shows where the package has no admin UI built in it: a source checkout, before
+# its UI is built.
+UI_MISSING = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>AgentGov</title></head>'
+    "<body><h1>The admin center isn't built here</h1><p>This control plane's package has no "
+    "admin UI in it. Build it in the repository's <code>ui</code> folder with "
+    "<code>npm ci &amp;&amp; npm run build</code>, then load this page again. The API is at "
+    '<a href="../docs">/docs</a>.</p></body></html>'
+)
+
+
 class _UiFiles(StaticFiles):
+    async def check_config(self) -> None:
+        # Not built (yet): get_response says so, rather than failing.
+        if Path(str(self.directory)).is_dir():
+            await super().check_config()
+
     async def get_response(self, path: str, scope: Scope) -> Response:
-        response = await super().get_response(path, scope)
+        built = (Path(str(self.directory)) / "index.html").is_file()
+        if not built and path in {".", "index.html"} and scope["method"] in {"GET", "HEAD"}:
+            response: Response = HTMLResponse(UI_MISSING)
+        else:
+            response = await super().get_response(path, scope)
         response.headers.update(UI_HEADERS)
+        # The build names its scripts and styles after their content (assets/index-1a2b3c.js),
+        # so they never change; the page naming them is checked each time, so that after an
+        # upgrade it doesn't name ones that are gone.
+        unchanging = Path(path).parts[:1] == ("assets",) and response.status_code in (200, 304)
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, immutable" if unchanging else "no-cache"
+        )
         return response
 
 
@@ -193,12 +223,10 @@ def create_app(
     app.include_router(authzen_routes.router)
     app.include_router(assertion_routes.router)
 
-    ui_dir = Path(str(resources.files("agentgov") / "ui"))
-    if (ui_dir / "index.html").exists():
-        app.mount("/ui", _UiFiles(directory=ui_dir, html=True), name="ui")
+    app.mount("/ui", _UiFiles(directory=UI_DIR, html=True, check_dir=False), name="ui")
 
-        @app.get("/", include_in_schema=False)
-        def root() -> RedirectResponse:
-            return RedirectResponse("/ui/")
+    @app.get("/", include_in_schema=False)
+    def root() -> RedirectResponse:
+        return RedirectResponse("/ui/")
 
     return app

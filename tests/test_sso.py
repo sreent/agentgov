@@ -605,7 +605,9 @@ class TestIssuesForPeople:
         assert sign_in(sso, provider, sub="user-1", roles=[]).headers["location"] == "/ui/"
         me = sso.get("/v1/me").json()
         assert (me["roles"], me["inbox"]) == (["person"], {"issues": True, "approvals": False})
-        assert [f["id"] for f in sso.get("/v1/me/issues").json()] == [mine_id]
+        assert [(f["id"], f["agent_name"]) for f in sso.get("/v1/me/issues").json()] == [
+            (mine_id, "support-bot")
+        ]
         assert sso.get(f"/v1/findings/{mine_id}").json()["yours"] is True
         # Their issues, and nothing else.
         assert sso.get("/v1/findings").status_code == 403

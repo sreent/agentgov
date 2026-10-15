@@ -78,6 +78,10 @@ Issues = "https://github.com/sreent/ai-agent-governance-platform/issues"
 [tool.hatch.version]
 path = "src/agentgov/__init__.py"
 
+[tool.hatch.build]
+# The admin UI, built from ui/ into the package (npm run build there): not in git.
+artifacts = ["src/agentgov/ui"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentgov"]
 

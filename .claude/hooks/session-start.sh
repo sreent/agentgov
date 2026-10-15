@@ -1,6 +1,7 @@
 #!/bin/bash
 # Prepares a Claude Code cloud session to run this repository's checks
-# (scripts/ci.sh): Python dependencies in .venv and the opa binary. Docker is
+# (scripts/ci.sh): Python dependencies in .venv, the opa binary, and the admin UI's
+# packages in ui/node_modules and its build in the package (src/agentgov/ui). Docker is
 # started on demand by scripts/ci.sh when an image or end-to-end check needs it.
 set -euo pipefail
 

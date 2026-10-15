@@ -3,7 +3,8 @@
 # Runs this repository's checks. The GitHub workflows call this script too, so a
 # local run matches CI.
 #
-#   scripts/ci.sh             lint, Rego checks, tests, the Helm chart and the image build (ci.yml)
+#   scripts/ci.sh             lint, Rego checks, tests, the admin UI's browser tests, the Helm
+#                             chart and the image build (ci.yml)
 #   scripts/ci.sh --e2e       all of the above, then the full stack and the demo, with
 #                             Compose and from the Helm chart's pods on Docker (e2e.yml)
 #   scripts/ci.sh --e2e-only  only the end-to-end run
@@ -11,17 +12,23 @@
 #   scripts/ci.sh --kind-only only that (e2e.yml)
 #   scripts/ci.sh --spire     --kind, with SPIRE on the cluster issuing the components'
 #                             certificates (e2e.yml, with --kind-only)
-#   scripts/ci.sh --quick     lint, Rego checks and tests; no Docker
+#   scripts/ci.sh --quick     lint, Rego checks and tests; no Docker, no browser
+#   scripts/ci.sh --ui-only   only the admin UI's browser tests (ci.yml)
+#   scripts/ci.sh --no-ui     everything but them
 #   scripts/ci.sh --matrix    also run the tests on each Python 3.11-3.13 found
 #   scripts/ci.sh --postgres  also run the tests on PostgreSQL (a throwaway container)
 #   scripts/ci.sh --keep      leave the end-to-end stack running afterwards
-#   scripts/ci.sh --setup     only prepare the toolchain (.venv and opa)
+#   scripts/ci.sh --setup     only prepare the toolchain (.venv, opa, and the admin UI's
+#                             packages and build if Node.js is installed)
 #
 # Python dependencies go into .venv, and opa (and, for the chart, helm,
-# kubeconform, kind and kubectl) into .venv/bin; they are fetched on first use. Docker steps need a Docker daemon. Behind an HTTPS proxy
-# (HTTPS_PROXY, and SSL_CERT_FILE for a TLS-inspecting one), image builds go
-# through it. The end-to-end run uses its own Compose project ("agentgov-ci")
-# and the stack's usual host ports, so stop a running local stack first.
+# kubeconform, kind and kubectl) into .venv/bin; they are fetched on first use. Docker
+# steps need a Docker daemon. The admin UI's browser tests need Node.js, and Playwright's
+# Chromium, installed once with: cd ui && npm ci && npx playwright install chromium. Their
+# packages go into ui/node_modules. Behind an HTTPS proxy (HTTPS_PROXY, and SSL_CERT_FILE
+# for a TLS-inspecting one), image builds go through it. The end-to-end run uses its own
+# Compose project ("agentgov-ci") and the stack's usual host ports, so stop a running
+# local stack first.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -47,15 +54,17 @@ SPIRE_CHART_VERSION=0.30.3
 COMPOSE=(docker compose -p agentgov-ci -f deploy/compose/docker-compose.yml)
 E2E_PORTS=(8000 8080 8180 8181 4317 4318 9200 9300)
 
-lint=1 tests=1 chart=1 image=1 e2e=0 kind=0 spire=0 matrix=0 postgres=0 keep=0 setup_only=0
+lint=1 tests=1 ui=1 chart=1 image=1 e2e=0 kind=0 spire=0 matrix=0 postgres=0 keep=0 setup_only=0
 for arg in "$@"; do
   case "$arg" in
     --e2e) e2e=1 postgres=1 ;;
-    --e2e-only) lint=0 tests=0 chart=0 image=0 e2e=1 ;;
+    --e2e-only) lint=0 tests=0 ui=0 chart=0 image=0 e2e=1 ;;
     --kind) kind=1 ;;
-    --kind-only) lint=0 tests=0 chart=0 image=0 kind=1 ;;
+    --kind-only) lint=0 tests=0 ui=0 chart=0 image=0 kind=1 ;;
     --spire) kind=1 spire=1 ;;
-    --quick) chart=0 image=0 ;;
+    --quick) ui=0 chart=0 image=0 ;;
+    --ui-only) lint=0 tests=0 ui=1 chart=0 image=0 ;;
+    --no-ui) ui=0 ;;
     --matrix) matrix=1 ;;
     --postgres) postgres=1 ;;
     --keep) keep=1 ;;
@@ -351,6 +360,30 @@ postgres_tests() {
   return "$rc"
 }
 
+# setup_ui: the admin UI's Node.js packages in ui/node_modules, reinstalled only when
+# ui/package-lock.json changes.
+setup_ui() {
+  local stamp=ui/node_modules/.agentgov-deps want
+  want=$(sha256 ui/package-lock.json)
+  if [ ! -f "$stamp" ] || [ "$(cat "$stamp")" != "$want" ]; then
+    echo "installing the admin UI's packages into ui/node_modules"
+    (cd ui && npm ci --no-audit --no-fund) || return 1
+    echo "$want" >"$stamp"
+  fi
+}
+
+# ui_tests: the admin UI: its types and lint, its build into the package (src/agentgov/ui),
+# then its main flows in Chromium (ui/e2e), with Playwright, against a control plane of
+# their own on port 8765 (scripts/ui-test-server.py) that serves that build.
+ui_tests() {
+  setup_ui || return 1
+  (cd ui && npm run --silent check && npm run --silent build) || return 1
+  # As in CI: a control plane started for the run, never one already running.
+  if (cd ui && CI=1 npx playwright test); then return 0; fi
+  echo "The report, with a trace of each failed test: cd ui && npx playwright show-report"
+  return 1
+}
+
 # The chart: lint, render the default, a production-like configuration and the profiles,
 # and validate every manifest against the Kubernetes API schemas.
 lint_chart() {
@@ -438,7 +471,10 @@ lint_chart() {
 image_smoke() {
   docker_build agentgov:ci . &&
     docker run --rm agentgov:ci version &&
-    first_line docker run --rm --entrypoint opa agentgov:ci version
+    first_line docker run --rm --entrypoint opa agentgov:ci version &&
+    # The admin UI the image's Node stage built, in the package.
+    docker run --rm --entrypoint python agentgov:ci -c \
+      "from importlib.resources import files; assert (files('agentgov') / 'ui' / 'index.html').is_file(); print('admin UI built in')"
 }
 
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -963,7 +999,13 @@ setup_python .venv "${PYTHON:-python3}" || { echo "${red}Python setup failed${re
 export PATH="$ROOT/.venv/bin:$PATH"
 setup_opa || { echo "${red}opa setup failed${reset}"; exit 1; }
 echo "$(python --version), $(first_line opa version), ruff $(ruff --version | cut -d' ' -f2)"
-[ "$setup_only" = 1 ] && exit 0
+if [ "$setup_only" = 1 ]; then
+  if command -v npm >/dev/null 2>&1; then
+    { setup_ui && (cd ui && npm run --silent build >/dev/null); } ||
+      echo "${yellow}could not install or build the admin UI${reset}"
+  fi
+  exit 0
+fi
 
 # Docker is started when a step needs it; tests use it only if it is already up.
 if [ "$image" = 1 ] || [ "$e2e" = 1 ] || [ "$kind" = 1 ] || [ "$postgres" = 1 ]; then
@@ -995,6 +1037,11 @@ if [ "$tests" = 1 ]; then
     if docker_ready; then run "Tests on PostgreSQL" postgres_tests .venv; else
       skip "Tests on PostgreSQL" "no Docker daemon"
     fi
+  fi
+fi
+if [ "$ui" = 1 ]; then
+  if command -v npm >/dev/null 2>&1; then run "Admin UI (lint, build, browser tests)" ui_tests; else
+    skip "Admin UI (lint, build, browser tests)" "no Node.js"
   fi
 fi
 if [ "$chart" = 1 ]; then

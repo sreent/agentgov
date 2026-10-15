@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from agentgov.api import app as app_module
 from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.opa import WHAT_IF
@@ -95,6 +96,43 @@ class TestAuth:
         assert "frame-ancestors 'none'" in csp
         assert resp.headers["x-content-type-options"] == "nosniff"
         assert "content-security-policy" not in client.get("/healthz").headers
+
+    def test_ui_not_built_says_how_to_build_it(self, settings, tmp_path, monkeypatch) -> None:
+        # A source checkout whose admin UI isn't built (ui/, npm run build).
+        monkeypatch.setattr(app_module, "UI_DIR", tmp_path / "ui")
+        with TestClient(create_app(settings, background=False)) as client:
+            resp = client.get("/", follow_redirects=True)
+            assert (resp.status_code, resp.url.path) == (200, "/ui/")
+            assert "npm ci &amp;&amp; npm run build" in resp.text
+            assert "script-src 'self';" in resp.headers["content-security-policy"]
+            assert client.get("/ui/assets/index.js").status_code == 404
+            # Built while the control plane runs: served from then on.
+            page = "<!doctype html><title>AgentGov</title>"
+            (tmp_path / "ui").mkdir()
+            (tmp_path / "ui" / "index.html").write_text(page)
+            built = client.get("/ui/")
+            assert (built.status_code, built.text) == (200, page)
+            assert "script-src 'self';" in built.headers["content-security-policy"]
+
+    def test_ui_scripts_are_kept_and_the_page_checked_each_time(
+        self, settings, tmp_path, monkeypatch
+    ) -> None:
+        # Scripts and styles are named after their content; the page naming them changes
+        # with each build.
+        (tmp_path / "assets").mkdir(parents=True)
+        (tmp_path / "index.html").write_text('<script src="./assets/index-1a2b3c.js"></script>')
+        (tmp_path / "assets" / "index-1a2b3c.js").write_text("console.log('AgentGov')")
+        monkeypatch.setattr(app_module, "UI_DIR", tmp_path)
+        with TestClient(create_app(settings, background=False)) as client:
+            script = client.get("/ui/assets/index-1a2b3c.js")
+            assert script.headers["cache-control"] == "public, max-age=31536000, immutable"
+            again = client.get(
+                "/ui/assets/index-1a2b3c.js", headers={"If-None-Match": script.headers["etag"]}
+            )
+            assert again.status_code == 304
+            assert again.headers["cache-control"] == "public, max-age=31536000, immutable"
+            for path in ("/ui/", "/ui/index.html"):
+                assert client.get(path).headers["cache-control"] == "no-cache", path
 
 
 class TestRoles:

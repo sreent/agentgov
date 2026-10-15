@@ -247,11 +247,15 @@ def my_issues(
     request: Request, status: str | None = "open", principal: Principal = Depends(signed_in)
 ) -> list[dict[str, Any]]:
     """The issues that reached the person signed in: about agents they own or sponsor, or
-    sent to a team they are in (docs/issues.md)."""
+    sent to a team they are in (docs/issues.md). With the agent's name, as an issue on its own
+    has it: people without a role can't list agents."""
     if status not in (None, "all", *findings.STATUSES):
         raise ValidationError(f"status is {', '.join(findings.STATUSES)} or all")
     with _rt(request).db.session() as s:
-        return [findings.to_dict(f) for f in issues.for_person(s, principal.person, status=status)]
+        rows = issues.for_person(s, principal.person, status=status)
+        ids = {f.agent_id for f in rows if f.agent_id}
+        names = {a.id: a.name for a in s.scalars(select(Agent).where(Agent.id.in_(ids))).unique()}
+        return [{**findings.to_dict(f), "agent_name": names.get(f.agent_id)} for f in rows]
 
 
 @router.get("/findings/{finding_id}", tags=["findings"])
