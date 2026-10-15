@@ -3,12 +3,15 @@ FastAPI wrote it, and the same error shapes ({"detail": ...})."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
 import re
+import threading
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as Waited
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -120,7 +123,7 @@ def stream_response(
     media_type: str | None = None,
 ) -> StreamingHttpResponse:
     """As Starlette's StreamingResponse: sent as it is made. A synchronous iterator is read
-    in the views' threads a part at a time (Django would read it all, then send it)."""
+    in one of the views' threads as it is sent (Django would read it all, then send it)."""
     parts = content if isinstance(content, AsyncIterable) else _in_threads(iter(content))
     answer = StreamingHttpResponse(parts, status=status_code, headers=headers)
     return _typed(answer, headers, media_type)
@@ -182,15 +185,54 @@ def _typed(answer: _Answer, headers: Headers, media_type: str | None) -> _Answer
 _DONE = object()
 
 
+@dataclasses.dataclass
+class _Failed:
+    error: BaseException
+
+
 async def _in_threads(parts: Iterator[Any]) -> AsyncIterator[Any]:
-    step = sync_to_async(next, thread_sensitive=False, executor=VIEWS)
+    """``parts``, read in one of the views' threads from the first to the last, a part ahead
+    of what has been sent: a generator may hold, from one part to the next, what belongs to
+    the thread it runs in (a transaction, on Django's connection for that thread)."""
+    loop = asyncio.get_running_loop()
+    ready: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
+    stop = threading.Event()
+
+    def hand(item: Any) -> bool:
+        handing = asyncio.run_coroutine_threadsafe(ready.put(item), loop)
+        while not stop.is_set():
+            try:
+                handing.result(timeout=0.1)
+                return True
+            except Waited:
+                pass
+        handing.cancel()
+        return False
+
+    def read() -> None:
+        try:
+            for part in parts:
+                if not hand(part):
+                    return
+            hand(_DONE)
+        except BaseException as exc:
+            hand(_Failed(exc))
+        finally:
+            close = getattr(parts, "close", None)
+            if close is not None:
+                close()
+
+    reading = loop.run_in_executor(VIEWS, read)
     try:
-        while (part := await step(parts, _DONE)) is not _DONE:
+        while (part := await ready.get()) is not _DONE:
+            if isinstance(part, _Failed):
+                raise part.error
             yield part
     finally:
-        close = getattr(parts, "close", None)
-        if close is not None:
-            await sync_to_async(close, thread_sensitive=False, executor=VIEWS)()
+        # Sent no further (the client went, or the answer failed): the reader stops, and
+        # closes the generator in its thread.
+        stop.set()
+        await reading
 
 
 class Renderer(BaseRenderer):

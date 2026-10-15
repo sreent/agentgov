@@ -131,16 +131,18 @@ class ControlPlane:
             await _refused(exc.status_code, exc.detail, exc.headers)(scope, receive, send)
 
     async def _lifespan(self, receive: Receive, send: Send) -> None:
-        # As Starlette ran FastAPI's lifespan: what fails is said, then raised.
+        # As Starlette ran FastAPI's lifespan: what fails is said, then raised. The runtime
+        # starts and stops in a thread, as it uses the database, which Django keeps off the
+        # event loop.
         rt = self.state.rt
         started = False
         await receive()  # lifespan.startup
         try:
             loop = asyncio.get_running_loop()
             if self.background:
-                rt.start(loop)
+                await asyncio.to_thread(rt.start, loop)
             else:
-                rt.init_db()
+                await asyncio.to_thread(rt.init_db)
                 rt.bundles.bind_loop(loop)
             try:
                 await send({"type": "lifespan.startup.complete"})
@@ -148,7 +150,7 @@ class ControlPlane:
                 await receive()  # lifespan.shutdown
             finally:
                 if self.background:
-                    rt.stop()
+                    await asyncio.to_thread(rt.stop)
         except BaseException:
             failed = "lifespan.shutdown.failed" if started else "lifespan.startup.failed"
             await send({"type": failed, "message": traceback.format_exc()})

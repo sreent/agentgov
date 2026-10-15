@@ -12,6 +12,7 @@ from sqlalchemy import Engine, create_engine, make_url
 from sqlalchemy.pool import NullPool
 from starlette.testclient import TestClient
 
+from agentgov import db as database
 from agentgov import migrations
 from agentgov.api.app import create_app
 from agentgov.config import Settings
@@ -41,6 +42,15 @@ TEMPLATE = "agentgov_test_template"
 def postgres_admin() -> Engine:
     assert POSTGRES
     return create_engine(POSTGRES, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+
+
+@pytest.fixture(autouse=True)
+def _disposed() -> Iterator[None]:
+    """Every database a test opened is closed after it: its connections, and on PostgreSQL
+    psycopg's pool, whose threads would otherwise outlive it."""
+    yield
+    for db in database.live():
+        db.dispose()
 
 
 @pytest.fixture(scope="session")
@@ -81,6 +91,8 @@ def database_url(tmp_path: Path, migrated_database: Path | str) -> Iterator[str]
     try:
         yield make_url(POSTGRES).set(database=name).render_as_string(False)
     finally:
+        for db in database.live():
+            db.dispose()
         with admin.connect() as connection:
             connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
         admin.dispose()

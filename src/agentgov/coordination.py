@@ -43,7 +43,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from agentgov.db import CLIENT_KEEPALIVES, SERVER_KEEPALIVES, Database
+from agentgov.db import CLIENT_KEEPALIVES, SERVER_KEEPALIVES, Database, Transaction
 from agentgov.registry.errors import Conflict
 
 log = logging.getLogger(__name__)
@@ -150,7 +150,7 @@ class Coordinator:
             self._thread = None
 
     # -- changes -----------------------------------------------------------------------
-    def publish(self, session: Session, topics: set[str]) -> None:
+    def publish(self, tx: Transaction, topics: set[str]) -> None:
         """Tell the other replicas about this transaction's changes, with its commit."""
         shared = sorted(topics - LOCAL_TOPICS)
         if not shared:
@@ -158,10 +158,7 @@ class Coordinator:
         payload = json.dumps({"from": self.name, "topics": shared}, separators=(",", ":"))
         if len(payload.encode()) > MAX_PAYLOAD:
             payload = json.dumps({"from": self.name, "topics": [EVERYTHING]})
-        session.execute(
-            text("SELECT pg_notify(:channel, :payload)"),
-            {"channel": CHANNEL, "payload": payload},
-        )
+        tx.execute("SELECT pg_notify(%s, %s)", [CHANNEL, payload])
 
     def received(self, payload: str) -> None:
         """Act on another replica's change notice."""
@@ -263,19 +260,16 @@ class Coordinator:
             lockers = self._held.lockers = {}
         return lockers
 
-    def _fence(self, session: Session) -> None:
+    def _fence(self, tx: Transaction) -> None:
         """Before a transaction of a job's commits: the job still holds its lock, held by
         the server process that took it. Once the lock went, another replica may run the
         job: this run's transaction rolls back, and the job stops."""
         for name, pid in list(self._lockers().items()):
-            held = session.execute(
-                text(
-                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
-                    "AND granted AND classid = :space AND objid = :key AND objsubid = 2 "
-                    "AND pid = :pid)"
-                ),
-                {"space": LOCK_SPACE, "key": lock_key(name) & 0xFFFFFFFF, "pid": pid},
-            ).scalar()
+            [(held,)] = tx.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+                "AND granted AND classid = %s AND objid = %s AND objsubid = 2 AND pid = %s)",
+                [LOCK_SPACE, lock_key(name) & 0xFFFFFFFF, pid],
+            )
             if not held:
                 raise JobLost(
                     f"{name} lost its lock (the database restarted, or dropped the "

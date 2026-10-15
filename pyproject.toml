@@ -61,7 +61,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-postgres = ["psycopg[binary]>=3.2"]
+# psycopg, and its pool, which Django keeps the connections in (agentgov.db).
+postgres = ["psycopg[binary,pool]>=3.2"]
 otlp-protobuf = ["opentelemetry-proto>=1.30"]
 # Runs examples/agents/demo_agent.py (MCP Python SDK 2.x client).
 demo = ["mcp>=2.3,<3"]

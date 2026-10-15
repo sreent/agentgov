@@ -70,10 +70,18 @@ The HTTP layer, a group at a time (`src/agentgov/web`):
 
 The data layer:
 
-- [ ] Prototypes of the transaction rules on SQLite and PostgreSQL, with tests: ledger last,
-  job locks, row locks, changes after commit.
-- [ ] Django models for every table, unmanaged, with a test that compares them with the
-  migrated schema.
+- [x] The transaction rules on Django, on SQLite and PostgreSQL, with tests: ledger last,
+  job locks, row locks, changes after commit. Rather than prototypes, Django runs every
+  transaction now (`agentgov.db`, `tests/test_transactions.py`): its checks and the ledger's
+  entries come before Django commits, and `transaction.on_commit` announces what changed. The
+  SQLAlchemy sessions the modules still use ride on Django's connection, in the same
+  transaction, so modules can move one at a time. Connections are pooled, in psycopg's pool on
+  PostgreSQL (15 a process, as SQLAlchemy's was) and in one of AgentGov's on SQLite.
+- [x] Django models for every table, unmanaged, with a test that compares them with the
+  migrated schema (`agentgov.db.models`, `tests/test_django_models.py`): the columns,
+  keys, constraints, indexes and defaults, and the values each ORM writes, read by the
+  other. Times are UTC without a zone and JSON is in `json` columns, as SQLAlchemy made
+  them (`agentgov.db.fields`); Django's ORM uses the database whose transaction is open.
 - [ ] The modules, the ledger first, each with its tests.
 - [ ] Django's migrations: the first one matches the last Alembic revision; a release runs
   both; then Alembic goes.
