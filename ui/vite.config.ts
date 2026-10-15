@@ -20,7 +20,14 @@ export default defineConfig(({ command }) => ({
   // plane serves it. The dev server and the preview serve it at /ui/, as the control plane.
   base: command === 'build' ? './' : '/ui/',
   plugins: [react()],
-  build: { outDir: 'dist', emptyOutDir: true, target: 'es2022' },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    target: 'es2022',
+    // React in a file of its own: it stays cached when a new version of AgentGov changes
+    // only the pages.
+    rolldownOptions: { output: { codeSplitting: { groups: [{ name: 'react', test: /node_modules/ }] } } },
+  },
   server: { proxy },
   preview: { proxy, headers: UI_HEADERS },
 }));
