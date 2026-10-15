@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov import ids
 from agentgov.api.app import create_app

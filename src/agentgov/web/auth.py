@@ -1,6 +1,6 @@
 """Who is calling, for the routes Django serves: the very rules of ``agentgov.api.auth`` and
 ``agentgov.api.reach`` (tokens, API keys, single sign-on sessions, the CSRF header, the
-internal listener, roles for some teams), applied to Django's requests while routes move.
+internal listener, roles for some teams), applied to Django's requests.
 
 A route names its check as its ``auth``, which runs before anything else is read, as
 FastAPI's dependencies did; the route reads who is calling as ``request.auth``::
@@ -44,9 +44,8 @@ class _Request:
 
 
 def guard(check: Callable[[Any], Principal]) -> Callable[[HttpRequest], Principal]:
-    """A check FastAPI's routes depended on (``agentgov.api.auth.require``, ``signed_in``,
-    ``agentgov.api.reach.require``), as a route's ``auth``: who is calling, else 401 or
-    403."""
+    """A check of ``agentgov.api.auth`` or ``agentgov.api.reach`` (``require``,
+    ``signed_in``), as a route's ``auth``: who is calling, else 401 or 403."""
 
     def guarded(request: HttpRequest) -> Principal:
         return check(_Request(request))

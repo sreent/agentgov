@@ -14,7 +14,7 @@ import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov.api.app import create_app
 from agentgov.config import Settings

@@ -12,8 +12,8 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import ids, ledger
 from agentgov.api.app import create_app

@@ -10,8 +10,8 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov.config import Settings
 from agentgov.models import Finding, IntegrationState, LedgerEntry

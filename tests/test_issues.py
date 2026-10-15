@@ -9,8 +9,8 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import cli, ids
 from agentgov.models import Finding, LedgerEntry, Notification

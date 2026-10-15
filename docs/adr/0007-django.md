@@ -63,7 +63,10 @@ The HTTP layer, a group at a time (`src/agentgov/web`):
   faces the internet: its caller is still checked from the headers before anything reads
   the body (`agentgov.web.asgi`), since Django reads every body whole before a view runs.
 - [x] Single sign-on (cookies, redirects, back-channel logout).
-- [ ] The admin UI's files; then FastAPI goes, and the app runs the runtime itself.
+- [x] The admin UI's files; then FastAPI goes, and the app runs the runtime itself. The
+  files are Starlette's `StaticFiles`, as before (Starlette stays: the governance processor
+  uses it too); `/`, `/openapi.json`, `/docs` and `/redoc` are Django's. What FastAPI
+  answered stays in `tests/fastapi_answers.py`, for Django's answers to be checked against.
 
 The data layer:
 
@@ -77,8 +80,9 @@ The data layer:
 
 ## Consequences
 
-* Two web frameworks run side by side until the first stage ends. `/docs` lists the routes
-  of both, and the authorization matrix probes them all.
+* Two web frameworks ran side by side until the first stage ended, `/docs` listing the
+  routes of both and the authorization matrix probing them all. Since, Django serves the API,
+  answering as FastAPI did; `/openapi.json` is Django Ninja's description of the same routes.
 * The second stage reimplements the data layer's rules rather than carrying them over. That
   is where the risk is, so it starts with prototypes, before any module moves.
 * Python 3.11 stays supported. Django 5.2's support ends in April 2028; the next long-term

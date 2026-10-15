@@ -20,6 +20,7 @@ from agentgov.web import (
     mcp,
     model_providers,
     packages,
+    pages,
     platforms,
     registry,
     rules,
@@ -29,6 +30,7 @@ from agentgov.web import (
 from agentgov.web.api import api
 
 for router in (
+    pages.router,
     health.router,
     registry.router,
     packages.router,

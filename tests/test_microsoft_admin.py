@@ -12,8 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import cli
 from agentgov.api.app import create_app

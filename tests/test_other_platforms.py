@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov.api.app import create_app
 from agentgov.config import Settings

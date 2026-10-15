@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine, make_url
 from sqlalchemy.pool import NullPool
+from starlette.testclient import TestClient
 
 from agentgov import migrations
 from agentgov.api.app import create_app

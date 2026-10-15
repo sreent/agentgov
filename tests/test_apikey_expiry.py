@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov import cli, ids
 from agentgov.api.app import create_app

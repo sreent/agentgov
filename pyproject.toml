@@ -23,7 +23,8 @@ keywords = [
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
-  "Framework :: FastAPI",
+  "Framework :: Django",
+  "Framework :: Django :: 5.2",
   "Intended Audience :: Developers",
   "Intended Audience :: System Administrators",
   "Operating System :: OS Independent",
@@ -33,12 +34,13 @@ classifiers = [
   "Topic :: System :: Monitoring",
 ]
 dependencies = [
-  # The API, moving from FastAPI to Django and Django Ninja (docs/adr/0007-django.md):
-  # Django 5.2 is the long-term release that runs on Python 3.11, and agentgov.web's
-  # threaded views build on Ninja's path views, so its minor version is held.
+  # The API, on Django and Django Ninja (docs/adr/0007-django.md): Django 5.2 is the
+  # long-term release that runs on Python 3.11, and agentgov.web's threaded views build on
+  # Ninja's path views, so its minor version is held.
   "django>=5.2.18,<6",
   "django-ninja>=1.7.1,<1.8",
-  "fastapi>=0.115",
+  # The admin UI's files (agentgov.api.app), and the governance processor's webhooks.
+  "starlette>=1.7,<2",
   "uvicorn[standard]>=0.47",
   "pydantic>=2.7",
   "sqlalchemy>=2.0.30",
@@ -101,7 +103,7 @@ extend-exclude = ["src/agentgov/processor/proto"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
 ignore = [
-  "B008",   # FastAPI dependency injection uses calls in defaults
+  "B008",   # Django Ninja's parameters are calls in defaults (Body(...), Query(...))
   "S101",   # asserts are fine in tests
   "RUF012", # mutable class attributes are idiomatic for SQLAlchemy/pydantic
 ]

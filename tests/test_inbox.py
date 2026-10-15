@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov.registry import agents, approvals, findings, issues
 from tests.conftest import ADMIN, seed

@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import cli
 from agentgov.models import FeatureSetting, Finding

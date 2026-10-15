@@ -443,7 +443,7 @@ class API(NinjaAPI):
 api = API(
     title="AgentGov control plane",
     version=__version__,
-    # FastAPI serves /docs while routes move, with these routes in it (agentgov.api.app).
+    # The description and documentation are the pages' (agentgov.web.pages).
     docs_url=None,
     openapi_url=None,
     urls_namespace="agentgov",

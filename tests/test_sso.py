@@ -20,8 +20,8 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi.testclient import TestClient
 from sqlalchemy import update
+from starlette.testclient import TestClient
 
 from agentgov import cli, ids
 from agentgov.api.app import create_app

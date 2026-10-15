@@ -29,8 +29,8 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import ids, migrations
 from agentgov.api.app import api_routes, create_app

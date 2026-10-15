@@ -1,5 +1,6 @@
-"""The HTTP layer on Django (agentgov.web) while routes move to it from FastAPI: it answers
-as FastAPI did, its views run side by side, and each path has one framework."""
+"""The HTTP layer on Django (agentgov.web): it answers as FastAPI did when it served the API
+(tests/fastapi_answers.py), its views run side by side, and a request goes to the route
+FastAPI would have taken."""
 
 from __future__ import annotations
 
@@ -13,26 +14,17 @@ from types import ModuleType
 from typing import Any
 from uuid import UUID
 
+import pytest
 from django import urls as django_urls
 from django.test import RequestFactory
-from fastapi import Body
-from fastapi.encoders import jsonable_encoder
-from fastapi.responses import (
-    JSONResponse,
-    PlainTextResponse,
-    RedirectResponse,
-    Response,
-    StreamingResponse,
-)
-from fastapi.routing import APIRoute
-from fastapi.testclient import TestClient
-from ninja import Body as NinjaBody
+from ninja import Body
 from pydantic import BaseModel, Field
+from starlette.testclient import TestClient
 
-from agentgov import web
 from agentgov.api.app import create_app
 from agentgov.web import api as web_api
 from tests.conftest import ADMIN
+from tests.fastapi_answers import ANSWERS, WRITTEN
 
 
 class Color(Enum):
@@ -61,17 +53,20 @@ VALUES: dict[str, Any] = {
 }
 
 
+# What errors carry, as FastAPI wrote it (tests/fastapi_answers.py's WRITTEN).
+ERRORS: list[Any] = [
+    VALUES,
+    *({key: value} for key, value in VALUES.items()),
+    [{"detail": "no", "errors": [{"loc": ["body", 0], "input": {}}]}],
+]
+
+
 def test_errors_are_written_as_fastapi_wrote_them() -> None:
     # Errors went out through FastAPI's JSONResponse, after its encoder; routes' answers
     # through pydantic (test_requests_are_answered_as_fastapi_answered_them).
-    values: list[Any] = [
-        VALUES,
-        *({key: value} for key, value in VALUES.items()),
-        [{"detail": "no", "errors": [{"loc": ["body", 0], "input": {}}]}],
-    ]
-    for value in values:
-        expected = JSONResponse(jsonable_encoder(value)).body
-        assert web_api.json_response(value).content == expected, value
+    assert len(ERRORS) == len(WRITTEN)
+    for value, written in zip(ERRORS, WRITTEN, strict=True):
+        assert web_api.json_response(value).content == written, value
 
 
 def test_sync_views_run_side_by_side() -> None:
@@ -158,83 +153,13 @@ REQUESTS: list[tuple[str, str, bytes, dict[str, str]]] = [
 ]
 
 
-def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
-    # The same routes on both frameworks, sent the same requests, give the same answers, byte
+def test_requests_are_answered_as_fastapi_answered_them() -> None:
+    # The same routes as FastAPI had, sent the same requests, give the answers it gave, byte
     # for byte: what each accepts, how it says what it refuses, and which route serves.
-    fastapi = create_app(settings, background=False).fastapi
-
-    @fastapi.post("/parity/thing")
-    def thing(payload: Thing) -> Thing:
-        return payload
-
-    @fastapi.post("/parity/two")
-    def two(reason: str = Body(), until: int = Body()) -> dict[str, Any]:
-        return {"reason": reason, "until": until}
-
-    @fastapi.get("/parity/query")
-    def query(limit: int, state: str | None = None) -> dict[str, Any]:
-        return {"limit": limit, "state": state}
-
-    @fastapi.get("/parity/boom")
-    def boom() -> None:
-        raise RuntimeError("boom")
-
-    @fastapi.get("/parity/values")
-    def values() -> dict[str, Any]:
-        return VALUES
-
-    @fastapi.post("/parity/items", status_code=201)
-    def make(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
-        return {"made": body}
-
-    @fastapi.post("/parity/items/preview")
-    def preview(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
-        return {"preview": body}
-
-    @fastapi.get("/parity/items/{ref}")
-    def read(ref: str) -> dict[str, Any]:
-        return {"read": ref}
-
-    @fastapi.delete("/parity/items/{ref}", status_code=204)
-    def remove(ref: str) -> None:
-        del ref
-
-    @fastapi.get("/parity/items/{name:path}/versions/{version}")
-    def version(name: str, version: str) -> dict[str, Any]:
-        return {"name": name, "version": version}
-
-    @fastapi.get("/parity/items/{name:path}/versions")
-    def versions(name: str) -> dict[str, Any]:
-        return {"name": name}
-
-    @fastapi.get("/parity/made/{kind}")
-    def made(kind: str) -> Response:
-        return {
-            "json": lambda: JSONResponse({"a": "é"}, status_code=202, headers={"X-Made": "1"}),
-            "raw": lambda: Response(
-                b"\x00\x01",
-                media_type="application/timestamp-reply",
-                headers={"Content-Disposition": 'attachment; filename="a.tsr"'},
-            ),
-            "csv": lambda: Response("é,1\n", media_type="text/csv"),
-            "empty": lambda: Response(status_code=202),
-            "text": lambda: PlainTextResponse("a: 1\n", media_type="application/yaml"),
-            "stream": lambda: StreamingResponse(iter([b"a\n", "é\n"]), media_type="text/plain"),
-            "redirect": lambda: RedirectResponse("/ui/a b?c=d"),
-            "cookies": cookies,
-        }[kind]()
-
-    def cookies() -> Response:
-        resp = RedirectResponse("/ui/", status_code=302)
-        resp.set_cookie("a", "1", max_age=600, httponly=True, secure=True, path="/auth")
-        resp.set_cookie("s", "t", max_age=3600, httponly=True, samesite="strict", path="/")
-        resp.delete_cookie("old", path="/auth")
-        return resp
-
     router = web_api.Router()
 
     @router.get("/parity/made/{kind}")
-    def ninja_made(request: Any, kind: str) -> Any:
+    def made(request: Any, kind: str) -> Any:
         return {
             "json": lambda: web_api.json_response({"a": "é"}, 202, headers={"X-Made": "1"}),
             "raw": lambda: web_api.raw_response(
@@ -249,10 +174,10 @@ def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
                 iter([b"a\n", "é\n"]), media_type="text/plain"
             ),
             "redirect": lambda: web_api.redirect_response("/ui/a b?c=d"),
-            "cookies": ninja_cookies,
+            "cookies": cookies,
         }[kind]()
 
-    def ninja_cookies() -> Any:
+    def cookies() -> Any:
         resp = web_api.redirect_response("/ui/", status_code=302)
         web_api.set_cookie(resp, "a", "1", max_age=600, httponly=True, secure=True, path="/auth")
         web_api.set_cookie(resp, "s", "t", max_age=3600, httponly=True, samesite="strict", path="/")
@@ -260,72 +185,64 @@ def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
         return resp
 
     @router.post("/parity/thing")
-    def ninja_thing(request: Any, payload: Thing) -> Thing:
-        return thing(payload)
+    def thing(request: Any, payload: Thing) -> Thing:
+        return payload
 
     @router.post("/parity/two")
-    def ninja_two(
-        request: Any, reason: str = NinjaBody(...), until: int = NinjaBody(...)
-    ) -> dict[str, Any]:
-        return two(reason, until)
+    def two(request: Any, reason: str = Body(...), until: int = Body(...)) -> dict[str, Any]:
+        return {"reason": reason, "until": until}
 
     @router.get("/parity/query")
-    def ninja_query(request: Any, limit: int, state: str | None = None) -> dict[str, Any]:
-        return query(limit, state)
+    def query(request: Any, limit: int, state: str | None = None) -> dict[str, Any]:
+        return {"limit": limit, "state": state}
 
     @router.get("/parity/boom")
-    def ninja_boom(request: Any) -> None:
-        boom()
+    def boom(request: Any) -> None:
+        raise RuntimeError("boom")
 
     @router.get("/parity/values")
-    def ninja_values(request: Any) -> dict[str, Any]:
-        return values()
+    def values(request: Any) -> dict[str, Any]:
+        return VALUES
 
     @router.post("/parity/items", status_code=201)
-    def ninja_make(request: Any, body: dict[str, Any] = NinjaBody(...)) -> dict[str, Any]:
-        return make(body)
+    def make(request: Any, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return {"made": body}
 
     @router.post("/parity/items/preview")
-    def ninja_preview(request: Any, body: dict[str, Any] = NinjaBody(...)) -> dict[str, Any]:
-        return preview(body)
+    def preview(request: Any, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return {"preview": body}
 
     @router.get("/parity/items/{ref}")
-    def ninja_read(request: Any, ref: str) -> dict[str, Any]:
-        return read(ref)
+    def read(request: Any, ref: str) -> dict[str, Any]:
+        return {"read": ref}
 
     @router.delete("/parity/items/{ref}", status_code=204)
-    def ninja_remove(request: Any, ref: str) -> None:
-        remove(ref)
+    def remove(request: Any, ref: str) -> None:
+        del ref
 
     @router.get("/parity/items/{path:name}/versions/{version}")
-    def ninja_version(request: Any, name: str, version: str) -> dict[str, Any]:
+    def version(request: Any, name: str, version: str) -> dict[str, Any]:
         return {"name": name, "version": version}
 
     @router.get("/parity/items/{path:name}/versions")
-    def ninja_versions(request: Any, name: str) -> dict[str, Any]:
-        return versions(name)
+    def versions(request: Any, name: str) -> dict[str, Any]:
+        return {"name": name}
 
     api = web_api.API(urls_namespace="test-parity", docs_url=None, openapi_url=None)
     api.add_router("", router)
     urls = ModuleType("parity_urls")
     urls.urlpatterns = [django_urls.path("", api.urls)]  # type: ignore[attr-defined]
-    client = TestClient(fastapi, raise_server_exceptions=False)
     factory = RequestFactory()
+    assert len(REQUESTS) == len(ANSWERS)
     for method, url, body, headers in REQUESTS:
-        before = client.request(method, url, content=body, headers=headers, follow_redirects=False)
+        before = ANSWERS[(method, url, body, tuple(sorted(headers.items())))]
         request = factory.generic(
             method, url, data=body, content_type=headers.get("content-type", "")
         )
         request.urlconf = urls
         found = django_urls.get_resolver(urls).resolve(request.path_info)
         after = asyncio.run(_sent(found.func(request, **found.kwargs)))
-        sent = {name: value for name, value in before.headers.items() if name != "set-cookie"}
-        assert after == (
-            before.status_code,
-            dict(sorted(sent.items())),
-            before.content,
-            [_undated(c) for c in before.headers.get_list("set-cookie")],
-        ), (method, url, body, headers)
+        assert after == before, (method, url, body, headers)
 
 
 async def _sent(view: Any) -> tuple[int, dict[str, str], bytes, list[str]]:
@@ -374,35 +291,7 @@ def _samples(path: str, literals: set[str]) -> set[str]:
     return found
 
 
-def test_each_path_has_one_framework(settings) -> None:
-    # A path Django serves that FastAPI's patterns also match (or the other way round) would
-    # change hands by accident: routes move a whole path at a time.
-    app = create_app(settings, background=False)
-
-    def flat(found: list[Any]) -> Any:
-        for route in found:
-            if type(route).__name__ == "_IncludedRouter":
-                yield from flat(route.original_router.routes)
-            else:
-                yield route
-
-    fastapi = [r for r in flat(app.fastapi.routes) if isinstance(r, APIRoute)]
-
-    def sample(path: str) -> str:
-        return re.sub(r"\{[^}]+\}", "x", path)
-
-    for route in fastapi:
-        assert not web.serves(sample(route.path)), f"{route.path}: Django serves it too"
-    moved = list(web_api.routes())
-    assert moved
-    for _method, path in moved:
-        assert web.serves(sample(path)), path
-        assert not any(r.path_regex.match(sample(path)) for r in fastapi), (
-            f"{path}: FastAPI's routes match it too"
-        )
-
-
-def test_moved_routes_answer_as_before(settings) -> None:
+def test_the_app_answers_as_before(settings) -> None:
     with TestClient(create_app(settings, background=False)) as client:
         assert client.get("/healthz").json() == {"status": "ok"}
         assert client.get("/readyz").json()["status"] == "ready"
@@ -429,10 +318,59 @@ def test_moved_routes_answer_as_before(settings) -> None:
             "http://testserver/healthz?x=1",
         )
         assert client.get("/healthz/").json() == {"status": "ok"}
+        twice = client.get("/healthz//", follow_redirects=False)
+        assert twice.headers["location"] == "http://testserver/healthz"
         assert client.get("/v1/me/", headers=ADMIN, follow_redirects=False).status_code == 307
         assert client.get("/v1/nothing/", follow_redirects=False).status_code == 404
         # The API's description lists every route, whichever framework serves it.
         paths = client.get("/openapi.json").json()["paths"]
         assert {"/v1/me", "/healthz", "/v1/agents"} <= set(paths)
-        # "/" is still the admin UI's.
-        assert client.get("/", follow_redirects=False).headers["location"] == "/ui/"
+        # "/" is still the admin UI's, and what isn't the API's is its files, or not found.
+        root = client.get("/", follow_redirects=False)
+        assert (root.status_code, root.headers["location"]) == (307, "/ui/")
+        assert client.post("/").headers["allow"] == "GET"
+        ui = client.get("/ui", follow_redirects=False)
+        assert (ui.status_code, ui.headers["location"]) == (307, "http://testserver/ui/")
+        for method, path, status, detail in (
+            ("GET", "/nothing", 404, "Not Found"),
+            ("GET", "/ui/nothing.js", 404, "Not Found"),
+            ("GET", "/ui/../pyproject.toml", 404, "Not Found"),
+            ("POST", "/ui/", 405, "Method Not Allowed"),
+        ):
+            answer = client.request(method, path)
+            assert (answer.status_code, answer.json()) == (status, {"detail": detail}), path
+        page = client.get("/ui/")
+        assert page.headers["content-security-policy"].startswith("default-src 'self'")
+        assert client.head("/ui/").headers["etag"] == page.headers["etag"]
+
+
+class _Runtime:
+    """What the app asks of the runtime while it runs."""
+
+    def __init__(self, fails: Exception | None = None) -> None:
+        self.fails = fails
+        self.calls: list[str] = []
+
+    def start(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.calls.append("start")
+        if self.fails:
+            raise self.fails
+
+    def stop(self) -> None:
+        self.calls.append("stop")
+
+
+def test_the_runtime_runs_while_the_app_does(settings) -> None:
+    rt = _Runtime()
+    with TestClient(create_app(settings, runtime=rt)) as client:  # type: ignore[arg-type]
+        assert rt.calls == ["start"]
+        assert client.get("/healthz").status_code == 200
+    assert rt.calls == ["start", "stop"]
+    # A runtime that can't start stops the server from starting, saying why.
+    failing = _Runtime(fails=RuntimeError("the database is unreachable"))
+    with (
+        pytest.raises(RuntimeError, match="the database is unreachable"),
+        TestClient(create_app(settings, runtime=failing)),  # type: ignore[arg-type]
+    ):
+        pass
+    assert failing.calls == ["start"]

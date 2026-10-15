@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import ids
 from agentgov.models import AccessAssignment, Agent, Finding, LedgerEntry, RuleMatch

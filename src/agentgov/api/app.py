@@ -1,34 +1,27 @@
-"""The control plane's ASGI application: Django (agentgov.web) for the routes that have
-moved to it, FastAPI for the rest until all have (docs/adr/0007-django.md)."""
+"""The control plane's ASGI application: Django serves the API and its documentation
+(agentgov.web, docs/adr/0007-django.md), the admin UI's files go as they are, and the
+runtime runs while the application does."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import secrets
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import traceback
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
 
-from fastapi import FastAPI, Request
-from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import RequestValidationError
-from fastapi.openapi.utils import get_openapi
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.routing import APIRoute
-from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import URL
-from starlette.responses import Response
-from starlette.routing import Match
+from starlette.exceptions import HTTPException
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.staticfiles import StaticFiles
 from starlette.types import Receive, Scope, Send
+from starlette.websockets import WebSocketClose
 
-from agentgov import __version__, web
+from agentgov import web
 from agentgov.config import Settings
-from agentgov.registry.errors import RegistryError
 from agentgov.runtime import Runtime
-from agentgov.web.api import api as web_api
 from agentgov.web.api import routes as web_routes
 
 log = logging.getLogger(__name__)
@@ -46,8 +39,9 @@ UI_HEADERS = {
 }
 
 
-# The admin UI, built from ui/ into the package (npm run build there).
+# The admin UI, built from ui/ into the package (npm run build there), and where it is.
 UI_DIR = Path(str(resources.files("agentgov") / "ui"))
+UI_PATH = "/ui"
 
 # What /ui/ shows where the package has no admin UI built in it: a source checkout, before
 # its UI is built.
@@ -90,106 +84,83 @@ def create_app(
     if not settings.admin_token and settings.dev_mode:
         settings = settings.with_overrides(admin_token="agt-dev-" + secrets.token_urlsafe(16))
         log.warning("dev mode: generated admin token %s", settings.admin_token)
-    rt = runtime or Runtime(settings)
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        if background:
-            rt.start(asyncio.get_running_loop())
-        else:
-            rt.init_db()
-            rt.bundles.bind_loop(asyncio.get_running_loop())
-        try:
-            yield
-        finally:
-            if background:
-                rt.stop()
-
-    app = FastAPI(
-        title="AgentGov control plane",
-        version=__version__,
-        description="Open-source AI agent governance: registry, lifecycle, policy distribution "
-        "and evidence, composed from Keycloak, OPA, agentgateway, Presidio and OpenTelemetry.",
-        lifespan=lifespan,
-    )
-    app.state.rt = rt
-
-    @app.exception_handler(RegistryError)
-    async def registry_error(_: Request, exc: RegistryError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
-
-    @app.exception_handler(RequestValidationError)
-    async def request_error(_: Request, exc: RequestValidationError) -> JSONResponse:
-        # Same shape as every other error ({"detail": "..."}), with the field errors kept.
-        errors = jsonable_encoder(exc.errors())
-        message = "; ".join(
-            ".".join(str(p) for p in e.get("loc", []) if p != "body") + f": {e.get('msg')}"
-            for e in errors
-        )
-        return JSONResponse(
-            status_code=422, content={"detail": message or "invalid request", "errors": errors}
-        )
-
-    app.mount("/ui", _UiFiles(directory=UI_DIR, html=True, check_dir=False), name="ui")
-
-    @app.get("/", include_in_schema=False)
-    def root() -> RedirectResponse:
-        return RedirectResponse("/ui/")
-
-    def openapi() -> dict[str, Any]:
-        # Every route, whichever framework serves it.
-        if app.openapi_schema is None:
-            schema = get_openapi(
-                title=app.title, version=app.version, description=app.description, routes=app.routes
-            )
-            moved = web_api.get_openapi_schema(path_prefix="")
-            schema["paths"] = {**schema.get("paths", {}), **moved.get("paths", {})}
-            app.openapi_schema = schema
-        return app.openapi_schema
-
-    app.openapi = openapi  # type: ignore[method-assign]
-    return ControlPlane(app)
+    return ControlPlane(runtime or Runtime(settings), background=background)
 
 
 class ControlPlane:
-    """The ASGI app: Django serves the routes that have moved to it (agentgov.web), FastAPI
-    the rest, and FastAPI's lifespan starts and stops the runtime."""
+    """The ASGI app: Django serves the API (agentgov.web), and the admin UI's files go as
+    they are. While the app runs, so does the runtime: all of it with ``background``, else
+    only its database (as tests want it)."""
 
-    def __init__(self, fastapi: FastAPI) -> None:
-        self.fastapi = fastapi
-        self.state = fastapi.state
+    def __init__(self, rt: Runtime, *, background: bool = True) -> None:
+        self.state = SimpleNamespace(rt=rt)
+        self.background = background
         self.django = web.handler()
+        self.ui = _UiFiles(directory=UI_DIR, html=True, check_dir=False)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            path = scope["path"]
-            if web.serves(path):
-                await self.django({**scope, web.RUNTIME: self.state.rt}, receive, send)
-                return
-            other = path[:-1] if path.endswith("/") else path + "/"
-            if path != "/" and web.serves(other) and not self._fastapi_serves(scope):
-                # As FastAPI answered a path with its last slash, or without, that it served
-                # the other way.
-                url = URL(scope={**scope, "path": other})
-                await RedirectResponse(str(url))(scope, receive, send)
-                return
-        await self.fastapi(scope, receive, send)
+        if scope["type"] == "lifespan":
+            await self._lifespan(receive, send)
+        elif scope["type"] == "http":
+            await self._http(scope, receive, send)
+        else:  # no WebSockets here
+            await WebSocketClose()(scope, receive, send)
 
-    def _fastapi_serves(self, scope: Scope) -> bool:
-        return any(r.matches(scope)[0] != Match.NONE for r in self.fastapi.router.routes)
+    async def _http(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope["path"]
+        if web.serves(path):
+            await self.django({**scope, web.RUNTIME: self.state.rt}, receive, send)
+            return
+        if path.startswith(UI_PATH + "/"):
+            await self._ui(scope, receive, send)
+            return
+        other = path.rstrip("/") if path.endswith("/") else path + "/"
+        if path != "/" and (web.serves(other) or other == UI_PATH + "/"):
+            # A path with slashes at its end, or without one, that is served the other way.
+            url = URL(scope={**scope, "path": other})
+            await RedirectResponse(str(url))(scope, receive, send)
+            return
+        await _refused(404, "Not Found")(scope, receive, send)
+
+    async def _ui(self, scope: Scope, receive: Receive, send: Send) -> None:
+        mounted = {**scope, "root_path": scope.get("root_path", "") + UI_PATH}
+        try:
+            await self.ui(mounted, receive, send)
+        except HTTPException as exc:
+            await _refused(exc.status_code, exc.detail)(scope, receive, send)
+
+    async def _lifespan(self, receive: Receive, send: Send) -> None:
+        # As Starlette ran FastAPI's lifespan: what fails is said, then raised.
+        rt = self.state.rt
+        started = False
+        await receive()  # lifespan.startup
+        try:
+            loop = asyncio.get_running_loop()
+            if self.background:
+                rt.start(loop)
+            else:
+                rt.init_db()
+                rt.bundles.bind_loop(loop)
+            try:
+                await send({"type": "lifespan.startup.complete"})
+                started = True
+                await receive()  # lifespan.shutdown
+            finally:
+                if self.background:
+                    rt.stop()
+        except BaseException:
+            failed = "lifespan.shutdown.failed" if started else "lifespan.startup.failed"
+            await send({"type": failed, "message": traceback.format_exc()})
+            raise
+        await send({"type": "lifespan.shutdown.complete"})
+
+
+def _refused(status: int, detail: str) -> Response:
+    # As the API refuses: {"detail": ...}.
+    return JSONResponse({"detail": detail}, status_code=status)
 
 
 def api_routes(app: ControlPlane) -> list[tuple[str, str]]:
-    """Every API route, as (method, path), whichever framework serves it."""
-
-    def flat(found: list[Any]) -> Any:
-        for route in found:
-            if type(route).__name__ == "_IncludedRouter":
-                yield from flat(route.original_router.routes)
-            else:
-                yield route
-
-    out = {
-        (m, r.path) for r in flat(app.fastapi.routes) if isinstance(r, APIRoute) for m in r.methods
-    }
-    return sorted(out | set(web_routes()))
+    """Every route of ``app``'s API, as (method, path)."""
+    del app  # every control plane serves the one API (agentgov.web)
+    return sorted(set(web_routes()))

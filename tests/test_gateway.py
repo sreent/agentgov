@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov.config import Settings
 from agentgov.gateway import (

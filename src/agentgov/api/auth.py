@@ -13,7 +13,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import HTTPException, Request
+from starlette.exceptions import HTTPException
+from starlette.requests import Request
 
 from agentgov.identity import sso
 from agentgov.registry import apikeys, features

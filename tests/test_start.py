@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from tests.conftest import ADMIN
 from tests.test_platforms import bot, import_inventory

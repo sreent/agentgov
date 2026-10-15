@@ -11,7 +11,7 @@ from urllib.parse import parse_qs
 import httpx
 import jwt
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov import cli
 from agentgov.api.app import create_app

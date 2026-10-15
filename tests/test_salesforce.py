@@ -12,7 +12,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from tests.conftest import ADMIN
 

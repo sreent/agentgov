@@ -1,8 +1,9 @@
-"""The control plane's HTTP layer on Django and Django Ninja (docs/adr/0007-django.md).
+"""The control plane's HTTP layer on Django and Django Ninja (docs/adr/0007-django.md),
+behind the ASGI app ``agentgov.api.app.create_app`` makes.
 
-Routes move here from FastAPI (agentgov.api) a group at a time. Until a group has moved,
-FastAPI serves it, behind the one ASGI app ``agentgov.api.app.create_app`` makes; data stays
-in SQLAlchemy for this stage, each route in a transaction of its own as before.
+It answers as FastAPI did when it served the API (tests/fastapi_answers.py), so callers
+notice no difference. The data is still SQLAlchemy's, each route in a transaction of its
+own; the ADR's second stage moves it to Django's ORM.
 """
 
 from __future__ import annotations
