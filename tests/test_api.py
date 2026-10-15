@@ -114,6 +114,26 @@ class TestAuth:
             assert (built.status_code, built.text) == (200, page)
             assert "script-src 'self';" in built.headers["content-security-policy"]
 
+    def test_ui_scripts_are_kept_and_the_page_checked_each_time(
+        self, settings, tmp_path, monkeypatch
+    ) -> None:
+        # Scripts and styles are named after their content; the page naming them changes
+        # with each build.
+        (tmp_path / "assets").mkdir(parents=True)
+        (tmp_path / "index.html").write_text('<script src="./assets/index-1a2b3c.js"></script>')
+        (tmp_path / "assets" / "index-1a2b3c.js").write_text("console.log('AgentGov')")
+        monkeypatch.setattr(app_module, "UI_DIR", tmp_path)
+        with TestClient(create_app(settings, background=False)) as client:
+            script = client.get("/ui/assets/index-1a2b3c.js")
+            assert script.headers["cache-control"] == "public, max-age=31536000, immutable"
+            again = client.get(
+                "/ui/assets/index-1a2b3c.js", headers={"If-None-Match": script.headers["etag"]}
+            )
+            assert again.status_code == 304
+            assert again.headers["cache-control"] == "public, max-age=31536000, immutable"
+            for path in ("/ui/", "/ui/index.html"):
+                assert client.get(path).headers["cache-control"] == "no-cache", path
+
 
 class TestRoles:
     def test_registrar_requests_are_pending(self, client) -> None:

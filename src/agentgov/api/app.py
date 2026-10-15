@@ -89,6 +89,13 @@ class _UiFiles(StaticFiles):
         else:
             response = await super().get_response(path, scope)
         response.headers.update(UI_HEADERS)
+        # The build names its scripts and styles after their content (assets/index-1a2b3c.js),
+        # so they never change; the page naming them is checked each time, so that after an
+        # upgrade it doesn't name ones that are gone.
+        unchanging = Path(path).parts[:1] == ("assets",) and response.status_code in (200, 304)
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, immutable" if unchanging else "no-cache"
+        )
         return response
 
 
