@@ -11,17 +11,23 @@ export interface Badges { approvals: Badge; findings: Badge }
 let badges: Badges = { approvals: { count: 0, tone: '' }, findings: { count: 0, tone: '' } };
 const listeners = new Set<() => void>();
 
-function update(pendingApprovals: number, findings: { open: number; by_severity: Record<string, number> }) {
-  const by = findings.by_severity;
-  badges = {
-    approvals: { count: pendingApprovals, tone: pendingApprovals ? 'warning' : '' },
-    findings: { count: findings.open, tone: by.critical ? 'critical' : by.high ? 'serious' : findings.open ? 'warning' : '' },
-  };
+/** Set the counts from what a page has loaded already: either, or both. */
+export function updateBadges({ pendingApprovals, findings }: {
+  pendingApprovals?: number | null;
+  findings?: { open: number; by_severity?: Record<string, number> } | null;
+}): void {
+  const next = { ...badges };
+  if (pendingApprovals != null) next.approvals = { count: pendingApprovals, tone: pendingApprovals ? 'warning' : '' };
+  if (findings) {
+    const by = findings.by_severity || {};
+    next.findings = { count: findings.open, tone: by.critical ? 'critical' : by.high ? 'serious' : findings.open ? 'warning' : '' };
+  }
+  badges = next;
   listeners.forEach((l) => l());
 }
 
 export function clearBadges(): void {
-  update(0, { open: 0, by_severity: {} });
+  updateBadges({ pendingApprovals: 0, findings: { open: 0 } });
 }
 
 /** Count again: after a change that may have changed what waits. */
@@ -33,7 +39,7 @@ export async function refreshBadges(): Promise<void> {
         pages.includes('approvals') ? api<unknown[]>('v1/me/approvals?status=pending') : [],
         pages.includes('findings') ? api<{ severity: string }[]>('v1/me/issues?status=open') : [],
       ]);
-      update(pending.length, { open: issues.length, by_severity: countBy(issues, 'severity') });
+      updateBadges({ pendingApprovals: pending.length, findings: { open: issues.length, by_severity: countBy(issues, 'severity') } });
       return;
     }
     // How many are open, and whether any is critical or high: counted by the control
@@ -45,7 +51,7 @@ export async function refreshBadges(): Promise<void> {
     const [waiting, open, critical, high] = await Promise.all([
       api<{ total: number }>('v1/inbox'), count(''), count('&severity=critical'), count('&severity=high'),
     ]);
-    update(waiting.total, { open, by_severity: { critical, high } });
+    updateBadges({ pendingApprovals: waiting.total, findings: { open, by_severity: { critical, high } } });
   } catch {
     /* badges are a convenience; the pages show the real state */
   }
