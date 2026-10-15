@@ -94,7 +94,7 @@ def test_long_poll_wakes_on_change(rt, settings) -> None:
 
     async def scenario() -> float:
         rt.bundles.bind_loop(asyncio.get_running_loop())
-        etag = rt.bundles.current().etag
+        etag = (await asyncio.to_thread(rt.bundles.current)).etag
         loop = asyncio.get_running_loop()
         started = loop.time()
         waiter = asyncio.create_task(rt.bundles.wait_for_change(etag, timeout=10))
@@ -117,7 +117,8 @@ def test_long_poll_times_out_without_change(rt, settings) -> None:
 
     async def scenario():
         rt.bundles.bind_loop(asyncio.get_running_loop())
-        return await rt.bundles.wait_for_change(rt.bundles.current().etag, timeout=0.3)
+        current = await asyncio.to_thread(rt.bundles.current)
+        return await rt.bundles.wait_for_change(current.etag, timeout=0.3)
 
     assert asyncio.run(scenario()) is None
 

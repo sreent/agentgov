@@ -338,7 +338,7 @@ def test_the_database_tells_replicas_with_the_commit() -> None:
     """Without PostgreSQL there is no one to tell: a commit names its topics locally."""
     db = Database("sqlite://")
     told: list[Any] = []
-    db.before_commit = lambda session, topics: told.append(topics)
+    db.before_commit = lambda tx, topics: told.append(topics)
     with db.session() as s:
         mark_changed(s, "agents")
     with db.session():

@@ -164,6 +164,7 @@ tests its URL, as a role that may create databases:
 | `src/agentgov/coordination.py` | Several control-plane replicas: changes to every replica, the leader, jobs one at a time |
 | `src/agentgov/tls.py` | Mutual TLS between the components, and making their certificates |
 | `src/agentgov/mcp_scan.py` | The MCP servers set up on a developer's machine (`agentgov mcp scan`) |
+| `src/agentgov/db` | The database's connections and transactions, which Django runs with the rules every transaction keeps, and the SQLAlchemy sessions the modules use in them until they move to Django's ORM ([ADR 0007](docs/adr/0007-django.md)) |
 | `src/agentgov/models.py`, `src/agentgov/migrations` | The database schema and its migrations (Alembic) |
 | `src/agentgov/config.py`, `src/agentgov/cli.py` | The settings, and the `agentgov` command |
 | `ui` | The admin UI: React and TypeScript (`src`: a module per page in `pages`, the sign-in page and the menu in `shell`, and what pages share in `components` and `lib`), built with Vite into `src/agentgov/ui` (not in git), and its browser tests (`e2e`, Playwright) |

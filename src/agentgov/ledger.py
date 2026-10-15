@@ -19,7 +19,7 @@ import math
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -154,7 +154,7 @@ def _utc(value: datetime | None) -> datetime | None:
 
 
 def append(
-    session: Session,
+    session: Session | db.Transaction,
     *,
     type: str,
     actor: str,
@@ -198,18 +198,20 @@ def append(
         trace_id=storable(trace_id, _LENGTHS["trace_id"]),
         on_behalf_of=storable(on_behalf_of, _LENGTHS["on_behalf_of"]),
     )
-    session.info.setdefault(_PENDING, []).append(entry)
+    tx = db.transaction_of(session)
+    tx.info.setdefault(_PENDING, []).append(entry)
     # For what sends the ledger on (agentgov.secops.delivery), once this commits.
-    mark_changed(session, "ledger")
+    mark_changed(tx, "ledger")
     return entry
 
 
-def _write_pending(session: Session) -> None:
+def _write_pending(tx: db.Transaction) -> None:
     """Write the transaction's entries, in the order they were appended. Updating the head
     row first takes a write lock held until the commit: appenders take turns."""
-    pending: list[LedgerEntry] | None = session.info.pop(_PENDING, None)
+    pending: list[LedgerEntry] | None = tx.info.pop(_PENDING, None)
     if not pending:
         return
+    session = tx.orm()
     ensure_head(session)
     session.execute(
         update(LedgerHead).where(LedgerHead.id == 1).values(last_seq=LedgerHead.last_seq)
@@ -230,30 +232,40 @@ def _write_pending(session: Session) -> None:
 db.WRITE_LAST.append(_write_pending)
 
 
+def _savepoint(tx: db.Transaction) -> Callable[[], None]:
+    """Entries appended in a savepoint (Transaction.savepoint) go if it rolls back; those of
+    a transaction that rolls back go with it."""
+    start = len(tx.info.get(_PENDING) or ())
+
+    def undo() -> None:
+        pending = tx.info.get(_PENDING)
+        if pending is not None:
+            del pending[start:]
+
+    return undo
+
+
+db.SAVEPOINTS.append(_savepoint)
+
+
 @event.listens_for(Session, "after_transaction_create")
 def _savepoint_begins(session: Session, transaction: SessionTransaction) -> None:
     if transaction.nested:
-        marks = session.info.setdefault(_SAVEPOINTS, {})
-        marks[transaction] = len(session.info.get(_PENDING) or ())
+        tx = db.transaction_of(session)
+        marks = tx.info.setdefault(_SAVEPOINTS, {})
+        marks[transaction] = len(tx.info.get(_PENDING) or ())
 
 
 @event.listens_for(Session, "after_soft_rollback")
 def _rolled_back(session: Session, previous: SessionTransaction) -> None:
-    """Entries appended since a savepoint that rolled back, or in a transaction that did,
-    go with them."""
+    """Entries appended since a savepoint of the session's (begin_nested) that rolled back
+    go with it."""
     if previous.nested:
-        start = (session.info.get(_SAVEPOINTS) or {}).get(previous)
-        pending = session.info.get(_PENDING)
+        tx = db.transaction_of(session)
+        start = (tx.info.get(_SAVEPOINTS) or {}).get(previous)
+        pending = tx.info.get(_PENDING)
         if start is not None and pending is not None:
             del pending[start:]
-    elif previous.parent is None:
-        session.info.pop(_PENDING, None)
-
-
-@event.listens_for(Session, "after_transaction_end")
-def _transaction_ends(session: Session, transaction: SessionTransaction) -> None:
-    if transaction.parent is None:
-        session.info.pop(_SAVEPOINTS, None)
 
 
 def iter_entries(

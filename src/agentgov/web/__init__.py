@@ -2,8 +2,8 @@
 behind the ASGI app ``agentgov.api.app.create_app`` makes.
 
 It answers as FastAPI did when it served the API (tests/fastapi_answers.py), so callers
-notice no difference. The data is still SQLAlchemy's, each route in a transaction of its
-own; the ADR's second stage moves it to Django's ORM.
+notice no difference. Each route runs in a transaction of its own, which Django runs
+(agentgov.db); the models are SQLAlchemy's until the ADR's second stage moves them to Django.
 """
 
 from __future__ import annotations
@@ -22,8 +22,9 @@ RUNTIME = "agentgov.runtime"
 
 
 def configure() -> None:
-    """Django's settings, once per process: the HTTP layer only, with nothing that keeps
-    state of its own (no Django sessions, users, messages or database yet)."""
+    """Django's settings, once per process: the HTTP layer, and the databases, which
+    agentgov.db adds as it opens them (nothing else keeps state: no Django sessions, users
+    or messages)."""
     if settings.configured:
         return
     settings.configure(

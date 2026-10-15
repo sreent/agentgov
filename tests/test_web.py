@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
@@ -377,3 +378,41 @@ def test_the_runtime_runs_while_the_app_does(settings) -> None:
     ):
         pass
     assert failing.calls == ["start"]
+
+
+def test_a_streamed_answer_is_made_in_one_thread() -> None:
+    # A generator may hold, from one part to the next, what belongs to its thread: a
+    # transaction, on Django's connection for that thread (/v1/ledger/export).
+    made: list[tuple[str, int]] = []
+
+    def parts() -> Iterator[bytes]:
+        try:
+            for n in range(3):
+                made.append(("part", threading.get_ident()))
+                yield b"%d" % n
+        finally:
+            made.append(("closed", threading.get_ident()))
+
+    async def everything() -> list[bytes]:
+        got, release = [], threading.Event()
+        async for part in web_api._in_threads(parts()):
+            got.append(part)
+            # Other views take whichever threads are idle meanwhile.
+            web_api.VIEWS.submit(release.wait, 2)
+        release.set()
+        return got
+
+    assert asyncio.run(everything()) == [b"0", b"1", b"2"]
+    assert len({thread for _, thread in made}) == 1
+
+    made.clear()
+
+    async def one() -> bytes:
+        stream = web_api._in_threads(parts())
+        part = await anext(stream)
+        await stream.aclose()  # the client went
+        return part
+
+    assert asyncio.run(one()) == b"0"
+    assert made[-1][0] == "closed"
+    assert len({thread for _, thread in made}) == 1
