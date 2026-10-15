@@ -8,6 +8,7 @@ import asyncio
 import logging
 import secrets
 import traceback
+from collections.abc import Mapping
 from importlib import resources
 from pathlib import Path
 from types import SimpleNamespace
@@ -127,7 +128,7 @@ class ControlPlane:
         try:
             await self.ui(mounted, receive, send)
         except HTTPException as exc:
-            await _refused(exc.status_code, exc.detail)(scope, receive, send)
+            await _refused(exc.status_code, exc.detail, exc.headers)(scope, receive, send)
 
     async def _lifespan(self, receive: Receive, send: Send) -> None:
         # As Starlette ran FastAPI's lifespan: what fails is said, then raised.
@@ -155,9 +156,9 @@ class ControlPlane:
         await send({"type": "lifespan.shutdown.complete"})
 
 
-def _refused(status: int, detail: str) -> Response:
-    # As the API refuses: {"detail": ...}.
-    return JSONResponse({"detail": detail}, status_code=status)
+def _refused(status: int, detail: str, headers: Mapping[str, str] | None = None) -> Response:
+    # As the API refuses: {"detail": ...}, with the headers the refusal has (Allow).
+    return JSONResponse({"detail": detail}, status_code=status, headers=headers)
 
 
 def api_routes(app: ControlPlane) -> list[tuple[str, str]]:

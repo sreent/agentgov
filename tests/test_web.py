@@ -339,6 +339,7 @@ def test_the_app_answers_as_before(settings) -> None:
         ):
             answer = client.request(method, path)
             assert (answer.status_code, answer.json()) == (status, {"detail": detail}), path
+        assert client.post("/ui/").headers["allow"] == "GET, HEAD"
         page = client.get("/ui/")
         assert page.headers["content-security-policy"].startswith("default-src 'self'")
         assert client.head("/ui/").headers["etag"] == page.headers["etag"]
