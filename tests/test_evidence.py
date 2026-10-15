@@ -17,14 +17,13 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import delete, select, update
 from starlette.testclient import TestClient
 
 from agentgov import compliance, ids, ledger, retention
 from agentgov import timestamping as tsp
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.models import (
+from agentgov.db.models import (
     AgentActivity,
     ApprovalRequest,
     Destination,
@@ -160,10 +159,10 @@ class TestTimestamping:
 
 
 def _old_entries(rt: Runtime, count: int, days_ago: int) -> None:
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         for i in range(count):
             ledger.append(
-                s, type="test.old", actor="test", ts=ids.utcnow() - timedelta(days=days_ago - i)
+                tx, type="test.old", actor="test", ts=ids.utcnow() - timedelta(days=days_ago - i)
             )
 
 
@@ -182,15 +181,15 @@ class TestCheckpoints:
     def test_one_per_period_while_the_chain_grows(self, rt: Runtime) -> None:
         _old_entries(rt, 3, 1)
         now = ids.utcnow()
-        with rt.db.session() as s:
-            first = retention.checkpoint_if_due(s, rt.settings, now)
-            assert (first.seq, first.hash) == (3, s.get(LedgerEntry, 3).hash)
-        with rt.db.session() as s:
-            assert retention.checkpoint_if_due(s, rt.settings, now + timedelta(hours=25)) is None
+        with rt.db.transaction() as tx:
+            first = retention.checkpoint_if_due(tx, rt.settings, now)
+            assert (first.seq, first.hash) == (3, LedgerEntry.objects.get(seq=3).hash)
+        with rt.db.transaction() as tx:
+            assert retention.checkpoint_if_due(tx, rt.settings, now + timedelta(hours=25)) is None
         _old_entries(rt, 1, 1)
-        with rt.db.session() as s:
-            assert retention.checkpoint_if_due(s, rt.settings, now + timedelta(hours=1)) is None
-            assert retention.checkpoint_if_due(s, rt.settings, now + timedelta(hours=25)).seq == 4
+        with rt.db.transaction() as tx:
+            assert retention.checkpoint_if_due(tx, rt.settings, now + timedelta(hours=1)) is None
+            assert retention.checkpoint_if_due(tx, rt.settings, now + timedelta(hours=25)).seq == 4
 
     def test_time_stamped_by_the_authority(self, settings: Settings) -> None:
         tsa = FakeTSA()
@@ -202,16 +201,16 @@ class TestCheckpoints:
         _old_entries(runtime, 2, 1)
         out = runtime.run_retention()
         assert (out["checkpoint"], out["timestamped"]) == (2, 1)
-        with runtime.db.session() as s:
-            point = s.get(LedgerCheckpoint, 2)
+        with runtime.db.transaction() as tx:
+            point = LedgerCheckpoint.objects.get(seq=2)
             assert point.timestamped_at.isoformat() == "2026-10-11T12:00:00+00:00"
             response = base64.b64decode(point.timestamp)
         digest, _ = query(tsa.requests[0])
         assert digest == hashlib.sha256(ledger.statement(2, point.hash)).digest()
         assert tsp.read_response(response, digest, None).time == point.timestamped_at
         # The chain records it: a time-stamp replaced later shows.
-        with runtime.db.session() as s:
-            recorded = s.get(LedgerEntry, 3)
+        with runtime.db.transaction() as tx:
+            recorded = LedgerEntry.objects.get(seq=3)
             assert recorded.type == "ledger.timestamped"
             assert recorded.details == {
                 "checkpoint": 2,
@@ -226,19 +225,19 @@ class TestCheckpoints:
         for refuse in ("status", "forge"):
             setattr(tsa, refuse, 2 if refuse == "status" else True)
             _old_entries(runtime, 1, 1)
-            with runtime.db.session() as s:
-                seq = ledger.checkpoint(s).seq
+            with runtime.db.transaction() as tx:
+                seq = ledger.checkpoint(tx).seq
             assert runtime.stamp_checkpoints() == 0
-            with runtime.db.session() as s:
-                point = s.get(LedgerCheckpoint, seq)
+            with runtime.db.transaction() as tx:
+                point = LedgerCheckpoint.objects.get(seq=seq)
                 assert point.timestamp is None
                 assert (
                     "refused" if refuse == "status" else "isn't signed"
                 ) in point.timestamp_error
             setattr(tsa, refuse, 0 if refuse == "status" else False)
             assert runtime.stamp_checkpoints() == 1
-        with runtime.db.session() as s:
-            assert ledger.verify(s, settings=runtime.settings)["valid"] is True
+        with runtime.db.transaction() as tx:
+            assert ledger.verify(tx, settings=runtime.settings)["valid"] is True
         runtime.db.dispose()
 
 
@@ -256,11 +255,11 @@ class TestRewrites:
         runtime.init_db()
         _old_entries(runtime, 3, 1)
         assert runtime.run_retention()["timestamped"] == 1
-        with runtime.db.session() as s:
-            _rewrite(s, 2, "edited")
-            s.get(LedgerCheckpoint, 3).hash = s.get(LedgerEntry, 3).hash
-        with runtime.db.session() as s:
-            result = ledger.verify(s)
+        with runtime.db.transaction() as tx:
+            _rewrite(tx, 2, "edited")
+            LedgerCheckpoint.objects.filter(seq=3).update(hash=LedgerEntry.objects.get(seq=3).hash)
+        with runtime.db.transaction() as tx:
+            result = ledger.verify(tx)
         assert result["valid"] is False
         assert result["problem"].startswith(
             "checkpoint 3's time-stamp doesn't check out: the authority time-stamped another hash"
@@ -286,23 +285,24 @@ class TestRewrites:
 
         tsa = FakeTSA()
         runtime = self._stamped(settings, tsa)
-        with runtime.db.session() as s:
-            _rewrite(s, 2, "edited")
-            point = s.get(LedgerCheckpoint, 3)
-            point.hash = s.get(LedgerEntry, 3).hash
+        with runtime.db.transaction() as tx:
+            _rewrite(tx, 2, "edited")
+            point = LedgerCheckpoint.objects.get(seq=3)
+            point.hash = LedgerEntry.objects.get(seq=3).hash
             digest = hashlib.sha256(ledger.statement(3, point.hash)).digest()
             point.timestamp = base64.b64encode(unsigned_reply(digest, None)).decode()
-        with runtime.db.session() as s:
-            result = ledger.verify(s)
+            point.save()
+        with runtime.db.transaction() as tx:
+            result = ledger.verify(tx)
         assert "checkpoint 3's time-stamp doesn't check out: the time-stamp isn't signed" in [
             p["problem"] for p in result["problems"]
         ]
         # Taken away, it is asked for again: the authority signs the rewritten statement.
-        with runtime.db.session() as s:
-            s.get(LedgerCheckpoint, 3).timestamp = None
+        with runtime.db.transaction() as tx:
+            LedgerCheckpoint.objects.filter(seq=3).update(timestamp=None)
         assert runtime.stamp_checkpoints() == 1
-        with runtime.db.session() as s:
-            result = ledger.verify(s)
+        with runtime.db.transaction() as tx:
+            result = ledger.verify(tx)
         assert result["valid"] is False
         assert any(
             p["problem"].startswith("checkpoint 3 was time-stamped again at entry")
@@ -313,23 +313,24 @@ class TestRewrites:
     def test_a_time_stamp_taken_away_or_swapped_shows(self, settings: Settings) -> None:
         tsa = FakeTSA()
         runtime = self._stamped(settings, tsa)
-        with runtime.db.session() as s:
-            s.get(LedgerCheckpoint, 3).timestamp = None
-        with runtime.db.session() as s:
-            problem = ledger.verify(s)["problem"]
+        with runtime.db.transaction() as tx:
+            LedgerCheckpoint.objects.filter(seq=3).update(timestamp=None)
+        with runtime.db.transaction() as tx:
+            problem = ledger.verify(tx)["problem"]
         assert problem == "checkpoint 3's time-stamp, recorded at entry 4, is gone"
         # Another genuine one, from the same authority: not the one recorded.
-        with runtime.db.session() as s:
-            point = s.get(LedgerCheckpoint, 3)
+        with runtime.db.transaction() as tx:
+            point = LedgerCheckpoint.objects.get(seq=3)
             digest = hashlib.sha256(ledger.statement(3, point.hash)).digest()
             point.timestamp = base64.b64encode(tsa.signer.reply(digest, None)).decode()
-        with runtime.db.session() as s:
-            problem = ledger.verify(s)["problem"]
+            point.save()
+        with runtime.db.transaction() as tx:
+            problem = ledger.verify(tx)["problem"]
         assert problem.startswith("checkpoint 3's time-stamp isn't the one recorded at entry 4")
-        with runtime.db.session() as s:
-            s.delete(s.get(LedgerCheckpoint, 3))
-        with runtime.db.session() as s:
-            assert ledger.verify(s)["problem"] == "checkpoint 3, time-stamped at entry 4, is gone"
+        with runtime.db.transaction() as tx:
+            LedgerCheckpoint.objects.filter(seq=3).delete()
+        with runtime.db.transaction() as tx:
+            assert ledger.verify(tx)["problem"] == "checkpoint 3, time-stamped at entry 4, is gone"
         runtime.db.dispose()
 
     def test_a_late_time_stamp_vouches_only_from_its_time(self, settings: Settings) -> None:
@@ -338,8 +339,8 @@ class TestRewrites:
         tsa = FakeTSA()
         tsa.gen_time = (ids.utcnow() + timedelta(days=3)).strftime("%Y%m%d%H%M%SZ").encode()
         runtime = self._stamped(settings, tsa)
-        with runtime.db.session() as s:
-            result = ledger.verify(s, settings=runtime.settings)
+        with runtime.db.transaction() as tx:
+            result = ledger.verify(tx, settings=runtime.settings)
         assert result["valid"] is True
         assert result["warnings"][0].startswith("checkpoint 3 vouches only from ")
         runtime.db.dispose()
@@ -349,8 +350,8 @@ class TestRewrites:
     ) -> None:
         tsa = FakeTSA()
         runtime = self._stamped(settings, tsa)
-        with runtime.db.session() as s:
-            result = ledger.verify(s, settings=runtime.settings)
+        with runtime.db.transaction() as tx:
+            result = ledger.verify(tx, settings=runtime.settings)
         assert result["valid"] is True
         assert result["warnings"][-1].startswith(
             "the authority isn't checked: without AGENTGOV_LEDGER_TSA_CA_FILE"
@@ -364,23 +365,21 @@ class TestRewrites:
         )
         point = runtime.make_checkpoint()
         assert point is not None and point["timestamped"]
-        with runtime.db.session() as s:
-            result = ledger.verify(s, settings=runtime.settings)
+        with runtime.db.transaction() as tx:
+            result = ledger.verify(tx, settings=runtime.settings)
             assert (result["valid"], result["warnings"]) == (True, [])
-            recorded = s.scalar(
-                select(LedgerEntry)
-                .where(LedgerEntry.type == "ledger.timestamped")
-                .order_by(LedgerEntry.seq.desc())
-                .limit(1)
+            recorded = (
+                LedgerEntry.objects.filter(type="ledger.timestamped").order_by("-seq").first()
             )
             assert recorded.details["authority"] is True
         impostor = FakeTSA(Authority("Impostor TSA"))
         runtime._tsa_http = impostor.client()
-        with runtime.db.session() as s:
-            seq = ledger.checkpoint(s).seq
+        with runtime.db.transaction() as tx:
+            seq = ledger.checkpoint(tx).seq
         assert runtime.stamp_checkpoints() == 0
-        with runtime.db.session() as s:
-            assert "doesn't lead to the authority's" in s.get(LedgerCheckpoint, seq).timestamp_error
+        with runtime.db.transaction() as tx:
+            point = LedgerCheckpoint.objects.get(seq=seq)
+            assert "doesn't lead to the authority's" in point.timestamp_error
         runtime.db.dispose()
 
     def test_the_evidence_pack_is_checked_against_its_checkpoints(
@@ -453,8 +452,8 @@ class TestRewrites:
         runtime = self._stamped(settings, tsa)  # checkpoint 3, recorded at 4; entries to 6
 
         def pack(name: str) -> Path:
-            with runtime.db.session() as s:
-                zipped = compliance.pack(s, runtime.settings, 30)
+            with runtime.db.transaction() as tx:
+                zipped = compliance.pack(tx.orm(), runtime.settings, 30)
             folder = tmp_path / name
             with zipfile.ZipFile(zipped) as z:
                 z.extractall(folder)
@@ -492,12 +491,10 @@ class TestRewrites:
         assert out.exit_code == 2 and "isn't the one recorded at entry 4" in out.output
         # Cut back to before the checkpoint, the head with it: the checkpoint says it was
         # longer.
-        with runtime.db.session() as s:
-            keep = s.get(LedgerEntry, 2)
-            s.execute(delete(LedgerEntry).where(LedgerEntry.seq > 2))
-            s.execute(
-                update(LedgerHead).where(LedgerHead.id == 1).values(last_seq=2, last_hash=keep.hash)
-            )
+        with runtime.db.transaction():
+            keep = LedgerEntry.objects.get(seq=2)
+            LedgerEntry.objects.filter(seq__gt=2).delete()
+            LedgerHead.objects.filter(id=1).update(last_seq=2, last_hash=keep.hash)
         out = verify(pack("cut"))
         assert out.exit_code == 2
         assert "checkpoint 3 is beyond the last entry here (2)" in out.output
@@ -513,15 +510,15 @@ class TestRewrites:
 
         tsa = FakeTSA()
         runtime = self._stamped(settings, tsa)
-        with runtime.db.session() as s:
-            ledger.checkpoint(s)  # 6
+        with runtime.db.transaction() as tx:
+            ledger.checkpoint(tx)  # 6
         _old_entries(runtime, 2, 1)
         # Marked as archived, and the entries before it removed.
-        with runtime.db.session() as s:
-            s.get(LedgerCheckpoint, 6).pruned_at = ids.utcnow()
-            s.execute(delete(LedgerEntry).where(LedgerEntry.seq <= 6))
-        with runtime.db.session() as s:
-            zipped = compliance.pack(s, runtime.settings, 30)
+        with runtime.db.transaction() as tx:
+            LedgerCheckpoint.objects.filter(seq=6).update(pruned_at=ids.utcnow())
+            LedgerEntry.objects.filter(seq__lte=6).delete()
+        with runtime.db.transaction() as tx:
+            zipped = compliance.pack(tx.orm(), runtime.settings, 30)
         folder = tmp_path / "pack"
         with zipfile.ZipFile(zipped) as z:
             z.extractall(folder)
@@ -541,8 +538,8 @@ class TestRewrites:
         tsa = FakeTSA()
         tsa.gen_time = (ids.utcnow() + timedelta(days=3)).strftime("%Y%m%d%H%M%SZ").encode()
         runtime = self._stamped(settings, tsa)
-        with runtime.db.session() as s:
-            zipped = compliance.pack(s, runtime.settings, 30)
+        with runtime.db.transaction() as tx:
+            zipped = compliance.pack(tx.orm(), runtime.settings, 30)
         folder = tmp_path / "pack"
         with zipfile.ZipFile(zipped) as z:
             z.extractall(folder)
@@ -557,34 +554,34 @@ class TestArchives:
         rt = archiving
         _old_entries(rt, 5, 300)
         _old_entries(rt, 2, 1)
-        with rt.db.session() as s:
-            out = retention.archive(s, rt.settings)
+        with rt.db.transaction() as tx:
+            out = retention.archive(tx, rt.settings)
         assert (out["from"], out["to"], out["entries"]) == (1, 5, 5)
         path = Path(rt.settings.ledger_archive_dir) / out["archive"]
         assert hashlib.sha256(path.read_bytes()).hexdigest() == out["sha256"]
         records = list(retention.read_archive(path))
         assert [r["seq"] for r in records] == [1, 2, 3, 4, 5]
         assert ledger.verify_records(records, start=(0, ledger.GENESIS))["valid"]
-        with rt.db.session() as s:
-            assert s.scalar(select(LedgerEntry.seq).order_by(LedgerEntry.seq)) == 6
-            point = s.get(LedgerCheckpoint, 5)
+        with rt.db.transaction() as tx:
+            assert LedgerEntry.objects.order_by("seq").values_list("seq", flat=True).first() == 6
+            point = LedgerCheckpoint.objects.get(seq=5)
             assert (point.archive, point.archived_from) == (out["archive"], 1)
             # The chain in the database goes on from the checkpoint, and still verifies.
-            result = ledger.verify(s)
+            result = ledger.verify(tx)
             assert (result["valid"], result["from"], result["checked"]) == (True, 5, 8)
-            archived = s.scalar(select(LedgerEntry).where(LedgerEntry.type == "ledger.archived"))
+            archived = LedgerEntry.objects.filter(type="ledger.archived").first()
             assert archived.details["sha256"] == out["sha256"]
             # The chain says which entries left, up to which hash, going on from which.
             assert archived.details["follows"] == ledger.GENESIS
             assert (archived.details["from"], archived.details["to"]) == (1, 5)
             # The next archive goes on from this one.
-            assert retention.archive(s, rt.settings) is None
+            assert retention.archive(tx, rt.settings) is None
         # Nothing that left with it may still be in the database.
         records[2]["details"] = {}
-        with rt.db.session() as s:
-            s.add(LedgerEntry(**{**records[2], "ts": ids.utcnow()}))
-        with rt.db.session() as s:
-            assert ledger.verify(s)["problem"] == (
+        with rt.db.transaction() as tx:
+            LedgerEntry.objects.create(**{**records[2], "ts": ids.utcnow()})
+        with rt.db.transaction() as tx:
+            assert ledger.verify(tx)["problem"] == (
                 "entry 3 is still in the database, though the entries up to 5 left it with an "
                 "archive"
             )
@@ -598,53 +595,54 @@ class TestArchives:
         directory.mkdir(parents=True, exist_ok=True)
         there = directory / "ledger-000000000001-000000000005.jsonl.gz"
         there.write_bytes(gzip.compress(b'{"seq": 1, "reason": "another history"}\n'))
-        with rt.db.session() as s:
-            out = retention.archive(s, rt.settings)
+        with rt.db.transaction() as tx:
+            out = retention.archive(tx, rt.settings)
         assert "already there" in out["error"]
         assert gzip.decompress(there.read_bytes()) == b'{"seq": 1, "reason": "another history"}\n'
-        with rt.db.session() as s:
-            assert s.get(LedgerEntry, 1) is not None and ledger.verify(s)["from"] == 0
-            failed = s.scalar(select(Finding).where(Finding.type == retention.ARCHIVE_FAILED))
+        with rt.db.transaction() as tx:
+            assert LedgerEntry.objects.filter(seq=1).exists() and ledger.verify(tx)["from"] == 0
+            failed = Finding.objects.filter(type=retention.ARCHIVE_FAILED).first()
             assert failed.status == "open" and "already there" in failed.description
         # The same entries, from a round whose transaction didn't commit: kept as they are.
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             lines = [
                 json.dumps(ledger.to_dict(e), sort_keys=True) + "\n"
-                for e in ledger.iter_entries(s, until=5)
+                for e in ledger.iter_entries(tx, until=5)
             ]
         there.write_bytes(gzip.compress("".join(lines).encode(), mtime=0))
         kept = there.read_bytes()
-        with rt.db.session() as s:
-            out = retention.archive(s, rt.settings)
+        with rt.db.transaction() as tx:
+            out = retention.archive(tx, rt.settings)
         assert out["to"] == 5 and there.read_bytes() == kept
         assert out["sha256"] == hashlib.sha256(kept).hexdigest()
 
     def test_what_a_destination_wasnt_sent_stays(self, archiving: Runtime) -> None:
         rt = archiving
         _old_entries(rt, 5, 300)
-        with rt.db.session() as s:
-            features.set_mode(s, rt.settings, "security-operations", "inform", actor="admin:t")
-            s.add(Destination(id="dst_1", name="siem", kind="webhook", url="https://siem.test",
-                              events=[], status="active", cursor=3, labels={}))  # fmt: skip
-        with rt.db.session() as s:
-            assert retention.archive(s, rt.settings)["to"] == 3
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
+            features.set_mode(tx.orm(), rt.settings, "security-operations", "inform", actor="t")
+            Destination.objects.create(
+                id="dst_1", name="siem", kind="webhook", url="https://siem.test", cursor=3
+            )
+        with rt.db.transaction() as tx:
+            assert retention.archive(tx, rt.settings)["to"] == 3
+        with rt.db.transaction() as tx:
             # Not sent to while security operations are off: they don't hold anything back.
-            features.set_mode(s, rt.settings, "security-operations", "off", actor="admin:t")
-        with rt.db.session() as s:
+            features.set_mode(tx.orm(), rt.settings, "security-operations", "off", actor="t")
+        with rt.db.transaction() as tx:
             # The rest of the old ones (6 on are recent: the features' changes, the archive).
-            assert retention.archive(s, rt.settings)["to"] == 5
+            assert retention.archive(tx, rt.settings)["to"] == 5
 
     def test_a_broken_chain_isnt_archived(self, archiving: Runtime) -> None:
         rt = archiving
         _old_entries(rt, 4, 300)
-        with rt.db.session() as s:
-            s.get(LedgerEntry, 2).reason = "edited"
-        with rt.db.session() as s:
-            assert "doesn't match its hash" in retention.archive(s, rt.settings)["error"]
-        with rt.db.session() as s:
-            assert s.scalar(select(LedgerEntry.seq).order_by(LedgerEntry.seq)) == 1
-            failed = s.scalar(select(Finding).where(Finding.type == retention.ARCHIVE_FAILED))
+        with rt.db.transaction() as tx:
+            LedgerEntry.objects.filter(seq=2).update(reason="edited")
+        with rt.db.transaction() as tx:
+            assert "doesn't match its hash" in retention.archive(tx, rt.settings)["error"]
+        with rt.db.transaction() as tx:
+            assert LedgerEntry.objects.order_by("seq").values_list("seq", flat=True).first() == 1
+            failed = Finding.objects.filter(type=retention.ARCHIVE_FAILED).first()
             assert failed.status == "open" and failed.severity == "high"
 
     def test_nowhere_to_write(self, archiving: Runtime, tmp_path: Path) -> None:
@@ -653,15 +651,13 @@ class TestArchives:
         rt = archiving
         rt.settings = rt.settings.with_overrides(ledger_archive_dir=str(blocked / "archive"))
         _old_entries(rt, 2, 300)
-        with rt.db.session() as s:
-            assert retention.archive(s, rt.settings)["error"]
-        with rt.db.session() as s:
-            assert (
-                s.scalar(select(Finding.status).where(Finding.type == retention.ARCHIVE_FAILED))
-                == "open"
-            )
+        with rt.db.transaction() as tx:
+            assert retention.archive(tx, rt.settings)["error"]
+        with rt.db.transaction() as tx:
+            failed = Finding.objects.filter(type=retention.ARCHIVE_FAILED).first()
+            assert failed.status == "open"
             # Nothing left the database.
-            assert s.get(LedgerEntry, 1) is not None and ledger.verify(s)["from"] == 0
+            assert LedgerEntry.objects.filter(seq=1).exists() and ledger.verify(tx)["from"] == 0
 
     def test_archives_verify_offline(self, archiving: Runtime, monkeypatch, tmp_path: Path) -> None:
         from agentgov import cli
@@ -669,12 +665,12 @@ class TestArchives:
 
         rt = archiving
         _old_entries(rt, 3, 300)
-        with rt.db.session() as s:
-            first = retention.archive(s, rt.settings)
+        with rt.db.transaction() as tx:
+            first = retention.archive(tx, rt.settings)
         _old_entries(rt, 2, 250)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             # Entries 4 (ledger.archived) to 6, older than the period by now.
-            second = retention.archive(s, rt.settings, ids.utcnow() + timedelta(days=200))
+            second = retention.archive(tx, rt.settings, ids.utcnow() + timedelta(days=200))
         files = [str(Path(rt.settings.ledger_archive_dir) / a["archive"]) for a in (first, second)]
         result = runner.invoke(
             cli.app, ["ledger", "verify", "--file", files[0], "--file", files[1]]
@@ -704,27 +700,29 @@ def test_old_operational_records_go(settings: Settings) -> None:
     rt.init_db()
     now = ids.utcnow()
     old, recent = now - timedelta(days=120), now - timedelta(days=10)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         for when, tag in ((old, "old"), (recent, "new")):
             day = when.strftime("%Y-%m-%d")
-            s.add(AgentActivity(agent_id=f"agt_{tag}", day=day))
-            s.add(ModelUsage(agent_id=f"agt_{tag}", day=day, provider="p", model="m"))
-            s.add(RiskSignal(id=f"sig_{tag}", agent_id="agt_x", kind="denied", ts=when))
-            s.add(ApprovalRequest(id=f"apr_{tag}", agent_id="agt_x", agent_name="x", action="a",
-                                  resource="r", arguments_hash="h", status="approved",
-                                  requested_at=when, expires_at=when))  # fmt: skip
+            AgentActivity.objects.create(agent_id=f"agt_{tag}", day=day)
+            ModelUsage.objects.create(agent_id=f"agt_{tag}", day=day, provider="p", model="m")
+            RiskSignal.objects.create(id=f"sig_{tag}", agent_id="agt_x", kind="denied", ts=when)
+            ApprovalRequest.objects.create(id=f"apr_{tag}", agent_id="agt_x", agent_name="x",
+                                           action="a", resource="r", arguments_hash="h",
+                                           status="approved", requested_at=when,
+                                           expires_at=when)  # fmt: skip
             finding, _ = findings.raise_finding(
-                s, type="test.thing", severity="low", subject=tag, title=tag
+                tx.orm(), type="test.thing", severity="low", subject=tag, title=tag
             )
             finding.status, finding.resolved_at = "resolved", when
-            s.add(Notification(id=f"ntf_{tag}", finding_id=finding.id, level="team",
-                               channel="email", recipient="a@example.com", status="sent",
-                               created_at=when))  # fmt: skip
-        s.add(ApprovalRequest(id="apr_waiting", agent_id="agt_x", agent_name="x", action="a",
-                              resource="r", arguments_hash="h", status="pending",
-                              requested_at=old, expires_at=now))  # fmt: skip
-    with rt.db.session() as s:
-        removed = retention.prune_records(s, rt.settings, now)
+            Notification.objects.create(id=f"ntf_{tag}", finding_id=finding.id, level="team",
+                                        channel="email", recipient="a@example.com",
+                                        status="sent", created_at=when)  # fmt: skip
+        ApprovalRequest.objects.create(id="apr_waiting", agent_id="agt_x", agent_name="x",
+                                       action="a", resource="r", arguments_hash="h",
+                                       status="pending", requested_at=old,
+                                       expires_at=now)  # fmt: skip
+    with rt.db.transaction() as tx:
+        removed = retention.prune_records(tx, rt.settings, now)
     assert removed == {
         "activity": 1,
         "model_usage": 1,
@@ -733,11 +731,14 @@ def test_old_operational_records_go(settings: Settings) -> None:
         "approvals": 1,
         "findings": 1,
     }
-    with rt.db.session() as s:
-        assert {a.agent_id for a in s.scalars(select(AgentActivity))} == {"agt_new"}
-        assert {a.id for a in s.scalars(select(ApprovalRequest))} == {"apr_new", "apr_waiting"}
-        assert [f.subject for f in s.scalars(select(Finding))] == ["new"]
-        entry = s.scalar(select(LedgerEntry).where(LedgerEntry.type == "retention.pruned"))
+    with rt.db.transaction() as tx:
+        assert set(AgentActivity.objects.values_list("agent_id", flat=True)) == {"agt_new"}
+        assert set(ApprovalRequest.objects.values_list("id", flat=True)) == {
+            "apr_new",
+            "apr_waiting",
+        }
+        assert list(Finding.objects.values_list("subject", flat=True)) == ["new"]
+        entry = LedgerEntry.objects.filter(type="retention.pruned").first()
         assert entry.details["findings"] == 1
     rt.db.dispose()
 
@@ -857,7 +858,7 @@ class TestCompliance:
         assert "least-privilege" in security["gaps"][0]
         assert "No call went through" in security["gaps"][-1]
         rt = client.app.state.rt  # type: ignore[attr-defined]
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             for decision, reason in [
                 ("deny", "crm/export_customers is not granted"),
                 ("deny", "credentials in the arguments"),
@@ -865,7 +866,7 @@ class TestCompliance:
                 ("allow", None),
             ]:
                 ledger.append(
-                    s, type="decision.request", actor="agent:a", decision=decision, reason=reason
+                    tx, type="decision.request", actor="agent:a", decision=decision, reason=reason
                 )
         counts = {e["label"]: e["value"] for e in security["evidence"]}
         assert counts["Calls refused"] == 0 and counts["Let through in monitor mode"] == 0
@@ -873,8 +874,8 @@ class TestCompliance:
         assert security["status"] == "partly" and "least-privilege" in security["gaps"][0]
         counts = {e["label"]: e["value"] for e in security["evidence"]}
         assert counts["Calls refused"] == 2 and counts["Let through in monitor mode"] == 1
-        with rt.db.session() as s:
-            s.get(LedgerEntry, 1).reason = "edited"
+        with rt.db.transaction() as tx:
+            LedgerEntry.objects.filter(seq=1).update(reason="edited")
         logging = control("A.6.2.8", "iso-42001")
         assert logging["status"] == "attention" and "broken" in logging["gaps"][0]
 

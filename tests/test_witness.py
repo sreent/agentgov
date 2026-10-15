@@ -161,26 +161,22 @@ def test_entries_gone_behind_a_made_up_archive_are_noticed(
 ) -> None:
     """The entry the file names is gone, and no archive accounts for it: entries were
     removed, not archived, and the database holds another history."""
-    from sqlalchemy import delete
-
-    from agentgov.models import LedgerCheckpoint, LedgerEntry, LedgerHead
+    from agentgov.db.models import LedgerCheckpoint, LedgerEntry, LedgerHead
 
     seed(kept)
     rt = rt_of(kept)
     rt.check_witness()
     head = json.loads(head_file.read_text())
     assert head["ts"]  # when that entry was written: an archive can't have taken it yet
-    with rt.db.session() as s:
-        last = s.get(LedgerHead, 1)
-        s.add(
-            LedgerCheckpoint(
-                seq=last.last_seq,
-                hash=last.last_hash,
-                entry_ts=ids.utcnow(),
-                pruned_at=ids.utcnow(),
-            )
+    with rt.db.transaction():
+        last = LedgerHead.objects.get(id=1)
+        LedgerCheckpoint.objects.create(
+            seq=last.last_seq,
+            hash=last.last_hash,
+            entry_ts=ids.utcnow(),
+            pruned_at=ids.utcnow(),
         )
-        s.execute(delete(LedgerEntry))
+        LedgerEntry.objects.all().delete()
     status = rt.check_witness()
     assert status is not None and status.state == "forked"
     assert json.loads(head_file.read_text()) == head  # left as it is
@@ -198,20 +194,20 @@ def test_an_entry_archived_since_is_accounted_for(settings: Settings, tmp_path: 
         settings.with_overrides(ledger_retention_days=183, ledger_archive_dir=str(archive))
     )
     rt.init_db()
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         for i in range(3):
-            ledger.append(s, type="test.old", actor="t", ts=ids.utcnow() - timedelta(days=300 - i))
+            ledger.append(tx, type="test.old", actor="t", ts=ids.utcnow() - timedelta(days=300 - i))
     rt.check_witness()
     path = archive / "ledger-head.json"
     head = json.loads(path.read_text())
     assert head["seq"] == 3
-    with rt.db.session() as s:
-        assert retention.archive(s, rt.settings)["to"] == 3
+    with rt.db.transaction() as tx:
+        assert retention.archive(tx, rt.settings)["to"] == 3
     assert rt.check_witness().state == "ok"
     # The same entry, said to have been written recently: it can't have been archived.
     path.write_text(json.dumps({**head, "ts": ids.isoformat(ids.utcnow())}))
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         from agentgov import witness as kept_head
 
-        assert kept_head.compare(s, str(path)).state == "forked"
+        assert kept_head.compare(tx, str(path)).state == "forked"
     rt.db.dispose()

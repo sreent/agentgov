@@ -207,7 +207,12 @@ writes SQLite-compatible batch operations), and give new columns on existing tab
 
 While the modules move to Django's ORM ([ADR 0007](docs/adr/0007-django.md)), the Django
 models in `src/agentgov/db/models.py` name the same tables: change them in step, and
-`tests/test_django_models.py` checks them against the database the migrations build.
+`tests/test_django_models.py` checks them against the database the migrations build. A
+module that has moved (the ledger, its retention and its witness so far) queries with
+Django's models in the caller's transaction, and takes the transaction or, from a module
+still on SQLAlchemy, its session (`agentgov.db.Where`). It hands those modules none of
+Django's objects to change: SQLAlchemy wouldn't write what they change. Its tests move
+with it, onto `db.transaction()` and Django's models.
 
 ## Pull requests
 

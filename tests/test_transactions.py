@@ -13,6 +13,7 @@ from sqlalchemy import event, select
 
 from agentgov import ledger
 from agentgov.db import Database, Transaction, mark_changed, transaction_of
+from agentgov.db import models as django_models
 from agentgov.models import IntegrationState
 
 WHEN = "2026-10-15 00:00:00.000000"
@@ -33,7 +34,7 @@ def keys(db: Database) -> list[str]:
 
 def what(sql: str) -> str:
     """What a statement does, and to which table: "INSERT ledger"."""
-    words = sql.split()
+    words = sql.replace('"', "").split()
     verb = words[0].upper()
     return f"{verb} {words[2] if verb in ('INSERT', 'DELETE') else words[1]}"
 
@@ -73,6 +74,31 @@ def test_what_both_write_rolls_back_together(db: Database, heard: list[set[str]]
     assert heard == []
 
 
+def test_djangos_orm_sees_what_the_session_holds(db: Database) -> None:
+    """What the session holds is written before Django's ORM reads or writes, as before
+    SQLAlchemy's own queries: a module that moved to Django's ORM sees what one still on
+    SQLAlchemy changed in the same transaction."""
+    rows = django_models.IntegrationState.objects
+    with db.session() as s:
+        s.add(IntegrationState(key="pending", data={}))
+        assert rows.filter(key="pending").exists()
+        with s.no_autoflush:  # unless the session is told not to
+            s.add(IntegrationState(key="held", data={}))
+            assert not rows.filter(key="held").exists()
+        assert rows.filter(key="held").exists()
+    assert keys(db) == ["held", "pending"]
+
+
+def test_a_savepoint_rolls_back_without_writing_what_the_session_holds(db: Database) -> None:
+    with db.transaction() as tx:
+        put(tx, "taken")
+        with pytest.raises(RuntimeError, match="this part failed"), db.transaction():
+            tx.orm().add(IntegrationState(key="taken", data={}))  # can't be written
+            raise RuntimeError("this part failed")
+        put(tx, "after")
+    assert keys(db) == ["after", "taken"]
+
+
 def test_a_savepoint_rolls_back_alone(db: Database) -> None:
     with db.transaction() as tx:
         put(tx, "before")
@@ -100,7 +126,7 @@ def test_ledger_entries_are_written_last(db: Database) -> None:
         return execute(sql, params, many, context)
 
     event.listen(db._lent, "before_cursor_execute", heard_sqlalchemy)
-    with db.transaction() as tx, connections[db.alias].execute_wrapper(heard_django):
+    with connections[db.alias].execute_wrapper(heard_django), db.transaction() as tx:
         ledger.append(tx, type="test.first", actor="tests")
         # Not written yet: the transaction's own queries don't see it.
         assert tx.execute("SELECT count(*) FROM ledger") == [(0,)]

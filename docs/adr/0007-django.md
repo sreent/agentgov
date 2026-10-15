@@ -82,7 +82,13 @@ The data layer:
   keys, constraints, indexes and defaults, and the values each ORM writes, read by the
   other. Times are UTC without a zone and JSON is in `json` columns, as SQLAlchemy made
   them (`agentgov.db.fields`); Django's ORM uses the database whose transaction is open.
-- [ ] The modules, the ledger first, each with its tests.
+- [ ] The modules, the ledger first, each with its tests. A module that moves runs its
+  queries on Django's ORM in the caller's transaction, and takes the transaction or, from a
+  module still on SQLAlchemy, its session (`agentgov.db.Where`). Django's queries see what
+  the session holds: it writes it first, as it does before its own queries (not before
+  Django's savepoint statements, nor in its `no_autoflush` blocks). Moved so far: the
+  ledger, its retention and its witness (`agentgov.ledger`, `agentgov.retention`,
+  `agentgov.witness`).
 - [ ] Django's migrations: the first one matches the last Alembic revision; a release runs
   both; then Alembic goes.
 

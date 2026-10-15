@@ -6,12 +6,19 @@ every transaction keeps (``Transaction``): checks it must pass before it commits
 entries written last, and its changes announced once it commits, never before. Nested, it is
 a savepoint. ``Database.session()`` is the same transaction with a SQLAlchemy session in it, on
 Django's connection: what either writes commits, or rolls back, with what the other wrote.
+
+Django's ORM uses the database whose transaction is open (``Router``), and sees what the
+session changed: the session writes it first, as it does before its own queries. The
+session doesn't see what Django's ORM changed in rows it already loaded, until it loads them
+again: a module that moved to Django's ORM doesn't change what one still on SQLAlchemy holds,
+nor hands it Django's objects to change.
 """
 
 from __future__ import annotations
 
 import itertools
 import logging
+import re
 import shutil
 import tempfile
 import threading
@@ -33,6 +40,11 @@ from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy.types import TypeDecorator
+
+from agentgov import web
+
+# Django's settings, before anything imports the models (agentgov.db.models).
+web.configure()
 
 log = logging.getLogger(__name__)
 
@@ -104,7 +116,12 @@ class Transaction:
             self._session = None
 
 
-def transaction_of(where: Session | Transaction) -> Transaction:
+# What the modules' functions take for the transaction they run in: the transaction, or,
+# from the modules still on SQLAlchemy, its session (Database.session).
+Where = Transaction | Session
+
+
+def transaction_of(where: Where) -> Transaction:
     """The transaction a session is in (Database.session)."""
     if isinstance(where, Transaction):
         return where
@@ -130,7 +147,7 @@ def lock(session: Session, instance: Any) -> None:
     session.refresh(instance)
 
 
-def mark_changed(where: Session | Transaction, *topics: str) -> None:
+def mark_changed(where: Where, *topics: str) -> None:
     """Record that this transaction changed registry state.
 
     Topics are delivered to ``Database.on_commit`` only after the transaction
@@ -272,6 +289,23 @@ registry.register("postgresql.agentgov", __name__, "_LentPostgreSQL")
 registry.register("sqlite.agentgov", __name__, "_LentSQLite")
 
 
+# Statements that read or write the tables, as Django's ORM runs them.
+_READS_OR_WRITES = re.compile(r"\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b", re.IGNORECASE)
+
+
+def _autoflush(
+    tx: Transaction, execute: Callable[..., Any], sql: Any, params: Any, many: bool, context: Any
+) -> Any:
+    """What the transaction's SQLAlchemy session holds, written before Django runs a
+    statement that reads or writes the tables, as SQLAlchemy does before its own queries
+    (and doesn't in its ``no_autoflush`` blocks). Not before Django's savepoint statements:
+    rolling one back must not fail on what was changed in it."""
+    session = tx._session
+    if session is not None and isinstance(sql, str) and _READS_OR_WRITES.match(sql):
+        session._autoflush()
+    return execute(sql, params, many, context)
+
+
 # ------------------------------------------------------------------- the databases
 
 _names = itertools.count(1)
@@ -359,9 +393,6 @@ def _django_database(url: str) -> tuple[dict[str, Any], Path | None]:
 
 class Database:
     def __init__(self, url: str, on_commit: Callable[[set[str]], None] | None = None) -> None:
-        from agentgov import web
-
-        web.configure()
         self.url = url
         self.on_commit = on_commit
         # Called with a transaction's topics just before it commits, inside it: how the
@@ -437,7 +468,10 @@ class Database:
         open_.append(self.alias)
         tx = self._local.transaction = Transaction(self)
         try:
-            with django_transaction.atomic(using=self.alias):
+            with (
+                connections[self.alias].execute_wrapper(partial(_autoflush, tx)),
+                django_transaction.atomic(using=self.alias),
+            ):
                 yield tx
                 self._before_commit(tx)
         finally:

@@ -16,6 +16,8 @@ The operational records whose history is in the ledger (daily activity and model
 risk signals, notifications sent, decided approval requests, resolved findings, ended
 access assignments, developers' MCP servers not reported since) go after
 ``AGENTGOV_DATA_RETENTION_DAYS``.
+
+The functions here run in the caller's transaction (agentgov.db), on Django's ORM.
 """
 
 from __future__ import annotations
@@ -30,12 +32,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select
-from sqlalchemy.orm import Session
+from django.db.models import Min, Q
 
-from agentgov import ids, ledger, timestamping
+from agentgov import db, ids, ledger, timestamping
 from agentgov.config import Settings
-from agentgov.models import (
+from agentgov.db.models import (
     AccessAssignment,
     AgentActivity,
     ApprovalRequest,
@@ -66,12 +67,12 @@ class ArchiveError(Exception):
 # ------------------------------------------------------------------ checkpoints
 
 
-def latest_checkpoint(session: Session) -> LedgerCheckpoint | None:
-    return session.scalar(select(LedgerCheckpoint).order_by(LedgerCheckpoint.seq.desc()).limit(1))
+def latest_checkpoint(tx: db.Where) -> LedgerCheckpoint | None:
+    return LedgerCheckpoint.objects.order_by("-seq").first()
 
 
 def checkpoint_if_due(
-    session: Session, settings: Settings, now: datetime | None = None
+    tx: db.Where, settings: Settings, now: datetime | None = None
 ) -> LedgerCheckpoint | None:
     """Keep the head as a checkpoint when the last one is older than the period and the
     chain has grown since."""
@@ -79,28 +80,23 @@ def checkpoint_if_due(
     if hours <= 0:
         return None
     now = now or ids.utcnow()
-    latest = latest_checkpoint(session)
+    latest = latest_checkpoint(tx)
     if latest is not None and latest.created_at > now - timedelta(hours=hours):
         return None
-    point = ledger.checkpoint(session)
+    point = ledger.checkpoint(tx)
     if point is None or (latest is not None and point.seq == latest.seq):
         return None
     return point
 
 
-def unstamped(session: Session) -> list[tuple[int, str]]:
+def unstamped(tx: db.Where) -> list[tuple[int, str]]:
     """Checkpoints still to be time-stamped, newest first."""
-    rows = session.scalars(
-        select(LedgerCheckpoint)
-        .where(LedgerCheckpoint.timestamp.is_(None))
-        .order_by(LedgerCheckpoint.seq.desc())
-        .limit(STAMP_BATCH)
-    )
-    return [(c.seq, c.hash) for c in rows]
+    rows = LedgerCheckpoint.objects.filter(timestamp__isnull=True).order_by("-seq")
+    return list(rows.values_list("seq", "hash")[:STAMP_BATCH])
 
 
 def save_stamp(
-    session: Session,
+    tx: db.Where,
     seq: int,
     url: str,
     *,
@@ -110,17 +106,19 @@ def save_stamp(
     """Keep the authority's time-stamp on the checkpoint, and record it in the chain, so
     that one taken away or replaced later shows (agentgov.ledger.verify); or why there is
     none yet."""
-    point = session.get(LedgerCheckpoint, seq)
+    point = LedgerCheckpoint.objects.filter(seq=seq).first()
     if point is None:
         return
     point.tsa_url = url
     if stamp is None:
         point.timestamp_error = error
+        point.save(update_fields=["tsa_url", "timestamp_error"])
         return
     point.timestamp = base64.b64encode(stamp.response).decode()
     point.timestamped_at, point.timestamp_error = stamp.time, None
+    point.save(update_fields=["tsa_url", "timestamp", "timestamped_at", "timestamp_error"])
     ledger.append(
-        session,
+        tx,
         type=ledger.STAMPED,
         actor=SYSTEM,
         reason=f"checkpoint {seq} time-stamped by {url}",
@@ -137,20 +135,15 @@ def save_stamp(
     )
 
 
-def unlogged(session: Session) -> list[tuple[int, str]]:
+def unlogged(tx: db.Where) -> list[tuple[int, str]]:
     """Checkpoints still to be added to the transparency log, newest first (one that the
     log took, and whose proof didn't check out, isn't added again)."""
-    rows = session.scalars(
-        select(LedgerCheckpoint)
-        .where(LedgerCheckpoint.tlog_entry.is_(None))
-        .order_by(LedgerCheckpoint.seq.desc())
-        .limit(STAMP_BATCH)
-    )
-    return [(c.seq, c.hash) for c in rows]
+    rows = LedgerCheckpoint.objects.filter(tlog_entry__isnull=True).order_by("-seq")
+    return list(rows.values_list("seq", "hash")[:STAMP_BATCH])
 
 
 def save_log_entry(
-    session: Session,
+    tx: db.Where,
     seq: int,
     url: str,
     *,
@@ -158,72 +151,63 @@ def save_log_entry(
     checked: bool | None = None,
     error: str | None = None,
 ) -> None:
-    point = session.get(LedgerCheckpoint, seq)
-    if point is None:
-        return
-    point.tlog_url = url
+    values: dict[str, Any] = {"tlog_url": url, "tlog_error": error}
     if entry is not None:
-        point.tlog_entry = entry
-        point.tlog_index = int(entry["logIndex"])
-        point.tlog_logged_at = ids.utcnow()
-        point.tlog_checked = checked
-    point.tlog_error = error
+        values.update(
+            tlog_entry=entry,
+            tlog_index=int(entry["logIndex"]),
+            tlog_logged_at=ids.utcnow(),
+            tlog_checked=checked,
+        )
+    LedgerCheckpoint.objects.filter(seq=seq).update(**values)
 
 
 # --------------------------------------------------------------------- archives
 
 
-def _cursor_floor(session: Session) -> int | None:
+def _cursor_floor(tx: db.Where) -> int | None:
     """The furthest entry every active destination has been sent, while they are sent to."""
-    if features.mode(session, "security-operations") == features.OFF:
+    if features.mode(db.transaction_of(tx).orm(), "security-operations") == features.OFF:
         return None
-    cursors = session.scalars(
-        select(Destination.cursor).where(Destination.status == "active")
-    ).all()
-    return min(cursors) if cursors else None
+    cursors = Destination.objects.filter(status="active").values_list("cursor", flat=True)
+    return min(cursors, default=None)
 
 
-def archivable(session: Session, settings: Settings, now: datetime) -> tuple[int, int]:
+def archivable(tx: db.Where, settings: Settings, now: datetime) -> tuple[int, int]:
     """The entries to archive now: after the chain's base, up to the last one older than
     the retention period whose predecessors are all older too, and no further than what
     every active destination has had."""
-    floor, _ = ledger.base(session)
+    floor, _ = ledger.base(tx)
     cutoff = now - timedelta(days=settings.ledger_retention_days)
-    young = session.scalar(
-        select(func.min(LedgerEntry.seq)).where(
-            LedgerEntry.seq > floor, LedgerEntry.ts >= cutoff, ledger.in_chain()
-        )
-    )
-    head = session.get(LedgerHead, 1)
-    last = (young - 1) if young is not None else (head.last_seq if head else floor)
-    last = min(last, head.last_seq if head else floor)
-    sent = _cursor_floor(session)
+    young = ledger.chain().filter(seq__gt=floor, ts__gte=cutoff).aggregate(seq=Min("seq"))["seq"]
+    head = LedgerHead.objects.filter(id=1).values_list("last_seq", flat=True).first()
+    end = head if head is not None else floor
+    last = min((young - 1) if young is not None else end, end)
+    sent = _cursor_floor(tx)
     if sent is not None:
         last = min(last, sent)
     return floor, min(last, floor + ARCHIVE_BATCH)
 
 
-def archive(
-    session: Session, settings: Settings, now: datetime | None = None
-) -> dict[str, Any] | None:
+def archive(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict[str, Any] | None:
     """Archive the entries past the retention period, then remove them from the database.
     None when there is nothing to archive (or retention is off)."""
     if settings.ledger_retention_days <= 0 or not settings.ledger_archive_dir:
         return None
     now = now or ids.utcnow()
-    floor, last = archivable(session, settings, now)
+    floor, last = archivable(tx, settings, now)
     if last <= floor:
         return None
     directory = Path(settings.ledger_archive_dir)
     name = f"ledger-{floor + 1:012d}-{last:012d}.jsonl.gz"
-    _, prev = ledger.base(session)
+    _, prev = ledger.base(tx)
     follows = prev
     tmp = directory / f".{name}.tmp"
     count, last_entry = 0, None
     try:
         directory.mkdir(parents=True, exist_ok=True)
         with gzip.open(tmp, "wt", encoding="utf-8") as out:
-            for entry in ledger.iter_entries(session, after=floor, until=last):
+            for entry in ledger.iter_entries(tx, after=floor, until=last):
                 # A broken chain isn't archived over: the break stays where it can be seen.
                 if entry.seq != floor + count + 1 or entry.prev_hash != prev:
                     raise ArchiveError(f"the chain is broken at entry {entry.seq}")
@@ -251,19 +235,18 @@ def archive(
     except (OSError, ArchiveError) as exc:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        _archive_failed(session, str(exc))
+        _archive_failed(tx, str(exc))
         return {"error": str(exc)}
-    point = session.get(LedgerCheckpoint, last) or LedgerCheckpoint(
+    point = LedgerCheckpoint.objects.filter(seq=last).first() or LedgerCheckpoint(
         seq=last, hash=last_entry.hash, entry_ts=last_entry.ts
     )
     point.archive, point.archive_sha256 = name, digest
     point.archived_from, point.pruned_at = floor + 1, now
-    session.add(point)
-    session.flush()
-    session.execute(delete(LedgerEntry).where(LedgerEntry.seq > floor, LedgerEntry.seq <= last))
-    findings.resolve_key(session, f"{ARCHIVE_FAILED}:ledger", actor=SYSTEM)
+    point.save()
+    LedgerEntry.objects.filter(seq__gt=floor, seq__lte=last).delete()
+    findings.resolve_key(db.transaction_of(tx).orm(), f"{ARCHIVE_FAILED}:ledger", actor=SYSTEM)
     ledger.append(
-        session,
+        tx,
         type="ledger.archived",
         actor=SYSTEM,
         reason=f"entries {floor + 1} to {last}, older than "
@@ -296,9 +279,9 @@ def _same_entries(one: Path, other: Path) -> bool:
         return False
 
 
-def _archive_failed(session: Session, error: str) -> None:
+def _archive_failed(tx: db.Where, error: str) -> None:
     findings.raise_finding(
-        session,
+        db.transaction_of(tx).orm(),
         type=ARCHIVE_FAILED,
         severity="high",
         subject="ledger",
@@ -322,9 +305,7 @@ def read_archive(path: str | Path) -> Any:
 # ---------------------------------------------------------------------- records
 
 
-def prune_records(
-    session: Session, settings: Settings, now: datetime | None = None
-) -> dict[str, int]:
+def prune_records(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict[str, int]:
     """Remove the operational records older than AGENTGOV_DATA_RETENTION_DAYS."""
     days = settings.data_retention_days
     if days <= 0:
@@ -332,38 +313,31 @@ def prune_records(
     now = now or ids.utcnow()
     cutoff = now - timedelta(days=days)
     day = cutoff.strftime("%Y-%m-%d")
-    gone_findings = select(Finding.id).where(
-        Finding.status.in_(("resolved", "dismissed")), Finding.resolved_at < cutoff
-    )
-    statements = {
-        "activity": delete(AgentActivity).where(AgentActivity.day < day),
-        "model_usage": delete(ModelUsage).where(ModelUsage.day < day),
-        "risk_signals": delete(RiskSignal).where(RiskSignal.ts < cutoff),
-        "notifications": delete(Notification).where(
-            or_(
-                Notification.finding_id.in_(gone_findings),
-                (Notification.status != "pending") & (Notification.created_at < cutoff),
-            )
+    gone_findings = Finding.objects.filter(
+        status__in=("resolved", "dismissed"), resolved_at__lt=cutoff
+    ).values("id")
+    ended = Q(ended_at__lt=cutoff) | Q(ended_at__isnull=True, decided_at__lt=cutoff)
+    records = {
+        "activity": AgentActivity.objects.filter(day__lt=day),
+        "model_usage": ModelUsage.objects.filter(day__lt=day),
+        "risk_signals": RiskSignal.objects.filter(ts__lt=cutoff),
+        "notifications": Notification.objects.filter(
+            Q(finding_id__in=gone_findings) | (~Q(status="pending") & Q(created_at__lt=cutoff))
         ),
-        "approvals": delete(ApprovalRequest).where(
-            ApprovalRequest.status != "pending", ApprovalRequest.requested_at < cutoff
+        "approvals": ApprovalRequest.objects.exclude(status="pending").filter(
+            requested_at__lt=cutoff
         ),
-        "findings": delete(Finding).where(Finding.id.in_(gone_findings)),
-        "access_assignments": delete(AccessAssignment).where(
-            AccessAssignment.status.in_(("denied", "revoked", "renewed")),
-            func.coalesce(AccessAssignment.ended_at, AccessAssignment.decided_at) < cutoff,
+        "findings": Finding.objects.filter(id__in=gone_findings),
+        "access_assignments": AccessAssignment.objects.filter(
+            ended, status__in=("denied", "revoked", "renewed")
         ),
-        "mcp_sightings": delete(McpSighting).where(McpSighting.last_seen_at < cutoff),
+        "mcp_sightings": McpSighting.objects.filter(last_seen_at__lt=cutoff),
     }
-    counts = {}
-    for name, statement in statements.items():
-        counts[name] = session.execute(
-            statement.execution_options(synchronize_session=False)
-        ).rowcount
+    counts = {name: rows.delete()[0] for name, rows in records.items()}
     removed = {k: v for k, v in counts.items() if v}
     if removed:
         ledger.append(
-            session,
+            tx,
             type="retention.pruned",
             actor=SYSTEM,
             reason=f"operational records older than {days} days removed",
