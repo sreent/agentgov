@@ -23,6 +23,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from importlib.resources import files
 from pathlib import Path
 from types import FrameType
 
@@ -60,6 +61,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--log", type=Path, help="Where the control plane's output goes.")
     args = parser.parse_args()
+    # The admin UI the control plane serves: built from ui/ into the package.
+    if not (files("agentgov") / "ui" / "index.html").is_file():
+        sys.exit("The admin UI isn't built: run npm run build in ui/ first.")
     agentgov = shutil.which("agentgov", path=str(Path(sys.executable).parent)) or "agentgov"
     work = Path(tempfile.mkdtemp(prefix="agentgov-ui-test-"))
     # Nothing from the developer's own settings: the tests expect this setup alone.
