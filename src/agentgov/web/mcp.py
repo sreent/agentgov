@@ -6,27 +6,29 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Request
-from fastapi.responses import JSONResponse
+from django.http import HttpRequest, HttpResponse
+from ninja import Body
 
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES
 from agentgov.registry import features, mcp_registry, mcp_sightings
 from agentgov.registry.errors import Conflict
+from agentgov.web.api import Router, json_response
+from agentgov.web.auth import require, runtime
 
 # The registry, as GitHub Copilot and VS Code read it: the MCP Registry API, version 0.1,
 # without credentials. Its own errors are {"error": "..."}.
-public = APIRouter(prefix="/registry/v0.1", tags=["mcp registry"])
-router = APIRouter(prefix="/v1/mcp", tags=["mcp"])
+public = Router(tags=["mcp registry"])
+router = Router(tags=["mcp"])
 read = require(*READ_ROLES)
 reporter = require("registrar")  # and admins
 CORS = {"Access-Control-Allow-Origin": "*"}
 
 
-def _answer(body: dict[str, Any], status: int = 200) -> JSONResponse:
-    return JSONResponse(body, status_code=status, headers=CORS)
+def _answer(body: dict[str, Any], status: int = 200) -> HttpResponse:
+    return json_response(body, status, headers=CORS)
 
 
-def _closed() -> JSONResponse:
+def _closed() -> HttpResponse:
     return _answer({"error": "The MCP registry is off (feature mcp-registry)"}, 404)
 
 
@@ -37,17 +39,17 @@ def _since(value: str | None) -> datetime | None:
     return when if when.tzinfo else when.replace(tzinfo=UTC)
 
 
-@public.get("/servers")
+@public.get("/registry/v0.1/servers")
 def list_servers(
-    request: Request,
+    request: HttpRequest,
     cursor: str | None = None,
     limit: int | None = None,
     search: str | None = None,
     updated_since: str | None = None,
     version: str | None = None,
     include_deleted: bool = False,
-) -> JSONResponse:
-    rt = request.app.state.rt
+) -> HttpResponse:
+    rt = runtime(request)
     try:
         since = _since(updated_since)
     except ValueError:
@@ -68,11 +70,11 @@ def list_servers(
     return _answer(page)
 
 
-@public.get("/servers/{name:path}/versions/{version}")
+@public.get("/registry/v0.1/servers/{path:name}/versions/{version}")
 def get_version(
-    request: Request, name: str, version: str, include_deleted: bool = False
-) -> JSONResponse:
-    rt = request.app.state.rt
+    request: HttpRequest, name: str, version: str, include_deleted: bool = False
+) -> HttpResponse:
+    rt = runtime(request)
     with rt.db.session() as s:
         if not features.is_on(s, "mcp-registry"):
             return _closed()
@@ -82,10 +84,10 @@ def get_version(
         return _answer(mcp_registry.server_response(ts, rt.settings))
 
 
-@public.get("/servers/{name:path}/versions")
-def list_versions(request: Request, name: str, include_deleted: bool = False) -> JSONResponse:
+@public.get("/registry/v0.1/servers/{path:name}/versions")
+def list_versions(request: HttpRequest, name: str, include_deleted: bool = False) -> HttpResponse:
     """AgentGov keeps one version of each server: its current one."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         if not features.is_on(s, "mcp-registry"):
             return _closed()
@@ -97,10 +99,10 @@ def list_versions(request: Request, name: str, include_deleted: bool = False) ->
         )
 
 
-@router.get("/registry")
-def registry_view(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/mcp/registry", auth=read)
+def registry_view(request: HttpRequest) -> dict[str, Any]:
     """What developers' MCP clients see in the registry, and where they read it."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         servers = mcp_registry.listed(s)
         return {
@@ -111,23 +113,21 @@ def registry_view(request: Request, _: Principal = Depends(read)) -> dict[str, A
         }
 
 
-@router.get("/managed-settings")
-def managed_settings(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/mcp/managed-settings", auth=read)
+def managed_settings(request: HttpRequest) -> dict[str, Any]:
     """The registry as the allowlist of GitHub Copilot's enterprise managed settings
     (managed-settings.json), which matches servers by URL and command."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         return mcp_registry.managed_settings(s, rt.settings)
 
 
-@router.post("/sightings")
-def report_sightings(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(reporter)
-) -> dict[str, int]:
+@router.post("/v1/mcp/sightings", auth=reporter)
+def report_sightings(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, int]:
     """One machine and person's MCP servers, as ``agentgov mcp scan --report`` sends them
     (``{"machine", "user", "servers": [...]}``); they replace that machine and person's
     previous report."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         if not features.is_on(s, "mcp-discovery"):
             raise Conflict("discovery of developers' MCP servers is off (feature mcp-discovery)")
@@ -137,14 +137,14 @@ def report_sightings(
             machine=body.get("machine"),
             user=body.get("user"),
             servers=body.get("servers"),
-            actor=principal.actor,
+            actor=request.auth.actor,
         )
 
 
-@router.get("/sightings")
-def list_sightings(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+@router.get("/v1/mcp/sightings", auth=read)
+def list_sightings(request: HttpRequest) -> list[dict[str, Any]]:
     """Every MCP server developers reported, with how many machines and people have it,
     and whether it is approved."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         return mcp_sightings.view(s, rt.settings)

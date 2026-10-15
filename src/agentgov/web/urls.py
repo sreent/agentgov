@@ -1,13 +1,38 @@
-"""The routes Django serves (agentgov.web): the API's groups that have moved."""
+"""The routes Django serves (agentgov.web): the API's groups that have moved, in the order
+FastAPI had them (where two routes take a path, the first serves it)."""
 
 from __future__ import annotations
 
 from django.urls import include, path
 
-from agentgov.web import health
+from agentgov.web import (
+    access,
+    features,
+    health,
+    identity,
+    instructions,
+    mcp,
+    model_providers,
+    packages,
+    rules,
+    secops,
+)
 from agentgov.web.api import api
 
-api.add_router("", health.router)
+for router in (
+    health.router,
+    packages.router,
+    rules.router,
+    access.router,
+    instructions.router,
+    features.router,
+    model_providers.router,
+    identity.router,
+    secops.router,
+    mcp.router,
+    mcp.public,
+):
+    api.add_router("", router)
 
 # Ninja's own root (its docs page, off here) left out: "/" is the admin UI's.
 patterns, app_name, namespace = api.urls

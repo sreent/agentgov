@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Request
+from django.http import HttpRequest
+from ninja import Body
 
 from agentgov import health
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES
 from agentgov.registry import features
 from agentgov.registry.errors import ValidationError
+from agentgov.web.api import Router
+from agentgov.web.auth import require, runtime
 
-router = APIRouter(prefix="/v1", tags=["features"])
+router = Router(tags=["features"])
 read = require(*READ_ROLES)
 admin = require("admin")
 
@@ -28,28 +31,28 @@ def _described(s: Any, rt: Any, key: str | None = None) -> list[dict[str, Any]]:
     return items
 
 
-@router.get("/features")
-def list_features(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/features", auth=read)
+def list_features(request: HttpRequest) -> dict[str, Any]:
     """Every feature, its mode, what that mode does, who chose it and whether it can do
     what its mode says."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         return {"groups": features.GROUPS, "features": _described(s, rt)}
 
 
-@router.get("/features/{key}")
-def get_feature(request: Request, key: str, _: Principal = Depends(read)) -> dict[str, Any]:
-    rt = request.app.state.rt
+@router.get("/v1/features/{key}", auth=read)
+def get_feature(request: HttpRequest, key: str) -> dict[str, Any]:
+    rt = runtime(request)
     with rt.db.session() as s:
         return _described(s, rt, key)[0]
 
 
-@router.get("/components")
-def list_components(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/components", auth=read)
+def list_components(request: HttpRequest) -> dict[str, Any]:
     """What the control plane reaches itself, and what each governance processor said it
     reaches, with whether it is in touch; and the hosts credentials may go to
     (AGENTGOV_CREDENTIAL_HOSTS; none listed, any host)."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         return {
             "control_plane": rt.health.get(),
@@ -60,11 +63,11 @@ def list_components(request: Request, _: Principal = Depends(read)) -> dict[str,
         }
 
 
-@router.get("/feature-presets")
-def list_presets(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/feature-presets", auth=read)
+def list_presets(request: HttpRequest) -> dict[str, Any]:
     """Starting points that set many modes at once, with what each would change now and
     what it would leave (docs/features.md#starting-points)."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         return {
             "presets": [features.preview_preset(s, rt.settings, name) for name in features.PRESETS],
@@ -72,35 +75,29 @@ def list_presets(request: Request, _: Principal = Depends(read)) -> dict[str, An
         }
 
 
-@router.post("/feature-presets/{name}")
-def apply_preset(
-    request: Request, name: str, principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/feature-presets/{name}", auth=admin)
+def apply_preset(request: HttpRequest, name: str) -> dict[str, Any]:
     """Apply a starting point: each mode it changes is a feature.changed entry in the
     ledger that names it. Features the deployment pins keep their pins."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
-        plan = features.apply_preset(s, rt.settings, name, actor=principal.actor)
+        plan = features.apply_preset(s, rt.settings, name, actor=request.auth.actor)
         return {**plan, "features": _described(s, rt)}
 
 
-@router.put("/features/{key}")
-def set_feature(
-    request: Request,
-    key: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
-) -> dict[str, Any]:
+@router.put("/v1/features/{key}", auth=admin)
+def set_feature(request: HttpRequest, key: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Choose a feature's mode, ``{"mode": "monitor"}``, and for a control its exceptions,
     ``{"scopes": [{"mode": "enforce", "scope": {"teams": ["payments"]}}]}``: its mode for
     the agents in a scope, the first that matches (docs/features.md#exceptions). Features
     the deployment pins (AGENTGOV_FEATURES) can only be changed there."""
     if "mode" not in body and "scopes" not in body:
         raise ValidationError("give the feature's mode, its exceptions (scopes), or both")
-    rt = request.app.state.rt
+    rt = runtime(request)
+    actor = request.auth.actor
     with rt.db.session() as s:
         if "mode" in body:
-            features.set_mode(s, rt.settings, key, body.get("mode"), actor=principal.actor)
+            features.set_mode(s, rt.settings, key, body.get("mode"), actor=actor)
         if "scopes" in body:
-            features.set_scopes(s, rt.settings, key, body.get("scopes"), actor=principal.actor)
+            features.set_scopes(s, rt.settings, key, body.get("scopes"), actor=actor)
         return _described(s, rt, key)[0]

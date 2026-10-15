@@ -9,9 +9,11 @@ import threading
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
+from types import ModuleType
 from typing import Any
 from uuid import UUID
 
+from django import urls as django_urls
 from django.test import RequestFactory
 from fastapi import Body
 from fastapi.encoders import jsonable_encoder
@@ -31,18 +33,39 @@ class Color(Enum):
     RED = "red"
 
 
-def test_json_is_written_as_fastapi_wrote_it() -> None:
+VALUES: dict[str, Any] = {
+    "at": datetime(2026, 10, 15, 8, 0, 0, 123456, tzinfo=UTC),
+    "local": datetime(2026, 10, 15, 8, 0, tzinfo=timezone(timedelta(hours=2))),
+    "naive": datetime(2026, 10, 15, 8, 0),
+    "day": date(2026, 10, 15),
+    "took": timedelta(minutes=5),
+    "name": "Zoë ✓\u2028\x01\n",
+    "n": 3,
+    "x": 2.5,
+    "cost": 1.2e-05,
+    "big": 1e20,
+    "ok": True,
+    "none": None,
+    "money": Decimal("12"),
+    "price": Decimal("2.50"),
+    "color": Color.RED,
+    "id": UUID("12345678-1234-5678-1234-567812345678"),
+    "tags": ["a", ("b", "c")],
+    "nested": [{"deeper": [1, {"at": datetime(2026, 1, 1, tzinfo=UTC)}]}],
+}
+
+
+def test_errors_are_written_as_fastapi_wrote_them() -> None:
+    # Errors went out through FastAPI's JSONResponse, after its encoder; routes' answers
+    # through pydantic (test_requests_are_answered_as_fastapi_answered_them).
     values: list[Any] = [
-        {"at": datetime(2026, 10, 15, 8, 0, 0, 123456, tzinfo=UTC)},
-        {"at": datetime(2026, 10, 15, 8, 0, tzinfo=timezone(timedelta(hours=2)))},
-        {"at": datetime(2026, 10, 15, 8, 0), "day": date(2026, 10, 15)},
-        {"name": "Zoë ✓", "n": 3, "x": 2.5, "ok": True, "none": None},
-        {"money": Decimal("12"), "price": Decimal("2.50"), "color": Color.RED},
-        {"id": UUID("12345678-1234-5678-1234-567812345678"), "tags": ["a", ("b", "c")]},
-        [{"nested": {"deeper": [1, {"at": datetime(2026, 1, 1, tzinfo=UTC)}]}}],
+        VALUES,
+        *({key: value} for key, value in VALUES.items()),
+        [{"detail": "no", "errors": [{"loc": ["body", 0], "input": {}}]}],
     ]
     for value in values:
-        assert web_api.dumps(value) == JSONResponse(jsonable_encoder(value)).body, value
+        expected = JSONResponse(jsonable_encoder(value)).body
+        assert web_api.json_response(value).content == expected, value
 
 
 def test_sync_views_run_side_by_side() -> None:
@@ -79,36 +102,50 @@ class Thing(BaseModel):
 
 JSON = {"content-type": "application/json"}
 
-# (path, body, headers): GET without a body, POST with one.
-REQUESTS: list[tuple[str, bytes | None, dict[str, str]]] = [
-    ("/parity/thing", b'{"name": "a", "count": 2}', JSON),
-    ("/parity/thing", b'{"name": ""}', JSON),
-    ("/parity/thing", b'{"count": "x"}', JSON),
-    ("/parity/thing", b'{"name": "a", "inner": {"when": "y"}}', JSON),
-    ("/parity/thing", b'{"name": "a", "inner": []}', JSON),
-    ("/parity/thing", b"[]", JSON),
-    ("/parity/thing", b"", {}),
-    ("/parity/thing", b"not json", JSON),
-    ("/parity/thing", b'{"name": ', JSON),
-    ("/parity/thing", b"\xff\xfe", JSON),
+POST = "POST"
+GET = "GET"
+
+# (method, path, body, headers)
+REQUESTS: list[tuple[str, str, bytes, dict[str, str]]] = [
+    (POST, "/parity/thing", b'{"name": "a", "count": 2}', JSON),
+    (POST, "/parity/thing", b'{"name": ""}', JSON),
+    (POST, "/parity/thing", b'{"count": "x"}', JSON),
+    (POST, "/parity/thing", b'{"name": "a", "inner": {"when": "y"}}', JSON),
+    (POST, "/parity/thing", b'{"name": "a", "inner": []}', JSON),
+    (POST, "/parity/thing", b"[]", JSON),
+    (POST, "/parity/thing", b"", {}),
+    (POST, "/parity/thing", b"not json", JSON),
+    (POST, "/parity/thing", b'{"name": ', JSON),
+    (POST, "/parity/thing", b"\xff\xfe", JSON),
     # Only a body that says it is JSON is read as JSON (a form posted from a page isn't).
-    ("/parity/thing", b'{"name": "a"}', {"content-type": "text/plain"}),
-    ("/parity/thing", b'{"name": "a"}', {}),
-    ("/parity/thing", b'{"name": "a"}', {"content-type": "application/merge-patch+json"}),
-    ("/parity/two", b'{"reason": "x", "until": 3}', JSON),
-    ("/parity/two", b'{"reason": "x"}', JSON),
-    ("/parity/two", b'{"reason": "x", "until": "z"}', JSON),
-    ("/parity/two", b"", {}),
-    ("/parity/query?limit=3&state=open", None, {}),
-    ("/parity/query?limit=many", None, {}),
-    ("/parity/query", None, {}),
-    ("/parity/boom", None, {}),
+    (POST, "/parity/thing", b'{"name": "a"}', {"content-type": "text/plain"}),
+    (POST, "/parity/thing", b'{"name": "a"}', {}),
+    (POST, "/parity/thing", b'{"name": "a"}', {"content-type": "application/merge-patch+json"}),
+    (POST, "/parity/two", b'{"reason": "x", "until": 3}', JSON),
+    (POST, "/parity/two", b'{"reason": "x"}', JSON),
+    (POST, "/parity/two", b'{"reason": "x", "until": "z"}', JSON),
+    (POST, "/parity/two", b"", {}),
+    (GET, "/parity/query?limit=3&state=open", b"", {}),
+    (GET, "/parity/query?limit=many", b"", {}),
+    (GET, "/parity/query", b"", {}),
+    (GET, "/parity/boom", b"", {}),
+    (GET, "/parity/values", b"", {}),
+    (POST, "/parity/items", b'{"name": "a"}', JSON),
+    ("DELETE", "/parity/items/a", b"", {}),
+    # Two routes for a path: the first with its method serves it, else the first says
+    # which methods it takes.
+    (POST, "/parity/items/preview", b"{}", JSON),
+    (GET, "/parity/items/preview", b"", {}),
+    ("PUT", "/parity/items/preview", b"", {}),
+    ("PUT", "/parity/items/a", b"", {}),
+    (GET, "/parity/items/a/b/c/versions", b"", {}),
+    (GET, "/parity/items/a/b/versions/2", b"", {}),
 ]
 
 
 def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
     # The same routes on both frameworks, sent the same requests, give the same answers, byte
-    # for byte: what each accepts, and how it says what it refuses.
+    # for byte: what each accepts, how it says what it refuses, and which route serves.
     fastapi = create_app(settings, background=False).fastapi
 
     @fastapi.post("/parity/thing")
@@ -126,6 +163,34 @@ def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
     @fastapi.get("/parity/boom")
     def boom() -> None:
         raise RuntimeError("boom")
+
+    @fastapi.get("/parity/values")
+    def values() -> dict[str, Any]:
+        return VALUES
+
+    @fastapi.post("/parity/items", status_code=201)
+    def make(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return {"made": body}
+
+    @fastapi.post("/parity/items/preview")
+    def preview(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return {"preview": body}
+
+    @fastapi.get("/parity/items/{ref}")
+    def read(ref: str) -> dict[str, Any]:
+        return {"read": ref}
+
+    @fastapi.delete("/parity/items/{ref}", status_code=204)
+    def remove(ref: str) -> None:
+        del ref
+
+    @fastapi.get("/parity/items/{name:path}/versions/{version}")
+    def version(name: str, version: str) -> dict[str, Any]:
+        return {"name": name, "version": version}
+
+    @fastapi.get("/parity/items/{name:path}/versions")
+    def versions(name: str) -> dict[str, Any]:
+        return {"name": name}
 
     router = web_api.Router()
 
@@ -147,23 +212,85 @@ def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
     def ninja_boom(request: Any) -> None:
         boom()
 
+    @router.get("/parity/values")
+    def ninja_values(request: Any) -> dict[str, Any]:
+        return values()
+
+    @router.post("/parity/items", status_code=201)
+    def ninja_make(request: Any, body: dict[str, Any] = NinjaBody(...)) -> dict[str, Any]:
+        return make(body)
+
+    @router.post("/parity/items/preview")
+    def ninja_preview(request: Any, body: dict[str, Any] = NinjaBody(...)) -> dict[str, Any]:
+        return preview(body)
+
+    @router.get("/parity/items/{ref}")
+    def ninja_read(request: Any, ref: str) -> dict[str, Any]:
+        return read(ref)
+
+    @router.delete("/parity/items/{ref}", status_code=204)
+    def ninja_remove(request: Any, ref: str) -> None:
+        remove(ref)
+
+    @router.get("/parity/items/{path:name}/versions/{version}")
+    def ninja_version(request: Any, name: str, version: str) -> dict[str, Any]:
+        return {"name": name, "version": version}
+
+    @router.get("/parity/items/{path:name}/versions")
+    def ninja_versions(request: Any, name: str) -> dict[str, Any]:
+        return versions(name)
+
     api = web_api.API(urls_namespace="test-parity", docs_url=None, openapi_url=None)
     api.add_router("", router)
-    views = {str(p.pattern): p.callback for p in api.urls[0]}
+    urls = ModuleType("parity_urls")
+    urls.urlpatterns = [django_urls.path("", api.urls)]  # type: ignore[attr-defined]
     client = TestClient(fastapi, raise_server_exceptions=False)
     factory = RequestFactory()
-    for path, body, headers in REQUESTS:
-        method = "GET" if body is None else "POST"
-        before = client.request(method, path, content=body, headers=headers)
+    for method, url, body, headers in REQUESTS:
+        before = client.request(method, url, content=body, headers=headers)
         request = factory.generic(
-            method, path, data=body or b"", content_type=headers.get("content-type", "")
+            method, url, data=body, content_type=headers.get("content-type", "")
         )
-        after = asyncio.run(views[path.split("?")[0].lstrip("/")](request))
-        assert (after.status_code, after["content-type"], after.content) == (
-            before.status_code,
-            before.headers["content-type"],
-            before.content,
-        ), (path, body, headers)
+        request.urlconf = urls
+        found = django_urls.get_resolver(urls).resolve(request.path_info)
+        after = asyncio.run(found.func(request, **found.kwargs))
+        assert _answer(after.status_code, after.headers, after.content) == _answer(
+            before.status_code, before.headers, before.content
+        ), (method, url, body, headers)
+
+
+def _answer(status: int, headers: Any, content: bytes) -> tuple[Any, ...]:
+    named = ("content-type", "content-length", "allow", "location")
+    return status, {name: headers.get(name) for name in named}, content
+
+
+def test_the_first_route_written_for_a_request_serves_it() -> None:
+    # As FastAPI routed: of the routes that take the request's path and method, the first
+    # written serves it.
+    served = {(path, method) for method, path in web_api.routes()}
+    written = [(p, m) for p, m in web_api.WRITTEN if (web_api.as_written(p), m) in served]
+    pattern = {p: _pattern(p) for p, _ in written}
+    literals = {s for p, _ in written for s in p.split("/") if s and "{" not in s}
+    for path, method in written:
+        for sample in _samples(path, literals):
+            first = next(p for p, m in written if m == method and pattern[p].match(sample[1:]))
+            request = RequestFactory().generic(method, sample)
+            view, _ = web_api._route(request)
+            assert view.path_view._find_operation(request).path == first, (method, sample)
+
+
+def _pattern(path: str) -> Any:
+    route = re.sub(r"\{(?:(\w+):)?(\w+)\}", lambda m: f"<{m[1] + ':' if m[1] else ''}{m[2]}>", path)
+    return django_urls.resolvers.RoutePattern(route[1:], is_endpoint=True)
+
+
+def _samples(path: str, literals: set[str]) -> set[str]:
+    """``path`` with its parameters filled in, and with each a literal of another path."""
+    found = {re.sub(r"\{[^}]+\}", "x", path)}
+    for name in re.findall(r"\{[^}]+\}", path):
+        for literal in literals:
+            found.add(re.sub(r"\{[^}]+\}", "x", path.replace(name, literal, 1)))
+    return found
 
 
 def test_each_path_has_one_framework(settings) -> None:

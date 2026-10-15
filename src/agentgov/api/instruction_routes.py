@@ -1,4 +1,6 @@
-"""Agent instructions (system prompts) and what scanning finds in them."""
+"""An agent's instructions (system prompts) and what scanning finds in them. The check of
+instructions that aren't stored is on Django (agentgov.web.instructions); these routes move
+there with the registry's agent routes, whose paths they share (docs/adr/0007-django.md)."""
 
 from __future__ import annotations
 
@@ -7,22 +9,13 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, Request
 
 from agentgov.api import reach
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import Principal
 from agentgov.registry import agents, instructions
-from agentgov.registry.errors import ValidationError
+from agentgov.web.instructions import classifier
 
 router = APIRouter(prefix="/v1", tags=["instructions"])
 # Administrators, for every team or for their teams' agents.
 team_admin = reach.require("admin")
-
-
-def _classifier(rt: Any) -> dict[str, Any]:
-    g = rt.guardian
-    return {
-        "enabled": g is not None,
-        "model": g.model if g else None,
-        "criteria": g.criteria if g else [],
-    }
 
 
 @router.get("/agents/{ref}/instructions")
@@ -33,7 +26,7 @@ def get_instructions(
     rt = request.app.state.rt
     with rt.db.session() as s:
         agent = reach.agent(s, principal, ref)
-        return {"classifier": _classifier(rt), "sources": instructions.for_agent(s, agent.id)}
+        return {"classifier": classifier(rt), "sources": instructions.for_agent(s, agent.id)}
 
 
 @router.put("/agents/{ref}/instructions")
@@ -88,21 +81,3 @@ def rescan_instructions(
         )
         agents.refresh_risk(s, rt.settings, agent)
         return {"agent": agent.name, "rescanned": count}
-
-
-@router.post("/instructions/check")
-def check_instructions(
-    request: Request,
-    body: dict[str, Any] = Body(...),
-    _: Principal = Depends(require(*READ_ROLES, "registrar")),
-) -> dict[str, Any]:
-    """Check instructions without storing them, for example in a CI pipeline.
-
-    With the classifier configured this waits for its verdicts unless
-    ``classifier`` is false."""
-    rt = request.app.state.rt
-    classify = body.get("classifier", True)
-    if not isinstance(classify, bool):
-        raise ValidationError("classifier must be true or false")
-    result = instructions.check(body.get("text"), rt.guardian, classify=classify)
-    return {**result, "classifier": {**_classifier(rt), **result["classifier"]}}

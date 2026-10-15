@@ -77,7 +77,7 @@ def delegation_jwks(request: HttpRequest) -> HttpResponse:
     return json_response(chains.jwks(keys), headers={"Cache-Control": "public, max-age=300"})
 
 
-@router.get("/v1/me", tags=["system"])
+@router.get("/v1/me", tags=["system"], auth=signed_in)
 def whoami(request: HttpRequest) -> dict[str, Any]:
     """The caller's identity and roles, so clients can tailor what they offer."""
-    return describe(runtime(request), signed_in(request))
+    return describe(runtime(request), request.auth)

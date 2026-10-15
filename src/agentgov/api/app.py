@@ -26,23 +26,17 @@ from starlette.types import Receive, Scope, Send
 
 from agentgov import __version__, web
 from agentgov.api import (
-    access_routes,
     assertion_routes,
     authzen_routes,
     copilot_studio_routes,
     evidence_routes,
-    feature_routes,
     governance_routes,
-    identity_routes,
     instruction_routes,
     integration_routes,
-    mcp_routes,
-    model_routes,
     package_routes,
     platform_routes,
     registry_routes,
     rule_routes,
-    secops_routes,
     sso_routes,
 )
 from agentgov.config import Settings
@@ -157,17 +151,10 @@ def create_app(
     app.include_router(evidence_routes.router)
     app.include_router(integration_routes.router)
     app.include_router(sso_routes.router)
-    app.include_router(access_routes.router)
     app.include_router(platform_routes.router)
     app.include_router(platform_routes.agent_router)
     app.include_router(instruction_routes.router)
     app.include_router(copilot_studio_routes.router)
-    app.include_router(feature_routes.router)
-    app.include_router(model_routes.router)
-    app.include_router(identity_routes.router)
-    app.include_router(secops_routes.router)
-    app.include_router(mcp_routes.router)
-    app.include_router(mcp_routes.public)
     app.include_router(authzen_routes.router)
     app.include_router(assertion_routes.router)
 

@@ -54,8 +54,9 @@ The HTTP layer, a group at a time (`src/agentgov/web`):
 - [x] The foundation: Django's settings built from AgentGov's, the composed ASGI app, threaded
   views, JSON and error answers as FastAPI wrote them, the API's description at `/docs` with
   every route in it, and health, version and `/v1/me` on Django.
-- [ ] Features, rules, instructions, access, identity issuers, models, MCP servers, security
-  operations, access packages.
+- [x] Features, rules, instructions, access, identity issuers, models, MCP servers, security
+  operations, access packages. Their routes under an agent's path (`/v1/agents/{ref}/...`)
+  move with the registry's, whose `POST /v1/agents/{ref}/{action}` takes those paths too.
 - [ ] Evidence (downloads and archives), platforms, the registry, governance.
 - [ ] What other components call: OPA's bundles and decision logs, the gateway's
   configuration, telemetry, Copilot Studio, AuthZEN, assertions.

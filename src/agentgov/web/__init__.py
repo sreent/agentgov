@@ -48,6 +48,10 @@ def configure() -> None:
     logging.getLogger("django.request").setLevel(logging.ERROR)
 
 
+# Before anything here imports Django Ninja, which reads the settings as it loads.
+configure()
+
+
 @cache
 def handler() -> Any:
     """Django's ASGI handler, which serves the routes that have moved (agentgov.web.urls)."""
