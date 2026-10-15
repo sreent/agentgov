@@ -17,6 +17,11 @@ export default defineConfig([
       // The API's answers are JSON the control plane validates; the UI reads them as they come.
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      // Names, descriptions and reasons come from agents and platforms: rendered as text only.
+      'no-restricted-syntax': ['error', {
+        selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+        message: 'The admin UI renders what the API returns as text only (docs/threat-model.md).',
+      }],
     },
   },
   {

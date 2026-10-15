@@ -8,8 +8,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.node.json && vite build",
-    "lint": "eslint --max-warnings 0 .",
+    "build": "tsc -p tsconfig.json && vite build",
+    "check": "tsc -p tsconfig.node.json && eslint --max-warnings 0 .",
     "preview": "vite preview",
     "test:e2e": "playwright test"
   },
