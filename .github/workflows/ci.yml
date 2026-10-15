@@ -1,6 +1,6 @@
 # Runs scripts/ci.sh, the same checks contributors run locally: ruff, opa
-# fmt/check/test and pytest on each supported Python and on PostgreSQL, plus the
-# image build and smoke test once.
+# fmt/check/test and pytest on each supported Python and on PostgreSQL, the image build
+# and smoke test once, and the admin UI's main flows in Chromium (Playwright).
 name: ci
 
 on:
@@ -28,7 +28,7 @@ jobs:
         include:
           - name: Python 3.12 and image
             python-version: "3.12"
-            args: ""
+            args: --no-ui
           - name: Python 3.11
             python-version: "3.11"
             args: --quick
@@ -38,6 +38,10 @@ jobs:
           - name: PostgreSQL
             python-version: "3.12"
             args: --quick --postgres
+          - name: Admin UI in a browser
+            python-version: "3.12"
+            args: --ui-only
+            browser: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -45,4 +49,24 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@v7
+        if: matrix.browser
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install Chromium for Playwright
+        if: matrix.browser
+        working-directory: ui
+        run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
       - run: scripts/ci.sh ${{ matrix.args }}
+      # What the browser tests saw: the report, each failed test's trace and screenshot,
+      # and the control plane's log.
+      - uses: actions/upload-artifact@v7
+        if: failure() && matrix.browser
+        with:
+          name: playwright-report
+          path: |
+            ui/playwright-report/
+            ui/test-results/
+          retention-days: 14

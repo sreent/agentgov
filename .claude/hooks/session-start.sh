@@ -1,7 +1,8 @@
 #!/bin/bash
 # Prepares a Claude Code cloud session to run this repository's checks
-# (scripts/ci.sh): Python dependencies in .venv and the opa binary. Docker is
-# started on demand by scripts/ci.sh when an image or end-to-end check needs it.
+# (scripts/ci.sh): Python dependencies in .venv, the opa binary, and the admin UI's
+# packages in ui/node_modules. Docker is started on demand by scripts/ci.sh when an
+# image or end-to-end check needs it.
 set -euo pipefail
 
 if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then

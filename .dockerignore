@@ -10,3 +10,7 @@ deploy
 docs
 examples
 tests
+# The admin UI's packages and test output (ui/)
+ui/node_modules
+ui/test-results
+ui/playwright-report

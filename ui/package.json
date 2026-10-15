@@ -1,0 +1,15 @@
+{
+  "name": "agentgov-ui",
+  "private": true,
+  "description": "AgentGov's admin UI, and its browser tests",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1"
+  }
+}

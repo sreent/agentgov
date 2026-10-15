@@ -40,9 +40,10 @@ the docs:
 
 ## Development setup
 
-You need Python 3.11 or later; Docker for the image and end-to-end checks. The first
-run of `scripts/ci.sh` creates `.venv` with the development dependencies and downloads
-the pinned [OPA](https://www.openpolicyagent.org) binary into it:
+You need Python 3.11 or later; Docker for the image and end-to-end checks; Node.js 22 or
+later for the admin UI's browser tests. The first run of `scripts/ci.sh` creates `.venv`
+with the development dependencies and downloads the pinned
+[OPA](https://www.openpolicyagent.org) binary into it:
 
 ```bash
 scripts/ci.sh --setup && . .venv/bin/activate
@@ -66,7 +67,8 @@ request. Run it before you open one:
 
 ```bash
 scripts/ci.sh             # ruff, the docs, the Compose files, opa fmt/check/test, pytest,
-                          # the Helm chart, the image
+                          # the admin UI in a browser, the Helm chart, the image
+scripts/ci.sh --ui-only   # only the admin UI in a browser
 scripts/ci.sh --e2e       # also: the demo and ledger verification against the Compose
                           # stack and against the Helm chart's pods run with Docker,
                           # and the inventory stack
@@ -89,16 +91,49 @@ without a comment: [configuration](docs/configuration.md#reference) is generated
 comments in `src/agentgov/config.py`, so after changing a setting run
 `scripts/settings-doc.py` to regenerate it.
 
+On GitHub, the `ci` workflow runs the checks on Python 3.11, 3.12 and 3.13, on PostgreSQL,
+and the admin UI in a browser (its report, traces and the control plane's log are kept as
+an artifact when a test fails). The `e2e` workflow runs the end-to-end check for pull
+requests that change code or the deployment.
+
+### The admin UI in a browser
+
+The tests in `ui/e2e` drive the admin UI's main flows in Chromium with
+[Playwright](https://playwright.dev): signing in and out, the menu and every page it opens,
+registering, approving, blocking and unblocking agents and tool servers, the approvals
+inbox, issues (dismissed, reopened, risk accepted, resolved several at once), API keys,
+what an auditor and a role for one team see, the ledger and its chain, the compliance
+report and evidence pack, and features' modes. They run against a control plane of their
+own, started for them on port 8765 with the examples' manifests applied
+(`scripts/ui-test-server.py`), and fail on any script error in the page. Install the
+packages and Chromium once, then run them:
+
+```bash
+cd ui && npm ci && npx playwright install chromium
+npx playwright test                 # all of them; --headed to watch, --ui to step through
+npx playwright test e2e/agents.spec.ts
+npx playwright show-report          # after a failure: each failed test's trace
+```
+
+`npx playwright test` uses a control plane already answering on port 8765 as it is: start
+one with `python scripts/ui-test-server.py` to keep it between runs. `scripts/ci.sh`, like
+CI, always starts its own. The control plane's log is in
+`ui/test-results/control-plane.log`.
+
+A test finds what it checks the way people do, by role, label, heading and text
+(`getByRole('button', { name: 'Block server' })`), never by CSS class or DOM structure,
+so that the tests hold however the UI is built. They share one control plane and run one
+at a time: a test that changes something other tests see, such as a feature's mode, puts
+it back.
+
+### The tests on PostgreSQL
+
 The tests run on SQLite, each on a copy of a database the migrations built. Production
 runs on PostgreSQL, so `--postgres` (and `--e2e`) runs them again there: each test on a
 database of its own, copied from a template. To use a PostgreSQL of your own, give the
 tests its URL, as a role that may create databases:
 `AGENTGOV_TEST_POSTGRES_URL=postgresql+psycopg://postgres:secret@127.0.0.1:5432/postgres pytest`
 (the migrations' test empties the database the URL names).
-
-On GitHub, the `ci` workflow runs the checks on Python
-3.11, 3.12 and 3.13 and on PostgreSQL, and the `e2e` workflow runs the end-to-end check for
-pull requests that change code or the deployment.
 
 ## Where things live
 
@@ -122,11 +157,12 @@ pull requests that change code or the deployment.
 | `src/agentgov/models.py`, `src/agentgov/migrations` | The database schema and its migrations (Alembic) |
 | `src/agentgov/config.py`, `src/agentgov/cli.py` | The settings, and the `agentgov` command |
 | `src/agentgov/ui` | Admin UI (static files, no build step) |
+| `ui` | The admin UI's browser tests (`e2e`, Playwright) |
 | `deploy/compose`, `deploy/helm` | The Compose stack and the Helm chart (keep the chart's realm file in step with Compose's: CI compares them) |
 | `deploy/kubernetes` | Values and manifests for the cloud guides |
 | `examples` | Manifests, a demo MCP server, model, workload identity issuer and agent other agents call, a stand-in for the security team's tools, a developer's machine, and the demo agent |
 | `docs` | The documentation ([index](docs/README.md)) and the ADRs |
-| `scripts` | `ci.sh`, the docs checks, `chart-on-docker.py`, `check-inventory.py`, `new-migration.sh` and `gen-protos.sh` |
+| `scripts` | `ci.sh`, the docs checks, `chart-on-docker.py`, `check-inventory.py`, `ui-test-server.py`, `new-migration.sh` and `gen-protos.sh` |
 | `tests` | Unit and integration tests |
 
 If you change a protocol definition in `src/agentgov/processor/proto` (agentgateway's

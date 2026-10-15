@@ -351,7 +351,8 @@ GenAI conventions and the OWASP Top 10 for Agentic Applications.
 [where things live](CONTRIBUTING.md#where-things-live) in the repository.
 
 ```bash
-scripts/ci.sh          # lint, Rego checks, tests, image build; sets up .venv and opa
+scripts/ci.sh          # lint, Rego checks, tests, the admin UI in a browser, image build;
+                       # sets up .venv and opa
 scripts/ci.sh --e2e    # plus the full stack and the demo walkthrough
 ```
 
