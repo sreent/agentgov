@@ -342,7 +342,9 @@ def test_the_app_answers_as_before(settings) -> None:
         assert client.post("/ui/").headers["allow"] == "GET, HEAD"
         page = client.get("/ui/")
         assert page.headers["content-security-policy"].startswith("default-src 'self'")
-        assert client.head("/ui/").headers["etag"] == page.headers["etag"]
+        # HEAD as GET: the built UI's tag, or none for the page saying it isn't built.
+        head = client.head("/ui/")
+        assert (head.status_code, head.headers.get("etag")) == (200, page.headers.get("etag"))
 
 
 class _Runtime:
