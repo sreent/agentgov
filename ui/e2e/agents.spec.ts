@@ -84,13 +84,16 @@ test('finds agents by name, status and owner', async ({ page }) => {
 
 test('a search typed just before leaving leaves the next page alone', async ({ page }) => {
   await signIn(page, undefined, '/agents');
+  // The next page is slow to load: the search, which waits for the typing to stop, finishes
+  // while it loads.
+  await page.route('**/v1/overview', async (route) => {
+    await new Promise((done) => setTimeout(done, 1_500));
+    await route.continue();
+  });
   await page.getByRole('searchbox', { name: 'Search agents' }).fill('billing');
-  // Away before the search runs: it waits for the typing to stop.
   await menu(page, 'Overview').click();
   await expect(pageHeading(page, 'Overview')).toBeVisible();
-  await page.waitForTimeout(1_000);
   await expect(page).toHaveURL(/#\/overview$/);
-  await expect(pageHeading(page, 'Overview')).toBeVisible();
 });
 
 test('sorts the list by a column', async ({ page }) => {

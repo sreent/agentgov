@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from fastapi import HTTPException, Request
+from starlette.exceptions import HTTPException
+from starlette.requests import Request
 
 
 def if_match(request: Request) -> int | None:

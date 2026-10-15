@@ -148,7 +148,8 @@ tests its URL, as a role that may create databases:
 
 | Path | What |
 |---|---|
-| `src/agentgov/api` | The HTTP API's routes and authentication |
+| `src/agentgov/api` | The ASGI app (`app.py`: the API, the admin UI's files, the runtime's lifespan) and the rules of who may call what (`auth.py`, `reach.py`) |
+| `src/agentgov/web` | The HTTP API on Django and Django Ninja ([ADR 0007](docs/adr/0007-django.md)) |
 | `src/agentgov/registry` | The service layer: agents, blueprints, tool servers, model providers and usage, identity issuers, approvals, findings, risk, posture, discovery, platforms, instructions, decisions, features, destinations, manifests, API keys, access |
 | `src/agentgov/secops` | The ledger as OCSF events, delivery to SIEMs and chats, alerts, hand-off levels |
 | `src/agentgov/platforms` | Microsoft's services (Graph, the Power Platform API) and Copilot Studio threat detection |

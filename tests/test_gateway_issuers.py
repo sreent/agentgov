@@ -14,8 +14,8 @@ from typing import Any
 import httpx
 import pytest
 import yaml
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov.api.app import create_app
 from agentgov.config import Settings

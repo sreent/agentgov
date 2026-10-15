@@ -20,8 +20,8 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import a2a_auth, cli
 from agentgov.api.app import create_app

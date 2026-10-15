@@ -4,102 +4,99 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Request
+from django.http import HttpRequest
+from ninja import Body
 from sqlalchemy import select
 
 from agentgov.api import reach
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES
 from agentgov.api.versions import if_match
 from agentgov.models import Agent
 from agentgov.registry import model_providers, model_usage
 from agentgov.registry.errors import NotFound
 from agentgov.registry.validation import known_fields
 from agentgov.secops import handoff
+from agentgov.web.api import Router
+from agentgov.web.auth import guard, require, runtime
 
-router = APIRouter(prefix="/v1/models", tags=["models"])
+router = Router(tags=["models"])
 read = require(*READ_ROLES)
 admin = require("admin")
 
 
-@router.get("/providers")
-def list_providers(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
-    with request.app.state.rt.db.session() as s:
+@router.get("/v1/models/providers", auth=read)
+def list_providers(request: HttpRequest) -> list[dict[str, Any]]:
+    with runtime(request).db.session() as s:
         return [model_providers.to_dict(p) for p in model_providers.list_all(s)]
 
 
-@router.post("/providers", status_code=201)
-def create_provider(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/models/providers", status_code=201, auth=admin)
+def create_provider(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Approve a model provider; agents call it at ``/llm/<name>`` once the gateway can
     read its API key (``key_file``)."""
     known_fields(body, {"name", *model_providers.FIELDS}, "a model provider")
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
-        provider = model_providers.create(s, body, actor=principal.actor, settings=rt.settings)
+        provider = model_providers.create(s, body, actor=request.auth.actor, settings=rt.settings)
         return model_providers.to_dict(provider)
 
 
-@router.get("/providers/{ref}")
-def get_provider(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
-    with request.app.state.rt.db.session() as s:
+@router.get("/v1/models/providers/{ref}", auth=read)
+def get_provider(request: HttpRequest, ref: str) -> dict[str, Any]:
+    with runtime(request).db.session() as s:
         return model_providers.to_dict(model_providers.get(s, ref))
 
 
-@router.patch("/providers/{ref}")
+@router.patch("/v1/models/providers/{ref}", auth=admin)
 def update_provider(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     known_fields(body, model_providers.FIELDS, "a model provider's edit")
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         provider = model_providers.get(s, ref)
         model_providers.update(
             s,
             provider,
             body,
-            actor=principal.actor,
+            actor=request.auth.actor,
             version=if_match(request),
             settings=rt.settings,
         )
         return model_providers.to_dict(provider)
 
 
-@router.post("/providers/{ref}/{action}")
-def provider_action(
-    request: Request, ref: str, action: str, principal: Principal = Depends(require("secops"))
-) -> dict[str, Any]:
+@router.post("/v1/models/providers/{ref}/{action}", auth=require("secops"))
+def provider_action(request: HttpRequest, ref: str, action: str) -> dict[str, Any]:
     """``block`` stops every call to the provider at once; ``unblock`` allows them again."""
     if action not in ("block", "unblock"):
         raise NotFound(f"no action {action!r}: block or unblock")
-    with request.app.state.rt.db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         handoff.check_kill_switch(s, principal, action)
         provider = model_providers.get(s, ref)
         model_providers.set_status(s, provider, action, actor=principal.actor)
         return model_providers.to_dict(provider)
 
 
-@router.delete("/providers/{ref}", status_code=204)
-def delete_provider(request: Request, ref: str, principal: Principal = Depends(admin)) -> None:
-    with request.app.state.rt.db.session() as s:
-        model_providers.delete(s, model_providers.get(s, ref), actor=principal.actor)
+@router.delete("/v1/models/providers/{ref}", status_code=204, auth=admin)
+def delete_provider(request: HttpRequest, ref: str) -> None:
+    with runtime(request).db.session() as s:
+        model_providers.delete(s, model_providers.get(s, ref), actor=request.auth.actor)
 
 
-@router.get("/usage")
+@router.get("/v1/models/usage", auth=guard(reach.read))
 def get_usage(
-    request: Request,
+    request: HttpRequest,
     days: int = 7,
     agent: str | None = None,
     provider: str | None = None,
-    principal: Principal = Depends(reach.read),
 ) -> dict[str, Any]:
     """Calls, tokens and cost per agent, day, provider and model for the last ``days`` days;
     the same added up per owner and per sponsor of the agents; and each agent's tokens
     today against its budget. For someone with roles for some teams only, their agents'."""
-    with request.app.state.rt.db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         agent_id = reach.agent(s, principal, agent).id if agent else None
         rows = model_usage.usage(
             s, days=min(max(days, 1), 90), agent_id=agent_id, provider=provider

@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -29,12 +29,11 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.routing import APIRoute
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import ids, migrations
-from agentgov.api.app import create_app
+from agentgov.api.app import api_routes, create_app
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.models import AdminSession, ApiKey, ApprovalRequest
@@ -273,20 +272,8 @@ class Probe:
 
 
 def routes(app: Any) -> list[tuple[str, str]]:
-    """Every API route, as (method, path)."""
-
-    def flat(found: list[Any]) -> Iterator[Any]:
-        for route in found:
-            if type(route).__name__ == "_IncludedRouter":
-                yield from flat(route.original_router.routes)
-            else:
-                yield route
-
-    out = set()
-    for route in flat(app.routes):
-        if isinstance(route, APIRoute):
-            out |= {(method, route.path) for method in route.methods}
-    return sorted(out)
+    """Every API route, as (method, path), whichever framework serves it."""
+    return api_routes(app)
 
 
 # Routes whose body names one agent.

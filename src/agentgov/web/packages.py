@@ -4,22 +4,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from django.http import HttpRequest
+from ninja import Body
 
 from agentgov.api import reach
-from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
+from agentgov.api.auth import READ_ROLES, Principal
 from agentgov.api.versions import if_match
 from agentgov.models import AccessAssignment, Agent
 from agentgov.registry import access_packages, agents
 from agentgov.registry.errors import NotFound, ValidationError
 from agentgov.secops import handoff
+from agentgov.web.api import HTTPException, Router
+from agentgov.web.auth import guard, require, runtime, signed_in
 
-router = APIRouter(prefix="/v1", tags=["access packages"])
+router = Router(tags=["access packages"])
 admin = require("admin")
-
-
-def _rt(request: Request) -> Any:
-    return request.app.state.rt
 
 
 def _responsible(session: Any, principal: Principal, agent: Agent) -> bool:
@@ -56,64 +55,60 @@ def _may_read(
 # --------------------------------------------------------------------- packages
 
 
-@router.get("/access-packages")
-def list_packages(request: Request, _: Principal = Depends(signed_in)) -> list[dict[str, Any]]:
+@router.get("/v1/access-packages", auth=signed_in)
+def list_packages(request: HttpRequest) -> list[dict[str, Any]]:
     """Everyone signed in: people ask for packages for the agents they own or sponsor."""
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         return [access_packages.to_dict(s, p) for p in access_packages.list_all(s)]
 
 
-@router.post("/access-packages", status_code=201)
-def create_package(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
-) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
-        return access_packages.to_dict(s, access_packages.create(s, body, actor=principal.actor))
-
-
-@router.get("/access-packages/{ref}")
-def get_package(request: Request, ref: str, _: Principal = Depends(signed_in)) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
-        return access_packages.to_dict(s, access_packages.get(s, ref))
-
-
-@router.patch("/access-packages/{ref}")
-def update_package(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
-) -> dict[str, Any]:
-    """Change a package: every agent that holds it gets the change."""
-    with _rt(request).db.session() as s:
-        package = access_packages.get(s, ref)
-        access_packages.update(s, package, body, actor=principal.actor, version=if_match(request))
+@router.post("/v1/access-packages", status_code=201, auth=admin)
+def create_package(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    with runtime(request).db.session() as s:
+        package = access_packages.create(s, body, actor=request.auth.actor)
         return access_packages.to_dict(s, package)
 
 
-@router.delete("/access-packages/{ref}")
-def delete_package(
-    request: Request, ref: str, principal: Principal = Depends(admin)
-) -> dict[str, str]:
-    with _rt(request).db.session() as s:
-        access_packages.delete(s, access_packages.get(s, ref), actor=principal.actor)
+@router.get("/v1/access-packages/{ref}", auth=signed_in)
+def get_package(request: HttpRequest, ref: str) -> dict[str, Any]:
+    with runtime(request).db.session() as s:
+        return access_packages.to_dict(s, access_packages.get(s, ref))
+
+
+@router.patch("/v1/access-packages/{ref}", auth=admin)
+def update_package(
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
+) -> dict[str, Any]:
+    """Change a package: every agent that holds it gets the change."""
+    with runtime(request).db.session() as s:
+        package = access_packages.get(s, ref)
+        access_packages.update(
+            s, package, body, actor=request.auth.actor, version=if_match(request)
+        )
+        return access_packages.to_dict(s, package)
+
+
+@router.delete("/v1/access-packages/{ref}", auth=admin)
+def delete_package(request: HttpRequest, ref: str) -> dict[str, str]:
+    with runtime(request).db.session() as s:
+        access_packages.delete(s, access_packages.get(s, ref), actor=request.auth.actor)
         return {"deleted": ref}
 
 
 # ------------------------------------------------------------------ assignments
 
 
-@router.get("/access-assignments")
+@router.get("/v1/access-assignments", auth=guard(reach.read))
 def list_assignments(
-    request: Request,
+    request: HttpRequest,
     status: str | None = None,
     agent: str | None = None,
     package: str | None = None,
-    principal: Principal = Depends(reach.read),
 ) -> list[dict[str, Any]]:
     """What agents hold and asked for: for someone with roles for some teams only, their
     agents'."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         rows = access_packages.assignments(
             s,
             status=status,
@@ -128,10 +123,8 @@ def list_assignments(
         ]
 
 
-@router.post("/access-assignments", status_code=201)
-def request_package(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(signed_in)
-) -> dict[str, Any]:
+@router.post("/v1/access-assignments", status_code=201, auth=signed_in)
+def request_package(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Ask for an access package for an agent (``agent``, ``package``, ``days``,
     ``reason``); asked again while it holds one, it is a renewal. The agent's owner and
     sponsors, approvers, administrators and registrars ask; an administrator can assign it
@@ -145,7 +138,8 @@ def request_package(
         if not isinstance(body.get(key), str) or not body[key]:
             raise ValidationError(f"{key} is required")
     approve = body.get("approve", False) is True
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         agent = agents.get(s, body["agent"])
         here = _in_reach(s, principal, agent, f"agent {body['agent']!r} not found")
         if not access_packages.may_request(s, here.roles, principal.person, agent):
@@ -168,13 +162,12 @@ def request_package(
         return access_packages.assignment_dict(s, row)
 
 
-@router.get("/access-assignments/{assignment_id}")
-def get_assignment(
-    request: Request, assignment_id: str, principal: Principal = Depends(signed_in)
-) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+@router.get("/v1/access-assignments/{assignment_id}", auth=signed_in)
+def get_assignment(request: HttpRequest, assignment_id: str) -> dict[str, Any]:
+    with runtime(request).db.session() as s:
         row = access_packages.assignment(s, assignment_id)
-        _may_read(s, principal, _agent(s, row), f"access assignment {assignment_id} not found")
+        missing = f"access assignment {assignment_id} not found"
+        _may_read(s, request.auth, _agent(s, row), missing)
         return access_packages.assignment_dict(s, row)
 
 
@@ -185,13 +178,9 @@ def _agent(session: Any, row: AccessAssignment) -> Agent:
     return agent
 
 
-@router.post("/access-assignments/{assignment_id}/{action}")
+@router.post("/v1/access-assignments/{assignment_id}/{action}", auth=signed_in)
 def assignment_action(
-    request: Request,
-    assignment_id: str,
-    action: str,
-    body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(signed_in),
+    request: HttpRequest, assignment_id: str, action: str, body: dict[str, Any] = Body({})
 ) -> dict[str, Any]:
     """``approve`` and ``deny`` a request (approvers and administrators, never the person who
     asked); ``revoke`` what an agent holds (approvers and administrators, and the secops role
@@ -199,7 +188,8 @@ def assignment_action(
     and the agent's owner and sponsors)."""
     if action not in ("approve", "deny", "revoke", "review"):
         raise NotFound(f"no action {action!r}: approve, deny, revoke or review")
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         row = access_packages.assignment(s, assignment_id)
         agent = _agent(s, row)
         # Their roles where the agent is: an approver for its team decides.
@@ -230,12 +220,11 @@ def assignment_action(
         return access_packages.assignment_dict(s, row)
 
 
-@router.get("/agents/{ref}/access-packages", tags=["agents"])
-def agent_packages(
-    request: Request, ref: str, principal: Principal = Depends(signed_in)
-) -> list[dict[str, Any]]:
+@router.get("/v1/agents/{ref}/access-packages", tags=["agents"], auth=signed_in)
+def agent_packages(request: HttpRequest, ref: str) -> list[dict[str, Any]]:
     """The access packages an agent holds and has asked for, newest first."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         agent = agents.get(s, ref)
         _may_read(s, principal, agent, f"agent {ref!r} not found")
         return [

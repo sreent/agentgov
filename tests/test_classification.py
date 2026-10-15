@@ -9,7 +9,7 @@ import zipfile
 from typing import Any
 
 import httpx
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from tests.conftest import ADMIN, seed
 from tests.test_api import key

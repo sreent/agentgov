@@ -17,8 +17,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from fastapi import HTTPException, Request
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException
+from starlette.requests import Request
 
 from agentgov.api.auth import READ_ROLES, Principal, authenticate
 from agentgov.identity import sso

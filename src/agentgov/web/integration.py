@@ -13,11 +13,10 @@ import gzip
 import json
 from typing import Any
 
-import anyio.to_thread
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
+from django.http import HttpRequest, HttpResponse
+from ninja import Body
 
 from agentgov import health
-from agentgov.api.auth import Principal, require
 from agentgov.gateway import etag_of
 from agentgov.opa.bundle import BUNDLE_CONTENT_TYPE, parse_prefer_wait, record_status
 from agentgov.registry import (
@@ -32,8 +31,14 @@ from agentgov.registry import (
 )
 from agentgov.registry.errors import NotFound, ValidationError
 from agentgov.telemetry import decode_protobuf, ingest
+from agentgov.web.api import (
+    HTTPException,
+    Router,
+    raw_response,
+)
+from agentgov.web.auth import arequire, require, runtime
 
-router = APIRouter()
+router = Router()
 # What components read: the service role, and administrators.
 service = require("service")
 # What components report (decisions, observations, OPA's decision logs, telemetry): the
@@ -42,12 +47,8 @@ service = require("service")
 component = require("service", admin=False)
 
 
-def _rt(request: Request) -> Any:
-    return request.app.state.rt
-
-
-async def _json_body(request: Request) -> Any:
-    raw = await request.body()
+def _json_body(request: HttpRequest) -> Any:
+    raw = request.body
     if request.headers.get("content-encoding", "").lower() == "gzip":
         raw = gzip.decompress(raw)
     try:
@@ -59,9 +60,10 @@ async def _json_body(request: Request) -> Any:
 # ---------------------------------------------------------------------------- OPA
 
 
-@router.get("/v1/opa/bundles/agentgov.tar.gz", tags=["opa"])
-async def opa_bundle(request: Request, _: Principal = Depends(service)) -> Response:
-    rt = _rt(request)
+# On the server's event loop, where a bundle's change wakes the requests waiting for it.
+@router.get("/v1/opa/bundles/agentgov.tar.gz", tags=["opa"], auth=arequire("service"))
+async def opa_bundle(request: HttpRequest) -> HttpResponse:
+    rt = runtime(request)
     etag = request.headers.get("if-none-match")
     wait = parse_prefer_wait(request.headers.get("prefer"))
     if etag and wait:
@@ -72,10 +74,10 @@ async def opa_bundle(request: Request, _: Principal = Depends(service)) -> Respo
         if bundle.etag == etag:
             bundle = None
     if bundle is None:
-        return Response(
+        return raw_response(
             status_code=304, headers={"ETag": etag or "", "Content-Type": BUNDLE_CONTENT_TYPE}
         )
-    return Response(
+    return raw_response(
         content=bundle.body, media_type=BUNDLE_CONTENT_TYPE, headers={"ETag": bundle.etag}
     )
 
@@ -83,71 +85,62 @@ async def opa_bundle(request: Request, _: Principal = Depends(service)) -> Respo
 # ------------------------------------------------------------------------ gateway
 
 
-@router.get("/v1/gateway/config", tags=["gateway"])
-async def gateway_config(request: Request, _: Principal = Depends(service)) -> Response:
+@router.get("/v1/gateway/config", tags=["gateway"], auth=service)
+def gateway_config(request: HttpRequest) -> HttpResponse:
     """agentgateway's configuration, generated from the registry, for gateways that
     don't share a volume with the control plane (see ``agentgov gateway-config``)."""
-    content = await asyncio.to_thread(_rt(request).gateway.render_current)
+    content = runtime(request).gateway.render_current()
     etag = etag_of(content)
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={"ETag": etag})
-    return Response(content=content, media_type="application/yaml", headers={"ETag": etag})
+        return raw_response(status_code=304, headers={"ETag": etag})
+    return raw_response(content=content, media_type="application/yaml", headers={"ETag": etag})
 
 
-@router.post("/v1/opa/logs", tags=["opa"])
-async def opa_decision_logs(request: Request, _: Principal = Depends(component)) -> dict[str, int]:
-    rt = _rt(request)
-    events = await _json_body(request)
+@router.post("/v1/opa/logs", tags=["opa"], auth=component)
+def opa_decision_logs(request: HttpRequest) -> dict[str, int]:
+    events = _json_body(request)
     if not isinstance(events, list):
         raise HTTPException(400, "expected a JSON array of decision events")
-
-    def store() -> dict[str, int]:
-        with rt.db.session() as s:
-            return decisions.record_opa_decisions(s, events)
-
-    return await anyio.to_thread.run_sync(store)
+    with runtime(request).db.session() as s:
+        return decisions.record_opa_decisions(s, events)
 
 
-@router.post("/v1/opa/status", tags=["opa"])
-async def opa_status(request: Request, _: Principal = Depends(component)) -> dict[str, str]:
-    rt = _rt(request)
-    status = await _json_body(request) or {}
+@router.post("/v1/opa/status", tags=["opa"], auth=component)
+def opa_status(request: HttpRequest) -> dict[str, str]:
+    status = _json_body(request) or {}
     errors = {
         name: b.get("errors") or b.get("message")
         for name, b in (status.get("bundles") or {}).items()
         if b.get("code") or b.get("errors")
     }
 
-    def store() -> None:
-        with rt.db.session() as s:
-            record_status(s, status)
-            if errors:
-                findings.raise_finding(
-                    s,
-                    type="opa.bundle_error",
-                    severity="critical",
-                    subject=str((status.get("labels") or {}).get("id", "opa")),
-                    category=findings.THREAT,
-                    title="OPA failed to activate the policy bundle",
-                    description=json.dumps(errors)[:2000],
-                    remediation="OPA keeps enforcing its last good bundle; fix the policy error "
-                    "so registry changes (including blocks) propagate.",
-                )
-            else:
-                findings.resolve_absent(s, types={"opa.bundle_error"}, present_keys=set())
-
-    await anyio.to_thread.run_sync(store)
+    with runtime(request).db.session() as s:
+        record_status(s, status)
+        if errors:
+            findings.raise_finding(
+                s,
+                type="opa.bundle_error",
+                severity="critical",
+                subject=str((status.get("labels") or {}).get("id", "opa")),
+                category=findings.THREAT,
+                title="OPA failed to activate the policy bundle",
+                description=json.dumps(errors)[:2000],
+                remediation="OPA keeps enforcing its last good bundle; fix the policy error "
+                "so registry changes (including blocks) propagate.",
+            )
+        else:
+            findings.resolve_absent(s, types={"opa.bundle_error"}, present_keys=set())
     return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------- processor
 
 
-@router.post("/v1/internal/approvals/check", tags=["internal"])
+@router.post("/v1/internal/approvals/check", tags=["internal"], auth=component)
 def internal_approval_check(
-    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(component)
+    request: HttpRequest, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
-    rt = _rt(request)
+    rt = runtime(request)
     if not isinstance(body.get("agent_id"), str) or not body["agent_id"]:
         raise ValidationError("agent_id is required: the agent asking")
     # The person the agent acts for, if it acts for one.
@@ -173,11 +166,9 @@ def internal_approval_check(
         }
 
 
-@router.post("/v1/internal/decisions", tags=["internal"])
-def internal_decisions(
-    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(component)
-) -> dict[str, int]:
-    rt = _rt(request)
+@router.post("/v1/internal/decisions", tags=["internal"], auth=component)
+def internal_decisions(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, int]:
+    rt = runtime(request)
     records = body.get("records") or []
     if not isinstance(records, list):
         raise ValidationError("records must be a list")
@@ -193,23 +184,19 @@ def internal_decisions(
     return {"stored": stored, **({"rejected": rejected} if rejected else {})}
 
 
-@router.post("/v1/internal/components", tags=["internal"])
-def internal_components(
-    request: Request, body: Any = Body(...), _: Principal = Depends(component)
-) -> dict[str, Any]:
+@router.post("/v1/internal/components", tags=["internal"], auth=component)
+def internal_components(request: HttpRequest, body: Any = Body(...)) -> dict[str, Any]:
     """A governance processor's report of what it can reach (agentgov.health). The answer
     gives it the features' modes, which it otherwise reads from OPA: it then knows them
     while OPA can't be asked."""
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         health.record(s, body)
         return {"recorded": "ok", "features": features.modes(s)}
 
 
-@router.post("/v1/internal/catalog", tags=["internal"])
-def internal_catalog(
-    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(component)
-) -> dict[str, Any]:
-    rt = _rt(request)
+@router.post("/v1/internal/catalog", tags=["internal"], auth=component)
+def internal_catalog(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    rt = runtime(request)
     with rt.db.session() as s:
         try:
             ts = toolservers.get(s, str(body.get("server")))
@@ -220,11 +207,9 @@ def internal_catalog(
         )
 
 
-@router.post("/v1/internal/observe", tags=["internal"])
-def internal_observe(
-    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(component)
-) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+@router.post("/v1/internal/observe", tags=["internal"], auth=component)
+def internal_observe(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    with runtime(request).db.session() as s:
         agent = discovery.observe(
             s,
             source=str(body.get("source") or "gateway"),
@@ -242,10 +227,10 @@ def internal_observe(
 # ---------------------------------------------------------------------- telemetry
 
 
-async def _otlp(request: Request, signal: str = "traces") -> Response:
-    rt = _rt(request)
+def _otlp(request: HttpRequest, signal: str = "traces") -> HttpResponse:
+    rt = runtime(request)
     content_type = request.headers.get("content-type", "")
-    raw = await request.body()
+    raw = request.body
     if request.headers.get("content-encoding", "").lower() == "gzip":
         raw = gzip.decompress(raw)
     protobuf = content_type.startswith("application/x-protobuf")
@@ -262,24 +247,22 @@ async def _otlp(request: Request, signal: str = "traces") -> Response:
         except ValueError as exc:
             raise HTTPException(400, f"invalid OTLP JSON: {exc}") from exc
 
-    def store() -> dict[str, Any]:
-        with rt.db.session() as s:
-            if signal == "logs":
-                return model_usage.ingest_logs(s, payload)
-            return ingest(s, payload, classify=rt.guardian is not None)
-
-    await anyio.to_thread.run_sync(store)
+    with rt.db.session() as s:
+        if signal == "logs":
+            model_usage.ingest_logs(s, payload)
+        else:
+            ingest(s, payload, classify=rt.guardian is not None)
     if protobuf:
-        return Response(content=b"", media_type="application/x-protobuf")
-    return Response(content=b"{}", media_type="application/json")
+        return raw_response(content=b"", media_type="application/x-protobuf")
+    return raw_response(content=b"{}", media_type="application/json")
 
 
-@router.post("/v1/otlp/v1/traces", tags=["telemetry"])
-async def otlp_traces(request: Request, _: Principal = Depends(component)) -> Response:
-    return await _otlp(request)
+@router.post("/v1/otlp/v1/traces", tags=["telemetry"], auth=component)
+def otlp_traces(request: HttpRequest) -> HttpResponse:
+    return _otlp(request)
 
 
-@router.post("/v1/otlp/v1/logs", tags=["telemetry"])
-async def otlp_logs(request: Request, _: Principal = Depends(component)) -> Response:
+@router.post("/v1/otlp/v1/logs", tags=["telemetry"], auth=component)
+def otlp_logs(request: HttpRequest) -> HttpResponse:
     """agentgateway's access logs, through the OpenTelemetry Collector: model usage."""
-    return await _otlp(request, "logs")
+    return _otlp(request, "logs")

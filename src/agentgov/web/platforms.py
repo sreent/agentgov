@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-import anyio
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from django.http import HttpRequest
+from ninja import Body
 from pydantic import BaseModel, Field
 
 from agentgov.api import reach
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES, Principal
 from agentgov.coordination import JobBusy
 from agentgov.identity.delegation import GRAPH, POWER_PLATFORM, DelegationError
 from agentgov.platforms import connections, threat_detection
@@ -24,9 +24,14 @@ from agentgov.registry import (
     platforms,
 )
 from agentgov.runtime import JOB_WAIT_SECONDS
+from agentgov.web.api import (
+    HTTPException,
+    Router,
+)
+from agentgov.web.auth import guard, require, runtime
 
-router = APIRouter(prefix="/v1/platforms", tags=["platforms"])
-agent_router = APIRouter(prefix="/v1/agents", tags=["platforms"])
+router = Router(tags=["platforms"])
+agent_router = Router(tags=["platforms"])
 read = require(*READ_ROLES)
 admin = require("admin")
 
@@ -51,10 +56,10 @@ def _as_signed_in_admin(rt: Any, principal: Principal, api: str) -> str:
         raise HTTPException(409, str(exc)) from exc
 
 
-@router.get("")
-def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/platforms", auth=read)
+def overview(request: HttpRequest) -> dict[str, Any]:
     """Each source of platform agents, how many it reported and how its last sync went."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         view = platforms.overview(
             s, m365_configured=rt.m365 is not None, connected=set(rt.platforms)
@@ -99,11 +104,12 @@ def _app_sync(rt: Any, key: str, actor: str) -> dict[str, Any]:
     return outcome
 
 
-@router.post("/sync")
-def sync_all(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
+@router.post("/v1/platforms/sync", auth=admin)
+def sync_all(request: HttpRequest) -> dict[str, Any]:
     """Run every connection AgentGov's app registration may use (they also run on a
     schedule); returns each one's counts, its error, or the permission it lacks."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     if rt.m365 is None:
         raise HTTPException(409, NOT_CONFIGURED)
     try:
@@ -112,10 +118,11 @@ def sync_all(request: Request, principal: Principal = Depends(admin)) -> dict[st
         raise HTTPException(502, str(exc)) from exc
 
 
-@router.post("/microsoft-365/sync")
-def sync_microsoft_365(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
+@router.post("/v1/platforms/microsoft-365/sync", auth=admin)
+def sync_microsoft_365(request: HttpRequest) -> dict[str, Any]:
     """Read the Microsoft 365 agent catalog now (it is also read on a schedule)."""
-    return _app_sync(request.app.state.rt, "microsoft-365", principal.actor)
+    principal = request.auth
+    return _app_sync(runtime(request), "microsoft-365", principal.actor)
 
 
 # People looked up with a Copilot Studio import or sync, at most: the scheduled lookup
@@ -153,17 +160,15 @@ def _with_people(counts: dict[str, Any], looked_up: dict[str, Any] | None) -> di
     return {**counts, "people": looked_up} if looked_up is not None else counts
 
 
-@router.post("/copilot-studio/import")
+@router.post("/v1/platforms/copilot-studio/import", auth=admin)
 def import_copilot_studio(
-    request: Request,
-    payload: Any = Body(...),
-    complete: bool = False,
-    principal: Principal = Depends(admin),
+    request: HttpRequest, payload: Any = Body(...), complete: bool = False
 ) -> dict[str, Any]:
     """Import Copilot Studio agents from a Power Platform inventory export (JSON). With
     ``complete``, the export is the whole inventory: agents missing from it are marked gone,
     and their findings close."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s, platforms.first_sync(s, "copilot-studio"):
         counts = platforms.import_copilot_studio(
             s, payload, actor=principal.actor, complete=complete
@@ -172,10 +177,11 @@ def import_copilot_studio(
     return _with_people(counts, _people(rt, principal))
 
 
-@router.post("/copilot-studio/sync")
-def sync_copilot_studio(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
+@router.post("/v1/platforms/copilot-studio/sync", auth=admin)
+def sync_copilot_studio(request: HttpRequest) -> dict[str, Any]:
     """Read the Copilot Studio inventory now, as the signed-in administrator."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     token = _as_signed_in_admin(rt, principal, POWER_PLATFORM)
     try:
         rows = rt.microsoft_admin.copilot_studio_agents(token)
@@ -192,36 +198,31 @@ def sync_copilot_studio(request: Request, principal: Principal = Depends(admin))
     return _with_people(counts, _people(rt, principal))
 
 
-@router.post("/entra-users/import")
-async def import_people(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
+@router.post("/v1/platforms/entra-users/import", auth=admin)
+def import_people(request: HttpRequest) -> dict[str, Any]:
     """Keep the people in a list of users from Microsoft Entra ID: CSV (the Entra admin
     center's Download users) or JSON. Then the makers of Copilot Studio agents are known
     by name without Microsoft Graph."""
-    rt = request.app.state.rt
-    raw = (await request.body()).decode("utf-8-sig", errors="replace")
+    principal = request.auth
+    raw = request.body.decode("utf-8-sig", errors="replace")
     payload: Any = raw
     if request.headers.get("content-type", "").startswith("application/json"):
         try:
             payload = json.loads(raw or "null")
         except ValueError as exc:
             raise HTTPException(422, f"invalid JSON: {exc}") from exc
-
-    def run() -> dict[str, Any]:
-        with rt.db.session() as s:
-            counts = people.import_list(s, payload, actor=principal.actor)
-            return {**counts, "makers": people.summary(s)}
-
-    return await anyio.to_thread.run_sync(run)
+    with runtime(request).db.session() as s:
+        counts = people.import_list(s, payload, actor=principal.actor)
+        return {**counts, "makers": people.summary(s)}
 
 
-@router.post("/{source}/sync")
-def sync_source(
-    request: Request, source: str, principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/platforms/{source}/sync", auth=admin)
+def sync_source(request: HttpRequest, source: str) -> dict[str, Any]:
     """Run one of the app's connections now (entra-agent-id, purview-audit or defender), or
     read another platform's agents (aws, google-cloud, salesforce, databricks or
     microsoft-foundry)."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     if source in platforms.INVENTORY_SOURCES:
         if source not in rt.platforms:
             raise HTTPException(
@@ -239,37 +240,34 @@ def sync_source(
     return _app_sync(rt, source, principal.actor)
 
 
-@router.get("/connectors")
-def connectors(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/platforms/connectors", auth=read)
+def connectors(request: HttpRequest) -> dict[str, Any]:
     """Every connector Copilot Studio agents use, and whether it is on the allowlist."""
-    with request.app.state.rt.db.session() as s:
+    with runtime(request).db.session() as s:
         return platforms.connector_usage(s)
 
 
-@router.put("/connectors/{connector_id}/approval")
+@router.put("/v1/platforms/connectors/{connector_id}/approval", auth=admin)
 def approve_connector(
-    request: Request,
-    connector_id: str,
-    body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(admin),
+    request: HttpRequest, connector_id: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
     """Put a connector on the allowlist. Agents using others get a finding."""
+    principal = request.auth
     note = body.get("note") or ""
     if not isinstance(note, str):
         raise HTTPException(422, "note must be a string")
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         platforms.approve_connector(s, connector_id, note=note, actor=principal.actor)
         platforms.refresh_risk(s, rt.settings)
     return {"connector_id": platforms.connector_key(connector_id), "approved": True}
 
 
-@router.delete("/connectors/{connector_id}/approval")
-def remove_approval(
-    request: Request, connector_id: str, principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.delete("/v1/platforms/connectors/{connector_id}/approval", auth=admin)
+def remove_approval(request: HttpRequest, connector_id: str) -> dict[str, Any]:
     """Take a connector off the allowlist."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         platforms.remove_approval(s, connector_id, actor=principal.actor)
         platforms.refresh_risk(s, rt.settings)
@@ -319,11 +317,12 @@ def _policy_targets(rt: Any, token: str) -> list[dict[str, Any]]:
     return targets
 
 
-@router.get("/connector-policy")
-def connector_policy_preview(request: Request, principal: Principal = Depends(admin)) -> dict:
+@router.get("/v1/platforms/connector-policy", auth=admin)
+def connector_policy_preview(request: HttpRequest) -> dict:
     """What pushing the connector allowlist into Power Platform would do, read as the
     signed-in administrator."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     token = _as_signed_in_admin(rt, principal, POWER_PLATFORM)
     try:
         policies = rt.microsoft_admin.connector_policies(token)
@@ -335,14 +334,13 @@ def connector_policy_preview(request: Request, principal: Principal = Depends(ad
         return {**view, "last_push": connector_policy.pushed(s) or None}
 
 
-@router.post("/connector-policy")
-def push_connector_policy(
-    request: Request, body: PolicyPush, principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/platforms/connector-policy", auth=admin)
+def push_connector_policy(request: HttpRequest, body: PolicyPush) -> dict[str, Any]:
     """Make Power Platform's connector policy "AgentGov connector allowlist" allow
     exactly the approved connectors, and apply it to ``targets``. Every other
     connector is blocked there, for apps and flows as well as agents."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         allowlist = connector_policy.approved(s)
     if not allowlist:
@@ -404,8 +402,8 @@ def push_connector_policy(
     return {"policy_id": policy_id, "connectors": allowlist, "targets": applied}
 
 
-def _platform_block(request: Request, ref: str, principal: Principal, *, blocked: bool) -> dict:
-    rt = request.app.state.rt
+def _platform_block(request: HttpRequest, ref: str, principal: Principal, *, blocked: bool) -> dict:
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         where = platforms.target(s, agent)
@@ -428,49 +426,48 @@ def _platform_block(request: Request, ref: str, principal: Principal, *, blocked
     return {"agent": agent.name, "platform": platforms.SOURCES[where["source"]], "blocked": blocked}
 
 
-@agent_router.post("/{ref}/platform/block")
-def platform_block(request: Request, ref: str, principal: Principal = Depends(admin)) -> dict:
+@agent_router.post("/v1/agents/{ref}/platform/block", auth=admin)
+def platform_block(request: HttpRequest, ref: str) -> dict:
     """Block the agent in its own platform, as the signed-in administrator: quarantine a
     Copilot Studio agent, or block a Microsoft 365 agent for the whole organisation."""
+    principal = request.auth
     return _platform_block(request, ref, principal, blocked=True)
 
 
-@agent_router.post("/{ref}/platform/unblock")
-def platform_unblock(request: Request, ref: str, principal: Principal = Depends(admin)) -> dict:
+@agent_router.post("/v1/agents/{ref}/platform/unblock", auth=admin)
+def platform_unblock(request: HttpRequest, ref: str) -> dict:
     """Undo a block in the agent's own platform, as the signed-in administrator."""
+    principal = request.auth
     return _platform_block(request, ref, principal, blocked=False)
 
 
 # ------------------------------------------------------ Entra access packages
 
 
-@router.get("/entra-access-packages")
-def entra_access_packages(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/platforms/entra-access-packages", auth=read)
+def entra_access_packages(request: HttpRequest) -> dict[str, Any]:
     """The Microsoft Entra access packages agents can hold, and what each agent's Entra
     identity holds, as last read."""
-    with request.app.state.rt.db.session() as s:
+    with runtime(request).db.session() as s:
         return entra_access.view(s)
 
 
-@agent_router.get("/{ref}/entra-access-packages")
-def agent_entra_access(
-    request: Request, ref: str, principal: Principal = Depends(reach.read)
-) -> dict:
+@agent_router.get("/v1/agents/{ref}/entra-access-packages", auth=guard(reach.read))
+def agent_entra_access(request: HttpRequest, ref: str) -> dict:
     """The Entra access packages the agent's Entra identity holds, and those it could."""
-    with request.app.state.rt.db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         return entra_access.for_agent(s, reach.agent(s, principal, ref))
 
 
-@agent_router.post("/{ref}/entra-access-packages/assign")
+@agent_router.post("/v1/agents/{ref}/entra-access-packages/assign", auth=admin)
 def assign_entra_package(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     """Ask Entra to assign an access package to the agent's identity (manage mode). Entra
     delivers it, or refuses; the next sync shows which."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     if rt.m365 is None:
         raise HTTPException(409, NOT_CONFIGURED)
     package = body.get("package")
@@ -495,12 +492,11 @@ def assign_entra_package(
     return {"agent": name, "package_id": package_id, **out}
 
 
-@agent_router.delete("/{ref}/entra-access-packages/{assignment_id}")
-def remove_entra_package(
-    request: Request, ref: str, assignment_id: str, principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@agent_router.delete("/v1/agents/{ref}/entra-access-packages/{assignment_id}", auth=admin)
+def remove_entra_package(request: HttpRequest, ref: str, assignment_id: str) -> dict[str, Any]:
     """Ask Entra to remove one of the agent identity's assignments (manage mode)."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     if rt.m365 is None:
         raise HTTPException(409, NOT_CONFIGURED)
     with rt.db.session() as s:

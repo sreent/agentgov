@@ -15,10 +15,10 @@ import httpx
 import pytest
 import uvicorn
 import yaml
-from fastapi.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
+from starlette.testclient import TestClient
 
 from agentgov import tls
 from agentgov.api.app import create_app

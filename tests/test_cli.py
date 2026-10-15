@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 from typer.testing import CliRunner
 
 from agentgov import cli

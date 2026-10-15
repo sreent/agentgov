@@ -13,11 +13,11 @@ import httpx
 import pytest
 
 from agentgov import authzen
-from agentgov.api import authzen_routes
 from agentgov.config import Settings
 from agentgov.processor.control_plane import DecisionRecorder
 from agentgov.processor.server import GovernanceProcessor
 from agentgov.registry import features
+from agentgov.web import authzen as authzen_routes
 from tests.conftest import ADMIN, requires_opa
 from tests.test_opa import _decide, _seed
 from tests.test_processor import AGENT, FakeControlPlane, FakeOpa, call_request, run

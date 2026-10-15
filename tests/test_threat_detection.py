@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import time
@@ -13,12 +14,12 @@ import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
-from agentgov.api import copilot_studio_routes
 from agentgov.api.app import create_app
 from agentgov.config import Settings
 from agentgov.runtime import Runtime
+from agentgov.web import copilot_studio as copilot_studio_routes
 from tests.conftest import ADMIN, requires_opa
 from tests.test_platforms import bot, connector
 
@@ -219,6 +220,38 @@ class TestCallers:
         too_big = b'{"x": "' + b"a" * (copilot_studio_routes.MAX_BODY_BYTES + 1) + b'"}'
         assert studio.post(url, content=too_big, headers=allowed).status_code == 413
         assert decisions(studio) == []
+
+    def test_nothing_asks_for_the_body_of_a_caller_refused(self, studio) -> None:
+        # Below the HTTP client: refused by its headers alone, a caller is answered before
+        # anything asks for the body (Django reads a body whole before a view runs).
+        asked: list[bool] = []
+        sent: list[dict[str, Any]] = []
+
+        async def receive() -> dict[str, Any]:
+            asked.append(True)
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        for headers in ([], [(b"authorization", b"Bearer not-a-token")]):
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": f"{ENDPOINT}/analyze-tool-execution",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [(b"content-length", b"2"), *headers],
+                "server": ("testserver", 80),
+                "client": ("203.0.113.9", 4000),
+            }
+            asyncio.run(studio.app(scope, receive, send))
+            assert sent[0]["status"] == 401, sent
+            assert asked == []
+            sent.clear()
 
     def test_off_by_default(self, client) -> None:
         assert client.post(f"{ENDPOINT}/validate").status_code == 404

@@ -4,19 +4,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Request
+from django.http import HttpRequest
+from ninja import Body
 
 from agentgov.api import reach
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES
 from agentgov.registry import agents, instructions
 from agentgov.registry.errors import ValidationError
+from agentgov.web.api import Router
+from agentgov.web.auth import guard, require, runtime
 
-router = APIRouter(prefix="/v1", tags=["instructions"])
+router = Router(tags=["instructions"])
 # Administrators, for every team or for their teams' agents.
-team_admin = reach.require("admin")
+team_admin = guard(reach.require("admin"))
 
 
-def _classifier(rt: Any) -> dict[str, Any]:
+def classifier(rt: Any) -> dict[str, Any]:
     g = rt.guardian
     return {
         "enabled": g is not None,
@@ -25,26 +28,23 @@ def _classifier(rt: Any) -> dict[str, Any]:
     }
 
 
-@router.get("/agents/{ref}/instructions")
-def get_instructions(
-    request: Request, ref: str, principal: Principal = Depends(reach.read)
-) -> dict[str, Any]:
+@router.get("/v1/agents/{ref}/instructions", auth=guard(reach.read))
+def get_instructions(request: HttpRequest, ref: str) -> dict[str, Any]:
     """The agent's instructions from each source, and what the rules and classifier found."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = reach.agent(s, principal, ref)
-        return {"classifier": _classifier(rt), "sources": instructions.for_agent(s, agent.id)}
+        return {"classifier": classifier(rt), "sources": instructions.for_agent(s, agent.id)}
 
 
-@router.put("/agents/{ref}/instructions")
+@router.put("/v1/agents/{ref}/instructions", auth=team_admin)
 def set_instructions(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(team_admin),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     """Set the agent's registered instructions. They are checked straight away."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = reach.agent(s, principal, ref, "admin")
         row = instructions.report(
@@ -59,15 +59,13 @@ def set_instructions(
         return instructions.to_dict(row)
 
 
-@router.delete("/agents/{ref}/instructions")
+@router.delete("/v1/agents/{ref}/instructions", auth=team_admin)
 def clear_instructions(
-    request: Request,
-    ref: str,
-    source: str = "registered",
-    principal: Principal = Depends(team_admin),
+    request: HttpRequest, ref: str, source: str = "registered"
 ) -> dict[str, Any]:
     """Forget the agent's instructions from one source (``registered`` by default)."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = reach.agent(s, principal, ref, "admin")
         instructions.clear(s, agent, source=source, actor=principal.actor)
@@ -75,12 +73,11 @@ def clear_instructions(
         return {"agent": agent.name, "source": source, "cleared": True}
 
 
-@router.post("/agents/{ref}/instructions/rescan")
-def rescan_instructions(
-    request: Request, ref: str, principal: Principal = Depends(team_admin)
-) -> dict[str, Any]:
+@router.post("/v1/agents/{ref}/instructions/rescan", auth=team_admin)
+def rescan_instructions(request: HttpRequest, ref: str) -> dict[str, Any]:
     """Check the stored instructions again with the current rules and classifier."""
-    rt = request.app.state.rt
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = reach.agent(s, principal, ref, "admin")
         count = instructions.rescan(
@@ -90,19 +87,15 @@ def rescan_instructions(
         return {"agent": agent.name, "rescanned": count}
 
 
-@router.post("/instructions/check")
-def check_instructions(
-    request: Request,
-    body: dict[str, Any] = Body(...),
-    _: Principal = Depends(require(*READ_ROLES, "registrar")),
-) -> dict[str, Any]:
+@router.post("/v1/instructions/check", auth=require(*READ_ROLES, "registrar"))
+def check_instructions(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Check instructions without storing them, for example in a CI pipeline.
 
     With the classifier configured this waits for its verdicts unless
     ``classifier`` is false."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     classify = body.get("classifier", True)
     if not isinstance(classify, bool):
         raise ValidationError("classifier must be true or false")
     result = instructions.check(body.get("text"), rt.guardian, classify=classify)
-    return {**result, "classifier": {**_classifier(rt), **result["classifier"]}}
+    return {**result, "classifier": {**classifier(rt), **result["classifier"]}}

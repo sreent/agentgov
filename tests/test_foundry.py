@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from tests.conftest import ADMIN
 

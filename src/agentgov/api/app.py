@@ -1,51 +1,29 @@
-"""FastAPI application factory for the control plane."""
+"""The control plane's ASGI application: Django serves the API and its documentation
+(agentgov.web, docs/adr/0007-django.md), the admin UI's files go as they are, and the
+runtime runs while the application does."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import secrets
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import traceback
+from collections.abc import Mapping
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
 
-from fastapi import Depends, FastAPI, Request
-from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
-from starlette.responses import Response
-from starlette.types import Scope
+from starlette.datastructures import URL
+from starlette.exceptions import HTTPException
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.staticfiles import StaticFiles
+from starlette.types import Receive, Scope, Send
+from starlette.websockets import WebSocketClose
 
-from agentgov import __version__
-from agentgov.api import (
-    access_routes,
-    assertion_routes,
-    authzen_routes,
-    copilot_studio_routes,
-    evidence_routes,
-    feature_routes,
-    governance_routes,
-    identity_routes,
-    instruction_routes,
-    integration_routes,
-    mcp_routes,
-    model_routes,
-    package_routes,
-    platform_routes,
-    registry_routes,
-    rule_routes,
-    secops_routes,
-    sso_routes,
-)
-from agentgov.api.auth import Principal, describe, signed_in
+from agentgov import web
 from agentgov.config import Settings
-from agentgov.identity import chains
-from agentgov.registry.errors import RegistryError
 from agentgov.runtime import Runtime
+from agentgov.web.api import routes as web_routes
 
 log = logging.getLogger(__name__)
 
@@ -62,8 +40,9 @@ UI_HEADERS = {
 }
 
 
-# The admin UI, built from ui/ into the package (npm run build there).
+# The admin UI, built from ui/ into the package (npm run build there), and where it is.
 UI_DIR = Path(str(resources.files("agentgov") / "ui"))
+UI_PATH = "/ui"
 
 # What /ui/ shows where the package has no admin UI built in it: a source checkout, before
 # its UI is built.
@@ -101,132 +80,88 @@ class _UiFiles(StaticFiles):
 
 def create_app(
     settings: Settings | None = None, *, runtime: Runtime | None = None, background: bool = True
-) -> FastAPI:
+) -> ControlPlane:
     settings = settings or Settings.from_env()
     if not settings.admin_token and settings.dev_mode:
         settings = settings.with_overrides(admin_token="agt-dev-" + secrets.token_urlsafe(16))
         log.warning("dev mode: generated admin token %s", settings.admin_token)
-    rt = runtime or Runtime(settings)
+    return ControlPlane(runtime or Runtime(settings), background=background)
 
-    @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        if background:
-            rt.start(asyncio.get_running_loop())
-        else:
-            rt.init_db()
-            rt.bundles.bind_loop(asyncio.get_running_loop())
+
+class ControlPlane:
+    """The ASGI app: Django serves the API (agentgov.web), and the admin UI's files go as
+    they are. While the app runs, so does the runtime: all of it with ``background``, else
+    only its database (as tests want it)."""
+
+    def __init__(self, rt: Runtime, *, background: bool = True) -> None:
+        self.state = SimpleNamespace(rt=rt)
+        self.background = background
+        self.django = web.handler()
+        self.ui = _UiFiles(directory=UI_DIR, html=True, check_dir=False)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "lifespan":
+            await self._lifespan(receive, send)
+        elif scope["type"] == "http":
+            await self._http(scope, receive, send)
+        else:  # no WebSockets here
+            await WebSocketClose()(scope, receive, send)
+
+    async def _http(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope["path"]
+        if web.serves(path):
+            await self.django({**scope, web.RUNTIME: self.state.rt}, receive, send)
+            return
+        if path.startswith(UI_PATH + "/"):
+            await self._ui(scope, receive, send)
+            return
+        other = path.rstrip("/") if path.endswith("/") else path + "/"
+        if path != "/" and (web.serves(other) or other == UI_PATH + "/"):
+            # A path with slashes at its end, or without one, that is served the other way.
+            url = URL(scope={**scope, "path": other})
+            await RedirectResponse(str(url))(scope, receive, send)
+            return
+        await _refused(404, "Not Found")(scope, receive, send)
+
+    async def _ui(self, scope: Scope, receive: Receive, send: Send) -> None:
+        mounted = {**scope, "root_path": scope.get("root_path", "") + UI_PATH}
         try:
-            yield
-        finally:
-            if background:
-                rt.stop()
+            await self.ui(mounted, receive, send)
+        except HTTPException as exc:
+            await _refused(exc.status_code, exc.detail, exc.headers)(scope, receive, send)
 
-    app = FastAPI(
-        title="AgentGov control plane",
-        version=__version__,
-        description="Open-source AI agent governance: registry, lifecycle, policy distribution "
-        "and evidence, composed from Keycloak, OPA, agentgateway, Presidio and OpenTelemetry.",
-        lifespan=lifespan,
-    )
-    app.state.rt = rt
+    async def _lifespan(self, receive: Receive, send: Send) -> None:
+        # As Starlette ran FastAPI's lifespan: what fails is said, then raised.
+        rt = self.state.rt
+        started = False
+        await receive()  # lifespan.startup
+        try:
+            loop = asyncio.get_running_loop()
+            if self.background:
+                rt.start(loop)
+            else:
+                rt.init_db()
+                rt.bundles.bind_loop(loop)
+            try:
+                await send({"type": "lifespan.startup.complete"})
+                started = True
+                await receive()  # lifespan.shutdown
+            finally:
+                if self.background:
+                    rt.stop()
+        except BaseException:
+            failed = "lifespan.shutdown.failed" if started else "lifespan.startup.failed"
+            await send({"type": failed, "message": traceback.format_exc()})
+            raise
+        await send({"type": "lifespan.shutdown.complete"})
 
-    @app.exception_handler(RegistryError)
-    async def registry_error(_: Request, exc: RegistryError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
-    @app.exception_handler(RequestValidationError)
-    async def request_error(_: Request, exc: RequestValidationError) -> JSONResponse:
-        # Same shape as every other error ({"detail": "..."}), with the field errors kept.
-        errors = jsonable_encoder(exc.errors())
-        message = "; ".join(
-            ".".join(str(p) for p in e.get("loc", []) if p != "body") + f": {e.get('msg')}"
-            for e in errors
-        )
-        return JSONResponse(
-            status_code=422, content={"detail": message or "invalid request", "errors": errors}
-        )
+def _refused(status: int, detail: str, headers: Mapping[str, str] | None = None) -> Response:
+    # As the API refuses: {"detail": ...}, with the headers the refusal has (Allow).
+    return JSONResponse({"detail": detail}, status_code=status, headers=headers)
 
-    @app.get("/healthz", tags=["health"])
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
 
-    @app.get("/readyz", tags=["health"])
-    def readyz() -> dict[str, Any]:
-        with rt.db.session() as s:
-            s.execute(text("SELECT 1"))
-        return {"status": "ready", "version": __version__}
-
-    delegation_keys = chains.keys(settings.key_secret)
-
-    @app.get("/v1/info", tags=["health"])
-    def info() -> dict[str, Any]:
-        return {
-            "version": __version__,
-            "gateway_url": settings.gateway_public_url,
-            "identity_provider": "keycloak" if settings.keycloak_enabled else None,
-            "token_endpoint": (
-                settings.keycloak_issuer.rstrip("/") + "/protocol/openid-connect/token"
-                if settings.keycloak_issuer
-                else None
-            ),
-            "audience": settings.gateway_audience,
-            # What the tokens of the identity issuers the gateway trusts carry, unless an
-            # issuer names an audience of its own.
-            "issuer_audience": settings.gateway_public_url.rstrip("/"),
-            "opa": bool(settings.opa_url),
-            "sso": {"enabled": settings.sso_enabled, "login_url": "/auth/login"},
-            # Signed-in administrators can act in Microsoft 365 through AgentGov.
-            "microsoft_admin_actions": settings.microsoft_admin_actions,
-            # IBM Granite Guardian, for agent instructions and traffic (docs/detection.md).
-            "classifier": {
-                "enabled": bool(settings.guardian_url),
-                "model": settings.guardian_model if settings.guardian_url else None,
-            },
-            # Where agents find the keys to check the delegations AgentGov gives them.
-            "delegation_jwks": "/v1/delegations/jwks" if delegation_keys else None,
-            # The transparency log the ledger's checkpoints go into (docs/evidence.md).
-            "transparency_log": settings.ledger_rekor_url,
-        }
-
-    @app.get("/v1/delegations/jwks", tags=["health"])
-    def delegation_jwks() -> Response:
-        """The public keys of the delegations AgentGov gives the agents it calls through the
-        gateway: an agent that checks the one each call carries refuses calls around the
-        gateway (docs/agent-to-agent.md#calls-around-the-gateway). No secret."""
-        return JSONResponse(
-            chains.jwks(delegation_keys), headers={"Cache-Control": "public, max-age=300"}
-        )
-
-    @app.get("/v1/me", tags=["system"])
-    def whoami(principal: Principal = Depends(signed_in)) -> dict[str, Any]:
-        """The caller's identity and roles, so clients can tailor what they offer."""
-        return describe(rt, principal)
-
-    app.include_router(registry_routes.router)
-    app.include_router(package_routes.router)
-    app.include_router(rule_routes.router)
-    app.include_router(governance_routes.router)
-    app.include_router(evidence_routes.router)
-    app.include_router(integration_routes.router)
-    app.include_router(sso_routes.router)
-    app.include_router(access_routes.router)
-    app.include_router(platform_routes.router)
-    app.include_router(platform_routes.agent_router)
-    app.include_router(instruction_routes.router)
-    app.include_router(copilot_studio_routes.router)
-    app.include_router(feature_routes.router)
-    app.include_router(model_routes.router)
-    app.include_router(identity_routes.router)
-    app.include_router(secops_routes.router)
-    app.include_router(mcp_routes.router)
-    app.include_router(mcp_routes.public)
-    app.include_router(authzen_routes.router)
-    app.include_router(assertion_routes.router)
-
-    app.mount("/ui", _UiFiles(directory=UI_DIR, html=True, check_dir=False), name="ui")
-
-    @app.get("/", include_in_schema=False)
-    def root() -> RedirectResponse:
-        return RedirectResponse("/ui/")
-
-    return app
+def api_routes(app: ControlPlane) -> list[tuple[str, str]]:
+    """Every route of ``app``'s API, as (method, path)."""
+    del app  # every control plane serves the one API (agentgov.web)
+    return sorted(set(web_routes()))

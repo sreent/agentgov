@@ -17,8 +17,8 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import delete, select, update
+from starlette.testclient import TestClient
 
 from agentgov import compliance, ids, ledger, retention
 from agentgov import timestamping as tsp

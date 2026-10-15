@@ -12,8 +12,8 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+from starlette.testclient import TestClient
 
 from agentgov import db, ledger
 from agentgov.config import Settings

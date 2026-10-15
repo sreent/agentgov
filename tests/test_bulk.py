@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov.config import Settings
 from agentgov.registry import findings

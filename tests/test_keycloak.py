@@ -554,7 +554,7 @@ def test_agents_with_a_workload_identity_have_no_secret(rt, settings, keycloak, 
 
 
 def test_the_api_says_what_token_authenticates_an_agent(settings, keycloak) -> None:
-    from fastapi.testclient import TestClient
+    from starlette.testclient import TestClient
 
     from agentgov.api.app import create_app
     from agentgov.runtime import Runtime

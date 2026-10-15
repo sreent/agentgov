@@ -13,9 +13,8 @@ import re
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from django.http import HttpRequest, HttpResponse
+from ninja import Body, Query
 from pydantic import BaseModel, Field
 
 from agentgov import ids
@@ -24,12 +23,21 @@ from agentgov.api.auth import (
     SESSION_COOKIE,
     bearer_token,
     describe,
-    session_principal,
 )
 from agentgov.identity import sso
+from agentgov.web.api import (
+    HTTPException,
+    Router,
+    delete_cookie,
+    json_response,
+    raw_response,
+    redirect_response,
+    set_cookie,
+)
+from agentgov.web.auth import runtime, session_principal
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/auth", tags=["sign-in"])
+router = Router(tags=["sign-in"])
 
 LOGIN_COOKIE = "agentgov_login"
 # Where in the UI to go once signed in: a page of the UI (its hash), such as an issue an
@@ -41,41 +49,41 @@ UI_PATH = "/ui/"
 PKCE_CHALLENGE = r"^[A-Za-z0-9_-]{43}$"
 
 
-def _client(request: Request) -> sso.OIDCClient:
-    client = request.app.state.rt.sso
+def _client(request: HttpRequest) -> sso.OIDCClient:
+    client = runtime(request).sso
     if client is None:
         raise HTTPException(404, "single sign-on is not configured")
     return client
 
 
-def _secure(request: Request) -> bool:
-    return request.app.state.rt.settings.public_url.startswith("https://")
+def _secure(request: HttpRequest) -> bool:
+    return runtime(request).settings.public_url.startswith("https://")
 
 
-def _redirect(url: str) -> RedirectResponse:
-    resp = RedirectResponse(url, status_code=302)
-    resp.delete_cookie(LOGIN_COOKIE, path="/auth")
-    resp.delete_cookie(NEXT_COOKIE, path="/auth")
+def _redirect(url: str) -> HttpResponse:
+    resp = redirect_response(url, status_code=302)
+    delete_cookie(resp, LOGIN_COOKIE, path="/auth")
+    delete_cookie(resp, NEXT_COOKIE, path="/auth")
     return resp
 
 
-def _back_to_ui(code: str) -> RedirectResponse:
+def _back_to_ui(code: str) -> HttpResponse:
     # Only a fixed code travels in the URL; the UI maps it to its own message.
     return _redirect(f"{UI_PATH}?sso_error={code}")
 
 
-def _back_to_cli(port: int, **query: str) -> RedirectResponse:
+def _back_to_cli(port: int, **query: str) -> HttpResponse:
     # The loopback address, never a host from the request: nothing else can receive the code.
     return _redirect(f"http://127.0.0.1:{port}/callback?{urlencode(query)}")
 
 
-@router.get("/login")
+@router.get("/auth/login")
 def login(
-    request: Request,
+    request: HttpRequest,
     cli_port: int | None = Query(None, ge=1024, le=65535),
     cli_challenge: str | None = Query(None, pattern=PKCE_CHALLENGE),
     next: str | None = Query(None, pattern=NEXT_PAGE, max_length=500),
-) -> RedirectResponse:
+) -> HttpResponse:
     """Send the browser to the identity provider.
 
     ``agentgov login`` adds ``cli_port`` and ``cli_challenge``: the browser then
@@ -89,11 +97,12 @@ def login(
     except sso.SSOError as exc:
         log.warning("cannot sign in: %s", exc)
         return _back_to_cli(cli_port, error=exc.code) if cli_port else _back_to_ui(exc.code)
-    with request.app.state.rt.db.session() as s:
+    with runtime(request).db.session() as s:
         state, url = sso.begin_login(s, client, cli_port=cli_port, cli_challenge=cli_challenge)
-    resp = RedirectResponse(url, status_code=302)
+    resp = redirect_response(url, status_code=302)
     # Binds the callback to this browser. Lax: it must survive the provider's redirect.
-    resp.set_cookie(
+    set_cookie(
+        resp,
         LOGIN_COOKIE,
         state,
         max_age=int(sso.LOGIN_TTL.total_seconds()),
@@ -103,7 +112,8 @@ def login(
         path="/auth",
     )
     if next and cli_port is None:
-        resp.set_cookie(
+        set_cookie(
+            resp,
             NEXT_COOKIE,
             next,
             max_age=int(sso.LOGIN_TTL.total_seconds()),
@@ -115,24 +125,24 @@ def login(
     return resp
 
 
-@router.get("/callback")
+@router.get("/auth/callback")
 def callback(
-    request: Request,
+    request: HttpRequest,
     state: str | None = None,
     code: str | None = None,
     error: str | None = None,
-) -> RedirectResponse:
+) -> HttpResponse:
     """The provider's redirect back: redeem the code and start a session."""
     client = _client(request)
-    rt = request.app.state.rt
+    rt = runtime(request)
     # Only a sign-in bound to this browser by its login cookie may go back to a CLI.
-    bound = bool(state) and request.cookies.get(LOGIN_COOKIE) == state
+    bound = bool(state) and request.COOKIES.get(LOGIN_COOKIE) == state
     port = None
     if bound:
         with rt.db.session() as s:
             port = sso.cli_port(s, state or "")
 
-    def failed(code: str) -> RedirectResponse:
+    def failed(code: str) -> HttpResponse:
         return _back_to_cli(port, error=code) if port else _back_to_ui(code)
 
     if error:
@@ -174,9 +184,10 @@ def callback(
         return _back_to_cli(port, code=one_time)
     if refresh_token:
         rt.delegations.remember(session_id, refresh_token, expires_at)
-    page = request.cookies.get(NEXT_COOKIE) or ""
+    page = request.COOKIES.get(NEXT_COOKIE) or ""
     resp = _redirect(UI_PATH + (page if re.match(NEXT_PAGE, page) else ""))
-    resp.set_cookie(
+    set_cookie(
+        resp,
         SESSION_COOKIE,
         token,
         max_age=rt.settings.session_hours * 3600,
@@ -188,8 +199,8 @@ def callback(
     return resp
 
 
-@router.get("/session")
-def current_session(request: Request) -> dict[str, Any]:
+@router.get("/auth/session")
+def current_session(request: HttpRequest) -> dict[str, Any]:
     """Whether this browser is signed in through single sign-on, and as whom.
 
     Always answers 200 (unlike ``/v1/me``), so the UI can check on first load
@@ -198,7 +209,7 @@ def current_session(request: Request) -> dict[str, Any]:
     principal = session_principal(request)
     if principal is None:
         return {"signed_in": False}
-    return {"signed_in": True, **describe(request.app.state.rt, principal)}
+    return {"signed_in": True, **describe(runtime(request), principal)}
 
 
 class CliCode(BaseModel):
@@ -206,11 +217,11 @@ class CliCode(BaseModel):
     verifier: str = Field(min_length=43, max_length=128)
 
 
-@router.post("/cli/token")
-def cli_token(request: Request, body: CliCode) -> dict[str, Any]:
+@router.post("/auth/cli/token")
+def cli_token(request: HttpRequest, body: CliCode = Body(...)) -> dict[str, Any]:
     """Give ``agentgov login`` its session: the one-time code and the PKCE verifier."""
     _client(request)
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         state, who = sso.collect_cli_login(s, body.code, body.verifier)
     if who is None:
@@ -235,8 +246,8 @@ def cli_token(request: Request, body: CliCode) -> dict[str, Any]:
     }
 
 
-@router.post("/logout")
-def logout(request: Request) -> JSONResponse:
+@router.post("/auth/logout")
+def logout(request: HttpRequest) -> HttpResponse:
     """End the session; the UI then visits ``logout_url`` to end the provider session.
 
     The CLI (``agentgov logout``) sends its session token as a bearer token.
@@ -244,11 +255,11 @@ def logout(request: Request) -> JSONResponse:
     client = _client(request)
     body: dict[str, Any] = {"logout_url": None}
     bearer = bearer_token(request)
-    token = bearer or request.cookies.get(SESSION_COOKIE)
+    token = bearer or request.COOKIES.get(SESSION_COOKIE)
     if token:
         if not bearer and request.headers.get(CSRF_HEADER) != "1":
             raise HTTPException(403, "cross-site request refused: send the X-AgentGov-CSRF header")
-        rt = request.app.state.rt
+        rt = runtime(request)
         with rt.db.session() as s:
             record = sso.lookup(s, token)
             session_id = record.id if record is not None else None
@@ -257,45 +268,45 @@ def logout(request: Request) -> JSONResponse:
             rt.delegations.forget(session_id)
         if id_token is not None:
             body["logout_url"] = client.logout_url(id_token or None)
-    resp = JSONResponse(body)
-    resp.delete_cookie(SESSION_COOKIE, path="/")
+    resp = json_response(body)
+    delete_cookie(resp, SESSION_COOKIE, path="/")
     return resp
 
 
-@router.post("/backchannel-logout")
-async def backchannel_logout(request: Request) -> Response:
+@router.post("/auth/backchannel-logout")
+def backchannel_logout(request: HttpRequest) -> HttpResponse:
     """The identity provider ended a person's session: end the AgentGov sessions that came
     from it (OpenID Connect Back-Channel Logout 1.0). The provider posts a logout token it
     signed for AgentGov's client, which names the session or the person."""
     client = _client(request)
     try:
-        fields = parse_qs((await request.body()).decode())
+        fields = parse_qs(request.body.decode())
     except UnicodeDecodeError:
         fields = {}
     tokens = fields.get("logout_token") or []
     if len(tokens) != 1:
         return _logout_refused("send one logout_token, as a form field")
     try:
-        ended = await run_in_threadpool(_end_provider_sessions, request, client, tokens[0])
+        ended = _end_provider_sessions(request, client, tokens[0])
     except sso.SSOError as exc:
         log.warning("refused a logout token: %s", exc)
         return _logout_refused(str(exc))
     if ended:
         log.info("the identity provider ended %d session(s)", len(ended))
-    return Response(status_code=200, headers={"Cache-Control": "no-store"})
+    return raw_response(status_code=200, headers={"Cache-Control": "no-store"})
 
 
-def _logout_refused(why: str) -> JSONResponse:
-    return JSONResponse(
+def _logout_refused(why: str) -> HttpResponse:
+    return json_response(
         {"error": "invalid_request", "error_description": why},
         status_code=400,
         headers={"Cache-Control": "no-store"},
     )
 
 
-def _end_provider_sessions(request: Request, client: sso.OIDCClient, token: str) -> list[str]:
+def _end_provider_sessions(request: HttpRequest, client: sso.OIDCClient, token: str) -> list[str]:
     claims = client.validate_logout(token)  # may fetch the provider's keys
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         ended = sso.end_provider_sessions(s, claims)
     if rt.delegations is not None:

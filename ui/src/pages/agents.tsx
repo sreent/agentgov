@@ -145,7 +145,7 @@ function AgentsView({ data }: { data: AgentsData }) {
   const searchBox = useRef<HTMLInputElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const searchSeq = useRef(0);
-  // Gone (another page shown): what finishes later changes nothing, the address least of all.
+  // Gone (another page shown): what finishes later changes nothing.
   const shown = useRef(true);
   useEffect(() => {
     shown.current = true;

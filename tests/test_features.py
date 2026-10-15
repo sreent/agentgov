@@ -6,8 +6,8 @@ import json
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import cli, telemetry
 from agentgov.api.app import create_app

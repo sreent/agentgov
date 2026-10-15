@@ -8,8 +8,8 @@ import zipfile
 from datetime import timedelta
 from typing import Any
 
-from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.testclient import TestClient
 
 from agentgov import ids, ledger
 from agentgov.models import Agent, PlatformAgent, PlatformSync

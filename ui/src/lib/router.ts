@@ -37,8 +37,13 @@ export function parseHash(): { path: string; params: URLSearchParams } {
   return { path, params: new URLSearchParams(q < 0 ? '' : raw.slice(q + 1)) };
 }
 
-/** Put a page's filters in its address, without going anywhere (for links and reloads). */
+/**
+ * Put a page's filters in its address, without going anywhere (for links and reloads). Only
+ * while the address is still that page's: what finishes after it was left (a search, say,
+ * while the next page loads) leaves the next page's address alone.
+ */
 export function setHashQuiet(path: string, params?: Record<string, unknown>): void {
+  if (parseHash().path !== path) return;
   const qs = params
     ? new URLSearchParams(Object.entries(params).filter(([, v]) => v).map(([k, v]) => [k, String(v)])).toString()
     : '';

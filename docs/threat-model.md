@@ -160,8 +160,9 @@ Where to start, in the order the promises above depend on each other:
 2. **The processor's decisions**, `src/agentgov/processor/`: `server.py` (tool calls),
    `model_guard.py`, `a2a_guard.py`, `a2a_answers.py`; and the policies they ask,
    `src/agentgov/policies/agentgov/` (`context.rego` first).
-3. **The API's authorization**, `src/agentgov/api/auth.py` and `src/agentgov/api/reach.py`,
-   and the reviewed list of who may call what, `tests/authz_matrix.txt`
+3. **The API's authorization**, `src/agentgov/api/auth.py` and `src/agentgov/api/reach.py`
+   (`src/agentgov/web/auth.py` applies them to the routes on Django), and the reviewed list
+   of who may call what, `tests/authz_matrix.txt`
    (`python -m tests.test_authz_matrix` writes it again).
 4. **The ledger**, `src/agentgov/ledger.py`, `src/agentgov/retention.py`,
    `src/agentgov/witness.py` and `src/agentgov/timestamping.py`.

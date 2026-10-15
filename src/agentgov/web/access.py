@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from django.http import HttpRequest
+from ninja import Body
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES
 from agentgov.identity import sso
 from agentgov.registry import access
+from agentgov.web.api import Router
+from agentgov.web.auth import require, runtime
 
-router = APIRouter(prefix="/v1/access", tags=["access"])
+router = Router(tags=["access"])
 read = require(*READ_ROLES)
 admin = require("admin")
 
@@ -46,11 +49,11 @@ def provider(rt: Any) -> dict[str, Any] | None:
     }
 
 
-@router.get("")
-def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/access", auth=read)
+def overview(request: HttpRequest) -> dict[str, Any]:
     """Everyone who has signed in (or been refused), the sessions open now, the roles
     given in AgentGov, and the identity provider."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     signing_in = provider(rt)  # may read the provider's discovery document
     with rt.db.session() as s:
         if signing_in is not None:
@@ -82,55 +85,47 @@ class Grant(BaseModel):
     reason: str | None = Field(None, max_length=1000)
 
 
-@router.post("/grants", status_code=201)
-def give_role(
-    request: Request, body: Grant, principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/access/grants", status_code=201, auth=admin)
+def give_role(request: HttpRequest, body: Grant = Body(...)) -> dict[str, Any]:
     """Give a person an AgentGov role, by the email address their identity provider vouches
     for: from their next sign-in, beside the roles the provider gives them. With ``team``,
     for that team's agents only."""
-    with request.app.state.rt.db.session() as s:
+    with runtime(request).db.session() as s:
         record = access.grant(
-            s, body.email, body.role, actor=principal.actor, reason=body.reason, team=body.team
+            s, body.email, body.role, actor=request.auth.actor, reason=body.reason, team=body.team
         )
         return access.grant_to_dict(record)
 
 
-@router.delete("/grants/{email}/{role}")
-def take_role(
-    request: Request, email: str, role: str, principal: Principal = Depends(admin)
-) -> dict[str, int]:
+@router.delete("/v1/access/grants/{email}/{role}", auth=admin)
+def take_role(request: HttpRequest, email: str, role: str) -> dict[str, int]:
     """Take away a role given in AgentGov; the person's sessions end with it."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
-        ended = access.revoke(s, email, role, actor=principal.actor)
+        ended = access.revoke(s, email, role, actor=request.auth.actor)
     if rt.delegations is not None:
         rt.delegations.forget(*ended)
     return {"ended": len(ended)}
 
 
-@router.delete("/sessions/{session_id}")
-def end_session(
-    request: Request, session_id: str, principal: Principal = Depends(admin)
-) -> dict[str, int]:
+@router.delete("/v1/access/sessions/{session_id}", auth=admin)
+def end_session(request: HttpRequest, session_id: str) -> dict[str, int]:
     """End one session. The person signs in again, which re-reads their roles."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
-        ended = access.end_session(s, session_id, actor=principal.actor)
+        ended = access.end_session(s, session_id, actor=request.auth.actor)
     if rt.delegations is not None:
         rt.delegations.forget(session_id)
     return {"ended": ended}
 
 
-@router.post("/people/{subject:path}/sign-out")
-def sign_out(
-    request: Request, subject: str, principal: Principal = Depends(admin)
-) -> dict[str, int]:
+@router.post("/v1/access/people/{path:subject}/sign-out", auth=admin)
+def sign_out(request: HttpRequest, subject: str) -> dict[str, int]:
     """End every session of one person (by the identity provider's subject)."""
-    rt = request.app.state.rt
+    rt = runtime(request)
     with rt.db.session() as s:
         ended_ids = access.session_ids(s, subject)
-        ended = access.sign_out(s, subject, actor=principal.actor)
+        ended = access.sign_out(s, subject, actor=request.auth.actor)
     if rt.delegations is not None:
         rt.delegations.forget(*ended_ids)
     return {"ended": ended}

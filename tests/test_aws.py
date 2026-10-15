@@ -11,7 +11,7 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov.config import Settings
 from agentgov.platforms.aws_auth import Credentials, Session, sign

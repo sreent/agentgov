@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from agentgov.api import app as app_module
 from agentgov.api.app import create_app
@@ -150,7 +150,7 @@ class TestRoles:
         assert ts.json()["status"] == "pending"
 
     def test_registrar_requests_activate_when_approval_is_not_required(self, settings) -> None:
-        from fastapi.testclient import TestClient
+        from starlette.testclient import TestClient
 
         from agentgov.api.app import create_app
 
