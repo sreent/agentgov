@@ -23,12 +23,10 @@ import json
 import re
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.db import lock, mark_changed
-from agentgov.models import BLOCKED, PENDING, ToolServer
+from agentgov.db.models import ToolServer
+from agentgov.models import BLOCKED, PENDING
 from agentgov.registry import findings, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
@@ -55,20 +53,18 @@ PACKAGE_TYPES = ("npm", "pypi", "oci", "nuget", "cargo", "mcpb")
 REGISTRY_NAME = re.compile(r"^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$")
 
 
-def get(session: Session, ref: str) -> ToolServer:
-    ts = session.get(ToolServer, ref) or session.scalar(
-        select(ToolServer).where(ToolServer.name == ref)
-    )
+def get(tx: db.Where, ref: str) -> ToolServer:
+    ts = ToolServer.objects.filter(pk=ref).first() or ToolServer.objects.filter(name=ref).first()
     if ts is None:
         raise NotFound(f"tool server {ref!r} not found")
     return ts
 
 
-def list_all(session: Session, status: str | None = None) -> list[ToolServer]:
-    stmt = select(ToolServer).order_by(ToolServer.name)
+def list_all(tx: db.Where, status: str | None = None) -> list[ToolServer]:
+    servers = ToolServer.objects.order_by("name")
     if status:
-        stmt = stmt.where(ToolServer.status == status)
-    return list(session.scalars(stmt))
+        servers = servers.filter(status=status)
+    return list(servers)
 
 
 def _package(i: int, value: Any) -> dict[str, Any]:
@@ -185,19 +181,16 @@ def _check(ts: ToolServer) -> None:
         raise ValidationError("packages are for servers listed for developers (developers: true)")
 
 
-def _unique_registry_name(session: Session, ts: ToolServer) -> None:
-    if ts.registry_name and session.scalar(
-        select(ToolServer).where(
-            ToolServer.registry_name == ts.registry_name, ToolServer.id != ts.id
-        )
-    ):
+def _unique_registry_name(tx: db.Where, ts: ToolServer) -> None:
+    taken = ToolServer.objects.filter(registry_name=ts.registry_name).exclude(id=ts.id)
+    if ts.registry_name and taken.exists():
         raise Conflict(f"another tool server is already {ts.registry_name!r} in the registry")
 
 
-def create(session: Session, data: dict[str, Any], *, actor: str, approve: bool) -> ToolServer:
+def create(tx: db.Where, data: dict[str, Any], *, actor: str, approve: bool) -> ToolServer:
     """Register a server. Requests from non-admins start ``pending`` review."""
     name = validation.slug(data.get("name"), "name")
-    if session.scalar(select(ToolServer).where(ToolServer.name == name)):
+    if ToolServer.objects.filter(name=name).exists():
         raise Conflict(f"tool server {name!r} already exists")
     ts = ToolServer(
         id=ids.new_id(ids.TOOL_SERVER),
@@ -214,11 +207,10 @@ def create(session: Session, data: dict[str, Any], *, actor: str, approve: bool)
     )
     _apply(ts, data)
     ts.revision = 0
-    _unique_registry_name(session, ts)
-    session.add(ts)
-    session.flush()
+    _unique_registry_name(tx, ts)
+    ts.save(force_insert=True)
     ledger.append(
-        session,
+        tx,
         type="toolserver.registered",
         actor=actor,
         resource=f"toolserver/{name}",
@@ -230,39 +222,40 @@ def create(session: Session, data: dict[str, Any], *, actor: str, approve: bool)
             "developers": ts.developers,
         },
     )
-    mark_changed(session, "toolservers")
+    mark_changed(tx, "toolservers")
     return ts
 
 
 def update(
-    session: Session,
+    tx: db.Where,
     ts: ToolServer,
     data: dict[str, Any],
     *,
     actor: str,
     version: int | None = None,
 ) -> list[str]:
-    start_edit(session, ts, version, f"tool server {ts.name}")
+    start_edit(tx, ts, version, f"tool server {ts.name}")
     changed = _apply(ts, data)
-    _unique_registry_name(session, ts)
+    _unique_registry_name(tx, ts)
     if changed:
         edited(ts)
+        ts.save()
         ledger.append(
-            session,
+            tx,
             type="toolserver.updated",
             actor=actor,
             resource=f"toolserver/{ts.name}",
             details={**{k: getattr(ts, k) for k in changed}, "changes": changes(ts)},
         )
-        mark_changed(session, "toolservers")
+        mark_changed(tx, "toolservers")
     return changed
 
 
-def set_status(session: Session, ts: ToolServer, action: str, *, actor: str) -> ToolServer:
+def set_status(tx: db.Where, ts: ToolServer, action: str, *, actor: str) -> ToolServer:
     targets = {"approve": APPROVED, "block": BLOCKED, "unblock": APPROVED}
     if action not in targets:
         raise ValidationError(f"unknown action {action!r}")
-    lock(session, ts)
+    lock(tx, ts)
     if action == "unblock" and ts.status != BLOCKED:
         raise InvalidTransition("tool server is not blocked")
     if action == "approve" and ts.status != PENDING:
@@ -277,22 +270,23 @@ def set_status(session: Session, ts: ToolServer, action: str, *, actor: str) -> 
     else:
         ts.blocked_from = None
     ts.status = target
+    ts.save()
     ledger.append(
-        session,
+        tx,
         type=f"toolserver.{action}",
         actor=actor,
         resource=f"toolserver/{ts.name}",
         severity="warning" if action == "block" else "info",
         details={"from": previous, "to": ts.status},
     )
-    mark_changed(session, "toolservers")
+    mark_changed(tx, "toolservers")
     return ts
 
 
-def delete(session: Session, ts: ToolServer, *, actor: str) -> None:
-    ledger.append(session, type="toolserver.deleted", actor=actor, resource=f"toolserver/{ts.name}")
-    session.delete(ts)
-    mark_changed(session, "toolservers")
+def delete(tx: db.Where, ts: ToolServer, *, actor: str) -> None:
+    ledger.append(tx, type="toolserver.deleted", actor=actor, resource=f"toolserver/{ts.name}")
+    ts.delete()
+    mark_changed(tx, "toolservers")
 
 
 def fingerprint(tool: dict[str, Any]) -> str:
@@ -307,7 +301,7 @@ def fingerprint(tool: dict[str, Any]) -> str:
 
 
 def record_catalog(
-    session: Session,
+    tx: db.Where,
     ts: ToolServer,
     tools: list[dict[str, Any]],
     *,
@@ -353,10 +347,11 @@ def record_catalog(
         catalog[name] = entry
     ts.tools = sorted(catalog.values(), key=lambda t: t["name"])
     ts.tools_synced_at = ids.utcnow()
+    ts.save()
 
     for name in report["changed"]:
         findings.raise_finding(
-            session,
+            db.orm(tx),
             type="toolserver.tool_drift",
             severity="high",
             subject=f"{ts.name}/{name}",
@@ -369,7 +364,7 @@ def record_catalog(
         )
     for name in report["poisoned"]:
         findings.raise_finding(
-            session,
+            db.orm(tx),
             type="toolserver.tool_poisoning",
             severity="critical",
             subject=f"{ts.name}/{name}",
@@ -381,7 +376,7 @@ def record_catalog(
         )
     if any(report.values()):
         ledger.append(
-            session,
+            tx,
             type="toolserver.catalog_changed",
             actor="service:processor",
             resource=f"toolserver/{ts.name}",
@@ -389,7 +384,7 @@ def record_catalog(
             details=report,
         )
     if {n: _policy_view(t) for n, t in catalog.items()} != before:
-        mark_changed(session, "toolservers")
+        mark_changed(tx, "toolservers")
     return report
 
 
@@ -404,7 +399,7 @@ def _policy_view(entry: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def approve_tool(session: Session, ts: ToolServer, tool_name: str, *, actor: str) -> dict[str, Any]:
+def approve_tool(tx: db.Where, ts: ToolServer, tool_name: str, *, actor: str) -> dict[str, Any]:
     """Accept a tool's current definition as the approved one."""
     catalog = [dict(t) for t in ts.tools or []]
     for entry in catalog:
@@ -412,14 +407,15 @@ def approve_tool(session: Session, ts: ToolServer, tool_name: str, *, actor: str
             entry["approved_fingerprint"] = entry.get("fingerprint")
             entry["changed_at"] = None
             ts.tools = catalog
+            ts.save()
             ledger.append(
-                session,
+                tx,
                 type="toolserver.tool_approved",
                 actor=actor,
                 resource=f"toolserver/{ts.name}/{tool_name}",
                 details={"fingerprint": entry["approved_fingerprint"]},
             )
-            mark_changed(session, "toolservers")
+            mark_changed(tx, "toolservers")
             return entry
     raise NotFound(f"tool {tool_name!r} is not in the {ts.name} catalog")
 

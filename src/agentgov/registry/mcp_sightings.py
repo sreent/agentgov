@@ -24,12 +24,10 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger, mcp_scan
+from agentgov import db, ids, ledger, mcp_scan
 from agentgov.config import Settings
-from agentgov.models import BLOCKED, Finding, McpSighting, ToolServer
+from agentgov.db.models import Finding, McpSighting, ToolServer
+from agentgov.models import BLOCKED
 from agentgov.registry import findings, mcp_registry
 from agentgov.registry.errors import ValidationError
 
@@ -44,12 +42,12 @@ KEEP_DAYS = 90  # servers no machine has reported for this long are forgotten
 ACTOR = "system:mcp-discovery"
 
 
-def matcher(session: Session, settings: Settings) -> Callable[[str], tuple[str, str | None]]:
+def matcher(tx: db.Where, settings: Settings) -> Callable[[str], tuple[str, str | None]]:
     """``identity`` -> (status, the tool server it is). Addresses compare as reported: by
     scheme, host, port and their path's hash (agentgov.mcp_scan.address)."""
     known: dict[str, tuple[str, str]] = {}
     address = mcp_scan.address
-    for ts in session.scalars(select(ToolServer).where(ToolServer.status != "pending")):
+    for ts in ToolServer.objects.exclude(status="pending"):
         blocked = ts.status == BLOCKED
         ok = BLOCKED_STATUS if blocked else APPROVED
         if ts.gateway:
@@ -103,7 +101,7 @@ def _sanitised(url: str | None, command: list[str], identity: str) -> tuple[Any,
 
 
 def report(
-    session: Session,
+    tx: db.Where,
     settings: Settings,
     *,
     machine: Any,
@@ -118,9 +116,7 @@ def report(
         raise ValidationError(f"servers must be a list of at most {MAX_SERVERS}")
     existing = {
         (s.client, s.scope, s.name, s.identity): s
-        for s in session.scalars(
-            select(McpSighting).where(McpSighting.machine == machine, McpSighting.os_user == user)
-        )
+        for s in McpSighting.objects.filter(machine=machine, os_user=user)
     }
     now = ids.utcnow()
     seen = set()
@@ -155,43 +151,42 @@ def report(
             row = McpSighting(
                 id=ids.new_id(ids.SIGHTING), machine=machine, os_user=user, first_seen_at=now
             )
-            session.add(row)
         for name, value in fields.items():
             setattr(row, name, value)
         row.last_seen_at = now
         row.reported_by = actor
+        row.save(force_insert=row._state.adding)
     dropped = set()
     for key, row in existing.items():
         if key not in seen:
             dropped.add(row.identity)
-            session.delete(row)
-    session.flush()
-    match = matcher(session, settings)
+            row.delete()
+    match = matcher(tx, settings)
     statuses = [match(identity)[0] for _, _, _, identity in seen]
     counts = {s: statuses.count(s) for s in (APPROVED, BYPASS, BLOCKED_STATUS, UNAPPROVED)}
     ledger.append(
-        session,
+        tx,
         type="mcp.servers_reported",
         actor=actor,
         resource=f"machine/{machine}",
         severity="warning" if len(seen) - counts[APPROVED] else "info",
         details={"user": user, "servers": len(seen), **counts},
     )
-    refresh(session, settings, {identity for *_, identity in seen} | dropped)
+    refresh(tx, settings, {identity for *_, identity in seen} | dropped)
     return {"servers": len(seen), **counts}
 
 
 def view(
-    session: Session, settings: Settings, identities: set[str] | None = None
+    tx: db.Where, settings: Settings, identities: set[str] | None = None
 ) -> list[dict[str, Any]]:
     """Every server reported (or those of ``identities``), with the machines and people
     that have it and its status."""
-    match = matcher(session, settings)
+    match = matcher(tx, settings)
     groups: dict[str, dict[str, Any]] = {}
-    stmt = select(McpSighting).order_by(McpSighting.last_seen_at.desc())
+    sightings = McpSighting.objects.order_by("-last_seen_at")
     if identities is not None:
-        stmt = stmt.where(McpSighting.identity.in_(identities or {""}))
-    for s in session.scalars(stmt):
+        sightings = sightings.filter(identity__in=identities or {""})
+    for s in sightings:
         g = groups.setdefault(
             s.identity,
             {
@@ -232,23 +227,21 @@ def _what(group: dict[str, Any]) -> str:
     return group["url"] or " ".join(group["command"]) or group["identity"]
 
 
-def refresh(session: Session, settings: Settings, identities: set[str] | None = None) -> int:
+def refresh(tx: db.Where, settings: Settings, identities: set[str] | None = None) -> int:
     """Raise a finding for each reported server that isn't approved, and resolve the rest;
     returns how many resolved. After a report, only for the servers it named or dropped
     (``identities``): the runtime refreshes everything when tool servers change, and hourly."""
     if identities is None:
         cutoff = ids.utcnow() - timedelta(days=KEEP_DAYS)
-        stale = select(McpSighting).where(McpSighting.last_seen_at < cutoff)
-        for old in session.scalars(stale):
-            session.delete(old)
+        McpSighting.objects.filter(last_seen_at__lt=cutoff).delete()
         # Servers reported before addresses were reported by host keep no more either.
-        for row in session.scalars(select(McpSighting)):
+        for row in McpSighting.objects.all():
             url, command, identity = _sanitised(row.url, list(row.command or []), row.identity)
             if (url, command, identity[:400]) != (row.url, row.command, row.identity):
                 row.url, row.command, row.identity = url, command, identity[:400]
-        session.flush()
+                row.save()
     present: set[str] = set()
-    for g in view(session, settings, identities):
+    for g in view(tx, settings, identities):
         if g["status"] == APPROVED:
             continue
         type_, severity = FINDINGS[g["status"]]
@@ -285,7 +278,7 @@ def refresh(session: Session, settings: Settings, identities: set[str] | None = 
                 "approved servers run."
             )
         findings.raise_finding(
-            session,
+            db.orm(tx),
             type=type_,
             severity=severity,
             subject=g["identity"][:200],
@@ -305,11 +298,6 @@ def refresh(session: Session, settings: Settings, identities: set[str] | None = 
     if identities is not None:
         # Findings about other servers stand as they are.
         scoped = {f"{t}:{i[:200]}" for t in types for i in identities}
-        present |= {
-            key
-            for key in session.scalars(
-                select(Finding.key).where(Finding.status == "open", Finding.type.in_(types))
-            )
-            if key not in scoped
-        }
-    return findings.resolve_absent(session, types=types, present_keys=present, actor=ACTOR)
+        open_ = Finding.objects.filter(status="open", type__in=types)
+        present |= {key for key in open_.values_list("key", flat=True) if key not in scoped}
+    return findings.resolve_absent(db.orm(tx), types=types, present_keys=present, actor=ACTOR)

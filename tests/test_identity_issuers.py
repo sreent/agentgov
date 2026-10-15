@@ -241,10 +241,11 @@ class TestAgents:
 
     def test_posture_flags_issuers_out_of_sync(self, rt, settings, issuers) -> None:
         with rt.db.session() as s:
-            identity_issuers.get(s, "cluster").sync_error = "Keycloak refused it"
-            spire = identity_issuers.get(s, "spire")
-            spire.sync_error = "Keycloak refused it"
-            identity_issuers.set_status(s, spire, "block", actor="a")
+            for name in ("cluster", "spire"):
+                issuer = identity_issuers.get(s, name)
+                issuer.sync_error = "Keycloak refused it"
+                issuer.save()
+            identity_issuers.set_status(s, identity_issuers.get(s, "spire"), "block", actor="a")
             posture.scan(s, settings)
         with rt.db.session() as s:
             found = {
@@ -258,7 +259,9 @@ class TestAgents:
             # A block that hasn't reached Keycloak leaves its agents signing in.
             assert found[spire.id].severity == "high"
             assert found[spire.id].description == "Keycloak refused it"
-            cluster.sync_error = spire.sync_error = None
+            for issuer in (cluster, spire):
+                issuer.sync_error = None
+                issuer.save()
             posture.scan(s, settings)
         with rt.db.session() as s:
             statuses = s.scalars(

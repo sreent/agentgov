@@ -88,7 +88,7 @@ def gateway_issuer(s: Any, spec: dict[str, Any], keys: list[dict[str, Any]] | No
     issuer = identity_issuers.create(s, {**spec, "gateway": True}, actor="admin:a")
     if keys is not None:
         issuer_keys.store(s, {issuer.id: keys})
-    return issuer
+    return identity_issuers.get(s, issuer.id)
 
 
 @pytest.fixture
@@ -155,11 +155,13 @@ class TestKeys:
                 "changed": ["cluster"],
                 "failed": ["cluster"],
             }
+            issuer.refresh_from_db()
             assert issuer.gateway_keys == [KEY]
             assert issuer.keys_error == "couldn't read it"
             # The same failure again changes nothing the gateway is given.
             assert issuer_keys.store(s, {issuer_id: down})["changed"] == []
             issuer_keys.store(s, {issuer_id: [KEY, NEXT]})
+            issuer.refresh_from_db()
             assert (issuer.gateway_keys, issuer.keys_error) == ([KEY, NEXT], None)
 
     def test_only_issuers_the_gateway_trusts_are_fetched_and_kept(self, rt) -> None:
@@ -195,6 +197,7 @@ class TestIssuers:
             issuer = gateway_issuer(s, CLUSTER, [KEY])
             issuer_keys.store(s, {issuer.id: issuer_keys.IssuerKeysError("down")})
             assert identity_issuers.update(s, issuer, {"gateway": False}, actor="a") == ["gateway"]
+            issuer.refresh_from_db()  # as stored
             assert (issuer.gateway_keys, issuer.keys_at, issuer.keys_error) == (None, None, None)
             assert identity_issuers.gateway_state(issuer) == {
                 "trusted": False,

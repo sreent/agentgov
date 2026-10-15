@@ -23,12 +23,10 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids
+from agentgov import db, ids
 from agentgov.config import Settings
-from agentgov.models import BLOCKED, ToolServer
+from agentgov.db.models import ToolServer
+from agentgov.models import BLOCKED
 
 API_VERSION = "v0.1"
 SCHEMA = "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
@@ -129,16 +127,10 @@ def server_response(ts: ToolServer, settings: Settings) -> dict[str, Any]:
     }
 
 
-def listed(session: Session, *, include_deleted: bool = False) -> list[ToolServer]:
+def listed(tx: db.Where, *, include_deleted: bool = False) -> list[ToolServer]:
     """The tool servers in the registry: listed and approved (or blocked, as deleted)."""
     statuses = ["approved", BLOCKED] if include_deleted else ["approved"]
-    return list(
-        session.scalars(
-            select(ToolServer)
-            .where(ToolServer.developers.is_(True), ToolServer.status.in_(statuses))
-            .order_by(ToolServer.name)
-        )
-    )
+    return list(ToolServer.objects.filter(developers=True, status__in=statuses).order_by("name"))
 
 
 def _cursor(name: str) -> str:
@@ -155,7 +147,7 @@ def _after(cursor: str | None) -> str | None:
 
 
 def server_list(
-    session: Session,
+    tx: db.Where,
     settings: Settings,
     *,
     cursor: str | None = None,
@@ -166,7 +158,7 @@ def server_list(
     include_deleted: bool = False,
 ) -> dict[str, Any]:
     """``GET /v0.1/servers``: one page of the registry, by name."""
-    servers = listed(session, include_deleted=include_deleted or updated_since is not None)
+    servers = listed(tx, include_deleted=include_deleted or updated_since is not None)
     rows = [(registry_name(ts, settings), ts) for ts in servers]
     rows.sort(key=lambda r: r[0])
     if search:
@@ -188,18 +180,18 @@ def server_list(
 
 
 def find(
-    session: Session, settings: Settings, name: str, *, include_deleted: bool = False
+    tx: db.Where, settings: Settings, name: str, *, include_deleted: bool = False
 ) -> ToolServer | None:
-    for ts in listed(session, include_deleted=include_deleted):
+    for ts in listed(tx, include_deleted=include_deleted):
         if registry_name(ts, settings) == name:
             return ts
     return None
 
 
-def managed_settings(session: Session, settings: Settings) -> dict[str, Any]:
+def managed_settings(tx: db.Where, settings: Settings) -> dict[str, Any]:
     """The registry as Copilot's enterprise managed-settings allowlist."""
     allowed: list[dict[str, Any]] = []
-    for ts in listed(session):
+    for ts in listed(tx):
         url = gateway_url(ts, settings) if ts.gateway else ts.url
         if url:
             allowed.append({"serverUrl": url})

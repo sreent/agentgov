@@ -12,8 +12,9 @@ from sqlalchemy import select
 
 from agentgov import cli, ids, mcp_scan
 from agentgov.config import Settings
+from agentgov.db.models import McpSighting
 from agentgov.gateway import render
-from agentgov.models import Finding, McpSighting, ToolServer
+from agentgov.models import Finding
 from agentgov.opa.bundle import registry_snapshot
 from agentgov.registry import manifests, mcp_registry, mcp_sightings, toolservers
 from agentgov.registry.errors import Conflict, ValidationError
@@ -106,7 +107,7 @@ class TestToolServers:
                     "gateway": False, "developers": True},
                 actor="a", approve=True,
             )  # fmt: skip
-            servers = list(s.scalars(select(ToolServer)))
+            servers = toolservers.list_all(s)
             names = {
                 r["name"] for r in render(servers, settings)["binds"][0]["listeners"][0]["routes"]
             }
@@ -361,14 +362,14 @@ class TestSightings:
     def test_what_was_kept_before_is_sanitised(self, client, settings) -> None:
         rt = client.app.state.rt
         secret = "https://actions.zapier.com/mcp/sk-ak-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c/sse"
-        with rt.db.session() as s:
+        with rt.db.transaction():
             now = ids.utcnow()
-            s.add(McpSighting(
+            McpSighting.objects.create(
                 id=ids.new_id(ids.SIGHTING), machine="laptop-1", os_user="alice", name="zapier",
                 client="cursor", scope="user", identity=f"url:{secret}", transport="sse",
                 url=secret, command=[], env=[], headers=[], first_seen_at=now,
                 last_seen_at=now, reported_by="registrar:mdm",
-            ))  # fmt: skip
+            )  # fmt: skip
         with rt.db.session() as s:
             mcp_sightings.refresh(s, settings)
         assert "9f8e7d6c" not in json.dumps(client.get("/v1/mcp/sightings", headers=ADMIN).json())

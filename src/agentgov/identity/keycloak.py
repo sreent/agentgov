@@ -657,6 +657,7 @@ class IdentityReconciler:
         except (KeycloakError, httpx.HTTPError) as exc:
             for issuer in identity_issuers.list_all(session):
                 issuer.sync_error = str(exc)[:500]
+                issuer.save()
             raise
         wanted = set()
         for issuer in identity_issuers.list_all(session):
@@ -685,6 +686,7 @@ class IdentityReconciler:
             except (KeycloakError, httpx.HTTPError) as exc:
                 issuer.sync_error = str(exc)[:500]
                 log.warning("identity provider for issuer %s: %s", issuer.name, exc)
+            issuer.save()
         for alias, provider in existing.items():
             stale = alias.startswith(identity_issuers.ALIAS_PREFIX) and alias not in wanted
             if stale and (provider.get("config") or {}).get("agentgov.managed") == "true":

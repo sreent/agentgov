@@ -92,7 +92,13 @@ The data layer:
   changes. Moved so far: the ledger, its retention and its witness (`agentgov.ledger`,
   `agentgov.retention`, `agentgov.witness`); sign-in, access and API keys
   (`agentgov.identity.sso`, `agentgov.identity.delegation`, `agentgov.registry.access`,
-  `agentgov.registry.apikeys`, and the views and authentication that use them).
+  `agentgov.registry.apikeys`, and the views and authentication that use them); tool
+  servers, the MCP registry and developers' MCP servers, model providers, and identity
+  issuers and their keys (`agentgov.registry.toolservers`, `mcp_registry`, `mcp_sightings`,
+  `model_providers`, `identity_issuers`, `agentgov.identity.issuer_keys`). Each read gives
+  another object, where SQLAlchemy's session gave the same one: a row is locked and read
+  afresh before it is changed (`agentgov.db.lock`, on SQLite too), and what was changed
+  before is saved first.
 - [ ] Django's migrations: the first one matches the last Alembic revision; a release runs
   both; then Alembic goes.
 
