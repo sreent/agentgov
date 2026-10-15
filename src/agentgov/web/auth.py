@@ -77,3 +77,8 @@ def arequire(*roles: str, admin: bool = True) -> Callable[[HttpRequest], Awaitab
 
 
 signed_in = guard(auth.signed_in)
+
+
+def session_principal(request: HttpRequest) -> Principal | None:
+    """The person signed in through single sign-on, from the session cookie."""
+    return auth.session_principal(_Request(request))  # type: ignore[arg-type]

@@ -62,7 +62,7 @@ The HTTP layer, a group at a time (`src/agentgov/web`):
   configuration, telemetry, Copilot Studio, AuthZEN, assertions. Copilot Studio's endpoint
   faces the internet: its caller is still checked from the headers before anything reads
   the body (`agentgov.web.asgi`), since Django reads every body whole before a view runs.
-- [ ] Single sign-on (cookies, redirects, back-channel logout).
+- [x] Single sign-on (cookies, redirects, back-channel logout).
 - [ ] The admin UI's files; then FastAPI goes, and the app runs the runtime itself.
 
 The data layer:

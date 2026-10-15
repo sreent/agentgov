@@ -154,6 +154,7 @@ REQUESTS: list[tuple[str, str, bytes, dict[str, str]]] = [
     (GET, "/parity/made/text", b"", {}),
     (GET, "/parity/made/stream", b"", {}),
     (GET, "/parity/made/redirect", b"", {}),
+    (GET, "/parity/made/cookies", b"", {}),
 ]
 
 
@@ -220,7 +221,15 @@ def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
             "text": lambda: PlainTextResponse("a: 1\n", media_type="application/yaml"),
             "stream": lambda: StreamingResponse(iter([b"a\n", "é\n"]), media_type="text/plain"),
             "redirect": lambda: RedirectResponse("/ui/a b?c=d"),
+            "cookies": cookies,
         }[kind]()
+
+    def cookies() -> Response:
+        resp = RedirectResponse("/ui/", status_code=302)
+        resp.set_cookie("a", "1", max_age=600, httponly=True, secure=True, path="/auth")
+        resp.set_cookie("s", "t", max_age=3600, httponly=True, samesite="strict", path="/")
+        resp.delete_cookie("old", path="/auth")
+        return resp
 
     router = web_api.Router()
 
@@ -240,7 +249,15 @@ def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
                 iter([b"a\n", "é\n"]), media_type="text/plain"
             ),
             "redirect": lambda: web_api.redirect_response("/ui/a b?c=d"),
+            "cookies": ninja_cookies,
         }[kind]()
+
+    def ninja_cookies() -> Any:
+        resp = web_api.redirect_response("/ui/", status_code=302)
+        web_api.set_cookie(resp, "a", "1", max_age=600, httponly=True, secure=True, path="/auth")
+        web_api.set_cookie(resp, "s", "t", max_age=3600, httponly=True, samesite="strict", path="/")
+        web_api.delete_cookie(resp, "old", path="/auth")
+        return resp
 
     @router.post("/parity/thing")
     def ninja_thing(request: Any, payload: Thing) -> Thing:
@@ -302,21 +319,30 @@ def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
         request.urlconf = urls
         found = django_urls.get_resolver(urls).resolve(request.path_info)
         after = asyncio.run(_sent(found.func(request, **found.kwargs)))
+        sent = {name: value for name, value in before.headers.items() if name != "set-cookie"}
         assert after == (
             before.status_code,
-            dict(sorted(before.headers.items())),
+            dict(sorted(sent.items())),
             before.content,
+            [_undated(c) for c in before.headers.get_list("set-cookie")],
         ), (method, url, body, headers)
 
 
-async def _sent(view: Any) -> tuple[int, dict[str, str], bytes]:
+async def _sent(view: Any) -> tuple[int, dict[str, str], bytes, list[str]]:
     response = await view
     if response.streaming:
         content = b"".join([part async for part in response])
     else:
         content = response.content
     headers = {name.lower(): value for name, value in response.headers.items()}
-    return response.status_code, dict(sorted(headers.items())), content
+    # As Django's ASGI handler writes its cookies.
+    cookies = [_undated(c.output(header="").strip()) for c in response.cookies.values()]
+    return response.status_code, dict(sorted(headers.items())), content, cookies
+
+
+def _undated(cookie: str) -> str:
+    # A cookie deleted expires as it is written: a second apart, both are right.
+    return re.sub(r"expires=[^;]+", "expires=...", cookie)
 
 
 def test_the_first_route_written_for_a_request_serves_it() -> None:

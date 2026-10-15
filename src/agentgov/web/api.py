@@ -133,6 +133,40 @@ def redirect_response(url: str, status_code: int = 307, headers: Headers = None)
     return answer
 
 
+def set_cookie(
+    response: HttpResponseBase,
+    key: str,
+    value: str = "",
+    max_age: int | None = None,
+    expires: int | str | None = None,
+    path: str | None = "/",
+    domain: str | None = None,
+    secure: bool = False,
+    httponly: bool = False,
+    samesite: str | None = "lax",
+) -> None:
+    """As Starlette's set_cookie (lax by default, and no expiry beside max_age): Django writes
+    the cookie with the same SimpleCookie."""
+    response.cookies[key] = value
+    cookie = response.cookies[key]
+    for name, given in (("max-age", max_age), ("expires", expires), ("path", path)):
+        if given is not None:
+            cookie[name] = given
+    if domain is not None:
+        cookie["domain"] = domain
+    if secure:
+        cookie["secure"] = True
+    if httponly:
+        cookie["httponly"] = True
+    if samesite is not None:
+        cookie["samesite"] = samesite
+
+
+def delete_cookie(response: HttpResponseBase, key: str, path: str = "/") -> None:
+    """As Starlette's delete_cookie."""
+    set_cookie(response, key, max_age=0, expires=0, path=path)
+
+
 def _typed(answer: _Answer, headers: Headers, media_type: str | None) -> _Answer:
     if any(name.lower() == "content-type" for name in headers or {}):
         return answer

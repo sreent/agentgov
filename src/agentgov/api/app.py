@@ -25,9 +25,6 @@ from starlette.routing import Match
 from starlette.types import Receive, Scope, Send
 
 from agentgov import __version__, web
-from agentgov.api import (
-    sso_routes,
-)
 from agentgov.config import Settings
 from agentgov.registry.errors import RegistryError
 from agentgov.runtime import Runtime
@@ -132,8 +129,6 @@ def create_app(
         return JSONResponse(
             status_code=422, content={"detail": message or "invalid request", "errors": errors}
         )
-
-    app.include_router(sso_routes.router)
 
     app.mount("/ui", _UiFiles(directory=UI_DIR, html=True, check_dir=False), name="ui")
 

@@ -24,6 +24,7 @@ from agentgov.web import (
     registry,
     rules,
     secops,
+    sso,
 )
 from agentgov.web.api import api
 
@@ -35,6 +36,7 @@ for router in (
     governance.router,
     evidence.router,
     integration.router,
+    sso.router,
     access.router,
     platforms.router,
     platforms.agent_router,
