@@ -17,7 +17,13 @@ from django import urls as django_urls
 from django.test import RequestFactory
 from fastapi import Body
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from ninja import Body as NinjaBody
@@ -140,6 +146,14 @@ REQUESTS: list[tuple[str, str, bytes, dict[str, str]]] = [
     ("PUT", "/parity/items/a", b"", {}),
     (GET, "/parity/items/a/b/c/versions", b"", {}),
     (GET, "/parity/items/a/b/versions/2", b"", {}),
+    # The answers routes make themselves.
+    (GET, "/parity/made/json", b"", {}),
+    (GET, "/parity/made/raw", b"", {}),
+    (GET, "/parity/made/csv", b"", {}),
+    (GET, "/parity/made/empty", b"", {}),
+    (GET, "/parity/made/text", b"", {}),
+    (GET, "/parity/made/stream", b"", {}),
+    (GET, "/parity/made/redirect", b"", {}),
 ]
 
 
@@ -192,7 +206,41 @@ def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
     def versions(name: str) -> dict[str, Any]:
         return {"name": name}
 
+    @fastapi.get("/parity/made/{kind}")
+    def made(kind: str) -> Response:
+        return {
+            "json": lambda: JSONResponse({"a": "é"}, status_code=202, headers={"X-Made": "1"}),
+            "raw": lambda: Response(
+                b"\x00\x01",
+                media_type="application/timestamp-reply",
+                headers={"Content-Disposition": 'attachment; filename="a.tsr"'},
+            ),
+            "csv": lambda: Response("é,1\n", media_type="text/csv"),
+            "empty": lambda: Response(status_code=202),
+            "text": lambda: PlainTextResponse("a: 1\n", media_type="application/yaml"),
+            "stream": lambda: StreamingResponse(iter([b"a\n", "é\n"]), media_type="text/plain"),
+            "redirect": lambda: RedirectResponse("/ui/a b?c=d"),
+        }[kind]()
+
     router = web_api.Router()
+
+    @router.get("/parity/made/{kind}")
+    def ninja_made(request: Any, kind: str) -> Any:
+        return {
+            "json": lambda: web_api.json_response({"a": "é"}, 202, headers={"X-Made": "1"}),
+            "raw": lambda: web_api.raw_response(
+                b"\x00\x01",
+                media_type="application/timestamp-reply",
+                headers={"Content-Disposition": 'attachment; filename="a.tsr"'},
+            ),
+            "csv": lambda: web_api.raw_response("é,1\n", media_type="text/csv"),
+            "empty": lambda: web_api.raw_response(status_code=202),
+            "text": lambda: web_api.text_response("a: 1\n", media_type="application/yaml"),
+            "stream": lambda: web_api.stream_response(
+                iter([b"a\n", "é\n"]), media_type="text/plain"
+            ),
+            "redirect": lambda: web_api.redirect_response("/ui/a b?c=d"),
+        }[kind]()
 
     @router.post("/parity/thing")
     def ninja_thing(request: Any, payload: Thing) -> Thing:
@@ -247,21 +295,28 @@ def test_requests_are_answered_as_fastapi_answered_them(settings) -> None:
     client = TestClient(fastapi, raise_server_exceptions=False)
     factory = RequestFactory()
     for method, url, body, headers in REQUESTS:
-        before = client.request(method, url, content=body, headers=headers)
+        before = client.request(method, url, content=body, headers=headers, follow_redirects=False)
         request = factory.generic(
             method, url, data=body, content_type=headers.get("content-type", "")
         )
         request.urlconf = urls
         found = django_urls.get_resolver(urls).resolve(request.path_info)
-        after = asyncio.run(found.func(request, **found.kwargs))
-        assert _answer(after.status_code, after.headers, after.content) == _answer(
-            before.status_code, before.headers, before.content
+        after = asyncio.run(_sent(found.func(request, **found.kwargs)))
+        assert after == (
+            before.status_code,
+            dict(sorted(before.headers.items())),
+            before.content,
         ), (method, url, body, headers)
 
 
-def _answer(status: int, headers: Any, content: bytes) -> tuple[Any, ...]:
-    named = ("content-type", "content-length", "allow", "location")
-    return status, {name: headers.get(name) for name in named}, content
+async def _sent(view: Any) -> tuple[int, dict[str, str], bytes]:
+    response = await view
+    if response.streaming:
+        content = b"".join([part async for part in response])
+    else:
+        content = response.content
+    headers = {name.lower(): value for name, value in response.headers.items()}
+    return response.status_code, dict(sorted(headers.items())), content
 
 
 def test_the_first_route_written_for_a_request_serves_it() -> None:

@@ -6,30 +6,31 @@ from __future__ import annotations
 import base64
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 from sqlalchemy import select
 
 from agentgov import compliance, ids, ledger, retention, timestamping, transparency, witness
-from agentgov.api.auth import READ_ROLES, Principal, require
+from agentgov.api.auth import READ_ROLES
 from agentgov.models import LedgerCheckpoint
 from agentgov.runtime import JOB_WAIT_SECONDS
+from agentgov.web.api import (
+    HTTPException,
+    Router,
+    json_response,
+    raw_response,
+    stream_response,
+)
+from agentgov.web.auth import require, runtime
 
-router = APIRouter(prefix="/v1", tags=["evidence"])
+router = Router(tags=["evidence"])
 read = require(*READ_ROLES)
 admin = require("admin")
 
 
-def _rt(request: Request) -> Any:
-    return request.app.state.rt
-
-
-@router.get("/ledger/checkpoints")
-def list_checkpoints(
-    request: Request, limit: int = 100, _: Principal = Depends(read)
-) -> list[dict[str, Any]]:
+@router.get("/v1/ledger/checkpoints", auth=read)
+def list_checkpoints(request: HttpRequest, limit: int = 100) -> list[dict[str, Any]]:
     """The ledger's checkpoints, newest first: their time-stamps and archives."""
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         rows = s.scalars(
             select(LedgerCheckpoint)
             .order_by(LedgerCheckpoint.seq.desc())
@@ -38,22 +39,22 @@ def list_checkpoints(
         return [ledger.checkpoint_dict(c) for c in rows]
 
 
-@router.post("/ledger/checkpoints", status_code=201)
-def make_checkpoint(request: Request, _: Principal = Depends(admin)) -> dict[str, Any]:
+@router.post("/v1/ledger/checkpoints", status_code=201, auth=admin)
+def make_checkpoint(request: HttpRequest) -> dict[str, Any]:
     """Keep the chain's head as a checkpoint now, and have it time-stamped if an authority
     is set."""
-    rt = _rt(request)
+    rt = runtime(request)
     point = rt.make_checkpoint(wait=JOB_WAIT_SECONDS)
     if point is None:
         raise HTTPException(409, "the ledger is empty")
     return point
 
 
-@router.get("/ledger/witness")
-def ledger_witness(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/ledger/witness", auth=read)
+def ledger_witness(request: HttpRequest) -> dict[str, Any]:
     """The database's ledger against its head kept outside it (docs/backup.md): whether it
     lost entries, or holds another history, since AgentGov last looked."""
-    rt = _rt(request)
+    rt = runtime(request)
     path = rt.settings.witness_file()
     if path is None:
         return {"configured": False}
@@ -61,37 +62,38 @@ def ledger_witness(request: Request, _: Principal = Depends(read)) -> dict[str, 
         return {"configured": True, **witness.compare(s, path).to_dict()}
 
 
-@router.post("/ledger/witness/accept")
-def accept_rewind(request: Request, principal: Principal = Depends(admin)) -> dict[str, Any]:
+@router.post("/v1/ledger/witness/accept", auth=admin)
+def accept_rewind(request: HttpRequest) -> dict[str, Any]:
     """Accept that the ledger lost entries (a database restored on purpose): what is missing
     is written into the ledger (``ledger.rewound``), and it goes on from the head it has."""
-    status = _rt(request).accept_rewind(actor=principal.actor)
+    principal = request.auth
+    status = runtime(request).accept_rewind(actor=principal.actor)
     return {"configured": True, **status.to_dict()}
 
 
-@router.get("/ledger/checkpoints/{seq}/timestamp")
-def checkpoint_timestamp(request: Request, seq: int, _: Principal = Depends(read)) -> Response:
+@router.get("/v1/ledger/checkpoints/{seq}/timestamp", auth=read)
+def checkpoint_timestamp(request: HttpRequest, seq: int) -> HttpResponse:
     """The authority's time-stamp of a checkpoint (a TimeStampResp), for
     ``openssl ts -verify -in checkpoint.tsr -data statement.txt -CAfile ...``."""
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         point = s.get(LedgerCheckpoint, seq)
         if point is None:
             raise HTTPException(404, f"no checkpoint at entry {seq}")
         if point.timestamp is None:
             raise HTTPException(404, f"checkpoint {seq} isn't time-stamped")
-        return Response(
+        return raw_response(
             base64.b64decode(point.timestamp),
             media_type=timestamping.REPLY,
             headers={"Content-Disposition": f'attachment; filename="checkpoint-{seq}.tsr"'},
         )
 
 
-@router.get("/ledger/checkpoints/{seq}/log-entry")
-def checkpoint_log_entry(request: Request, seq: int, _: Principal = Depends(read)) -> Response:
+@router.get("/v1/ledger/checkpoints/{seq}/log-entry", auth=read)
+def checkpoint_log_entry(request: HttpRequest, seq: int) -> HttpResponse:
     """A checkpoint's entry in the transparency log, as a Sigstore bundle, for
     ``cosign verify-blob --key agentgov.pub --bundle ... --trusted-root ... statement.txt``
     or ``agentgov ledger verify-log-entry``."""
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         point = s.get(LedgerCheckpoint, seq)
         if point is None:
             raise HTTPException(404, f"no checkpoint at entry {seq}")
@@ -101,7 +103,7 @@ def checkpoint_log_entry(request: Request, seq: int, _: Principal = Depends(read
             found = transparency.bundle(point.tlog_entry, ledger.statement(point.seq, point.hash))
         except transparency.TransparencyError as exc:
             raise HTTPException(409, f"checkpoint {seq}'s log entry can't be read: {exc}") from None
-        return JSONResponse(
+        return json_response(
             found,
             headers={
                 "Content-Disposition": f'attachment; filename="checkpoint-{seq}.sigstore.json"'
@@ -109,11 +111,11 @@ def checkpoint_log_entry(request: Request, seq: int, _: Principal = Depends(read
         )
 
 
-@router.get("/ledger/transparency-log")
-def transparency_log(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/ledger/transparency-log", auth=read)
+def transparency_log(request: HttpRequest) -> dict[str, Any]:
     """The transparency log checkpoints go into, and what checks their entries offline:
     AgentGov's public key, the log's, and a trusted root with the log for cosign."""
-    settings = _rt(request).settings
+    settings = runtime(request).settings
     url = settings.ledger_rekor_url
     if not url:
         return {"url": None}
@@ -132,11 +134,11 @@ def transparency_log(request: Request, _: Principal = Depends(read)) -> dict[str
     return out
 
 
-@router.get("/ledger/retention")
-def retention_view(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/ledger/retention", auth=read)
+def retention_view(request: HttpRequest) -> dict[str, Any]:
     """How long the ledger and the operational records are kept, and where the chain in
     the database starts."""
-    rt = _rt(request)
+    rt = runtime(request)
     settings = rt.settings
     with rt.db.session() as s:
         floor, floor_hash = ledger.base(s)
@@ -165,10 +167,10 @@ def retention_view(request: Request, _: Principal = Depends(read)) -> dict[str, 
         }
 
 
-@router.post("/ledger/retention/run")
-def run_retention(request: Request, _: Principal = Depends(admin)) -> dict[str, Any]:
+@router.post("/v1/ledger/retention/run", auth=admin)
+def run_retention(request: HttpRequest) -> dict[str, Any]:
     """Do now what the hourly retention round does."""
-    return _rt(request).run_retention(wait=JOB_WAIT_SECONDS)
+    return runtime(request).run_retention(wait=JOB_WAIT_SECONDS)
 
 
 # --------------------------------------------------------------- compliance
@@ -180,8 +182,8 @@ def _days(days: int) -> int:
     return days
 
 
-@router.get("/evidence/frameworks")
-def frameworks(_: Principal = Depends(read)) -> list[dict[str, Any]]:
+@router.get("/v1/evidence/frameworks", auth=read)
+def frameworks(request: HttpRequest) -> list[dict[str, Any]]:
     """The frameworks AgentGov reports on."""
     return [
         {"key": f.key, "title": f.title, "url": f.url, "note": f.note}
@@ -189,12 +191,9 @@ def frameworks(_: Principal = Depends(read)) -> list[dict[str, Any]]:
     ]
 
 
-@router.get("/evidence/report")
+@router.get("/v1/evidence/report", auth=read)
 def evidence_report(
-    request: Request,
-    framework: str = "eu-ai-act",
-    days: int = 90,
-    _: Principal = Depends(read),
+    request: HttpRequest, framework: str = "eu-ai-act", days: int = 90
 ) -> dict[str, Any]:
     """What AgentGov does towards a framework's controls, how far it is set up here, and the
     evidence over the last ``days`` days. It doesn't say that the organisation complies."""
@@ -202,28 +201,26 @@ def evidence_report(
         raise HTTPException(
             404, f"framework is one of {', '.join(compliance.FRAMEWORKS)} (got {framework!r})"
         )
-    rt = _rt(request)
+    rt = runtime(request)
     with rt.db.session() as s:
         return compliance.report(compliance.facts(s, rt.settings, _days(days)), framework)
 
 
-@router.get("/evidence/register")
-def classification_register(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+@router.get("/v1/evidence/register", auth=read)
+def classification_register(request: HttpRequest) -> list[dict[str, Any]]:
     """The classification register: every agent but deleted ones, with its classification
     under the EU AI Act (category, role, basis, purpose), who classified it and when."""
     from agentgov.registry import agents, classification
 
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         return [classification.row(a) for a in agents.list_agents(s)]
 
 
-@router.get("/evidence/pack")
-def evidence_pack(
-    request: Request, days: int = 90, _: Principal = Depends(read)
-) -> StreamingResponse:
+@router.get("/v1/evidence/pack", auth=read)
+def evidence_pack(request: HttpRequest, days: int = 90) -> StreamingHttpResponse:
     """The reports, the ledger for the period, the checkpoints and their time-stamps, the
     inventory and the registry as code, in one zip, for whoever assesses compliance."""
-    rt = _rt(request)
+    rt = runtime(request)
     with rt.db.session() as s:
         zipped = compliance.pack(s, rt.settings, _days(days))
     stamp = ids.utcnow().strftime("%Y%m%d-%H%M%S")
@@ -233,7 +230,7 @@ def evidence_pack(
             while chunk := zipped.read(1024 * 1024):
                 yield chunk
 
-    return StreamingResponse(
+    return stream_response(
         chunks(),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="agentgov-evidence-{stamp}.zip"'},

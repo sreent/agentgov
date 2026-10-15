@@ -6,12 +6,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from django.http import HttpRequest
+from ninja import Body
 from sqlalchemy import select
 
 from agentgov import gateway, ledger
 from agentgov.api import reach
-from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
+from agentgov.api.auth import READ_ROLES, Principal
 from agentgov.api.versions import if_match
 from agentgov.identity.keycloak import KeycloakError
 from agentgov.models import ACTIVE, PlatformAgent
@@ -34,42 +35,43 @@ from agentgov.registry import (
 from agentgov.registry.errors import Conflict, NotFound
 from agentgov.registry.validation import known_fields
 from agentgov.secops import handoff
+from agentgov.web.api import (
+    HTTPException,
+    Router,
+)
+from agentgov.web.auth import guard, require, runtime, signed_in
 
 # What an agent's body takes besides its name: the fields an edit changes, and its
 # identity from an issuer of its own.
 AGENT_FIELDS = {*agents.EDITABLE, "workload_identity"}
-router = APIRouter(prefix="/v1")
+router = Router()
 
 read = require(*READ_ROLES)
 admin = require("admin")
 # Kill switches: administrators, and the security team's tools as far as the hand-off lets them
 # (for the agents of their teams, when their role is for some teams only). A tool server,
 # which every team's agents use, only by roles for every team.
-kill_switch = reach.require("secops")
+kill_switch = guard(reach.require("secops"))
 org_kill_switch = require("secops")
-
-
-def _rt(request: Request) -> Any:
-    return request.app.state.rt
 
 
 # ----------------------------------------------------------------------- agents
 
 
-@router.get("/agents", tags=["agents"])
+@router.get("/v1/agents", tags=["agents"], auth=guard(reach.read))
 def list_agents(
-    request: Request,
+    request: HttpRequest,
     status: str | None = None,
     blueprint: str | None = None,
     risk_level: str | None = None,
     q: str | None = None,
     source: str | None = None,
     include_deleted: bool = False,
-    principal: Principal = Depends(reach.read),
 ) -> list[dict[str, Any]]:
     """``source`` is ``registered``, ``discovered:<how>`` or ``platform:<platform>``. Someone
     with roles for some teams only sees those teams' agents."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         listed = agents.list_agents(
             s,
             status=status,
@@ -104,17 +106,14 @@ def list_agents(
         return rows
 
 
-@router.post("/agents", status_code=201, tags=["agents"])
-def register_agent(
-    request: Request,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(reach.require("registrar")),
-) -> dict[str, Any]:
+@router.post("/v1/agents", status_code=201, tags=["agents"], auth=guard(reach.require("registrar")))
+def register_agent(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Register an agent. Admins may pass ``approve: true``; registrars always
     create ``pending`` agents that need approval (Agent 365 "requests"). A registrar or an
     admin for some teams only registers into one of them (``team``; their team, when they
     have one), an admin for it approving as admins do."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     # Where it comes from is the server's to say: registered.
     known_fields(body, AGENT_FIELDS | {"name", "approve", "instructions"}, "an agent")
     requested = bool(body.pop("approve", False))
@@ -157,11 +156,10 @@ def register_agent(
         return agents.to_dict(agent)
 
 
-@router.get("/agents/{ref}", tags=["agents"])
-def get_agent(
-    request: Request, ref: str, principal: Principal = Depends(reach.read)
-) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+@router.get("/v1/agents/{ref}", tags=["agents"], auth=guard(reach.read))
+def get_agent(request: HttpRequest, ref: str) -> dict[str, Any]:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, *READ_ROLES, ref=ref)
         makers = people.for_agent(s, agent.id)
@@ -185,13 +183,12 @@ def get_agent(
         return row
 
 
-@router.get("/agents/{ref}/a2a", tags=["agents"])
-def agent_a2a(
-    request: Request, ref: str, principal: Principal = Depends(reach.read)
-) -> dict[str, Any]:
+@router.get("/v1/agents/{ref}/a2a", tags=["agents"], auth=guard(reach.read))
+def agent_a2a(request: HttpRequest, ref: str) -> dict[str, Any]:
     """Agent to agent: where other agents call it through the gateway, whom it may call,
     and who may call it."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, *READ_ROLES, ref=ref)
@@ -199,14 +196,12 @@ def agent_a2a(
         return agents.a2a_view(s, rt.settings, agent, reached=reached)
 
 
-@router.patch("/agents/{ref}", tags=["agents"])
+@router.patch("/v1/agents/{ref}", tags=["agents"], auth=guard(reach.require("admin")))
 def update_agent(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(reach.require("admin")),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     known_fields(body, AGENT_FIELDS, "an agent's edit")
     with rt.db.session() as s:
         agent = agents.get(s, ref)
@@ -259,17 +254,15 @@ def _sponsors(agent: Any, principal: Principal) -> bool:
     return person is not None and person.lower() in {str(s).lower() for s in agent.sponsors or []}
 
 
-@router.post("/agents/{ref}/attest", tags=["agents"])
+@router.post("/v1/agents/{ref}/attest", tags=["agents"], auth=signed_in)
 def attest_agent(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(signed_in),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
     """A sponsor confirms the agent is still needed (periodic access review): its sponsors,
     whatever their role in AgentGov, and administrators."""
+    principal = request.auth
     refused = "only the agent's sponsors or an admin can attest"
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         try:
             agent = agents.get(s, ref)
         except NotFound:
@@ -298,18 +291,16 @@ def _straight_to_the_gateway(s: Any, agent: Any, settings: Any) -> dict[str, str
     return None
 
 
-@router.post("/agents/{ref}/credentials", tags=["agents"])
+@router.post("/v1/agents/{ref}/credentials", tags=["agents"], auth=guard(reach.require("admin")))
 def agent_credentials(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(reach.require("admin")),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
     """Return the agent's OAuth client credentials (``rotate: true`` issues a new secret);
     for an agent with a workload identity, what token authenticates it instead (and how it
     calls the gateway with that token itself, where the gateway takes its issuer's); and for
     a public client, where people sign in to it."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, "admin", ref=ref)
@@ -367,16 +358,13 @@ def agent_credentials(
         return creds
 
 
-@router.post("/agents/adopt", tags=["agents"])
-def adopt_agents(
-    request: Request,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(reach.require("admin")),
-) -> dict[str, Any]:
+@router.post("/v1/agents/adopt", tags=["agents"], auth=guard(reach.require("admin")))
+def adopt_agents(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Adopt agents found on platforms at once (``{"agents": [...]}``): with ``makers:
     true``, each agent's maker on its platform as owner and sponsor, where AgentGov knows
     them; ``owner`` and ``sponsors`` for the others. Those it can't adopt are left, each
     with why. An administrator for some teams only adopts those teams' agents."""
+    principal = request.auth
     refs = body.get("agents")
     sponsors = body.get("sponsors")
     if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
@@ -389,7 +377,7 @@ def adopt_agents(
     if owner is not None and not isinstance(owner, str):
         raise HTTPException(422, "owner is a team or a person's email address")
     reason = body.get("reason")
-    rt = _rt(request)
+    rt = runtime(request)
     with rt.db.session() as s:
         return people.adopt(
             s,
@@ -404,46 +392,44 @@ def adopt_agents(
         )
 
 
-@router.put("/agents/{ref}/classification", tags=["agents"])
+@router.put(
+    "/v1/agents/{ref}/classification", tags=["agents"], auth=guard(reach.require("approver"))
+)
 def classify_agent(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(reach.require("approver")),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     """Classify an agent under the EU AI Act: ``category``, ``role``, ``basis`` and
     ``purpose`` (docs/evidence.md#a-classification-register). Approvers and administrators."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, "approver", ref=ref)
         classification.classify(s, agent, body, actor=principal.actor)
         return agents.to_dict(agent)
 
 
-@router.delete("/agents/{ref}/classification", tags=["agents"])
-def unclassify_agent(
-    request: Request, ref: str, principal: Principal = Depends(reach.require("approver"))
-) -> dict[str, Any]:
+@router.delete(
+    "/v1/agents/{ref}/classification", tags=["agents"], auth=guard(reach.require("approver"))
+)
+def unclassify_agent(request: HttpRequest, ref: str) -> dict[str, Any]:
     """The agent is no longer classified: it shows as such in the register."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, "approver", ref=ref)
         classification.classify(s, agent, None, actor=principal.actor)
         return agents.to_dict(agent)
 
 
-@router.post("/agents/bulk", tags=["agents"])
-def bulk_agents(
-    request: Request,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(reach.require("secops", "approver")),
-) -> dict[str, Any]:
+@router.post("/v1/agents/bulk", tags=["agents"], auth=guard(reach.require("secops", "approver")))
+def bulk_agents(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Do one thing to many agents (``agents``, by name or ID) at once: a lifecycle
     ``action`` (approve, block, unblock, delete or restore); ``update`` with ``fields``
     (owner, team, sponsors, add_sponsors, remove_sponsors, blueprint, environment,
     risk_tier); or ``classify`` with ``fields`` (category, role, basis, purpose). Each on
     its own: those it can't do are ``left``, each with why. The secops role blocks and
     unblocks, as far as the hand-off lets it; approvers classify."""
+    principal = request.auth
     unknown = sorted(set(body) - {"action", "agents", "reason", "fields"})
     if unknown:
         raise HTTPException(
@@ -456,7 +442,7 @@ def bulk_agents(
     if action not in bulk.AGENT_ACTIONS:
         raise HTTPException(422, f"action is {', '.join(bulk.AGENT_ACTIONS)}")
     role = {"update": "admin", "classify": "approver"}.get(action, "secops")
-    rt = _rt(request)
+    rt = runtime(request)
     with rt.db.session() as s:
         if reach.teams(principal, role) == frozenset():
             raise HTTPException(403, f"role {principal.role!r} may not do this")
@@ -494,17 +480,14 @@ def bulk_agents(
         )
 
 
-@router.post("/agents/{ref}/{action}", tags=["agents"])
+@router.post("/v1/agents/{ref}/{action}", tags=["agents"], auth=kill_switch)
 def agent_lifecycle(
-    request: Request,
-    ref: str,
-    action: str,
-    body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(kill_switch),
+    request: HttpRequest, ref: str, action: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
     """Lifecycle actions: approve, block (kill switch), unblock, delete (soft), restore, adopt.
     Those with roles for some teams only, for those teams' agents."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, "secops", ref=ref)
@@ -537,12 +520,11 @@ def agent_lifecycle(
         return {**agents.to_dict(agent), "still_runs_in": platforms.still_runs_in(s, agent)}
 
 
-@router.delete("/agents/{ref}", tags=["agents"])
-def purge_agent(
-    request: Request, ref: str, principal: Principal = Depends(admin)
-) -> dict[str, str]:
+@router.delete("/v1/agents/{ref}", tags=["agents"], auth=admin)
+def purge_agent(request: HttpRequest, ref: str) -> dict[str, str]:
     """Permanently remove a soft-deleted agent and its identity."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         if rt.identity is not None and agent.status == "deleted":
@@ -554,23 +536,21 @@ def purge_agent(
         return {"purged": ref}
 
 
-@router.get("/agents/{ref}/risk", tags=["agents"])
-def agent_risk(
-    request: Request, ref: str, principal: Principal = Depends(reach.read)
-) -> dict[str, Any]:
+@router.get("/v1/agents/{ref}/risk", tags=["agents"], auth=guard(reach.read))
+def agent_risk(request: HttpRequest, ref: str) -> dict[str, Any]:
     """The agent's current risk, as last computed from decisions and posture scans."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, *READ_ROLES, ref=ref)
         return agents.to_dict(agent)["risk"]
 
 
-@router.post("/agents/{ref}/risk/refresh", tags=["agents"])
-def refresh_agent_risk(
-    request: Request, ref: str, principal: Principal = Depends(reach.require("admin"))
-) -> dict[str, Any]:
+@router.post("/v1/agents/{ref}/risk/refresh", tags=["agents"], auth=guard(reach.require("admin")))
+def refresh_agent_risk(request: HttpRequest, ref: str) -> dict[str, Any]:
     """Recompute risk now. May raise findings and, with auto-block enabled, block the agent."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         agent = agents.get(s, ref)
         reach.check(s, principal, agent, "admin", ref=ref)
@@ -581,47 +561,43 @@ def refresh_agent_risk(
 # ------------------------------------------------------------------- blueprints
 
 
-@router.get("/blueprints", tags=["blueprints"])
-def list_blueprints(request: Request, _: Principal = Depends(reach.read)) -> list[dict[str, Any]]:
+@router.get("/v1/blueprints", tags=["blueprints"], auth=guard(reach.read))
+def list_blueprints(request: HttpRequest) -> list[dict[str, Any]]:
     """Every blueprint, for everyone who reads AgentGov (for some teams too)."""
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         return [blueprints.to_dict(b) for b in blueprints.list_all(s)]
 
 
-@router.post("/blueprints", status_code=201, tags=["blueprints"])
-def create_blueprint(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/blueprints", status_code=201, tags=["blueprints"], auth=admin)
+def create_blueprint(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    principal = request.auth
     known_fields(body, {"name", *blueprints.FIELDS}, "a blueprint")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         return blueprints.to_dict(blueprints.create(s, body, actor=principal.actor))
 
 
-@router.get("/blueprints/{ref}", tags=["blueprints"])
-def get_blueprint(request: Request, ref: str, _: Principal = Depends(reach.read)) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+@router.get("/v1/blueprints/{ref}", tags=["blueprints"], auth=guard(reach.read))
+def get_blueprint(request: HttpRequest, ref: str) -> dict[str, Any]:
+    with runtime(request).db.session() as s:
         return blueprints.to_dict(blueprints.get(s, ref))
 
 
-@router.patch("/blueprints/{ref}", tags=["blueprints"])
+@router.patch("/v1/blueprints/{ref}", tags=["blueprints"], auth=admin)
 def update_blueprint(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
+    principal = request.auth
     known_fields(body, blueprints.FIELDS, "a blueprint's edit")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         bp = blueprints.get(s, ref)
         blueprints.update(s, bp, body, actor=principal.actor, version=if_match(request))
         return blueprints.to_dict(bp)
 
 
-@router.delete("/blueprints/{ref}", tags=["blueprints"])
-def delete_blueprint(
-    request: Request, ref: str, principal: Principal = Depends(admin)
-) -> dict[str, str]:
-    with _rt(request).db.session() as s:
+@router.delete("/v1/blueprints/{ref}", tags=["blueprints"], auth=admin)
+def delete_blueprint(request: HttpRequest, ref: str) -> dict[str, str]:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         blueprints.delete(s, blueprints.get(s, ref), actor=principal.actor)
         return {"deleted": ref}
 
@@ -629,13 +605,12 @@ def delete_blueprint(
 # ------------------------------------------------------------------------ teams
 
 
-@router.get("/teams", tags=["teams"])
-def list_teams(
-    request: Request, principal: Principal = Depends(reach.read)
-) -> list[dict[str, Any]]:
+@router.get("/v1/teams", tags=["teams"], auth=guard(reach.read))
+def list_teams(request: HttpRequest) -> list[dict[str, Any]]:
     """The teams: for someone with roles for some teams only, those."""
+    principal = request.auth
     mine = reach.teams(principal, *READ_ROLES)
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         return [
             teams.to_dict(t)
             for t in teams.list_all(s)
@@ -643,21 +618,19 @@ def list_teams(
         ]
 
 
-@router.post("/teams", status_code=201, tags=["teams"])
-def create_team(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/teams", status_code=201, tags=["teams"], auth=admin)
+def create_team(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """People and chat channels that own agents, and that issues escalate to."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         return teams.to_dict(teams.create(s, body, actor=principal.actor))
 
 
-@router.get("/teams/{ref}", tags=["teams"])
-def get_team(
-    request: Request, ref: str, principal: Principal = Depends(reach.read)
-) -> dict[str, Any]:
+@router.get("/v1/teams/{ref}", tags=["teams"], auth=guard(reach.read))
+def get_team(request: HttpRequest, ref: str) -> dict[str, Any]:
+    principal = request.auth
     mine = reach.teams(principal, *READ_ROLES)
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         team = teams.get(s, ref)
         if mine is not None and team.name.lower() not in {n.lower() for n in mine}:
             raise NotFound(f"team {ref!r} not found")
@@ -665,24 +638,19 @@ def get_team(
         return {**teams.to_dict(team), "named_by": teams.users(s, team.name, reached=reached)}
 
 
-@router.patch("/teams/{ref}", tags=["teams"])
-def update_team(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
-) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+@router.patch("/v1/teams/{ref}", tags=["teams"], auth=admin)
+def update_team(request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         team = teams.get(s, ref)
         teams.update_team(s, team, body, actor=principal.actor, version=if_match(request))
         return teams.to_dict(team)
 
 
-@router.delete("/teams/{ref}", tags=["teams"])
-def delete_team(
-    request: Request, ref: str, principal: Principal = Depends(admin)
-) -> dict[str, str]:
-    with _rt(request).db.session() as s:
+@router.delete("/v1/teams/{ref}", tags=["teams"], auth=admin)
+def delete_team(request: HttpRequest, ref: str) -> dict[str, str]:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         teams.delete(s, teams.get(s, ref), actor=principal.actor)
         return {"deleted": ref}
 
@@ -690,11 +658,9 @@ def delete_team(
 # ---------------------------------------------------------------- tool servers
 
 
-@router.get("/toolservers", tags=["toolservers"])
-def list_toolservers(
-    request: Request, status: str | None = None, _: Principal = Depends(read)
-) -> list[dict[str, Any]]:
-    rt = _rt(request)
+@router.get("/v1/toolservers", tags=["toolservers"], auth=read)
+def list_toolservers(request: HttpRequest, status: str | None = None) -> list[dict[str, Any]]:
+    rt = runtime(request)
     with rt.db.session() as s:
         return [
             toolservers.to_dict(t, rt.settings.gateway_public_url)
@@ -702,36 +668,31 @@ def list_toolservers(
         ]
 
 
-@router.post("/toolservers", status_code=201, tags=["toolservers"])
-def create_toolserver(
-    request: Request,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(require("registrar")),
-) -> dict[str, Any]:
+@router.post("/v1/toolservers", status_code=201, tags=["toolservers"], auth=require("registrar"))
+def create_toolserver(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Register an MCP server. Registrar requests start ``pending`` review
     (Agent 365's bring-your-own MCP server approval flow)."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     known_fields(body, {"name", *toolservers.FIELDS}, "a tool server")
     with rt.db.session() as s:
         ts = toolservers.create(s, body, actor=principal.actor, approve=principal.is_admin)
         return toolservers.to_dict(ts, rt.settings.gateway_public_url)
 
 
-@router.get("/toolservers/{ref}", tags=["toolservers"])
-def get_toolserver(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
-    rt = _rt(request)
+@router.get("/v1/toolservers/{ref}", tags=["toolservers"], auth=read)
+def get_toolserver(request: HttpRequest, ref: str) -> dict[str, Any]:
+    rt = runtime(request)
     with rt.db.session() as s:
         return toolservers.to_dict(toolservers.get(s, ref), rt.settings.gateway_public_url)
 
 
-@router.patch("/toolservers/{ref}", tags=["toolservers"])
+@router.patch("/v1/toolservers/{ref}", tags=["toolservers"], auth=admin)
 def update_toolserver(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     known_fields(body, toolservers.FIELDS, "a tool server's edit")
     with rt.db.session() as s:
         ts = toolservers.get(s, ref)
@@ -739,30 +700,27 @@ def update_toolserver(
         return toolservers.to_dict(ts, rt.settings.gateway_public_url)
 
 
-@router.delete("/toolservers/{ref}", tags=["toolservers"])
-def delete_toolserver(
-    request: Request, ref: str, principal: Principal = Depends(admin)
-) -> dict[str, str]:
-    with _rt(request).db.session() as s:
+@router.delete("/v1/toolservers/{ref}", tags=["toolservers"], auth=admin)
+def delete_toolserver(request: HttpRequest, ref: str) -> dict[str, str]:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         toolservers.delete(s, toolservers.get(s, ref), actor=principal.actor)
         return {"deleted": ref}
 
 
-@router.post("/toolservers/{ref}/tools/{tool}/approve", tags=["toolservers"])
-def approve_tool(
-    request: Request, ref: str, tool: str, principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/toolservers/{ref}/tools/{tool}/approve", tags=["toolservers"], auth=admin)
+def approve_tool(request: HttpRequest, ref: str, tool: str) -> dict[str, Any]:
     """Accept a changed tool definition (clears rug-pull protection for it)."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         return toolservers.approve_tool(s, toolservers.get(s, ref), tool, actor=principal.actor)
 
 
-@router.post("/toolservers/{ref}/{action}", tags=["toolservers"])
-def toolserver_action(
-    request: Request, ref: str, action: str, principal: Principal = Depends(org_kill_switch)
-) -> dict[str, Any]:
+@router.post("/v1/toolservers/{ref}/{action}", tags=["toolservers"], auth=org_kill_switch)
+def toolserver_action(request: HttpRequest, ref: str, action: str) -> dict[str, Any]:
     """approve (pending approval), block, unblock."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         handoff.check_kill_switch(s, principal, action)
         ts = toolservers.set_status(s, toolservers.get(s, ref), action, actor=principal.actor)
@@ -772,44 +730,40 @@ def toolserver_action(
 # --------------------------------------------------------------------- policies
 
 
-@router.get("/policies", tags=["policies"])
-def list_policies(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
-    with _rt(request).db.session() as s:
+@router.get("/v1/policies", tags=["policies"], auth=read)
+def list_policies(request: HttpRequest) -> list[dict[str, Any]]:
+    with runtime(request).db.session() as s:
         return [policies.to_dict(p) for p in policies.list_all(s)]
 
 
-@router.post("/policies", status_code=201, tags=["policies"])
-def create_policy(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
-) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+@router.post("/v1/policies", status_code=201, tags=["policies"], auth=admin)
+def create_policy(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         return policies.to_dict(policies.create(s, body, actor=principal.actor))
 
 
-@router.get("/policies/{ref}", tags=["policies"])
-def get_policy(request: Request, ref: str, _: Principal = Depends(read)) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+@router.get("/v1/policies/{ref}", tags=["policies"], auth=read)
+def get_policy(request: HttpRequest, ref: str) -> dict[str, Any]:
+    with runtime(request).db.session() as s:
         return policies.to_dict(policies.get(s, ref))
 
 
-@router.put("/policies/{ref}", tags=["policies"])
+@router.put("/v1/policies/{ref}", tags=["policies"], auth=admin)
 def update_policy(
-    request: Request,
-    ref: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
+    request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         policy = policies.get(s, ref)
         policies.update(s, policy, body, actor=principal.actor, version=if_match(request))
         return policies.to_dict(policy)
 
 
-@router.delete("/policies/{ref}", tags=["policies"])
-def delete_policy(
-    request: Request, ref: str, principal: Principal = Depends(admin)
-) -> dict[str, str]:
-    with _rt(request).db.session() as s:
+@router.delete("/v1/policies/{ref}", tags=["policies"], auth=admin)
+def delete_policy(request: HttpRequest, ref: str) -> dict[str, str]:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         policies.delete(s, policies.get(s, ref), actor=principal.actor)
         return {"deleted": ref}
 
@@ -817,22 +771,21 @@ def delete_policy(
 # --------------------------------------------------------------------- api keys
 
 
-@router.get("/apikeys", tags=["apikeys"])
-def list_apikeys(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+@router.get("/v1/apikeys", tags=["apikeys"], auth=read)
+def list_apikeys(request: HttpRequest) -> list[dict[str, Any]]:
     """Every key's name, role, prefix and use (never the key): readable for access reviews."""
-    rt = _rt(request)
+    rt = runtime(request)
     with rt.db.session() as s:
         return [apikeys.to_dict(k, rt.settings.api_key_max_days) for k in apikeys.list_all(s)]
 
 
-@router.post("/apikeys", status_code=201, tags=["apikeys"])
-def create_apikey(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/apikeys", status_code=201, tags=["apikeys"], auth=admin)
+def create_apikey(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """A new key: ``expires_in_days`` days (AGENTGOV_API_KEY_DAYS when left out; null: it
     never expires, unless AGENTGOV_API_KEY_MAX_DAYS says keys must)."""
+    principal = request.auth
     known_fields(body, {"name", "role", "expires_in_days", "team"}, "an API key")
-    rt = _rt(request)
+    rt = runtime(request)
     settings = rt.settings
     days = apikeys.lifetime(
         body.get("expires_in_days", settings.api_key_days), max_days=settings.api_key_max_days
@@ -849,11 +802,10 @@ def create_apikey(
         return {**apikeys.to_dict(key, settings.api_key_max_days), "token": token}
 
 
-@router.delete("/apikeys/{key_id}", tags=["apikeys"])
-def revoke_apikey(
-    request: Request, key_id: str, principal: Principal = Depends(admin)
-) -> dict[str, Any]:
-    rt = _rt(request)
+@router.delete("/v1/apikeys/{key_id}", tags=["apikeys"], auth=admin)
+def revoke_apikey(request: HttpRequest, key_id: str) -> dict[str, Any]:
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         key = apikeys.revoke(s, key_id, actor=principal.actor)
         return apikeys.to_dict(key, rt.settings.api_key_max_days)

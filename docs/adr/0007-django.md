@@ -57,7 +57,7 @@ The HTTP layer, a group at a time (`src/agentgov/web`):
 - [x] Features, rules, instructions, access, identity issuers, models, MCP servers, security
   operations, access packages. Their routes under an agent's path (`/v1/agents/{ref}/...`)
   move with the registry's, whose `POST /v1/agents/{ref}/{action}` takes those paths too.
-- [ ] Evidence (downloads and archives), platforms, the registry, governance.
+- [x] Evidence (downloads and archives), platforms, the registry, governance.
 - [ ] What other components call: OPA's bundles and decision logs, the gateway's
   configuration, telemetry, Copilot Studio, AuthZEN, assertions.
 - [ ] Single sign-on (cookies, redirects, back-channel logout).

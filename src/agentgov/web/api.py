@@ -7,17 +7,18 @@ import dataclasses
 import json
 import logging
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import PurePath
-from typing import Any
+from typing import Any, TypeVar
+from urllib.parse import quote
 from uuid import UUID
 
 from asgiref.sync import sync_to_async
-from django.http import HttpRequest, HttpResponse, HttpResponseBase
+from django.http import HttpRequest, HttpResponse, HttpResponseBase, StreamingHttpResponse
 from django.urls import URLResolver, get_resolver
 from ninja import NinjaAPI
 from ninja import Router as NinjaRouter
@@ -33,6 +34,7 @@ from agentgov import __version__
 from agentgov.registry.errors import RegistryError
 
 log = logging.getLogger(__name__)
+_Answer = TypeVar("_Answer", bound=HttpResponseBase)
 
 # The views' threads: Django runs a sync view under ASGI in one thread for every request,
 # one request at a time, so ours run here instead, as many at once as FastAPI's did.
@@ -78,15 +80,81 @@ def dumps(value: Any) -> bytes:
 _ANSWER: TypeAdapter[Any] = TypeAdapter(Any)
 
 
-def json_response(
-    value: Any, status: int = 200, headers: dict[str, str] | None = None
+# ------------------------------------------------------------------ answers
+# The answers routes make themselves, as Starlette's response classes made them, with the
+# same arguments.
+
+Headers = Mapping[str, str] | None
+
+
+def json_response(content: Any, status_code: int = 200, headers: Headers = None) -> HttpResponse:
+    """As FastAPI's JSONResponse: its errors, and the answers routes made themselves."""
+    body = json.dumps(jsonable(content), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    return raw_response(body, status_code, headers, "application/json")
+
+
+def raw_response(
+    content: bytes | str | None = None,
+    status_code: int = 200,
+    headers: Headers = None,
+    media_type: str | None = None,
 ) -> HttpResponse:
-    """An answer written as FastAPI's JSONResponse wrote it: its errors, and the answers
-    routes made themselves."""
-    body = json.dumps(jsonable(value), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-    return HttpResponse(
-        body.encode(), status=status, content_type="application/json", headers=headers
-    )
+    """As Starlette's Response: text in UTF-8, and no type unless it is given one."""
+    body = content.encode() if isinstance(content, str) else content or b""
+    return _typed(HttpResponse(body, status=status_code, headers=headers), headers, media_type)
+
+
+def text_response(
+    content: str, status_code: int = 200, headers: Headers = None, media_type: str = "text/plain"
+) -> HttpResponse:
+    """As Starlette's PlainTextResponse."""
+    return raw_response(content, status_code, headers, media_type)
+
+
+def stream_response(
+    content: Iterable[Any] | AsyncIterable[Any],
+    status_code: int = 200,
+    headers: Headers = None,
+    media_type: str | None = None,
+) -> StreamingHttpResponse:
+    """As Starlette's StreamingResponse: sent as it is made. A synchronous iterator is read
+    in the views' threads a part at a time (Django would read it all, then send it)."""
+    parts = content if isinstance(content, AsyncIterable) else _in_threads(iter(content))
+    answer = StreamingHttpResponse(parts, status=status_code, headers=headers)
+    return _typed(answer, headers, media_type)
+
+
+def redirect_response(url: str, status_code: int = 307, headers: Headers = None) -> HttpResponse:
+    """As Starlette's RedirectResponse: 307 unless told otherwise."""
+    answer = raw_response(b"", status_code, headers)
+    answer["Location"] = quote(url, safe=":/%#?=@[]!$&'()*+,;")
+    return answer
+
+
+def _typed(answer: _Answer, headers: Headers, media_type: str | None) -> _Answer:
+    if any(name.lower() == "content-type" for name in headers or {}):
+        return answer
+    if media_type is None:
+        del answer["Content-Type"]
+        return answer
+    if media_type.startswith("text/") and "charset=" not in media_type.lower():
+        media_type += "; charset=utf-8"
+    answer["Content-Type"] = media_type
+    return answer
+
+
+_DONE = object()
+
+
+async def _in_threads(parts: Iterator[Any]) -> AsyncIterator[Any]:
+    step = sync_to_async(next, thread_sensitive=False, executor=VIEWS)
+    try:
+        while (part := await step(parts, _DONE)) is not _DONE:
+            yield part
+    finally:
+        close = getattr(parts, "close", None)
+        if close is not None:
+            await sync_to_async(close, thread_sensitive=False, executor=VIEWS)()
 
 
 class Renderer(BaseRenderer):

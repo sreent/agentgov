@@ -7,13 +7,17 @@ from django.urls import include, path
 
 from agentgov.web import (
     access,
+    evidence,
     features,
+    governance,
     health,
     identity,
     instructions,
     mcp,
     model_providers,
     packages,
+    platforms,
+    registry,
     rules,
     secops,
 )
@@ -21,9 +25,14 @@ from agentgov.web.api import api
 
 for router in (
     health.router,
+    registry.router,
     packages.router,
     rules.router,
+    governance.router,
+    evidence.router,
     access.router,
+    platforms.router,
+    platforms.agent_router,
     instructions.router,
     features.router,
     model_providers.router,

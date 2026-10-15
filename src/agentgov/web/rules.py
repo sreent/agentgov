@@ -8,12 +8,14 @@ from typing import Any
 from django.http import HttpRequest
 from ninja import Body
 
+from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES
 from agentgov.api.versions import if_match
-from agentgov.registry import rules
+from agentgov.registry import access_packages, agents, rules
+from agentgov.registry.errors import NotFound
 from agentgov.runtime import JOB_WAIT_SECONDS
 from agentgov.web.api import HTTPException, Router
-from agentgov.web.auth import require, runtime
+from agentgov.web.auth import require, runtime, signed_in
 
 router = Router(tags=["management rules"])
 read = require(*READ_ROLES)
@@ -76,3 +78,17 @@ def delete_rule(request: HttpRequest, ref: str) -> dict[str, str]:
     with runtime(request).db.session() as s:
         rules.delete(s, rules.get(s, ref), actor=request.auth.actor)
         return {"deleted": ref}
+
+
+@router.get("/v1/agents/{ref}/rules", tags=["agents"], auth=signed_in)
+def agent_rules(request: HttpRequest, ref: str) -> list[dict[str, Any]]:
+    """The rules that match the agent, and what each will do or did: for readers, and the
+    agent's owner and sponsors."""
+    principal = request.auth
+    with runtime(request).db.session() as s:
+        agent = agents.get(s, ref)
+        person = principal.person
+        responsible = person is not None and person.lower() in access_packages.responsible(s, agent)
+        if not reach.roles_at(s, principal, agent) & set(READ_ROLES) and not responsible:
+            raise NotFound(f"agent {ref!r} not found")  # out of their reach
+        return rules.for_agent(s, agent)

@@ -16,13 +16,13 @@ import pytest
 from sqlalchemy import select, text
 
 from agentgov import ledger
-from agentgov.api import evidence_routes
 from agentgov.config import Settings
 from agentgov.coordination import LOCK_SPACE, Coordinator, JobBusy, JobLost, lock_key
 from agentgov.db import Database, mark_changed
 from agentgov.models import LedgerEntry
 from agentgov.registry import agents
 from agentgov.runtime import Runtime
+from agentgov.web import evidence as evidence_routes
 from tests.conftest import ADMIN, POSTGRES
 
 postgres = pytest.mark.skipif(not POSTGRES, reason="needs AGENTGOV_TEST_POSTGRES_URL")

@@ -218,3 +218,16 @@ def assignment_action(
                 raise ValidationError("keep is true (it still needs it) or false (remove it)")
             access_packages.review(s, row, keep=keep, actor=principal.actor, note=body.get("note"))
         return access_packages.assignment_dict(s, row)
+
+
+@router.get("/v1/agents/{ref}/access-packages", tags=["agents"], auth=signed_in)
+def agent_packages(request: HttpRequest, ref: str) -> list[dict[str, Any]]:
+    """The access packages an agent holds and has asked for, newest first."""
+    principal = request.auth
+    with runtime(request).db.session() as s:
+        agent = agents.get(s, ref)
+        _may_read(s, principal, agent, f"agent {ref!r} not found")
+        return [
+            access_packages.assignment_dict(s, r)
+            for r in access_packages.assignments(s, agent_id=agent.id)
+        ]

@@ -10,15 +10,14 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
-import anyio.to_thread
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
+from ninja import Body
 from sqlalchemy import func, select
 
 from agentgov import ids, ledger, witness
 from agentgov.api import reach
-from agentgov.api.auth import READ_ROLES, Principal, require, signed_in
+from agentgov.api.auth import READ_ROLES, Principal
 from agentgov.models import (
     DELETED,
     DISCOVERED,
@@ -50,38 +49,41 @@ from agentgov.registry import (
 from agentgov.registry.errors import ValidationError
 from agentgov.runtime import JOB_WAIT_SECONDS
 from agentgov.secops import handoff
+from agentgov.web.api import (
+    HTTPException,
+    Router,
+    stream_response,
+    text_response,
+)
+from agentgov.web.auth import guard, require, runtime, signed_in
 
-router = APIRouter(prefix="/v1")
+router = Router()
 read = require(*READ_ROLES)
 admin = require("admin")
-
-
-def _rt(request: Request) -> Any:
-    return request.app.state.rt
 
 
 # -------------------------------------------------------------------- approvals
 
 
-@router.get("/approvals", tags=["approvals"])
-def list_approvals(
-    request: Request, status: str | None = None, principal: Principal = Depends(reach.read)
-) -> list[dict[str, Any]]:
+@router.get("/v1/approvals", tags=["approvals"], auth=guard(reach.read))
+def list_approvals(request: HttpRequest, status: str | None = None) -> list[dict[str, Any]]:
     """The newest approval requests: for someone with roles for some teams only, their
     agents'."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         reached = reach.agent_ids(s, principal, *READ_ROLES)
         rows = approvals.list_requests(s, status=status, agent_ids=reached)
         return reach.mark([approvals.to_dict(r) for r in rows], s, principal, "agent_id")
 
 
-@router.get("/inbox", tags=["approvals"])
-def get_inbox(request: Request, principal: Principal = Depends(signed_in)) -> dict[str, Any]:
+@router.get("/v1/inbox", tags=["approvals"], auth=signed_in)
+def get_inbox(request: HttpRequest) -> dict[str, Any]:
     """What waits for a decision from whoever asks, by kind (``kinds``), and how many in all
     (``total``): calls held for a person, access packages asked for, risks asked to be
     accepted, and, for administrators, agents and tool servers waiting for approval,
     changed tool definitions, and agents found on platforms that nobody has reviewed."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         waiting = inbox.gather(s, principal, roles_at=reach.by_agent(s, principal))
         # Who they are where each one's agent is, for the admin UI's buttons.
         about = {"calls": "agent_id", "access": "agent_id", "risks": "agent_id", "agents": "id"}
@@ -91,22 +93,20 @@ def get_inbox(request: Request, principal: Principal = Depends(signed_in)) -> di
         return waiting
 
 
-@router.get("/me/approvals", tags=["approvals"])
-def my_approvals(
-    request: Request, status: str | None = None, principal: Principal = Depends(signed_in)
-) -> list[dict[str, Any]]:
+@router.get("/v1/me/approvals", tags=["approvals"], auth=signed_in)
+def my_approvals(request: HttpRequest, status: str | None = None) -> list[dict[str, Any]]:
     """The approval requests sent to the person signed in: those an agent made while it
     acted for them, where its blueprint sends them to the person."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         rows = approvals.list_for_person(s, principal.subject, status=status)
         return [approvals.to_dict(r) for r in rows]
 
 
-@router.get("/approvals/{approval_id}", tags=["approvals"])
-def get_approval(
-    request: Request, approval_id: str, principal: Principal = Depends(signed_in)
-) -> dict[str, Any]:
-    with _rt(request).db.session() as s:
+@router.get("/v1/approvals/{approval_id}", tags=["approvals"], auth=signed_in)
+def get_approval(request: HttpRequest, approval_id: str) -> dict[str, Any]:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         req = approvals.get(s, approval_id)
         # Everyone who reads AgentGov (where its agent is), and the person it was sent to.
         roles = reach.roles_at(s, principal, s.get(Agent, req.agent_id))
@@ -115,17 +115,14 @@ def get_approval(
         return reach.mark([approvals.to_dict(req)], s, principal, "agent_id")[0]
 
 
-@router.post("/approvals/{approval_id}/{verdict}", tags=["approvals"])
+@router.post("/v1/approvals/{approval_id}/{verdict}", tags=["approvals"], auth=signed_in)
 def decide_approval(
-    request: Request,
-    approval_id: str,
-    verdict: str,
-    body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(signed_in),
+    request: HttpRequest, approval_id: str, verdict: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
+    principal = request.auth
     if verdict not in ("approve", "deny"):
         raise HTTPException(404, "verdict must be approve or deny")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         req = approvals.get(s, approval_id)
         # Their roles where its agent is: an approver for its team decides it.
         here = reach.here(s, principal, s.get(Agent, req.agent_id))
@@ -148,34 +145,32 @@ def decide_approval(
 # --------------------------------------------------------------------- findings
 
 
-@router.get("/finding-types", tags=["findings"])
-def list_finding_types(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+@router.get("/v1/finding-types", tags=["findings"], auth=read)
+def list_finding_types(request: HttpRequest) -> list[dict[str, Any]]:
     """Each type of finding AgentGov has raised or is set up for: whether it is on, its
     severity if set here, and how many of its findings are open (docs/issues.md)."""
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         return finding_types.listing(s)
 
 
-@router.put("/finding-types/{type_}", tags=["findings"])
+@router.put("/v1/finding-types/{type_}", tags=["findings"], auth=admin)
 def configure_finding_type(
-    request: Request,
-    type_: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(admin),
+    request: HttpRequest, type_: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     """Turn a type of finding off or on, ``{"mode": "off"}``, or set its severity here,
     ``{"severity": "low"}`` (null: its checks' own)."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         return finding_types.configure(s, type_, body, actor=principal.actor)
 
 
 MAX_FINDINGS_PAGE = 2000
 
 
-@router.get("/findings", tags=["findings"])
+@router.get("/v1/findings", tags=["findings"], auth=guard(reach.read))
 def list_findings(
-    request: Request,
-    response: Response,
+    request: HttpRequest,
+    response: HttpResponse,
     status: str | None = "open",
     severity: str | None = None,
     type: str | None = None,
@@ -183,15 +178,15 @@ def list_findings(
     asked: bool = False,
     limit: int = 500,
     offset: int = 0,
-    principal: Principal = Depends(reach.read),
 ) -> list[dict[str, Any]]:
     """The findings, newest first, a page at a time (``limit``, at most 2000, from
     ``offset``); ``X-Total-Count`` says how many there are in all. ``asked``: only those
     whose people ask for their risk to be accepted. For someone with roles for some teams
     only, those about their agents."""
+    principal = request.auth
     if not 1 <= limit <= MAX_FINDINGS_PAGE or offset < 0:
         raise ValidationError(f"limit is 1 to {MAX_FINDINGS_PAGE}, and offset 0 or more")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         conditions = []
         if status and status != "all":
             conditions.append(Finding.status == status)
@@ -242,29 +237,27 @@ def _triage(session: Any, principal: Principal, finding: Any) -> Principal:
     return here
 
 
-@router.get("/me/issues", tags=["findings"])
-def my_issues(
-    request: Request, status: str | None = "open", principal: Principal = Depends(signed_in)
-) -> list[dict[str, Any]]:
+@router.get("/v1/me/issues", tags=["findings"], auth=signed_in)
+def my_issues(request: HttpRequest, status: str | None = "open") -> list[dict[str, Any]]:
     """The issues that reached the person signed in: about agents they own or sponsor, or
     sent to a team they are in (docs/issues.md). With the agent's name, as an issue on its own
     has it: people without a role can't list agents."""
+    principal = request.auth
     if status not in (None, "all", *findings.STATUSES):
         raise ValidationError(f"status is {', '.join(findings.STATUSES)} or all")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         rows = issues.for_person(s, principal.person, status=status)
         ids = {f.agent_id for f in rows if f.agent_id}
         names = {a.id: a.name for a in s.scalars(select(Agent).where(Agent.id.in_(ids))).unique()}
         return [{**findings.to_dict(f), "agent_name": names.get(f.agent_id)} for f in rows]
 
 
-@router.get("/findings/{finding_id}", tags=["findings"])
-def get_finding(
-    request: Request, finding_id: str, principal: Principal = Depends(signed_in)
-) -> dict[str, Any]:
+@router.get("/v1/findings/{finding_id}", tags=["findings"], auth=signed_in)
+def get_finding(request: HttpRequest, finding_id: str) -> dict[str, Any]:
     """A finding, with the people and teams it goes to, the messages sent about it, and
     what happened to it. For everyone who reads AgentGov, and the people it reached."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         finding = findings.get(s, finding_id)
         mine = issues.may_act(s, finding, principal.person)
         if not _where(s, principal, finding).roles & set(READ_ROLES) and not mine:
@@ -282,13 +275,12 @@ def get_finding(
         return reach.mark([row], s, principal, "agent_id")[0]
 
 
-@router.post("/findings/{finding_id}/acknowledge", tags=["findings"])
-def acknowledge_finding(
-    request: Request, finding_id: str, principal: Principal = Depends(signed_in)
-) -> dict[str, Any]:
+@router.post("/v1/findings/{finding_id}/acknowledge", tags=["findings"], auth=signed_in)
+def acknowledge_finding(request: HttpRequest, finding_id: str) -> dict[str, Any]:
     """Take an issue on: it goes no further up its chain. For the people it reached,
     approvers and administrators (and the secops role from triage on)."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         finding = findings.get(s, finding_id)
         here = _where(s, principal, finding)
         if not _triages(s, here) and not issues.may_act(s, finding, principal.person):
@@ -298,20 +290,22 @@ def acknowledge_finding(
         return findings.to_dict(issues.acknowledge(s, finding, actor=principal.actor))
 
 
-@router.post("/findings/{finding_id}/accept", tags=["findings"])
+@router.post(
+    "/v1/findings/{finding_id}/accept",
+    tags=["findings"],
+    auth=guard(reach.require("approver", "secops")),
+)
 def accept_finding(
-    request: Request,
-    finding_id: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(reach.require("approver", "secops")),
+    request: HttpRequest, finding_id: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     """Accept the risk until a date (``until``: a date, a time or a number of days), saying
     why (``reason``): it goes to nobody until then, and opens again then if it still
     holds. The people responsible for an agent don't accept its risks: approvers do."""
+    principal = request.auth
     unknown = sorted(set(body) - {"reason", "until"})
     if unknown:
         raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         finding = findings.get(s, finding_id)
         _triage(s, principal, finding)
         accepted = issues.accept(
@@ -336,16 +330,14 @@ def _theirs(session: Any, finding: Any, principal: Principal, what: str) -> str:
     return person
 
 
-@router.post("/findings/{finding_id}/not-mine", tags=["findings"])
+@router.post("/v1/findings/{finding_id}/not-mine", tags=["findings"], auth=signed_in)
 def decline_finding(
-    request: Request,
-    finding_id: str,
-    body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(signed_in),
+    request: HttpRequest, finding_id: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
     """Say an issue isn't yours, and why (``reason``): it goes on to the next people
     responsible for it at once, who hear why (``went_to``)."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         finding = findings.get(s, finding_id)
         person = _theirs(s, finding, principal, "say it isn't theirs")
@@ -360,19 +352,17 @@ def decline_finding(
         return {**findings.to_dict(finding), "went_to": went_to}
 
 
-@router.post("/findings/{finding_id}/exception", tags=["findings"])
+@router.post("/v1/findings/{finding_id}/exception", tags=["findings"], auth=signed_in)
 def ask_for_exception(
-    request: Request,
-    finding_id: str,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(signed_in),
+    request: HttpRequest, finding_id: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     """Ask an approver to accept an issue's risk until a date (``until``: a date, a time or
     a number of days), saying why (``reason``). It stays with you meanwhile."""
+    principal = request.auth
     unknown = sorted(set(body) - {"reason", "until"})
     if unknown:
         raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         finding = findings.get(s, finding_id)
         person = _theirs(s, finding, principal, "ask to accept its risk")
         asked = issues.ask_exception(
@@ -386,16 +376,18 @@ def ask_for_exception(
         return findings.to_dict(asked)
 
 
-@router.post("/findings/{finding_id}/exception/decline", tags=["findings"])
+@router.post(
+    "/v1/findings/{finding_id}/exception/decline",
+    tags=["findings"],
+    auth=guard(reach.require("approver", "secops")),
+)
 def decline_exception(
-    request: Request,
-    finding_id: str,
-    body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(reach.require("approver", "secops")),
+    request: HttpRequest, finding_id: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
     """Turn down a request to accept an issue's risk, saying why (``reason``): it stays
     with whoever asked, to fix."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         finding = findings.get(s, finding_id)
         _triage(s, principal, finding)
         declined = issues.decline_exception(
@@ -404,14 +396,13 @@ def decline_exception(
         return findings.to_dict(declined)
 
 
-@router.post("/findings/{finding_id}/recheck", tags=["findings"])
-def recheck_finding(
-    request: Request, finding_id: str, principal: Principal = Depends(signed_in)
-) -> dict[str, Any]:
+@router.post("/v1/findings/{finding_id}/recheck", tags=["findings"], auth=signed_in)
+def recheck_finding(request: HttpRequest, finding_id: str) -> dict[str, Any]:
     """Say you fixed what an issue is about: AgentGov checks it again now, as far as it can
     (``checked``), and says whether it is gone (``fixed``). For the people it reached,
     approvers and administrators."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         finding = findings.get(s, finding_id)
         if not _triages(s, _where(s, principal, finding)):
@@ -422,22 +413,21 @@ def recheck_finding(
         raise HTTPException(502, str(exc)) from exc
 
 
-@router.post("/findings/bulk", tags=["findings"])
-def bulk_findings(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(signed_in)
-) -> dict[str, Any]:
+@router.post("/v1/findings/bulk", tags=["findings"], auth=signed_in)
+def bulk_findings(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Do one thing to many ``findings`` (their IDs) at once: ``action`` is acknowledge,
     resolve, reopen, dismiss (``reason``; ``until``, for a while) or accept (``reason`` and
     ``until``). Each on its own: those it can't do are ``left``, each with why. The people
     an issue reached acknowledge theirs; approvers and the secops role (from triage on)
     do the rest."""
+    principal = request.auth
     unknown = sorted(set(body) - {"action", "findings", "reason", "until"})
     if unknown:
         raise ValidationError(
             f"unknown field(s) {', '.join(unknown)}: send action, findings, reason and until"
         )
     action = str(body.get("action") or "")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         triages = _triages(s, principal)
         # Roles for some teams only triage those teams' issues.
         some = set(principal.teams) & {"admin", "approver", "secops"}
@@ -465,19 +455,21 @@ def bulk_findings(
         )
 
 
-@router.post("/findings/{finding_id}/dismiss", tags=["findings"])
+@router.post(
+    "/v1/findings/{finding_id}/dismiss",
+    tags=["findings"],
+    auth=guard(reach.require("approver", "secops")),
+)
 def dismiss_finding(
-    request: Request,
-    finding_id: str,
-    body: dict[str, Any] = Body(default={}),
-    principal: Principal = Depends(reach.require("approver", "secops")),
+    request: HttpRequest, finding_id: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
     """Dismiss a finding that is wrong, saying why (``reason``); with ``until`` (a date, a
     time or a number of days), it opens again then if it still holds."""
+    principal = request.auth
     unknown = sorted(set(body) - {"reason", "until"})
     if unknown:
         raise ValidationError(f"unknown field(s) {', '.join(unknown)}: send reason and until")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         finding = findings.get(s, finding_id)
         _triage(s, principal, finding)
         until = body.get("until")
@@ -492,13 +484,13 @@ def dismiss_finding(
         return findings.to_dict(dismissed)
 
 
-@router.post("/findings/{finding_id}/{action}", tags=["findings"])
-def finding_action(
-    request: Request,
-    finding_id: str,
-    action: str,
-    principal: Principal = Depends(reach.require("approver", "secops")),
-) -> dict[str, Any]:
+@router.post(
+    "/v1/findings/{finding_id}/{action}",
+    tags=["findings"],
+    auth=guard(reach.require("approver", "secops")),
+)
+def finding_action(request: HttpRequest, finding_id: str, action: str) -> dict[str, Any]:
+    principal = request.auth
     status = {"resolve": "resolved", "reopen": "open"}.get(action)
     if status is None:
         raise HTTPException(
@@ -506,15 +498,15 @@ def finding_action(
             "action must be resolve, dismiss, reopen, acknowledge, accept, not-mine, exception "
             "or recheck",
         )
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         # The security team's tools, as far as the hand-off lets them.
         _triage(s, principal, findings.get(s, finding_id))
         return findings.to_dict(findings.set_status(s, finding_id, status, principal.actor))
 
 
-@router.post("/posture/scan", tags=["findings"])
-def posture_scan(request: Request, _: Principal = Depends(admin)) -> dict[str, Any]:
-    result = _rt(request).run_posture_scan(wait=JOB_WAIT_SECONDS)
+@router.post("/v1/posture/scan", tags=["findings"], auth=admin)
+def posture_scan(request: HttpRequest) -> dict[str, Any]:
+    result = runtime(request).run_posture_scan(wait=JOB_WAIT_SECONDS)
     if result is None:
         raise HTTPException(409, "posture checks are off: turn them on in Features first")
     return result
@@ -523,20 +515,20 @@ def posture_scan(request: Request, _: Principal = Depends(admin)) -> dict[str, A
 # ----------------------------------------------------------------------- ledger
 
 
-@router.get("/ledger", tags=["ledger"])
+@router.get("/v1/ledger", tags=["ledger"], auth=guard(reach.read))
 def list_ledger(
-    request: Request,
+    request: HttpRequest,
     type: str | None = None,
     agent: str | None = None,
     user: str | None = None,
     decision: str | None = None,
     before_seq: int | None = None,
     limit: int = 100,
-    principal: Principal = Depends(reach.read),
 ) -> list[dict[str, Any]]:
     """The newest entries first: for someone with roles for some teams only, those about
     their agents."""
-    with _rt(request).db.session() as s:
+    principal = request.auth
+    with runtime(request).db.session() as s:
         stmt = (
             select(LedgerEntry)
             .where(ledger.in_chain())
@@ -560,48 +552,47 @@ def list_ledger(
             stmt = stmt.where(LedgerEntry.decision == decision)
         if before_seq:
             stmt = stmt.where(LedgerEntry.seq < before_seq)
-        trace_url = _rt(request).settings.trace_url
+        trace_url = runtime(request).settings.trace_url
         return [ledger.with_trace_link(ledger.to_dict(e), trace_url) for e in s.scalars(stmt)]
 
 
-@router.get("/ledger/verify", tags=["ledger"])
-def verify_ledger(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
-    rt = _rt(request)
+@router.get("/v1/ledger/verify", tags=["ledger"], auth=read)
+def verify_ledger(request: HttpRequest) -> dict[str, Any]:
+    rt = runtime(request)
     with rt.db.session() as s:
         return ledger.verify(s, settings=rt.settings)
 
 
-@router.get("/ledger/export", tags=["ledger"])
-def export_ledger(request: Request, _: Principal = Depends(read)) -> StreamingResponse:
+@router.get("/v1/ledger/export", tags=["ledger"], auth=read)
+def export_ledger(request: HttpRequest) -> StreamingHttpResponse:
     """The full chain as JSON Lines, for SIEM import or offline verification."""
-    db = _rt(request).db
+    db = runtime(request).db
 
     def lines() -> Iterator[bytes]:
         with db.session() as s:
             for entry in ledger.iter_entries(s, until=ledger.head_seq(s)):
                 yield (json.dumps(ledger.to_dict(entry), sort_keys=True) + "\n").encode()
 
-    return StreamingResponse(lines(), media_type="application/x-ndjson")
+    return stream_response(lines(), media_type="application/x-ndjson")
 
 
 # --------------------------------------------------------------- overview & map
 
 
-@router.get("/start", tags=["overview"])
-def start_checklist(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/start", tags=["overview"], auth=read)
+def start_checklist(request: HttpRequest) -> dict[str, Any]:
     """Where to start: where the organisation said its agents are, and each step to a first
     useful day, done or not (docs/administration.md#start-here)."""
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         return start.checklist(s)
 
 
-@router.put("/start", tags=["overview"])
-def start_answer(
-    request: Request, body: dict[str, Any] = Body(...), principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.put("/v1/start", tags=["overview"], auth=admin)
+def start_answer(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Say where your agents are, ``{"places": ["copilot-studio", "gateway"]}``: what reads
     them is turned on and the rest off. Or hide the checklist, ``{"hidden": true}``."""
-    rt = _rt(request)
+    principal = request.auth
+    rt = runtime(request)
     with rt.db.session() as s:
         if set(body) == {"hidden"}:
             if not isinstance(body["hidden"], bool):
@@ -610,9 +601,9 @@ def start_answer(
         return start.answer(s, rt.settings, body, actor=principal.actor)
 
 
-@router.get("/overview", tags=["overview"])
-def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
-    rt = _rt(request)
+@router.get("/v1/overview", tags=["overview"], auth=read)
+def overview(request: HttpRequest) -> dict[str, Any]:
+    rt = runtime(request)
     now = ids.utcnow()
     # Built before opening our own session: nested sessions would deadlock on
     # SQLite, where every transaction takes the write lock up front.
@@ -725,20 +716,20 @@ def overview(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
         }
 
 
-@router.get("/replicas", tags=["overview"])
-def replicas(request: Request, _: Principal = Depends(read)) -> list[dict[str, Any]]:
+@router.get("/v1/replicas", tags=["overview"], auth=read)
+def replicas(request: HttpRequest) -> list[dict[str, Any]]:
     """The control plane's replicas connected to the database, and the one that leads (runs
     the scheduled work)."""
-    rt = _rt(request)
+    rt = runtime(request)
     with rt.db.session() as s:
         return rt.coordination.replicas(s)
 
 
-@router.get("/graph", tags=["overview"])
-def agent_map(request: Request, _: Principal = Depends(read)) -> dict[str, Any]:
+@router.get("/v1/graph", tags=["overview"], auth=read)
+def agent_map(request: HttpRequest) -> dict[str, Any]:
     """People, agents and tool servers with sponsorship, grants and observed usage; and
     the agents that may call, or did call, other agents."""
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
         servers = s.scalars(select(ToolServer).where(ToolServer.gateway.is_(True))).all()
@@ -844,12 +835,10 @@ def _glob(pattern: str, value: str) -> bool:
 # --------------------------------------------------------------- what-if & GitOps
 
 
-@router.post("/policies/evaluate", tags=["policies"])
-def evaluate_policy(
-    request: Request, body: dict[str, Any] = Body(...), _: Principal = Depends(read)
-) -> dict[str, Any]:
+@router.post("/v1/policies/evaluate", tags=["policies"], auth=read)
+def evaluate_policy(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """What-if: evaluate a hypothetical MCP call against the live policies in OPA."""
-    rt = _rt(request)
+    rt = runtime(request)
     if not rt.settings.opa_url:
         raise HTTPException(409, "OPA is not configured (AGENTGOV_OPA_URL)")
     path = body.get("path", "agentgov/mcp/decision")
@@ -873,13 +862,12 @@ def evaluate_policy(
     return {"path": path, "result": resp.json().get("result")}
 
 
-@router.post("/apply", tags=["manifests"])
-async def apply_manifests(
-    request: Request, principal: Principal = Depends(admin)
-) -> dict[str, Any]:
+@router.post("/v1/apply", tags=["manifests"], auth=admin)
+def apply_manifests(request: HttpRequest) -> dict[str, Any]:
     """Apply YAML (or JSON ``{"documents": [...]}``) manifests idempotently."""
-    rt = _rt(request)
-    raw = (await request.body()).decode()
+    principal = request.auth
+    rt = runtime(request)
+    raw = request.body.decode()
     if request.headers.get("content-type", "").startswith("application/json"):
         payload = json.loads(raw or "{}")
         docs = payload.get("documents", payload if isinstance(payload, list) else [])
@@ -887,33 +875,26 @@ async def apply_manifests(
             manifests.validate(doc, i)
     else:
         docs = manifests.parse(raw)
-
-    def run() -> list[dict[str, str]]:
-        with rt.db.session() as s:
-            return manifests.apply(s, rt.settings, docs, actor=principal.actor)
-
-    return {"results": await anyio.to_thread.run_sync(run)}
+    with rt.db.session() as s:
+        return {"results": manifests.apply(s, rt.settings, docs, actor=principal.actor)}
 
 
-@router.get("/export", tags=["manifests"])
-def export_manifests(request: Request, _: Principal = Depends(read)) -> PlainTextResponse:
-    with _rt(request).db.session() as s:
-        return PlainTextResponse(manifests.dump(manifests.export(s)), media_type="application/yaml")
+@router.get("/v1/export", tags=["manifests"], auth=read)
+def export_manifests(request: HttpRequest) -> HttpResponse:
+    with runtime(request).db.session() as s:
+        return text_response(manifests.dump(manifests.export(s)), media_type="application/yaml")
 
 
-@router.post("/discovery/import", tags=["discovery"])
-def import_discovery(
-    request: Request,
-    body: dict[str, Any] = Body(...),
-    principal: Principal = Depends(require("registrar", "service")),
-) -> dict[str, Any]:
+@router.post("/v1/discovery/import", tags=["discovery"], auth=require("registrar", "service"))
+def import_discovery(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Import scanner output, e.g. the Agent Governance Toolkit's agent-discovery JSON. A
     registrar, which reads no agents, is told how many it sent; an administrator or a
     component, how many were there already and how many are new."""
+    principal = request.auth
     items = body.get("items") or body.get("agents") or []
     if not isinstance(items, list):
         raise ValidationError("items must be a list")
-    with _rt(request).db.session() as s:
+    with runtime(request).db.session() as s:
         counts = discovery.import_scan(
             s,
             items,

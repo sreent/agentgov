@@ -29,14 +29,7 @@ from agentgov.api import (
     assertion_routes,
     authzen_routes,
     copilot_studio_routes,
-    evidence_routes,
-    governance_routes,
-    instruction_routes,
     integration_routes,
-    package_routes,
-    platform_routes,
-    registry_routes,
-    rule_routes,
     sso_routes,
 )
 from agentgov.config import Settings
@@ -144,16 +137,8 @@ def create_app(
             status_code=422, content={"detail": message or "invalid request", "errors": errors}
         )
 
-    app.include_router(registry_routes.router)
-    app.include_router(package_routes.router)
-    app.include_router(rule_routes.router)
-    app.include_router(governance_routes.router)
-    app.include_router(evidence_routes.router)
     app.include_router(integration_routes.router)
     app.include_router(sso_routes.router)
-    app.include_router(platform_routes.router)
-    app.include_router(platform_routes.agent_router)
-    app.include_router(instruction_routes.router)
     app.include_router(copilot_studio_routes.router)
     app.include_router(authzen_routes.router)
     app.include_router(assertion_routes.router)
