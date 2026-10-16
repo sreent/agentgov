@@ -27,8 +27,8 @@ PATH = "agentgov/authzen/evaluation"
 
 
 def _on(request: HttpRequest) -> None:
-    with runtime(request).db.session() as s:
-        if not features.is_on(s, FEATURE):
+    with runtime(request).db.transaction() as tx:
+        if not features.is_on(tx, FEATURE):
             raise HTTPException(404, "AgentGov isn't an AuthZEN decision point here")
 
 

@@ -41,9 +41,15 @@ from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.orm import Session
 
-from agentgov.db import CLIENT_KEEPALIVES, SERVER_KEEPALIVES, Database, Transaction
+from agentgov.db import (
+    CLIENT_KEEPALIVES,
+    SERVER_KEEPALIVES,
+    Database,
+    Transaction,
+    Where,
+    transaction_of,
+)
 from agentgov.registry.errors import Conflict
 
 log = logging.getLogger(__name__)
@@ -340,27 +346,21 @@ class Coordinator:
             connection.close()
 
     # -- the replicas ------------------------------------------------------------------
-    def replicas(self, session: Session) -> list[dict[str, Any]]:
+    def replicas(self, tx: Where) -> list[dict[str, Any]]:
         """The replicas connected to the database now, and which one leads. This one is
         among them even while it has lost touch with the others (``listening`` false)."""
         if not self.shared:
             return [{**self.status(), "this": True, "connected_since": None}]
         # Of this database only: another AgentGov on the same server has replicas, and a
         # leader, of its own.
-        rows = session.execute(
-            text(
-                "SELECT a.application_name, a.backend_start, EXISTS ("
-                "  SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND l.locktype = 'advisory'"
-                "  AND l.granted AND l.classid = :space AND l.objid = :key AND l.objsubid = 2"
-                ") FROM pg_stat_activity a WHERE a.datname = current_database() "
-                "AND a.application_name LIKE :prefix ORDER BY a.backend_start"
-            ),
-            {
-                "space": LOCK_SPACE,
-                "key": lock_key(LEADER) & 0xFFFFFFFF,
-                "prefix": f"{APPLICATION}/%",
-            },
-        ).all()
+        rows = transaction_of(tx).execute(
+            "SELECT a.application_name, a.backend_start, EXISTS ("
+            "  SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND l.locktype = 'advisory'"
+            "  AND l.granted AND l.classid = %s AND l.objid = %s AND l.objsubid = 2"
+            ") FROM pg_stat_activity a WHERE a.datname = current_database() "
+            "AND a.application_name LIKE %s ORDER BY a.backend_start",
+            (LOCK_SPACE, lock_key(LEADER) & 0xFFFFFFFF, f"{APPLICATION}/%"),
+        )
         found = []
         for application, since, leads in rows:
             name = application.removeprefix(f"{APPLICATION}/")

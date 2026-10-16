@@ -302,6 +302,14 @@ def chain() -> QuerySet[LedgerEntry]:
     )
 
 
+def of_type(entries: QuerySet[LedgerEntry], pattern: str) -> QuerySet[LedgerEntry]:
+    """The entries whose type is ``pattern``, where ``*`` stands for any text
+    (``decision.*``)."""
+    if "*" not in pattern:
+        return entries.filter(type=pattern)
+    return entries.filter(type__regex="^" + ".*".join(map(re.escape, pattern.split("*"))) + "$")
+
+
 def in_chain() -> ColumnElement[bool]:
     """:func:`chain`, for the modules still on SQLAlchemy: the entries the chain's head
     accounts for."""

@@ -36,15 +36,15 @@ def list_features(request: HttpRequest) -> dict[str, Any]:
     """Every feature, its mode, what that mode does, who chose it and whether it can do
     what its mode says."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        return {"groups": features.GROUPS, "features": _described(s, rt)}
+    with rt.db.transaction() as tx:
+        return {"groups": features.GROUPS, "features": _described(tx, rt)}
 
 
 @router.get("/v1/features/{key}", auth=read)
 def get_feature(request: HttpRequest, key: str) -> dict[str, Any]:
     rt = runtime(request)
-    with rt.db.session() as s:
-        return _described(s, rt, key)[0]
+    with rt.db.transaction() as tx:
+        return _described(tx, rt, key)[0]
 
 
 @router.get("/v1/components", auth=read)
@@ -53,10 +53,10 @@ def list_components(request: HttpRequest) -> dict[str, Any]:
     reaches, with whether it is in touch; and the hosts credentials may go to
     (AGENTGOV_CREDENTIAL_HOSTS; none listed, any host)."""
     rt = runtime(request)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         return {
             "control_plane": rt.health.get(),
-            "processors": health.reports(s),
+            "processors": health.reports(tx),
             "credential_hosts": rt.settings.credential_host_list(),
             # What vouches for the evidence ledger outside its database.
             "ledger": health.ledger_checks(rt.settings),
@@ -68,10 +68,12 @@ def list_presets(request: HttpRequest) -> dict[str, Any]:
     """Starting points that set many modes at once, with what each would change now and
     what it would leave (docs/features.md#starting-points)."""
     rt = runtime(request)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         return {
-            "presets": [features.preview_preset(s, rt.settings, name) for name in features.PRESETS],
-            "applied": features.deployment_preset(s),
+            "presets": [
+                features.preview_preset(tx, rt.settings, name) for name in features.PRESETS
+            ],
+            "applied": features.deployment_preset(tx),
         }
 
 
@@ -80,9 +82,9 @@ def apply_preset(request: HttpRequest, name: str) -> dict[str, Any]:
     """Apply a starting point: each mode it changes is a feature.changed entry in the
     ledger that names it. Features the deployment pins keep their pins."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        plan = features.apply_preset(s, rt.settings, name, actor=request.auth.actor)
-        return {**plan, "features": _described(s, rt)}
+    with rt.db.transaction() as tx:
+        plan = features.apply_preset(tx, rt.settings, name, actor=request.auth.actor)
+        return {**plan, "features": _described(tx, rt)}
 
 
 @router.put("/v1/features/{key}", auth=admin)
@@ -95,9 +97,9 @@ def set_feature(request: HttpRequest, key: str, body: dict[str, Any] = Body(...)
         raise ValidationError("give the feature's mode, its exceptions (scopes), or both")
     rt = runtime(request)
     actor = request.auth.actor
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         if "mode" in body:
-            features.set_mode(s, rt.settings, key, body.get("mode"), actor=actor)
+            features.set_mode(tx, rt.settings, key, body.get("mode"), actor=actor)
         if "scopes" in body:
-            features.set_scopes(s, rt.settings, key, body.get("scopes"), actor=actor)
-        return _described(s, rt, key)[0]
+            features.set_scopes(tx, rt.settings, key, body.get("scopes"), actor=actor)
+        return _described(tx, rt, key)[0]

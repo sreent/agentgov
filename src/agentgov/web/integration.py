@@ -101,8 +101,8 @@ def opa_decision_logs(request: HttpRequest) -> dict[str, int]:
     events = _json_body(request)
     if not isinstance(events, list):
         raise HTTPException(400, "expected a JSON array of decision events")
-    with runtime(request).db.session() as s:
-        return decisions.record_opa_decisions(s, events)
+    with runtime(request).db.transaction() as tx:
+        return decisions.record_opa_decisions(tx, events)
 
 
 @router.post("/v1/opa/status", tags=["opa"], auth=component)
@@ -114,11 +114,11 @@ def opa_status(request: HttpRequest) -> dict[str, str]:
         if b.get("code") or b.get("errors")
     }
 
-    with runtime(request).db.session() as s:
-        record_status(s, status)
+    with runtime(request).db.transaction() as tx:
+        record_status(tx, status)
         if errors:
             findings.raise_finding(
-                s,
+                tx,
                 type="opa.bundle_error",
                 severity="critical",
                 subject=str((status.get("labels") or {}).get("id", "opa")),
@@ -129,7 +129,7 @@ def opa_status(request: HttpRequest) -> dict[str, str]:
                 "so registry changes (including blocks) propagate.",
             )
         else:
-            findings.resolve_absent(s, types={"opa.bundle_error"}, present_keys=set())
+            findings.resolve_absent(tx, types={"opa.bundle_error"}, present_keys=set())
     return {"status": "ok"}
 
 
@@ -145,10 +145,10 @@ def internal_approval_check(
         raise ValidationError("agent_id is required: the agent asking")
     # The person the agent acts for, if it acts for one.
     person = body.get("user") if isinstance(body.get("user"), dict) else None
-    with rt.db.session() as s:
-        agent = agents.get(s, body["agent_id"])
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, body["agent_id"])
         outcome, req = approvals.check_or_request(
-            s,
+            tx,
             agent=agent,
             action=str(body.get("action")),
             resource=str(body.get("resource")),
@@ -177,10 +177,10 @@ def internal_decisions(request: HttpRequest, body: dict[str, Any] = Body(...)) -
         raise ValidationError("dropped must be a count")
     if dropped:
         # In a transaction of its own: recorded whatever becomes of the batch.
-        with rt.db.session() as s:
-            decisions.record_dropped(s, dropped)
-    with rt.db.session() as s:
-        stored, rejected = decisions.record_mcp_decisions(s, rt.settings, records)
+        with rt.db.transaction() as tx:
+            decisions.record_dropped(tx, dropped)
+    with rt.db.transaction() as tx:
+        stored, rejected = decisions.record_mcp_decisions(tx, rt.settings, records)
     return {"stored": stored, **({"rejected": rejected} if rejected else {})}
 
 
@@ -189,35 +189,35 @@ def internal_components(request: HttpRequest, body: Any = Body(...)) -> dict[str
     """A governance processor's report of what it can reach (agentgov.health). The answer
     gives it the features' modes, which it otherwise reads from OPA: it then knows them
     while OPA can't be asked."""
-    with runtime(request).db.session() as s:
-        health.record(s, body)
-        return {"recorded": "ok", "features": features.modes(s)}
+    with runtime(request).db.transaction() as tx:
+        health.record(tx, body)
+        return {"recorded": "ok", "features": features.modes(tx)}
 
 
 @router.post("/v1/internal/catalog", tags=["internal"], auth=component)
 def internal_catalog(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     rt = runtime(request)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         try:
-            ts = toolservers.get(s, str(body.get("server")))
+            ts = toolservers.get(tx, str(body.get("server")))
         except NotFound:
             return {"ignored": "unknown server"}
         return toolservers.record_catalog(
-            s, ts, list(body.get("tools") or []), poisoned=dict(body.get("poisoned") or {})
+            tx, ts, list(body.get("tools") or []), poisoned=dict(body.get("poisoned") or {})
         )
 
 
 @router.post("/v1/internal/observe", tags=["internal"], auth=component)
 def internal_observe(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
-    with runtime(request).db.session() as s:
+    with runtime(request).db.transaction() as tx:
         agent = discovery.observe(
-            s,
+            tx,
             source=str(body.get("source") or "gateway"),
             agent_id=body.get("agent_id"),
             client_id=body.get("client_id"),
             name=body.get("name"),
             details=body.get("details"),
-            discover=features.is_on(s, "discovery"),
+            discover=features.is_on(tx, "discovery"),
             issuer=body.get("issuer"),
             subject=body.get("subject"),
         )
@@ -247,11 +247,11 @@ def _otlp(request: HttpRequest, signal: str = "traces") -> HttpResponse:
         except ValueError as exc:
             raise HTTPException(400, f"invalid OTLP JSON: {exc}") from exc
 
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         if signal == "logs":
-            model_usage.ingest_logs(s, payload)
+            model_usage.ingest_logs(tx, payload)
         else:
-            ingest(s, payload, classify=rt.guardian is not None)
+            ingest(tx, payload, classify=rt.guardian is not None)
     if protobuf:
         return raw_response(content=b"", media_type="application/x-protobuf")
     return raw_response(content=b"{}", media_type="application/json")

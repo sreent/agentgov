@@ -6,7 +6,6 @@ from functools import cache
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse
-from sqlalchemy import text
 
 from agentgov import __version__
 from agentgov.api.auth import describe
@@ -29,8 +28,8 @@ def healthz(request: HttpRequest) -> dict[str, str]:
 
 @router.get("/readyz", tags=["health"])
 def readyz(request: HttpRequest) -> dict[str, Any]:
-    with runtime(request).db.session() as s:
-        s.execute(text("SELECT 1"))
+    with runtime(request).db.transaction() as tx:
+        tx.execute("SELECT 1")
     return {"status": "ready", "version": __version__}
 
 

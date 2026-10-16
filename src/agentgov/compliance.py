@@ -25,11 +25,9 @@ from datetime import datetime, timedelta
 from tempfile import SpooledTemporaryFile
 from typing import Any
 
-from django.db.models import Count
-from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from django.db.models import Count, Min, Q
 
-from agentgov import __version__, ids, ledger, transparency, witness
+from agentgov import __version__, db, ids, ledger, transparency, witness
 from agentgov.config import LEDGER_MIN_DAYS, Settings
 from agentgov.db.models import (
     AccessAssignment,
@@ -38,10 +36,14 @@ from agentgov.db.models import (
     Destination,
     Finding,
     IntegrationState,
+    LedgerCheckpoint,
+    LedgerEntry,
     ManagementRule,
+    ModelProvider,
     PlatformAgent,
     PlatformSync,
     Team,
+    ToolServer,
 )
 from agentgov.models import (
     ACTIVE,
@@ -49,10 +51,6 @@ from agentgov.models import (
     DELETED,
     DISCOVERED,
     PENDING,
-    LedgerCheckpoint,
-    LedgerEntry,
-    ModelProvider,
-    ToolServer,
 )
 from agentgov.registry import classification, features, posture
 from agentgov.registry import scopes as scope_rules
@@ -181,40 +179,38 @@ class Facts:
         return sum(n for t, n in self.by_type.items() if t.startswith(prefixes))
 
 
-def facts(session: Session, settings: Settings, days: int, now: datetime | None = None) -> Facts:
+def facts(tx: db.Where, settings: Settings, days: int, now: datetime | None = None) -> Facts:
     now = now or ids.utcnow()
     since = now - timedelta(days=days)
     agents = list(Agent.objects.exclude(status=DELETED))
-    f = Facts(now, since, settings, features.modes(session), agents)
-    f.exceptions = features.all_scopes(session)
-    for type_, decision, n in session.execute(
-        select(LedgerEntry.type, LedgerEntry.decision, func.count())
-        .where(LedgerEntry.ts >= since, ledger.in_chain())
-        .group_by(LedgerEntry.type, LedgerEntry.decision)
+    f = Facts(now, since, settings, features.modes(tx), agents)
+    f.exceptions = features.all_scopes(tx)
+    for type_, decision, n in (
+        ledger.chain()
+        .filter(ts__gte=since)
+        .values("type", "decision")
+        .annotate(n=Count("seq"))
+        .order_by()
+        .values_list("type", "decision", "n")
     ):
         f.by_type[type_] += n
         f.entries += n
         if type_.startswith("decision.") and decision == "deny":
             f.denied += n
-    f.monitored = session.scalar(
-        select(func.count())
-        .select_from(LedgerEntry)
-        .where(
-            LedgerEntry.ts >= since,
-            LedgerEntry.type.startswith("decision."),
-            LedgerEntry.reason.startswith("monitored:"),
-            ledger.in_chain(),
-        )
+    f.monitored = (
+        ledger.chain()
+        .filter(ts__gte=since, type__startswith="decision.", reason__startswith="monitored:")
+        .count()
     )
-    f.chain = ledger.verify(session, settings=settings)
+    f.chain = ledger.verify(tx, settings=settings)
     path = settings.witness_file()
-    f.witness = witness.compare(session, path).to_dict() if path else None
-    points = list(session.scalars(select(LedgerCheckpoint)))
+    f.witness = witness.compare(tx, path).to_dict() if path else None
+    points = list(LedgerCheckpoint.objects.all())
     f.checkpoints = len(points)
     stamps = [p.timestamped_at for p in points if p.timestamp is not None and p.timestamped_at]
     f.stamped, f.latest_stamp = len(stamps), max(stamps, default=None)
     f.archives = sum(1 for p in points if p.archive)
-    f.oldest = session.scalar(select(func.min(LedgerEntry.ts)).where(ledger.in_chain()))
+    f.oldest = ledger.chain().aggregate(oldest=Min("ts"))["oldest"]
     f.findings_open = Counter(
         dict(
             Finding.objects.filter(status="open")
@@ -229,28 +225,22 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     teams = list(Team.objects.all())
     f.teams, f.default_team = len(teams), any(t.is_default for t in teams)
     f.blueprints = Blueprint.objects.count()
-    servers = list(session.scalars(select(ToolServer)))
+    servers = list(ToolServer.objects.all())
     f.servers = Counter(s.status for s in servers)
     f.unverified_servers = sum(
         1 for s in servers if s.status == "approved" and s.trust_level != "verified"
     )
-    f.providers = session.scalar(select(func.count()).select_from(ModelProvider))
+    f.providers = ModelProvider.objects.count()
     destinations = list(Destination.objects.filter(status="active"))
     f.destinations = len(destinations)
     f.failing_destinations = sum(1 for d in destinations if d.failures >= 3)
     f.rules_enforced = ManagementRule.objects.filter(mode="enforce").count()
     f.packages_active = AccessAssignment.objects.filter(status="active").count()
     f.checked = set(
-        session.scalars(
-            select(LedgerEntry.agent_id)
-            .where(
-                LedgerEntry.ts >= since,
-                LedgerEntry.type.startswith("decision."),
-                LedgerEntry.agent_id.is_not(None),
-                ledger.in_chain(),
-            )
-            .distinct()
-        )
+        ledger.chain()
+        .filter(ts__gte=since, type__startswith="decision.", agent_id__isnull=False)
+        .values_list("agent_id", flat=True)
+        .distinct()
     )
     f.platform_seen = set(
         PlatformAgent.objects.filter(synced_at__gte=since).values_list("agent_id", flat=True)
@@ -1069,13 +1059,13 @@ features.json              Which of AgentGov's features are on, and how strictly
 """
 
 
-def pack(session: Session, settings: Settings, days: int) -> SpooledTemporaryFile[bytes]:
+def pack(tx: db.Where, settings: Settings, days: int) -> SpooledTemporaryFile[bytes]:
     """The evidence pack for the last ``days`` days, as a zip file."""
     import base64
 
     from agentgov.registry import manifests
 
-    f = facts(session, settings, days)
+    f = facts(tx, settings, days)
     reports = [report(f, key) for key in FRAMEWORKS]
     # The caller sends it, then closes it.
     out: SpooledTemporaryFile[bytes] = SpooledTemporaryFile(max_size=64 * 1024 * 1024)  # noqa: SIM115
@@ -1085,25 +1075,19 @@ def pack(session: Session, settings: Settings, days: int) -> SpooledTemporaryFil
             z.writestr(f"reports/{r['framework']['key']}.json", json.dumps(r, indent=2))
         z.writestr("report.md", markdown(reports))
         # The chain up to its head: rows stored past it aren't the ledger's.
-        head = ledger.head_seq(session)
-        first = session.scalar(
-            select(func.min(LedgerEntry.seq)).where(
-                LedgerEntry.ts >= f.since, LedgerEntry.seq <= head
-            )
-        )
+        head = ledger.head_seq(tx)
+        first = LedgerEntry.objects.filter(ts__gte=f.since, seq__lte=head).aggregate(
+            first=Min("seq")
+        )["first"]
         with z.open("ledger.jsonl", "w") as lines:
             if first is not None:
-                for entry in ledger.iter_entries(session, after=first - 1, until=head):
+                for entry in ledger.iter_entries(tx, after=first - 1, until=head):
                     lines.write((json.dumps(ledger.to_dict(entry), sort_keys=True) + "\n").encode())
         # Every checkpoint of those entries, and any beyond the chain's head, which show it
         # was longer; not those made since the entries were read (the head has moved).
-        moved = ledger.head_seq(session)
+        moved = ledger.head_seq(tx)
         points = list(
-            session.scalars(
-                select(LedgerCheckpoint)
-                .where(or_(LedgerCheckpoint.seq <= head, LedgerCheckpoint.seq > moved))
-                .order_by(LedgerCheckpoint.seq)
-            )
+            LedgerCheckpoint.objects.filter(Q(seq__lte=head) | Q(seq__gt=moved)).order_by("seq")
         )
         z.writestr(
             "checkpoints.json", json.dumps([ledger.checkpoint_dict(p) for p in points], indent=2)
@@ -1123,7 +1107,7 @@ def pack(session: Session, settings: Settings, days: int) -> SpooledTemporaryFil
         rows = [classification.row(a) for a in f.agents]
         z.writestr("register.json", json.dumps(rows, indent=2))
         z.writestr("register.csv", _csv(rows))
-        z.writestr("manifests.yaml", manifests.dump(manifests.export(session)))
+        z.writestr("manifests.yaml", manifests.dump(manifests.export(tx)))
         z.writestr("features.json", json.dumps(f.modes, indent=2, sort_keys=True))
         z.writestr("feature-exceptions.json", json.dumps(f.exceptions, indent=2, sort_keys=True))
     out.seek(0)

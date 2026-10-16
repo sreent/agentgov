@@ -29,8 +29,8 @@ _tokens_lock = threading.Lock()
 
 
 def _on(request: HttpRequest) -> None:
-    with runtime(request).db.session() as s:
-        if not features.is_on(s, FEATURE):
+    with runtime(request).db.transaction() as tx:
+        if not features.is_on(tx, FEATURE):
             raise HTTPException(404, "AgentGov doesn't give identity assertions here")
 
 
@@ -143,10 +143,10 @@ def _exchange(rt: Any, body: bytes, kind: str) -> dict[str, Any]:
     identity, person = assertions.caller(claims, request.subject_token_type)
     # What the registry says, then the policies (no transaction held while they decide),
     # then the record.
-    with rt.db.session() as s:
-        server = _server(s, request)
+    with rt.db.transaction() as tx:
+        server = _server(tx, request)
         target = {"name": server.name, "url": server.url, "client_id": server.oauth_client_id}
-        agent = _agent(s, identity)
+        agent = _agent(tx, identity)
         agent_id, agent_client = (agent.id, agent.client_id) if agent else (None, None)
     decision = _decide(
         rt,
@@ -198,11 +198,11 @@ def _exchange(rt: Any, body: bytes, kind: str) -> dict[str, Any]:
         reason = "monitored: " + "; ".join(monitored)
     else:
         reason = "; ".join(reasons) or None
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         agent = Agent.objects.filter(pk=agent_id).first() if agent_id else None
         client = identity.get("client_id") or "unknown"
         ledger.append(
-            s,
+            tx,
             type="decision.assertion",
             actor=f"agent:{agent.name}" if agent else f"client:{client}",
             agent=agent,

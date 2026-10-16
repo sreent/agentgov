@@ -44,13 +44,13 @@ def _keys_now(rt: Any, name: str, trusted: bool) -> dict[str, Any]:
     it can is known at once (docs/agent-identity.md#straight-to-the-gateway)."""
     if trusted:
         rt.refresh_issuer_keys([name])
-    with rt.db.session() as s:
-        return _with_count(s, identity_issuers.get(s, name))
+    with rt.db.transaction() as tx:
+        return _with_count(tx, identity_issuers.get(tx, name))
 
 
 @router.get("/v1/identity-issuers", auth=read)
 def list_issuers(request: HttpRequest) -> list[dict[str, Any]]:
-    with runtime(request).db.session() as s:
+    with runtime(request).db.transaction() as tx:
         counts = dict(
             Agent.objects.filter(workload_issuer__isnull=False)
             .values("workload_issuer")
@@ -58,10 +58,10 @@ def list_issuers(request: HttpRequest) -> list[dict[str, Any]]:
             .order_by()
             .values_list("workload_issuer", "n")
         )
-        on = features.is_on(s, OWN_IDENTITIES)
+        on = features.is_on(tx, OWN_IDENTITIES)
         return [
             identity_issuers.to_dict(i, counts.get(i.name, 0), on=on)
-            for i in identity_issuers.list_all(s)
+            for i in identity_issuers.list_all(tx)
         ]
 
 
@@ -70,8 +70,8 @@ def create_issuer(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dic
     """Trust an identity issuer: agents can then authenticate with its tokens (with
     ``gateway``, at the gateway too)."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        issuer = identity_issuers.create(s, body, actor=request.auth.actor)
+    with rt.db.transaction() as tx:
+        issuer = identity_issuers.create(tx, body, actor=request.auth.actor)
         _not_keycloak(rt, issuer)
         name, trusted = issuer.name, issuer.gateway
     return _keys_now(rt, name, trusted)
@@ -79,8 +79,8 @@ def create_issuer(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dic
 
 @router.get("/v1/identity-issuers/{ref}", auth=read)
 def get_issuer(request: HttpRequest, ref: str) -> dict[str, Any]:
-    with runtime(request).db.session() as s:
-        return _with_count(s, identity_issuers.get(s, ref))
+    with runtime(request).db.transaction() as tx:
+        return _with_count(tx, identity_issuers.get(tx, ref))
 
 
 @router.patch("/v1/identity-issuers/{ref}", auth=admin)
@@ -88,10 +88,10 @@ def update_issuer(
     request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     rt = runtime(request)
-    with rt.db.session() as s:
-        issuer = identity_issuers.get(s, ref)
+    with rt.db.transaction() as tx:
+        issuer = identity_issuers.get(tx, ref)
         changed = identity_issuers.update(
-            s, issuer, body, actor=request.auth.actor, version=if_match(request)
+            tx, issuer, body, actor=request.auth.actor, version=if_match(request)
         )
         _not_keycloak(rt, issuer)
         name = issuer.name
@@ -105,8 +105,8 @@ def fetch_issuer_keys(request: HttpRequest, ref: str) -> dict[str, Any]:
     """Fetch the signing keys of an issuer the gateway trusts now, as when it rotated them
     sooner than AgentGov fetches them again (AGENTGOV_ISSUER_KEYS_INTERVAL_SECONDS)."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        issuer = identity_issuers.get(s, ref)
+    with rt.db.transaction() as tx:
+        issuer = identity_issuers.get(tx, ref)
         if not issuer.gateway:
             raise Conflict(f"the gateway doesn't take {issuer.name}'s tokens: it has no keys there")
         name = issuer.name
@@ -120,14 +120,14 @@ def issuer_action(request: HttpRequest, ref: str, action: str) -> dict[str, Any]
     if action not in ("block", "unblock"):
         raise NotFound(f"no action {action!r}: block or unblock")
     principal = request.auth
-    with runtime(request).db.session() as s:
-        handoff.check_kill_switch(s, principal, action)
-        issuer = identity_issuers.get(s, ref)
-        identity_issuers.set_status(s, issuer, action, actor=principal.actor)
-        return _with_count(s, issuer)
+    with runtime(request).db.transaction() as tx:
+        handoff.check_kill_switch(tx, principal, action)
+        issuer = identity_issuers.get(tx, ref)
+        identity_issuers.set_status(tx, issuer, action, actor=principal.actor)
+        return _with_count(tx, issuer)
 
 
 @router.delete("/v1/identity-issuers/{ref}", status_code=204, auth=admin)
 def delete_issuer(request: HttpRequest, ref: str) -> None:
-    with runtime(request).db.session() as s:
-        identity_issuers.delete(s, identity_issuers.get(s, ref), actor=request.auth.actor)
+    with runtime(request).db.transaction() as tx:
+        identity_issuers.delete(tx, identity_issuers.get(tx, ref), actor=request.auth.actor)

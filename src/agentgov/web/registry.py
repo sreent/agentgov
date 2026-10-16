@@ -71,9 +71,9 @@ def list_agents(
     """``source`` is ``registered``, ``discovered:<how>`` or ``platform:<platform>``. Someone
     with roles for some teams only sees those teams' agents."""
     principal = request.auth
-    with runtime(request).db.session() as s:
+    with runtime(request).db.transaction() as tx:
         listed = agents.list_agents(
-            s,
+            tx,
             status=status,
             blueprint=blueprint,
             risk_level=risk_level,
@@ -81,13 +81,13 @@ def list_agents(
             source=source,
             include_deleted=include_deleted,
         )
-        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        reached = reach.agent_ids(tx, principal, *READ_ROLES)
         if reached is not None:
             listed = [a for a in listed if a.id in reached]
         # Who made each agent found on a platform, as its platform says.
         on_platforms = [a.id for a in listed if a.on_platform]
         makers = people.for_records(
-            s, list(PlatformAgent.objects.filter(agent_id__in=on_platforms))
+            tx, list(PlatformAgent.objects.filter(agent_id__in=on_platforms))
         )
         rows = [
             {
@@ -96,7 +96,7 @@ def list_agents(
             }
             for a in listed
         ]
-        reach.mark(rows, s, principal)
+        reach.mark(rows, tx, principal)
         return rows
 
 
@@ -112,7 +112,7 @@ def register_agent(request: HttpRequest, body: dict[str, Any] = Body(...)) -> di
     known_fields(body, AGENT_FIELDS | {"name", "approve", "instructions"}, "an agent")
     requested = bool(body.pop("approve", False))
     text = body.pop("instructions", None)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         own = reach.teams(principal, "registrar")
         if own is not None and not body.get("team") and len(own) == 1:
             body["team"] = next(iter(own))  # their one team
@@ -120,18 +120,18 @@ def register_agent(request: HttpRequest, body: dict[str, Any] = Body(...)) -> di
         admin_there = principal.is_admin or team in {
             name.lower() for name in principal.teams.get("admin", ())
         }
-        approve = requested if admin_there else not features.is_on(s, "registration-approval")
+        approve = requested if admin_there else not features.is_on(tx, "registration-approval")
         # Its reserved labels: administrators' for every team (admin).
-        with _unnamed(s, principal):
+        with _unnamed(tx, principal):
             agent = agents.register(
-                s,
+                tx,
                 rt.settings,
                 body,
                 actor=principal.actor,
                 approve=approve,
                 admin=principal.is_admin,
             )
-        reach.keep(s, principal, agent, "registrar")
+        reach.keep(tx, principal, agent, "registrar")
         # Put to work at once by a role for some teams only (an administrator for the team, or
         # a registrar while registration approval is off): with what its blueprint grants.
         every_team = principal.is_admin if admin_there else "registrar" in principal.roles
@@ -139,41 +139,41 @@ def register_agent(request: HttpRequest, body: dict[str, Any] = Body(...)) -> di
             reach.within_blueprint(agent)
         if text is not None:
             instructions.report(
-                s,
+                tx,
                 agent,
                 source="registered",
                 text=text,
                 actor=principal.actor,
                 classify=rt.guardian is not None,
             )
-            agents.refresh_risk(s, rt.settings, agent)
+            agents.refresh_risk(tx, rt.settings, agent)
         return agents.to_dict(agent)
 
 
 @router.get("/v1/agents/{ref}", tags=["agents"], auth=guard(reach.read))
 def get_agent(request: HttpRequest, ref: str) -> dict[str, Any]:
     principal = request.auth
-    with runtime(request).db.session() as s:
-        agent = agents.get(s, ref)
-        reach.check(s, principal, agent, *READ_ROLES, ref=ref)
-        makers = people.for_agent(s, agent.id)
+    with runtime(request).db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        reach.check(tx, principal, agent, *READ_ROLES, ref=ref)
+        makers = people.for_agent(tx, agent.id)
         row = {
             **agents.to_dict(agent),
             # What Microsoft 365 or Copilot Studio reports, for agents that run there.
-            "platforms": platforms.for_agent(s, agent.id),
+            "platforms": platforms.for_agent(tx, agent.id),
             # Blocked in AgentGov, the platform that still runs it, if one does.
-            "still_runs_in": platforms.still_runs_in(s, agent),
+            "still_runs_in": platforms.still_runs_in(tx, agent),
             # Who made it and owns it there, and whom adopting it would make its owner.
             "makers": makers,
             "suggested_owner": people.suggested(makers),
             # Its owner and sponsors who have left (docs/issues.md#people-who-leave).
-            "left": people.who_left(s, agent),
+            "left": people.who_left(tx, agent),
             # The controls whose mode differs for it, and why (docs/features.md#exceptions).
             "control_modes": features.exceptions_for(
-                agent, features.modes(s), features.all_scopes(s)
+                agent, features.modes(tx), features.all_scopes(tx)
             ),
         }
-        reach.mark([row], s, principal)
+        reach.mark([row], tx, principal)
         return row
 
 
@@ -183,11 +183,11 @@ def agent_a2a(request: HttpRequest, ref: str) -> dict[str, Any]:
     and who may call it."""
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
-        reach.check(s, principal, agent, *READ_ROLES, ref=ref)
-        reached = reach.agent_ids(s, principal, *READ_ROLES)
-        return agents.a2a_view(s, rt.settings, agent, reached=reached)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        reach.check(tx, principal, agent, *READ_ROLES, ref=ref)
+        reached = reach.agent_ids(tx, principal, *READ_ROLES)
+        return agents.a2a_view(tx, rt.settings, agent, reached=reached)
 
 
 @router.patch("/v1/agents/{ref}", tags=["agents"], auth=guard(reach.require("admin")))
@@ -197,20 +197,20 @@ def update_agent(
     principal = request.auth
     rt = runtime(request)
     known_fields(body, AGENT_FIELDS, "an agent's edit")
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
-        reach.check(s, principal, agent, "admin", ref=ref)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        reach.check(tx, principal, agent, "admin", ref=ref)
         _exemptions(principal, agent, body)
-        hold = reach.Hold(s, principal)
+        hold = reach.Hold(tx, principal)
         hold.before(agent)
-        with _unnamed(s, principal):
+        with _unnamed(tx, principal):
             changed = agents.update(
-                s, agent, body, actor=principal.actor, version=if_match(request)
+                tx, agent, body, actor=principal.actor, version=if_match(request)
             )
-        reach.keep(s, principal, agent, "admin")
+        reach.keep(tx, principal, agent, "admin")
         hold.check(agent)
         if set(changed) & agents.RISKY_FIELDS:
-            agents.refresh_risk(s, rt.settings, agent)
+            agents.refresh_risk(tx, rt.settings, agent)
         return agents.to_dict(agent)
 
 
@@ -256,18 +256,18 @@ def attest_agent(
     whatever their role in AgentGov, and administrators."""
     principal = request.auth
     refused = "only the agent's sponsors or an admin can attest"
-    with runtime(request).db.session() as s:
+    with runtime(request).db.transaction() as tx:
         try:
-            agent = agents.get(s, ref)
+            agent = agents.get(tx, ref)
         except NotFound:
             # Which agents exist is for those who may read them.
             if principal.roles & set(READ_ROLES):
                 raise
             raise HTTPException(403, refused) from None
-        admin_here = "admin" in reach.roles_at(s, principal, agent)
+        admin_here = "admin" in reach.roles_at(tx, principal, agent)
         if not admin_here and not _sponsors(agent, principal):
             raise HTTPException(403, refused)
-        agents.attest(s, agent, actor=principal.actor, note=body.get("note"))
+        agents.attest(tx, agent, actor=principal.actor, note=body.get("note"))
         return agents.to_dict(agent)
 
 
@@ -295,9 +295,9 @@ def agent_credentials(
     a public client, where people sign in to it."""
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
-        reach.check(s, principal, agent, "admin", ref=ref)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        reach.check(tx, principal, agent, "admin", ref=ref)
         if agent.status != ACTIVE:
             raise Conflict("credentials are only issued to active agents")
         if agent.workload_issuer and body.get("rotate"):
@@ -306,7 +306,7 @@ def agent_credentials(
             )
         if agents.identity_method(agent) == "sign-in" and body.get("rotate"):
             raise Conflict("a public client has no secret to rotate: people sign in to it")
-        direct = _straight_to_the_gateway(s, agent, rt.settings)
+        direct = _straight_to_the_gateway(tx, agent, rt.settings)
         if rt.identity is None:
             if direct is None:
                 raise HTTPException(409, "identity provider integration is not configured")
@@ -336,14 +336,14 @@ def agent_credentials(
         if creds.get("method") == "workload-identity":
             # What its issuer's token must look like to authenticate it. Nothing here is
             # secret, so reading it isn't recorded.
-            issuer = identity_issuers.get(s, creds["issuer"])
+            issuer = identity_issuers.get(tx, creds["issuer"])
             creds["assertion_type"] = identity_issuers.assertion_type(issuer)
             creds["assertion_audience"] = issuer.audience or rt.settings.keycloak_issuer
             if direct is not None:
                 creds["gateway"] = direct
             return creds
         ledger.append(
-            s,
+            tx,
             type="agent.credentials_rotated" if body.get("rotate") else "agent.credentials_read",
             actor=principal.actor,
             agent=agent,
@@ -372,9 +372,9 @@ def adopt_agents(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict
         raise HTTPException(422, "owner is a team or a person's email address")
     reason = body.get("reason")
     rt = runtime(request)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         return people.adopt(
-            s,
+            tx,
             rt.settings,
             refs,
             owner=(owner or "").strip() or None,
@@ -382,7 +382,7 @@ def adopt_agents(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict
             makers=bool(body.get("makers")),
             actor=principal.actor,
             reason=reason if isinstance(reason, str) else None,
-            reached=reach.agent_ids(s, principal, "admin"),
+            reached=reach.agent_ids(tx, principal, "admin"),
         )
 
 
@@ -395,10 +395,10 @@ def classify_agent(
     """Classify an agent under the EU AI Act: ``category``, ``role``, ``basis`` and
     ``purpose`` (docs/evidence.md#a-classification-register). Approvers and administrators."""
     principal = request.auth
-    with runtime(request).db.session() as s:
-        agent = agents.get(s, ref)
-        reach.check(s, principal, agent, "approver", ref=ref)
-        classification.classify(s, agent, body, actor=principal.actor)
+    with runtime(request).db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        reach.check(tx, principal, agent, "approver", ref=ref)
+        classification.classify(tx, agent, body, actor=principal.actor)
         return agents.to_dict(agent)
 
 
@@ -408,10 +408,10 @@ def classify_agent(
 def unclassify_agent(request: HttpRequest, ref: str) -> dict[str, Any]:
     """The agent is no longer classified: it shows as such in the register."""
     principal = request.auth
-    with runtime(request).db.session() as s:
-        agent = agents.get(s, ref)
-        reach.check(s, principal, agent, "approver", ref=ref)
-        classification.classify(s, agent, None, actor=principal.actor)
+    with runtime(request).db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        reach.check(tx, principal, agent, "approver", ref=ref)
+        classification.classify(tx, agent, None, actor=principal.actor)
         return agents.to_dict(agent)
 
 
@@ -437,38 +437,38 @@ def bulk_agents(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[
         raise HTTPException(422, f"action is {', '.join(bulk.AGENT_ACTIONS)}")
     role = {"update": "admin", "classify": "approver"}.get(action, "secops")
     rt = runtime(request)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         if reach.teams(principal, role) == frozenset():
             raise HTTPException(403, f"role {principal.role!r} may not do this")
         check = None
         # An edit loosens nothing for a role for some teams only (reach.Hold).
-        hold = reach.Hold(s, principal) if action == "update" else None
+        hold = reach.Hold(tx, principal) if action == "update" else None
         if role == "secops":
             if principal.teams:
                 # What the kill switch lets them do, by their roles where each agent is.
                 def check(agent: Any) -> None:
-                    handoff.check_kill_switch(s, reach.here(s, principal, agent), action)
+                    handoff.check_kill_switch(tx, reach.here(tx, principal, agent), action)
                     if action == "approve" and not principal.is_admin:
                         reach.within_blueprint(agent)
             else:
-                handoff.check_kill_switch(s, principal, action)
+                handoff.check_kill_switch(tx, principal, action)
         elif hold is not None:
             check = hold.before
 
         def keep(agent: Any) -> None:
-            reach.keep(s, principal, agent, role)
+            reach.keep(tx, principal, agent, role)
             if hold is not None:
                 hold.check(agent)
 
         return bulk.agents(
-            s,
+            tx,
             rt.settings,
             body.get("agents"),
             action,
             actor=principal.actor,
             reason=(reason or "").strip() or None,
             fields=body.get("fields"),
-            reached=reach.agent_ids(s, principal, role),
+            reached=reach.agent_ids(tx, principal, role),
             check=check,
             keep=keep,
         )
@@ -482,36 +482,36 @@ def agent_lifecycle(
     Those with roles for some teams only, for those teams' agents."""
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
-        reach.check(s, principal, agent, "secops", ref=ref)
-        handoff.check_kill_switch(s, reach.here(s, principal, agent), action)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        reach.check(tx, principal, agent, "secops", ref=ref)
+        handoff.check_kill_switch(tx, reach.here(tx, principal, agent), action)
         if action == "approve" and not principal.is_admin:
             reach.within_blueprint(agent)  # an administrator for its team only
         if action == "adopt" and body:
             _exemptions(principal, agent, body)
-            hold = reach.Hold(s, principal)
+            hold = reach.Hold(tx, principal)
             hold.before(agent)
-            with _unnamed(s, principal):
+            with _unnamed(tx, principal):
                 agents.update(
-                    s,
+                    tx,
                     agent,
                     {k: v for k, v in body.items() if k != "reason"},
                     actor=principal.actor,
                 )
-            reach.keep(s, principal, agent, "admin")
+            reach.keep(tx, principal, agent, "admin")
             hold.check(agent)
         agents.transition(
-            s, rt.settings, agent, action, actor=principal.actor, reason=body.get("reason")
+            tx, rt.settings, agent, action, actor=principal.actor, reason=body.get("reason")
         )
         if action in ("adopt", "approve", "restore"):
             # Its owner, sponsors and status count towards its risk: shown at once.
-            agents.refresh_risk(s, rt.settings, agent)
+            agents.refresh_risk(tx, rt.settings, agent)
         if agent.on_platform:
             # Those waiting to be reviewed on their platforms: blocked or deleted, they aren't.
-            platforms.review_summary(s)
+            platforms.review_summary(tx)
         # Blocked here, it may still run on its platform: an issue asks its people to stop it.
-        return {**agents.to_dict(agent), "still_runs_in": platforms.still_runs_in(s, agent)}
+        return {**agents.to_dict(agent), "still_runs_in": platforms.still_runs_in(tx, agent)}
 
 
 @router.delete("/v1/agents/{ref}", tags=["agents"], auth=admin)
@@ -519,14 +519,14 @@ def purge_agent(request: HttpRequest, ref: str) -> dict[str, str]:
     """Permanently remove a soft-deleted agent and its identity."""
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
         if rt.identity is not None and agent.status == "deleted":
             try:
                 rt.identity.delete(agent)
             except KeycloakError as exc:
                 raise HTTPException(502, f"identity provider error: {exc}") from exc
-        agents.purge(s, agent, actor=principal.actor)
+        agents.purge(tx, agent, actor=principal.actor)
         return {"purged": ref}
 
 
@@ -534,9 +534,9 @@ def purge_agent(request: HttpRequest, ref: str) -> dict[str, str]:
 def agent_risk(request: HttpRequest, ref: str) -> dict[str, Any]:
     """The agent's current risk, as last computed from decisions and posture scans."""
     principal = request.auth
-    with runtime(request).db.session() as s:
-        agent = agents.get(s, ref)
-        reach.check(s, principal, agent, *READ_ROLES, ref=ref)
+    with runtime(request).db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        reach.check(tx, principal, agent, *READ_ROLES, ref=ref)
         return agents.to_dict(agent)["risk"]
 
 
@@ -545,10 +545,10 @@ def refresh_agent_risk(request: HttpRequest, ref: str) -> dict[str, Any]:
     """Recompute risk now. May raise findings and, with auto-block enabled, block the agent."""
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
-        reach.check(s, principal, agent, "admin", ref=ref)
-        result = agents.refresh_risk(s, rt.settings, agent)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        reach.check(tx, principal, agent, "admin", ref=ref)
+        result = agents.refresh_risk(tx, rt.settings, agent)
         return {"score": result.score, "level": result.level, "factors": result.factors}
 
 
@@ -558,22 +558,22 @@ def refresh_agent_risk(request: HttpRequest, ref: str) -> dict[str, Any]:
 @router.get("/v1/blueprints", tags=["blueprints"], auth=guard(reach.read))
 def list_blueprints(request: HttpRequest) -> list[dict[str, Any]]:
     """Every blueprint, for everyone who reads AgentGov (for some teams too)."""
-    with runtime(request).db.session() as s:
-        return [blueprints.to_dict(b) for b in blueprints.list_all(s)]
+    with runtime(request).db.transaction() as tx:
+        return [blueprints.to_dict(b) for b in blueprints.list_all(tx)]
 
 
 @router.post("/v1/blueprints", status_code=201, tags=["blueprints"], auth=admin)
 def create_blueprint(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     principal = request.auth
     known_fields(body, {"name", *blueprints.FIELDS}, "a blueprint")
-    with runtime(request).db.session() as s:
-        return blueprints.to_dict(blueprints.create(s, body, actor=principal.actor))
+    with runtime(request).db.transaction() as tx:
+        return blueprints.to_dict(blueprints.create(tx, body, actor=principal.actor))
 
 
 @router.get("/v1/blueprints/{ref}", tags=["blueprints"], auth=guard(reach.read))
 def get_blueprint(request: HttpRequest, ref: str) -> dict[str, Any]:
-    with runtime(request).db.session() as s:
-        return blueprints.to_dict(blueprints.get(s, ref))
+    with runtime(request).db.transaction() as tx:
+        return blueprints.to_dict(blueprints.get(tx, ref))
 
 
 @router.patch("/v1/blueprints/{ref}", tags=["blueprints"], auth=admin)
@@ -582,17 +582,17 @@ def update_blueprint(
 ) -> dict[str, Any]:
     principal = request.auth
     known_fields(body, blueprints.FIELDS, "a blueprint's edit")
-    with runtime(request).db.session() as s:
-        bp = blueprints.get(s, ref)
-        blueprints.update(s, bp, body, actor=principal.actor, version=if_match(request))
+    with runtime(request).db.transaction() as tx:
+        bp = blueprints.get(tx, ref)
+        blueprints.update(tx, bp, body, actor=principal.actor, version=if_match(request))
         return blueprints.to_dict(bp)
 
 
 @router.delete("/v1/blueprints/{ref}", tags=["blueprints"], auth=admin)
 def delete_blueprint(request: HttpRequest, ref: str) -> dict[str, str]:
     principal = request.auth
-    with runtime(request).db.session() as s:
-        blueprints.delete(s, blueprints.get(s, ref), actor=principal.actor)
+    with runtime(request).db.transaction() as tx:
+        blueprints.delete(tx, blueprints.get(tx, ref), actor=principal.actor)
         return {"deleted": ref}
 
 
@@ -604,10 +604,10 @@ def list_teams(request: HttpRequest) -> list[dict[str, Any]]:
     """The teams: for someone with roles for some teams only, those."""
     principal = request.auth
     mine = reach.teams(principal, *READ_ROLES)
-    with runtime(request).db.session() as s:
+    with runtime(request).db.transaction() as tx:
         return [
             teams.to_dict(t)
-            for t in teams.list_all(s)
+            for t in teams.list_all(tx)
             if mine is None or t.name.lower() in {n.lower() for n in mine}
         ]
 
@@ -616,36 +616,36 @@ def list_teams(request: HttpRequest) -> list[dict[str, Any]]:
 def create_team(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """People and chat channels that own agents, and that issues escalate to."""
     principal = request.auth
-    with runtime(request).db.session() as s:
-        return teams.to_dict(teams.create(s, body, actor=principal.actor))
+    with runtime(request).db.transaction() as tx:
+        return teams.to_dict(teams.create(tx, body, actor=principal.actor))
 
 
 @router.get("/v1/teams/{ref}", tags=["teams"], auth=guard(reach.read))
 def get_team(request: HttpRequest, ref: str) -> dict[str, Any]:
     principal = request.auth
     mine = reach.teams(principal, *READ_ROLES)
-    with runtime(request).db.session() as s:
-        team = teams.get(s, ref)
+    with runtime(request).db.transaction() as tx:
+        team = teams.get(tx, ref)
         if mine is not None and team.name.lower() not in {n.lower() for n in mine}:
             raise NotFound(f"team {ref!r} not found")
-        reached = reach.agent_ids(s, principal, *READ_ROLES)
-        return {**teams.to_dict(team), "named_by": teams.users(s, team.name, reached=reached)}
+        reached = reach.agent_ids(tx, principal, *READ_ROLES)
+        return {**teams.to_dict(team), "named_by": teams.users(tx, team.name, reached=reached)}
 
 
 @router.patch("/v1/teams/{ref}", tags=["teams"], auth=admin)
 def update_team(request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     principal = request.auth
-    with runtime(request).db.session() as s:
-        team = teams.get(s, ref)
-        teams.update_team(s, team, body, actor=principal.actor, version=if_match(request))
+    with runtime(request).db.transaction() as tx:
+        team = teams.get(tx, ref)
+        teams.update_team(tx, team, body, actor=principal.actor, version=if_match(request))
         return teams.to_dict(team)
 
 
 @router.delete("/v1/teams/{ref}", tags=["teams"], auth=admin)
 def delete_team(request: HttpRequest, ref: str) -> dict[str, str]:
     principal = request.auth
-    with runtime(request).db.session() as s:
-        teams.delete(s, teams.get(s, ref), actor=principal.actor)
+    with runtime(request).db.transaction() as tx:
+        teams.delete(tx, teams.get(tx, ref), actor=principal.actor)
         return {"deleted": ref}
 
 
@@ -655,10 +655,10 @@ def delete_team(request: HttpRequest, ref: str) -> dict[str, str]:
 @router.get("/v1/toolservers", tags=["toolservers"], auth=read)
 def list_toolservers(request: HttpRequest, status: str | None = None) -> list[dict[str, Any]]:
     rt = runtime(request)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         return [
             toolservers.to_dict(t, rt.settings.gateway_public_url)
-            for t in toolservers.list_all(s, status=status)
+            for t in toolservers.list_all(tx, status=status)
         ]
 
 
@@ -669,16 +669,16 @@ def create_toolserver(request: HttpRequest, body: dict[str, Any] = Body(...)) ->
     principal = request.auth
     rt = runtime(request)
     known_fields(body, {"name", *toolservers.FIELDS}, "a tool server")
-    with rt.db.session() as s:
-        ts = toolservers.create(s, body, actor=principal.actor, approve=principal.is_admin)
+    with rt.db.transaction() as tx:
+        ts = toolservers.create(tx, body, actor=principal.actor, approve=principal.is_admin)
         return toolservers.to_dict(ts, rt.settings.gateway_public_url)
 
 
 @router.get("/v1/toolservers/{ref}", tags=["toolservers"], auth=read)
 def get_toolserver(request: HttpRequest, ref: str) -> dict[str, Any]:
     rt = runtime(request)
-    with rt.db.session() as s:
-        return toolservers.to_dict(toolservers.get(s, ref), rt.settings.gateway_public_url)
+    with rt.db.transaction() as tx:
+        return toolservers.to_dict(toolservers.get(tx, ref), rt.settings.gateway_public_url)
 
 
 @router.patch("/v1/toolservers/{ref}", tags=["toolservers"], auth=admin)
@@ -688,17 +688,17 @@ def update_toolserver(
     principal = request.auth
     rt = runtime(request)
     known_fields(body, toolservers.FIELDS, "a tool server's edit")
-    with rt.db.session() as s:
-        ts = toolservers.get(s, ref)
-        toolservers.update(s, ts, body, actor=principal.actor, version=if_match(request))
+    with rt.db.transaction() as tx:
+        ts = toolservers.get(tx, ref)
+        toolservers.update(tx, ts, body, actor=principal.actor, version=if_match(request))
         return toolservers.to_dict(ts, rt.settings.gateway_public_url)
 
 
 @router.delete("/v1/toolservers/{ref}", tags=["toolservers"], auth=admin)
 def delete_toolserver(request: HttpRequest, ref: str) -> dict[str, str]:
     principal = request.auth
-    with runtime(request).db.session() as s:
-        toolservers.delete(s, toolservers.get(s, ref), actor=principal.actor)
+    with runtime(request).db.transaction() as tx:
+        toolservers.delete(tx, toolservers.get(tx, ref), actor=principal.actor)
         return {"deleted": ref}
 
 
@@ -706,8 +706,8 @@ def delete_toolserver(request: HttpRequest, ref: str) -> dict[str, str]:
 def approve_tool(request: HttpRequest, ref: str, tool: str) -> dict[str, Any]:
     """Accept a changed tool definition (clears rug-pull protection for it)."""
     principal = request.auth
-    with runtime(request).db.session() as s:
-        return toolservers.approve_tool(s, toolservers.get(s, ref), tool, actor=principal.actor)
+    with runtime(request).db.transaction() as tx:
+        return toolservers.approve_tool(tx, toolservers.get(tx, ref), tool, actor=principal.actor)
 
 
 @router.post("/v1/toolservers/{ref}/{action}", tags=["toolservers"], auth=org_kill_switch)
@@ -715,9 +715,9 @@ def toolserver_action(request: HttpRequest, ref: str, action: str) -> dict[str, 
     """approve (pending approval), block, unblock."""
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s:
-        handoff.check_kill_switch(s, principal, action)
-        ts = toolservers.set_status(s, toolservers.get(s, ref), action, actor=principal.actor)
+    with rt.db.transaction() as tx:
+        handoff.check_kill_switch(tx, principal, action)
+        ts = toolservers.set_status(tx, toolservers.get(tx, ref), action, actor=principal.actor)
         return toolservers.to_dict(ts, rt.settings.gateway_public_url)
 
 
@@ -726,21 +726,21 @@ def toolserver_action(request: HttpRequest, ref: str, action: str) -> dict[str, 
 
 @router.get("/v1/policies", tags=["policies"], auth=read)
 def list_policies(request: HttpRequest) -> list[dict[str, Any]]:
-    with runtime(request).db.session() as s:
-        return [policies.to_dict(p) for p in policies.list_all(s)]
+    with runtime(request).db.transaction() as tx:
+        return [policies.to_dict(p) for p in policies.list_all(tx)]
 
 
 @router.post("/v1/policies", status_code=201, tags=["policies"], auth=admin)
 def create_policy(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     principal = request.auth
-    with runtime(request).db.session() as s:
-        return policies.to_dict(policies.create(s, body, actor=principal.actor))
+    with runtime(request).db.transaction() as tx:
+        return policies.to_dict(policies.create(tx, body, actor=principal.actor))
 
 
 @router.get("/v1/policies/{ref}", tags=["policies"], auth=read)
 def get_policy(request: HttpRequest, ref: str) -> dict[str, Any]:
-    with runtime(request).db.session() as s:
-        return policies.to_dict(policies.get(s, ref))
+    with runtime(request).db.transaction() as tx:
+        return policies.to_dict(policies.get(tx, ref))
 
 
 @router.put("/v1/policies/{ref}", tags=["policies"], auth=admin)
@@ -748,17 +748,17 @@ def update_policy(
     request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     principal = request.auth
-    with runtime(request).db.session() as s:
-        policy = policies.get(s, ref)
-        policies.update(s, policy, body, actor=principal.actor, version=if_match(request))
+    with runtime(request).db.transaction() as tx:
+        policy = policies.get(tx, ref)
+        policies.update(tx, policy, body, actor=principal.actor, version=if_match(request))
         return policies.to_dict(policy)
 
 
 @router.delete("/v1/policies/{ref}", tags=["policies"], auth=admin)
 def delete_policy(request: HttpRequest, ref: str) -> dict[str, str]:
     principal = request.auth
-    with runtime(request).db.session() as s:
-        policies.delete(s, policies.get(s, ref), actor=principal.actor)
+    with runtime(request).db.transaction() as tx:
+        policies.delete(tx, policies.get(tx, ref), actor=principal.actor)
         return {"deleted": ref}
 
 
@@ -769,8 +769,8 @@ def delete_policy(request: HttpRequest, ref: str) -> dict[str, str]:
 def list_apikeys(request: HttpRequest) -> list[dict[str, Any]]:
     """Every key's name, role, prefix and use (never the key): readable for access reviews."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        return [apikeys.to_dict(k, rt.settings.api_key_max_days) for k in apikeys.list_all(s)]
+    with rt.db.transaction() as tx:
+        return [apikeys.to_dict(k, rt.settings.api_key_max_days) for k in apikeys.list_all(tx)]
 
 
 @router.post("/v1/apikeys", status_code=201, tags=["apikeys"], auth=admin)
@@ -784,9 +784,9 @@ def create_apikey(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dic
     days = apikeys.lifetime(
         body.get("expires_in_days", settings.api_key_days), max_days=settings.api_key_max_days
     )
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         key, token = apikeys.create(
-            s,
+            tx,
             name=body.get("name", ""),
             role=body.get("role", ""),
             actor=principal.actor,
@@ -800,6 +800,6 @@ def create_apikey(request: HttpRequest, body: dict[str, Any] = Body(...)) -> dic
 def revoke_apikey(request: HttpRequest, key_id: str) -> dict[str, Any]:
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s:
-        key = apikeys.revoke(s, key_id, actor=principal.actor)
+    with rt.db.transaction() as tx:
+        key = apikeys.revoke(tx, key_id, actor=principal.actor)
         return apikeys.to_dict(key, rt.settings.api_key_max_days)

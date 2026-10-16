@@ -97,13 +97,13 @@ def describe(rt: Any, principal: Principal) -> dict[str, Any]:
     """Who is signed in and with which roles; what is sent to people themselves (issues,
     and approval requests); and, for the secops role, what the hand-off lets it do."""
     out = principal.describe()
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         out["inbox"] = {
-            "issues": features.is_on(s, "issues"),
-            "approvals": features.is_on(s, "approvals-by-person"),
+            "issues": features.is_on(tx, "issues"),
+            "approvals": features.is_on(tx, "approvals-by-person"),
         }
         if "secops" in principal.roles or "secops" in principal.teams:
-            out["handoff"] = {"level": handoff.level(s), "reached": handoff.reached(s)}
+            out["handoff"] = {"level": handoff.level(tx), "reached": handoff.reached(tx)}
     return out
 
 

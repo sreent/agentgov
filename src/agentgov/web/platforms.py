@@ -60,13 +60,13 @@ def _as_signed_in_admin(rt: Any, principal: Principal, api: str) -> str:
 def overview(request: HttpRequest) -> dict[str, Any]:
     """Each source of platform agents, how many it reported and how its last sync went."""
     rt = runtime(request)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         view = platforms.overview(
-            s, m365_configured=rt.m365 is not None, connected=set(rt.platforms)
+            tx, m365_configured=rt.m365 is not None, connected=set(rt.platforms)
         )
-        detection = threat_detection.summary(s, features.mode(s, threat_detection.FEATURE))
-        links = connections.state(s, rt.settings, threat_detection=detection)
-        known = people.summary(s)
+        detection = threat_detection.summary(tx, features.mode(tx, threat_detection.FEATURE))
+        links = connections.state(tx, rt.settings, threat_detection=detection)
+        known = people.summary(tx)
     return {
         **view,
         # The people platforms name as agents' makers and owners: how many AgentGov knows.
@@ -134,11 +134,11 @@ def _people(rt: Any, principal: Principal) -> dict[str, Any] | None:
     """Look up the people a Copilot Studio import or sync named (docs/platforms.md#who-made-
     each-agent): with AgentGov's app when it may read users, else as the signed-in
     administrator. None when neither can; what went wrong, when it did."""
-    with rt.db.session() as s:
-        nobody = not people.wanted(s, limit=1) and not people.wanted_emails(s, limit=1)
-        if not features.is_on(s, "entra-users") or nobody:
+    with rt.db.transaction() as tx:
+        nobody = not people.wanted(tx, limit=1) and not people.wanted_emails(tx, limit=1)
+        if not features.is_on(tx, "entra-users") or nobody:
             return None  # off, or nobody to look up
-        roles = connections.granted(s)
+        roles = connections.granted(tx)
     ways = []
     if rt.m365 is not None and connections.runnable(connections.BY_KEY["entra-users"], roles):
         ways.append("app")
@@ -169,11 +169,11 @@ def import_copilot_studio(
     and their findings close."""
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s, platforms.first_sync(s, "copilot-studio"):
+    with rt.db.transaction() as tx, platforms.first_sync(tx, "copilot-studio"):
         counts = platforms.import_copilot_studio(
-            s, payload, actor=principal.actor, complete=complete
+            tx, payload, actor=principal.actor, complete=complete
         )
-        platforms.refresh_risk(s, rt.settings)
+        platforms.refresh_risk(tx, rt.settings)
     return _with_people(counts, _people(rt, principal))
 
 
@@ -186,15 +186,15 @@ def sync_copilot_studio(request: HttpRequest) -> dict[str, Any]:
     try:
         rows = rt.microsoft_admin.copilot_studio_agents(token)
     except PlatformError as exc:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             platforms.set_sync(
-                s, "copilot-studio", ok=False, counts={}, message=str(exc), actor=principal.actor
+                tx, "copilot-studio", ok=False, counts={}, message=str(exc), actor=principal.actor
             )
         raise HTTPException(502, str(exc)) from exc
-    with rt.db.session() as s, platforms.first_sync(s, "copilot-studio"):
+    with rt.db.transaction() as tx, platforms.first_sync(tx, "copilot-studio"):
         # Every page of the inventory, as the administrator's role sees the tenant.
-        counts = platforms.import_copilot_studio(s, rows, actor=principal.actor, complete=True)
-        platforms.refresh_risk(s, rt.settings)
+        counts = platforms.import_copilot_studio(tx, rows, actor=principal.actor, complete=True)
+        platforms.refresh_risk(tx, rt.settings)
     return _with_people(counts, _people(rt, principal))
 
 
@@ -211,9 +211,9 @@ def import_people(request: HttpRequest) -> dict[str, Any]:
             payload = json.loads(raw or "null")
         except ValueError as exc:
             raise HTTPException(422, f"invalid JSON: {exc}") from exc
-    with runtime(request).db.session() as s:
-        counts = people.import_list(s, payload, actor=principal.actor)
-        return {**counts, "makers": people.summary(s)}
+    with runtime(request).db.transaction() as tx:
+        counts = people.import_list(tx, payload, actor=principal.actor)
+        return {**counts, "makers": people.summary(tx)}
 
 
 @router.post("/v1/platforms/{source}/sync", auth=admin)
@@ -228,8 +228,8 @@ def sync_source(request: HttpRequest, source: str) -> dict[str, Any]:
             raise HTTPException(
                 409, f"{platforms.SOURCES[source]} is not configured (docs/other-platforms.md)"
             )
-        with rt.db.session() as s:
-            if not features.is_on(s, source):
+        with rt.db.transaction() as tx:
+            if not features.is_on(tx, source):
                 raise HTTPException(409, f"{source} is turned off: turn it on in Features first")
         try:
             return rt.sync_platform(source, actor=principal.actor, wait=JOB_WAIT_SECONDS)
@@ -243,8 +243,8 @@ def sync_source(request: HttpRequest, source: str) -> dict[str, Any]:
 @router.get("/v1/platforms/connectors", auth=read)
 def connectors(request: HttpRequest) -> dict[str, Any]:
     """Every connector Copilot Studio agents use, and whether it is on the allowlist."""
-    with runtime(request).db.session() as s:
-        return platforms.connector_usage(s)
+    with runtime(request).db.transaction() as tx:
+        return platforms.connector_usage(tx)
 
 
 @router.put("/v1/platforms/connectors/{connector_id}/approval", auth=admin)
@@ -257,9 +257,9 @@ def approve_connector(
     if not isinstance(note, str):
         raise HTTPException(422, "note must be a string")
     rt = runtime(request)
-    with rt.db.session() as s:
-        platforms.approve_connector(s, connector_id, note=note, actor=principal.actor)
-        platforms.refresh_risk(s, rt.settings)
+    with rt.db.transaction() as tx:
+        platforms.approve_connector(tx, connector_id, note=note, actor=principal.actor)
+        platforms.refresh_risk(tx, rt.settings)
     return {"connector_id": platforms.connector_key(connector_id), "approved": True}
 
 
@@ -268,9 +268,9 @@ def remove_approval(request: HttpRequest, connector_id: str) -> dict[str, Any]:
     """Take a connector off the allowlist."""
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s:
-        platforms.remove_approval(s, connector_id, actor=principal.actor)
-        platforms.refresh_risk(s, rt.settings)
+    with rt.db.transaction() as tx:
+        platforms.remove_approval(tx, connector_id, actor=principal.actor)
+        platforms.refresh_risk(tx, rt.settings)
     return {"connector_id": platforms.connector_key(connector_id), "approved": False}
 
 
@@ -301,8 +301,8 @@ def _policy_targets(rt: Any, token: str) -> list[dict[str, Any]]:
                 "assigned": [a.get("policyId") for a in assigned],
             }
         )
-    with rt.db.session() as s:
-        environments = connector_policy.studio_environments(s)
+    with rt.db.transaction() as tx:
+        environments = connector_policy.studio_environments(tx)
     for environment, count in sorted(environments.items()):
         assigned = admin_api.policy_assignments(token, "environment", environment)
         targets.append(
@@ -329,9 +329,9 @@ def connector_policy_preview(request: HttpRequest) -> dict:
         targets = _policy_targets(rt, token)
     except PlatformError as exc:
         raise HTTPException(502, str(exc)) from exc
-    with rt.db.session() as s:
-        view = connector_policy.preview(s, policies, targets)
-        return {**view, "last_push": connector_policy.pushed(s) or None}
+    with rt.db.transaction() as tx:
+        view = connector_policy.preview(tx, policies, targets)
+        return {**view, "last_push": connector_policy.pushed(tx) or None}
 
 
 @router.post("/v1/platforms/connector-policy", auth=admin)
@@ -341,8 +341,8 @@ def push_connector_policy(request: HttpRequest, body: PolicyPush) -> dict[str, A
     connector is blocked there, for apps and flows as well as agents."""
     principal = request.auth
     rt = runtime(request)
-    with rt.db.session() as s:
-        allowlist = connector_policy.approved(s)
+    with rt.db.transaction() as tx:
+        allowlist = connector_policy.approved(tx)
     if not allowlist:
         raise HTTPException(
             409,
@@ -393,9 +393,9 @@ def push_connector_policy(request: HttpRequest, body: PolicyPush) -> dict[str, A
             break
         applied.append(target.model_dump())
     # The policy changed in Power Platform either way: record what was done.
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         connector_policy.record_push(
-            s, policy_id=policy_id, connectors=allowlist, targets=applied, actor=principal.actor
+            tx, policy_id=policy_id, connectors=allowlist, targets=applied, actor=principal.actor
         )
     if failure:
         raise HTTPException(502, failure)
@@ -404,9 +404,9 @@ def push_connector_policy(request: HttpRequest, body: PolicyPush) -> dict[str, A
 
 def _platform_block(request: HttpRequest, ref: str, principal: Principal, *, blocked: bool) -> dict:
     rt = runtime(request)
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
-        where = platforms.target(s, agent)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
+        where = platforms.target(tx, agent)
     api = POWER_PLATFORM if where["source"] == "copilot-studio" else GRAPH
     token = _as_signed_in_admin(rt, principal, api)
     try:
@@ -418,10 +418,10 @@ def _platform_block(request: HttpRequest, ref: str, principal: Principal, *, blo
             rt.microsoft_admin.block_package(token, where["id"], blocked=blocked)
     except PlatformError as exc:
         raise HTTPException(502, str(exc)) from exc
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
         platforms.record_platform_block(
-            s, rt.settings, agent, where, blocked=blocked, actor=principal.actor
+            tx, rt.settings, agent, where, blocked=blocked, actor=principal.actor
         )
     return {"agent": agent.name, "platform": platforms.SOURCES[where["source"]], "blocked": blocked}
 
@@ -448,16 +448,16 @@ def platform_unblock(request: HttpRequest, ref: str) -> dict:
 def entra_access_packages(request: HttpRequest) -> dict[str, Any]:
     """The Microsoft Entra access packages agents can hold, and what each agent's Entra
     identity holds, as last read."""
-    with runtime(request).db.session() as s:
-        return entra_access.view(s)
+    with runtime(request).db.transaction() as tx:
+        return entra_access.view(tx)
 
 
 @agent_router.get("/v1/agents/{ref}/entra-access-packages", auth=guard(reach.read))
 def agent_entra_access(request: HttpRequest, ref: str) -> dict:
     """The Entra access packages the agent's Entra identity holds, and those it could."""
     principal = request.auth
-    with runtime(request).db.session() as s:
-        return entra_access.for_agent(s, reach.agent(s, principal, ref))
+    with runtime(request).db.transaction() as tx:
+        return entra_access.for_agent(tx, reach.agent(tx, principal, ref))
 
 
 @agent_router.post("/v1/agents/{ref}/entra-access-packages/assign", auth=admin)
@@ -473,10 +473,10 @@ def assign_entra_package(
     package = body.get("package")
     if not isinstance(package, str) or not package:
         raise HTTPException(422, "package is required: an Entra access package's ID or name")
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
         name = agent.name
-        identity, package_id, policy_id = entra_access.target(s, agent, package)
+        identity, package_id, policy_id = entra_access.target(tx, agent, package)
     try:
         made = rt.m365.assign_package(
             target_id=identity, policy_id=policy_id, package_id=package_id
@@ -484,9 +484,9 @@ def assign_entra_package(
     except PlatformError as exc:
         raise HTTPException(502, str(exc)) from exc
     out = {"request_id": made.get("id"), "state": made.get("state"), "status": made.get("status")}
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         entra_access.requested(
-            s, agents.get(s, ref), change="requested", package=package_id, actor=principal.actor,
+            tx, agents.get(tx, ref), change="requested", package=package_id, actor=principal.actor,
             policy_id=policy_id, **out,
         )  # fmt: skip
     return {"agent": name, "package_id": package_id, **out}
@@ -499,18 +499,18 @@ def remove_entra_package(request: HttpRequest, ref: str, assignment_id: str) -> 
     rt = runtime(request)
     if rt.m365 is None:
         raise HTTPException(409, NOT_CONFIGURED)
-    with rt.db.session() as s:
-        agent = agents.get(s, ref)
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, ref)
         name = agent.name
-        held = entra_access.holding(s, agent, assignment_id)
+        held = entra_access.holding(tx, agent, assignment_id)
     try:
         made = rt.m365.remove_assignment(assignment_id)
     except PlatformError as exc:
         raise HTTPException(502, str(exc)) from exc
     out = {"request_id": made.get("id"), "state": made.get("state"), "status": made.get("status")}
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         entra_access.requested(
-            s, agents.get(s, ref), change="removal_requested", package=held["package_id"],
+            tx, agents.get(tx, ref), change="removal_requested", package=held["package_id"],
             actor=principal.actor, assignment_id=assignment_id, **out,
         )  # fmt: skip
     return {"agent": name, "assignment_id": assignment_id, **out}
