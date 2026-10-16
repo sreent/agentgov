@@ -142,7 +142,7 @@ runs on PostgreSQL, so `--postgres` (and `--e2e`) runs them again there: each te
 database of its own, copied from a template. To use a PostgreSQL of your own, give the
 tests its URL, as a role that may create databases:
 `AGENTGOV_TEST_POSTGRES_URL=postgresql+psycopg://postgres:secret@127.0.0.1:5432/postgres pytest`
-(the migrations' test empties the database the URL names).
+(the tests make databases of their own there, and drop them).
 
 ## Where things live
 
@@ -165,7 +165,7 @@ tests its URL, as a role that may create databases:
 | `src/agentgov/tls.py` | Mutual TLS between the components, and making their certificates |
 | `src/agentgov/mcp_scan.py` | The MCP servers set up on a developer's machine (`agentgov mcp scan`) |
 | `src/agentgov/db` | The database's connections and transactions, which Django runs with the rules every transaction keeps; the tables as Django models (`models.py`), and their migrations (`migrations`) ([ADR 0007](docs/adr/0007-django.md)) |
-| `src/agentgov/migrations` | Bringing a database's schema up to date: Alembic's migrations (`versions`), which built it before Django's, then Django's |
+| `src/agentgov/migrations.py` | Bringing a database's schema up to date with Django's migrations, and taking over a database Alembic's migrations built before them |
 | `src/agentgov/config.py`, `src/agentgov/cli.py` | The settings, and the `agentgov` command |
 | `ui` | The admin UI: React and TypeScript (`src`: a module per page in `pages`, the sign-in page and the menu in `shell`, and what pages share in `components` and `lib`), built with Vite into `src/agentgov/ui` (not in git), and its browser tests (`e2e`, Playwright) |
 | `deploy/compose`, `deploy/helm` | The Compose stack and the Helm chart (keep the chart's realm file in step with Compose's: CI compares them) |
@@ -204,9 +204,9 @@ numbered one. Read it before you commit: Django asks whether a field was renamed
 can't tell, and moving data between columns is yours to write (`RunPython` or `RunSQL`).
 Keep each migration working on both PostgreSQL and SQLite, and give a new column a
 `db_default` or make it nullable: while an upgrade rolls out, the version before still
-writes rows without it. Alembic's migrations (`src/agentgov/migrations/versions`) built the
-schema before Django's ([ADR 0007](docs/adr/0007-django.md)): they still run first, up to
-their last, and take no new ones.
+writes rows without it. Alembic's migrations built the schema before Django's
+([ADR 0007](docs/adr/0007-django.md)), and are gone: a database they took to their last
+revision is taken over as it is (`src/agentgov/migrations.py`).
 
 Code that uses the database takes the transaction it runs in (`agentgov.db.Transaction`,
 which `db.transaction()` opens) and queries with Django's models. A model's `save()` writes

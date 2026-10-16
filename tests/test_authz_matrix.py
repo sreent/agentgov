@@ -38,6 +38,7 @@ from agentgov.db import Database
 from agentgov.db.models import AdminSession, ApiKey, ApprovalRequest
 from agentgov.registry import findings, issues, model_usage
 from agentgov.runtime import Runtime
+from tests.conftest import checkpoint
 from tests.test_models import access_log, logs
 from tests.test_sso import CLIENT_SECRET, ISSUER, FakeProvider, cli_session
 
@@ -401,10 +402,7 @@ def observe(workdir: Path) -> Observed:
     with client_for(template, provider) as client:
         seeded = seed(client, provider)
         app = client.app
-    db = Database(f"sqlite:///{template}")
-    with db.engine.connect() as connection:
-        connection.connection.dbapi_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    db.dispose()
+    checkpoint(template)
     seen = Observed(seeded=seeded, tried=probes(app))
     seen.all_routes = {f"{m} {p}" for m, p in routes(app)}
     for probe in seen.tried:

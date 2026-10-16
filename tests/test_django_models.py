@@ -1,6 +1,6 @@
 """The Django models (agentgov.db.models) against the database the migrations build: the
-same tables, columns, keys, constraints, indexes and defaults, whether Alembic's migrations
-built it or Django's; and the values as the databases hold them (docs/adr/0007-django.md)."""
+same tables, columns, keys, constraints, indexes and defaults; and the values as the
+databases hold them (docs/adr/0007-django.md)."""
 
 from __future__ import annotations
 
@@ -11,9 +11,8 @@ from typing import Any
 
 from django.apps import apps
 from django.core import checks
+from django.db import connections
 from django.db.models import Field, UniqueConstraint, Value
-from sqlalchemy import inspect
-from sqlalchemy import types as sa
 
 from agentgov.db import Database
 from agentgov.db import models as django_models
@@ -40,24 +39,28 @@ def django_kind(field: Field) -> str:
     }[kind]
 
 
-def database_kind(type_: Any) -> str:
-    if isinstance(type_, sa.Text):
-        return "text"
-    if isinstance(type_, sa.String):
-        return f"varchar({type_.length})"
-    if isinstance(type_, sa.BigInteger):
-        return "bigint"
-    if isinstance(type_, sa.Integer):
-        return "integer"
-    if isinstance(type_, sa.Boolean):
-        return "boolean"
-    if isinstance(type_, sa.Float):
-        return "float"
-    if isinstance(type_, sa.JSON):
-        return "json"
-    if isinstance(type_, sa.DateTime):
-        return "timestamp"
-    raise AssertionError(f"a column of type {type_!r}")
+# A column's type as each database names it, and as the models do.
+KINDS = {
+    "text": "text",
+    "integer": "integer",
+    "bigint": "bigint",
+    "bool": "boolean",
+    "boolean": "boolean",
+    "real": "float",
+    "double precision": "float",
+    "json": "json",
+    "datetime": "timestamp",
+    "timestamp without time zone": "timestamp",
+}
+
+
+def database_kind(declared: str) -> str:
+    declared = declared.lower()
+    if length := re.fullmatch(r"(?:varchar|character varying)\((\d+)\)", declared):
+        return f"varchar({length[1]})"
+    if declared not in KINDS:
+        raise AssertionError(f"a column of type {declared!r}")
+    return KINDS[declared]
 
 
 def django_default(field: Field) -> str:
@@ -105,37 +108,61 @@ def django_tables() -> dict[str, dict[str, Any]]:
     return tables
 
 
+def database_columns(db: Database, cursor: Any, table: str) -> list[tuple[str, str, bool, Any]]:
+    """Each column of ``table``: its name, its type as the database declares it, whether it
+    takes null, and its default as the database writes it."""
+    if db.sqlite:
+        cursor.execute(f'PRAGMA table_info("{table}")')
+        return [(name, kind, not notnull, default) for _, name, kind, notnull, default, _ in cursor]
+    cursor.execute(
+        "SELECT column_name, data_type, character_maximum_length, is_nullable = 'YES', "
+        "column_default FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = %s",
+        [table],
+    )
+    return [
+        (name, f"{kind}({length})" if length else kind, null, default)
+        for name, kind, length, null, default in cursor
+    ]
+
+
 def database_tables(db: Database) -> dict[str, dict[str, Any]]:
-    look = inspect(db.engine)
+    """The tables as the database has them, read by Django's introspection and from the
+    database's own catalogue."""
+    connection = connections[db.alias]
+    look = connection.introspection
     tables = {}
-    for name in look.get_table_names():
-        if name in ("alembic_version", "django_migrations"):
-            continue  # each tool's record of what it applied
-        columns = look.get_columns(name)
-        unique = {u["name"]: sorted(u["column_names"]) for u in look.get_unique_constraints(name)}
-        indexes = {}
-        for index in look.get_indexes(name):
-            if index.get("duplicates_constraint"):
-                continue
-            target = unique if index["unique"] else indexes
-            target[index["name"]] = sorted(index["column_names"])
-        kinds = {c["name"]: database_kind(c["type"]) for c in columns}
-        tables[name] = {
-            "columns": {c["name"]: (kinds[c["name"]], c["nullable"]) for c in columns},
-            "primary key": sorted(look.get_pk_constraint(name)["constrained_columns"]),
-            "unique": unique,
-            "indexes": indexes,
-            "foreign keys": {
-                fk["constrained_columns"][0]: (fk["referred_table"], fk["referred_columns"][0])
-                for fk in look.get_foreign_keys(name)
-            },
-            # A key the database numbers itself (AutoField) has no default of Django's.
-            "defaults": {
-                c["name"]: database_default(c["default"], kinds[c["name"]])
-                for c in columns
-                if c["default"] is not None and not c["default"].startswith("nextval(")
-            },
-        }
+    try:
+        with connection.cursor() as cursor:
+            for name in look.table_names(cursor):
+                if name in ("alembic_version", "django_migrations"):
+                    continue  # each tool's record of what it applied
+                unique, indexes, foreign_keys = {}, {}, {}
+                for constraint, about in look.get_constraints(cursor, name).items():
+                    if about["primary_key"] or about["check"]:
+                        continue
+                    if about["foreign_key"]:
+                        foreign_keys[about["columns"][0]] = tuple(about["foreign_key"])
+                    elif about["unique"]:
+                        unique[constraint] = sorted(about["columns"])
+                    elif about["index"]:
+                        indexes[constraint] = sorted(about["columns"])
+                columns = database_columns(db, cursor, name)
+                kinds = {column: database_kind(kind) for column, kind, _, _ in columns}
+                tables[name] = {
+                    "columns": {column: (kinds[column], null) for column, _, null, _ in columns},
+                    "primary key": sorted(look.get_primary_key_columns(cursor, name) or []),
+                    "unique": unique,
+                    "indexes": indexes,
+                    "foreign keys": foreign_keys,
+                    "defaults": {
+                        column: database_default(default, kinds[column])
+                        for column, _, _, default in columns
+                        if default is not None
+                    },
+                }
+    finally:
+        connection.close()
     return tables
 
 

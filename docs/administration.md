@@ -428,6 +428,9 @@ Two commands run where the control plane runs, against its database
 revision and the migrations pending, and `agentgov db upgrade` applies them (`--sql`
 prints them instead). The control plane also applies them when it starts, unless
 `AGENTGOV_DATABASE_AUTO_MIGRATE` is `false` (upgrading with [Compose](deploy/local.md#upgrading) or [Kubernetes](deploy/kubernetes.md#upgrading)).
+A database from before AgentGov's migrations were Django's is taken over at Alembic's last
+revision (0032); one an older version left short of it is refused, with the version that
+brings it there named.
 
 Every CLI command has `--help`. Commands that cannot be undone (`purge`, `delete` of
 blueprints, tool servers, model providers, identity issuers, destinations and policies,

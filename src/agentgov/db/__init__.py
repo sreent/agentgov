@@ -7,15 +7,15 @@ a savepoint. Django's ORM uses the database whose transaction is open (``Router`
 modules' functions take the transaction they run in.
 
 What needs a PostgreSQL session of its own, outside the pool and the transactions (the
-replicas' coordinator: LISTEN, and advisory locks held while a job runs), opens a connection
-of its own (``Database.connect``). SQLAlchemy's engine is kept for Alembic's migrations alone
-(agentgov.migrations), until they go.
+replicas' coordinator: LISTEN, and advisory locks held while a job runs or the schema is
+migrated), opens a connection of its own (``Database.connect``).
 """
 
 from __future__ import annotations
 
 import itertools
 import logging
+import re
 import shutil
 import tempfile
 import threading
@@ -24,13 +24,12 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
+from urllib.parse import parse_qsl, unquote
 
 from django.db import DEFAULT_DB_ALIAS, connections
 from django.db import transaction as django_transaction
 from django.db.models import Model
-from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine, make_url
 
 from agentgov import web
 
@@ -107,25 +106,6 @@ def mark_changed(tx: Transaction, *topics: str) -> None:
     tx.topics.update(topics)
 
 
-def _configure_sqlite(engine: Engine) -> None:
-    @event.listens_for(engine, "connect")
-    def _on_connect(dbapi_connection: Any, _record: Any) -> None:
-        # Let SQLAlchemy (not pysqlite) control transaction boundaries so we can
-        # issue BEGIN IMMEDIATE below.
-        dbapi_connection.isolation_level = None
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.close()
-
-    @event.listens_for(engine, "begin")
-    def _on_begin(connection: Any) -> None:
-        # Serialise writers up front. Deferred transactions in WAL mode fail with
-        # SQLITE_BUSY_SNAPSHOT when they upgrade from reader to writer after a
-        # concurrent commit; BEGIN IMMEDIATE avoids that class of error entirely.
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
-
-
 # TCP keepalives on every connection to PostgreSQL, both ways: the server drops a replica
 # whose host vanished within half a minute, and with it the advisory locks it held (the
 # leader's, a job's), and the replica notices as soon that it lost the server.
@@ -140,17 +120,6 @@ SERVER_KEEPALIVES = (
     "SET tcp_keepalives_interval = 5",
     "SET tcp_keepalives_count = 3",
 )
-
-
-def _configure_postgresql(engine: Engine) -> None:
-    @event.listens_for(engine, "connect")
-    def _on_connect(dbapi_connection: Any, _record: Any) -> None:
-        # As statements rather than startup options, which poolers such as PgBouncer
-        # refuse; committed, so that they last as long as the connection.
-        with dbapi_connection.cursor() as cursor:
-            for statement in SERVER_KEEPALIVES:
-                cursor.execute(statement)
-        dbapi_connection.commit()
 
 
 # ------------------------------------------------------------------- the databases
@@ -195,11 +164,59 @@ def _forget_disposed() -> None:
         seen.discard(alias)
 
 
+# A database's URL, read as SQLAlchemy read them when it ran AgentGov's database:
+# backend[+driver]://user:password@host:port/database?parameter=value. The user, the password
+# and the database are percent-decoded, and the password may hold anything but "@" as it is.
+_URL = re.compile(
+    r"""
+        (?P<backend>\w+)[\w+]*://
+        (?:(?P<user>[^:/]*)(?::(?P<password>[^@]*))?@)?
+        (?:(?:\[(?P<ipv6>[^/?]+)\]|(?P<host>[^/:?]+))?(?::(?P<port>[^/?]*))?)?
+        (?:/(?P<database>[^?]*))?
+        (?:\?(?P<query>.*))?
+    """,
+    re.VERBOSE,
+)
+
+
+class URL(NamedTuple):
+    backend: str
+    user: str | None
+    password: str | None
+    host: str | None
+    port: int | None
+    database: str | None
+    # Parameters for the driver, such as sslmode for PostgreSQL's.
+    query: dict[str, str]
+
+
+def parse_url(url: str) -> URL:
+    """The parts of a database's URL (AGENTGOV_DATABASE_URL)."""
+    match = _URL.match(url)
+    if match is None:
+        # Without the URL, which may hold a password.
+        raise ValueError("not a database URL, such as postgresql+psycopg://... or sqlite:///...")
+    parts = match.groupdict()
+    user, password, database = (
+        None if parts[name] is None else unquote(parts[name])
+        for name in ("user", "password", "database")
+    )
+    return URL(
+        backend=parts["backend"],
+        user=user,
+        password=password,
+        host=parts["ipv6"] or parts["host"],
+        port=None if parts["port"] is None else int(parts["port"]),
+        database=database,
+        query=dict(parse_qsl(parts["query"] or "")),
+    )
+
+
 def _django_database(url: str) -> tuple[dict[str, Any], Path | None]:
     """Django's settings for the database at ``url`` (as AGENTGOV_DATABASE_URL names it), and
     a directory made for it, to remove with it."""
-    parsed = make_url(url)
-    backend = parsed.get_backend_name()
+    parsed = parse_url(url)
+    backend = parsed.backend
     if backend == "sqlite":
         name, scratch = parsed.database, None
         if not name or name == ":memory:":
@@ -227,7 +244,7 @@ def _django_database(url: str) -> tuple[dict[str, Any], Path | None]:
         return {
             "ENGINE": "agentgov.db.postgresql",
             "NAME": parsed.database or "",
-            "USER": parsed.username or "",
+            "USER": parsed.user or "",
             "PASSWORD": parsed.password or "",
             "HOST": parsed.host or "",
             "PORT": str(parsed.port or ""),
@@ -253,25 +270,8 @@ class Database:
         # can hold several (the tests do).
         self.alias = f"agentgov-{next(_names)}"
         django, self._scratch = _django_database(url)
-        here = make_url(url)
-        if self._scratch is not None:
-            here = here.set(database=django["NAME"])
-        self.sqlite = here.get_backend_name() == "sqlite"
+        self.sqlite = django["ENGINE"] == "agentgov.db.sqlite3"
         self._local = threading.local()
-
-        # SQLAlchemy's own connections, for Alembic's migrations (agentgov.migrations).
-        kwargs: dict[str, Any] = {}
-        if self.sqlite:
-            kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
-        else:
-            kwargs["pool_pre_ping"] = True
-            kwargs["connect_args"] = dict(CLIENT_KEEPALIVES)
-        self.engine = create_engine(here, **kwargs)
-        if self.sqlite:
-            _configure_sqlite(self.engine)
-        else:
-            _configure_postgresql(self.engine)
-
         connections.settings[self.alias] = connections.configure_settings(
             {DEFAULT_DB_ALIAS: {}, self.alias: django}
         )[self.alias]
@@ -380,7 +380,6 @@ class Database:
             if psycopg_pool is not None:
                 psycopg_pool.close()
         connections.settings.pop(self.alias, None)
-        self.engine.dispose()
         if self._scratch is not None:
             shutil.rmtree(self._scratch, ignore_errors=True)
 

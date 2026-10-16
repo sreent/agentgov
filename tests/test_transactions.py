@@ -11,7 +11,7 @@ import pytest
 from django.db import IntegrityError, connections
 
 from agentgov import ledger
-from agentgov.db import Database, Transaction, mark_changed
+from agentgov.db import URL, Database, Transaction, mark_changed, parse_url
 from agentgov.db.models import IntegrationState
 
 WHEN = "2026-10-15 00:00:00.000000"
@@ -216,7 +216,53 @@ def test_a_connection_the_server_dropped_is_replaced(db: Database) -> None:
     with db.transaction() as tx:
         [(pid,)] = tx.execute("SELECT pg_backend_pid()")
     # The server drops it while it waits in the pool, as it does when it restarts.
-    with db.engine.connect() as other:
-        other.exec_driver_sql(f"SELECT pg_terminate_backend({int(pid)})")
+    with db.connect() as other:
+        other.execute("SELECT pg_terminate_backend(%s)", (pid,))
     with db.transaction() as tx:
         assert tx.execute("SELECT 1") == [(1,)]
+
+
+# ------------------------------------------------------------------ the database's URL
+
+
+def test_a_url_is_read_as_it_always_was() -> None:
+    """As SQLAlchemy read AGENTGOV_DATABASE_URL when it ran the database: the user, the
+    password and the database percent-decoded, a password that holds what URLs are split on,
+    and the driver's parameters."""
+    url = parse_url(
+        "postgresql+psycopg://agent%40gov:pa/ss?w#rd%40@db.example.com:5433/agent%20gov"
+        "?sslmode=verify-full&sslrootcert=system"
+    )
+    assert url == URL(
+        backend="postgresql",
+        user="agent@gov",
+        password="pa/ss?w#rd@",
+        host="db.example.com",
+        port=5433,
+        database="agent gov",
+        query={"sslmode": "verify-full", "sslrootcert": "system"},
+    )
+    assert parse_url("postgresql://agentgov@[::1]/agentgov").host == "::1"
+    assert parse_url("sqlite:///./agentgov.db").database == "./agentgov.db"
+    assert parse_url("sqlite:////var/lib/agentgov/agentgov.db").database == (
+        "/var/lib/agentgov/agentgov.db"
+    )
+    assert parse_url("sqlite://").database is None
+    for wrong in ("agentgov.db", "postgresql:/agentgov", ""):
+        with pytest.raises(ValueError, match="not a database URL"):
+            parse_url(wrong)
+
+
+def test_django_connects_where_the_url_says() -> None:
+    db = Database(
+        "postgresql+psycopg://agentgov:s3cr%2Fet@db.example.com:5433/agentgov?sslmode=require"
+    )
+    try:
+        settings = connections.settings[db.alias]
+        where = [settings[key] for key in ("NAME", "USER", "PASSWORD", "HOST", "PORT")]
+        assert where == ["agentgov", "agentgov", "s3cr/et", "db.example.com", "5433"]
+        assert settings["OPTIONS"]["sslmode"] == "require" and not db.sqlite
+    finally:
+        db.dispose()
+    with pytest.raises(ValueError, match="SQLite or PostgreSQL, not mysql"):
+        Database("mysql+pymysql://agentgov@db.example.com/agentgov")

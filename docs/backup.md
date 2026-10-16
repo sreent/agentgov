@@ -57,7 +57,8 @@ ledger archive's volume (`controlPlane.ledgerArchive`) on its own schedule.
    `AGENTGOV_DATABASE_URL` (and Keycloak) at it.
 3. **Start again:** `$compose up -d --wait`, or scale back up. A backup from an older
    version is brought up to date as the control plane starts (`agentgov db status` says
-   where it is).
+   where it is); one too old for this version is refused, with the version to bring it up
+   to date with first.
 4. **Check the ledger:** `agentgov ledger verify` (or **Verify chain** under **Ledger**)
    checks that what the database holds is intact. Then **Ledger** says which entries it lost:
    the ones written after the backup. **Accept the restore** there once you know why they
