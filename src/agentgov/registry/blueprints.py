@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.db import mark_changed
-from agentgov.models import Agent, Blueprint
+from agentgov.db.models import Agent, Blueprint
 from agentgov.registry import scopes, teams, validation
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
@@ -32,20 +29,18 @@ FIELDS = (
 )
 
 
-def get(session: Session, ref: str) -> Blueprint:
-    bp = session.get(Blueprint, ref) or session.scalar(
-        select(Blueprint).where(Blueprint.name == ref)
-    )
+def get(tx: db.Transaction, ref: str) -> Blueprint:
+    bp = Blueprint.objects.filter(pk=ref).first() or Blueprint.objects.filter(name=ref).first()
     if bp is None:
         raise NotFound(f"blueprint {ref!r} not found")
     return bp
 
 
-def list_all(session: Session) -> list[Blueprint]:
-    return list(session.scalars(select(Blueprint).order_by(Blueprint.name)))
+def list_all(tx: db.Transaction) -> list[Blueprint]:
+    return list(Blueprint.objects.order_by("name"))
 
 
-def _apply(session: Session, bp: Blueprint, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Transaction, bp: Blueprint, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in FIELDS:
         if key not in data:
@@ -70,7 +65,7 @@ def _apply(session: Session, bp: Blueprint, data: dict[str, Any]) -> list[str]:
         elif key == "labels":
             value = validation.labels(value)
         elif key == "team":
-            value = teams.reference(session, value)
+            value = teams.reference(tx, value)
         elif key in ("require_sponsor", "require_workload_identity"):
             value = bool(value)
         elif key == "attestation_days":
@@ -84,9 +79,9 @@ def _apply(session: Session, bp: Blueprint, data: dict[str, Any]) -> list[str]:
     return changed
 
 
-def create(session: Session, data: dict[str, Any], *, actor: str) -> Blueprint:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str) -> Blueprint:
     name = validation.slug(data.get("name"), "name")
-    if session.scalar(select(Blueprint).where(Blueprint.name == name)):
+    if Blueprint.objects.filter(name=name).exists():
         raise Conflict(f"blueprint {name!r} already exists")
     bp = Blueprint(
         id=ids.new_id(ids.BLUEPRINT),
@@ -100,55 +95,53 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Blueprint:
         approvals_by="approvers",
         require_workload_identity=False,
     )
-    _apply(session, bp, data)
-    session.add(bp)
-    session.flush()
+    _apply(tx, bp, data)
+    bp.save(force_insert=True)
     ledger.append(
-        session,
+        tx,
         type="blueprint.created",
         actor=actor,
         resource=f"blueprint/{name}",
         details={"permissions": bp.permissions, "risk_tier": bp.risk_tier},
     )
-    mark_changed(session, "blueprints")
+    mark_changed(tx, "blueprints")
     return bp
 
 
 def update(
-    session: Session,
+    tx: db.Transaction,
     bp: Blueprint,
     data: dict[str, Any],
     *,
     actor: str,
     version: int | None = None,
 ) -> list[str]:
-    start_edit(session, bp, version, f"blueprint {bp.name}")
-    changed = _apply(session, bp, data)
+    start_edit(tx, bp, version, f"blueprint {bp.name}")
+    changed = _apply(tx, bp, data)
     if changed:
         edited(bp)
+        bp.save()
         ledger.append(
-            session,
+            tx,
             type="blueprint.updated",
             actor=actor,
             resource=f"blueprint/{bp.name}",
             details={**{k: getattr(bp, k) for k in changed}, "changes": changes(bp)},
         )
-        mark_changed(session, "blueprints")
+        mark_changed(tx, "blueprints")
     return changed
 
 
-def delete(session: Session, bp: Blueprint, *, actor: str) -> None:
-    in_use = session.scalar(
-        select(func.count()).select_from(Agent).where(Agent.blueprint_id == bp.id)
-    )
+def delete(tx: db.Transaction, bp: Blueprint, *, actor: str) -> None:
+    in_use = Agent.objects.filter(blueprint_id=bp.id).count()
     if in_use:
         raise Conflict(f"blueprint {bp.name!r} is used by {in_use} agent(s)")
-    named_by = scopes.naming(session, "blueprints", bp.name)
+    named_by = scopes.naming(tx, "blueprints", bp.name)
     if named_by:
         raise Conflict(f"{', '.join(named_by)} name blueprint {bp.name!r}: change them first")
-    ledger.append(session, type="blueprint.deleted", actor=actor, resource=f"blueprint/{bp.name}")
-    session.delete(bp)
-    mark_changed(session, "blueprints")
+    ledger.append(tx, type="blueprint.deleted", actor=actor, resource=f"blueprint/{bp.name}")
+    Blueprint.objects.filter(pk=bp.id).delete()
+    mark_changed(tx, "blueprints")
 
 
 def to_dict(bp: Blueprint) -> dict[str, Any]:

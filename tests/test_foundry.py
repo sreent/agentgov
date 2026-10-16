@@ -457,9 +457,9 @@ def test_a_foundry_agent_is_its_entra_agent_identity(foundry_client, foundry) ->
     from agentgov.registry import platforms
 
     rt = foundry_client.app.state.rt
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         platforms.record_agent_identities(
-            s, [{"id": HELPDESK_IDENTITY, "displayName": "Helpdesk (agent identity)"}]
+            tx, [{"id": HELPDESK_IDENTITY, "displayName": "Helpdesk (agent identity)"}]
         )
     resp = foundry_client.post("/v1/platforms/microsoft-foundry/sync", headers=ADMIN)
     assert resp.status_code == 200, resp.text
@@ -479,9 +479,9 @@ def test_an_entra_agent_identity_read_after_its_foundry_agent_is_that_agent(
     resp = foundry_client.post("/v1/platforms/microsoft-foundry/sync", headers=ADMIN)
     assert resp.status_code == 200, resp.text
     rt = foundry_client.app.state.rt
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         platforms.record_agent_identities(
-            s, [{"id": HELPDESK_IDENTITY, "displayName": "Helpdesk (agent identity)"}]
+            tx, [{"id": HELPDESK_IDENTITY, "displayName": "Helpdesk (agent identity)"}]
         )
 
     agent = _agent(foundry_client, "helpdesk")

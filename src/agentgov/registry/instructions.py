@@ -21,12 +21,9 @@ import hashlib
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.db import mark_changed
-from agentgov.models import Agent, AgentInstructions, Finding
+from agentgov.db.models import Agent, AgentInstructions, Finding
 from agentgov.processor import detectors
 from agentgov.registry import features, finding_types, findings
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -72,7 +69,7 @@ def issues_of(row: AgentInstructions) -> list[dict[str, Any]]:
 
 
 def report(
-    session: Session,
+    tx: db.Transaction,
     agent: Agent,
     *,
     source: str,
@@ -89,30 +86,30 @@ def report(
         raise ValidationError(f"instructions are limited to {MAX_TEXT_CHARS} characters")
     text = text.strip()
     digest = _digest(text)
-    row = session.get(AgentInstructions, f"{agent.id}:{source}")
+    row = AgentInstructions.objects.filter(pk=f"{agent.id}:{source}").first()
     now = ids.utcnow()
     if row is not None and row.sha256 == digest:
         if now - row.reported_at > REPORT_EVERY:
             row.reported_at = now
+            row.save()
         return row
     before = {i["rule"] for i in issues_of(row)} if row is not None else set()
     if row is None:
         row = AgentInstructions(id=f"{agent.id}:{source}", agent_id=agent.id, source=source)
-        session.add(row)
     stored = _redact(text)
     row.text, row.truncated = stored[:MAX_STORED_CHARS], len(stored) > MAX_STORED_CHARS
     row.sha256, row.reported_by, row.updated_at, row.reported_at = digest, actor, now, now
-    checking = features.is_on(session, "instruction-checks")
+    checking = features.is_on(tx, "instruction-checks")
     if checking:
         _scan(row, classify)
     else:
         row.issues, row.classifier_state, row.classifier = [], UNCHECKED, {}
-    session.flush()
+    row.save(force_insert=row._state.adding)
     found = sorted({i["rule"] for i in row.issues})
     # Agents may report changing text all day: the ledger records what changes the outcome.
     if source != "telemetry" or set(found) != before:
         ledger.append(
-            session,
+            tx,
             type="agent.instructions_changed",
             actor=actor,
             agent=agent,
@@ -120,8 +117,8 @@ def report(
             details={"source": source, "sha256": digest, "issues": found, "checked": checking},
         )
     if checking:
-        evaluate(session, agent)
-    mark_changed(session, "instructions")
+        evaluate(tx, agent)
+    mark_changed(tx, "instructions")
     return row
 
 
@@ -130,93 +127,78 @@ def _scan(row: AgentInstructions, classify: bool) -> None:
     row.classifier_state, row.classifier = ("pending" if classify else "off"), {}
 
 
-def clear(session: Session, agent: Agent, *, source: str, actor: str) -> None:
-    row = session.get(AgentInstructions, f"{agent.id}:{source}")
+def clear(tx: db.Transaction, agent: Agent, *, source: str, actor: str) -> None:
+    row = AgentInstructions.objects.filter(pk=f"{agent.id}:{source}").first()
     if row is None:
         raise NotFound(f"agent {agent.name} has no {source} instructions")
-    session.delete(row)
-    session.flush()
+    row.delete()
     ledger.append(
-        session,
+        tx,
         type="agent.instructions_cleared",
         actor=actor,
         agent=agent,
         details={"source": source},
     )
-    evaluate(session, agent)
+    evaluate(tx, agent)
 
 
-def rescan(session: Session, agent: Agent, *, actor: str, classify: bool) -> int:
+def rescan(tx: db.Transaction, agent: Agent, *, actor: str, classify: bool) -> int:
     """Check the stored instructions again (after a rules update, or for the classifier)."""
-    if not features.is_on(session, "instruction-checks"):
+    if not features.is_on(tx, "instruction-checks"):
         raise Conflict("instruction checks are off: turn them on in Features first")
-    rows = list(
-        session.scalars(select(AgentInstructions).where(AgentInstructions.agent_id == agent.id))
-    )
+    rows = list(AgentInstructions.objects.filter(agent_id=agent.id).order_by("source"))
     for row in rows:
         _scan(row, classify)
+        row.save()
     if rows:
         ledger.append(
-            session,
+            tx,
             type="agent.instructions_rescanned",
             actor=actor,
             agent=agent,
             details={"sources": [r.source for r in rows], "classifier": classify},
         )
-        evaluate(session, agent)
-        mark_changed(session, "instructions")
+        evaluate(tx, agent)
+        mark_changed(tx, "instructions")
     return len(rows)
 
 
-def check_unchecked(session: Session, *, classify: bool) -> list[Agent]:
+def check_unchecked(tx: db.Transaction, *, classify: bool) -> list[Agent]:
     """Check the instructions that arrived while instruction checks were off; returns
     the agents they belong to."""
-    rows = list(
-        session.scalars(
-            select(AgentInstructions).where(AgentInstructions.classifier_state == UNCHECKED)
-        )
-    )
+    rows = list(AgentInstructions.objects.filter(classifier_state=UNCHECKED))
     for row in rows:
         _scan(row, classify)
+        row.save()
     checked = []
     for agent_id in sorted({row.agent_id for row in rows}):
-        agent = session.get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         if agent is not None:
-            evaluate(session, agent)
+            evaluate(tx, agent)
             checked.append(agent)
     if rows:
-        mark_changed(session, "instructions")
+        mark_changed(tx, "instructions")
     return checked
 
 
 # ---------------------------------------------------------------- classifier
 
 
-def queue_unclassified(session: Session) -> int:
+def queue_unclassified(tx: db.Transaction) -> int:
     """Queue instructions stored before the classifier was configured."""
-    rows = list(
-        session.scalars(
-            select(AgentInstructions).where(AgentInstructions.classifier_state == "off")
-        )
+    return AgentInstructions.objects.filter(classifier_state="off").update(
+        classifier_state="pending"
     )
-    for row in rows:
-        row.classifier_state = "pending"
-    return len(rows)
 
 
-def pending(session: Session, limit: int = 5) -> list[tuple[str, str, str]]:
+def pending(tx: db.Transaction, limit: int = 5) -> list[tuple[str, str, str]]:
     """``(id, text, sha256)`` of instructions waiting for the classifier."""
-    rows = session.scalars(
-        select(AgentInstructions)
-        .where(AgentInstructions.classifier_state == "pending")
-        .order_by(AgentInstructions.updated_at)
-        .limit(limit)
-    )
-    return [(r.id, r.text, r.sha256) for r in rows]
+    rows = AgentInstructions.objects.filter(classifier_state="pending").order_by("updated_at")
+    return list(rows.values_list("id", "text", "sha256")[:limit])
 
 
 def record_classification(
-    session: Session,
+    tx: db.Transaction,
     row_id: str,
     digest: str,
     result: dict[str, Any],
@@ -224,49 +206,46 @@ def record_classification(
     error: str | None = None,
 ) -> Agent | None:
     """Store the classifier's verdicts; returns the agent when they were stored."""
-    row = session.get(AgentInstructions, row_id)
+    row = AgentInstructions.objects.filter(pk=row_id).first()
     if row is None or row.sha256 != digest:
         return None  # changed while being classified: the new text is queued already
     row.classifier_state = "error" if error else "done"
     row.classifier = {**result, "error": error, "scanned_at": ids.isoformat(ids.utcnow())}
-    agent = session.get(Agent, row.agent_id)
+    row.save()
+    agent = Agent.objects.filter(pk=row.agent_id).first()
     if agent is None:
         return None
     flagged = [i["rule"] for i in guardian.issues(result.get("verdicts") or {})]
     if flagged:
         ledger.append(
-            session,
+            tx,
             type="agent.instructions_flagged",
             actor="system:classifier",
             agent=agent,
             severity="warning",
             details={"source": row.source, "model": result.get("model"), "criteria": flagged},
         )
-    evaluate(session, agent)
+    evaluate(tx, agent)
     return agent
 
 
 # ------------------------------------------------------------------- finding
 
 
-def evaluate(session: Session, agent: Agent) -> Finding | None:
+def evaluate(tx: db.Transaction, agent: Agent) -> Finding | None:
     """Raise, update or resolve the agent's ``agent.unsafe_instructions`` finding."""
     found = [
         {**issue, "source": row.source}
-        for row in session.scalars(
-            select(AgentInstructions)
-            .where(AgentInstructions.agent_id == agent.id)
-            .order_by(AgentInstructions.source)
-        )
+        for row in AgentInstructions.objects.filter(agent_id=agent.id).order_by("source")
         for issue in issues_of(row)
     ]
     key = f"{FINDING}:{agent.id}"
     if not found:
-        findings.resolve_key(session, key, actor=SYSTEM_ACTOR)
+        findings.resolve_key(tx, key, actor=SYSTEM_ACTOR)
         return None
     found.sort(key=lambda i: rules.SEVERITIES.index(i["severity"]))
     fingerprint = sorted({f"{i['source']}:{i['rule']}" for i in found})
-    existing = session.scalar(select(Finding).where(Finding.key == key))
+    existing = findings.by_key(tx, key)
     if (
         existing is not None
         and existing.status == "dismissed"
@@ -275,9 +254,9 @@ def evaluate(session: Session, agent: Agent) -> Finding | None:
         and finding_types.SUPPRESSED not in (existing.details or {})
     ):
         # Dismissing accepted the problems found then; new ones are asked about again.
-        findings.set_status(session, existing.id, "open", SYSTEM_ACTOR)
+        findings.set_status(tx, existing.id, "open", SYSTEM_ACTOR)
     finding, _ = findings.raise_finding(
-        session,
+        tx,
         type=FINDING,
         severity=found[0]["severity"],
         subject=agent.id,
@@ -312,14 +291,10 @@ def to_dict(row: AgentInstructions) -> dict[str, Any]:
     }
 
 
-def for_agent(session: Session, agent_id: str) -> list[dict[str, Any]]:
+def for_agent(tx: db.Transaction, agent_id: str) -> list[dict[str, Any]]:
     return [
         to_dict(row)
-        for row in session.scalars(
-            select(AgentInstructions)
-            .where(AgentInstructions.agent_id == agent_id)
-            .order_by(AgentInstructions.source)
-        )
+        for row in AgentInstructions.objects.filter(agent_id=agent_id).order_by("source")
     ]
 
 

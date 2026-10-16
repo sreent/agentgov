@@ -44,12 +44,11 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from sqlalchemy import select
 
 from agentgov import ids
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.models import ACTIVE, DISCOVERED, Agent, IdentityIssuer
+from agentgov.db.models import ACTIVE, DISCOVERED, Agent, IdentityIssuer
 from agentgov.registry import features, identity_issuers, validation
 
 log = logging.getLogger(__name__)
@@ -553,6 +552,7 @@ class IdentityReconciler:
                 # No credentials are minted until the agent is first approved.
                 agent.identity_error = None
                 agent.identity_digest = identity_digest(agent, self.settings)
+                agent.save()
                 return
             try:
                 agent.idp_client_uuid = self.admin.create_client(
@@ -617,6 +617,7 @@ class IdentityReconciler:
         agent.identity_synced_at = ids.utcnow()
         agent.identity_error = None
         agent.identity_digest = identity_digest(agent, self.settings)
+        agent.save()
 
     def _sync_people_scope(self, agent: Agent, scopes: _Scopes) -> None:
         """The agent's client scope, offered to the people's apps, while it acts for people."""
@@ -648,18 +649,19 @@ class IdentityReconciler:
                 self.admin.add_optional_scope(app_uuid, scope["id"])
                 optional.add(name)
 
-    def sync_issuers(self, session: Any) -> None:
+    def sync_issuers(self, tx: Any) -> None:
         """Converge the realm's identity providers with the identity issuers: one per
         issuer, enabled while the issuer is approved and workload-identity is on."""
-        on = features.is_on(session, "workload-identity")
+        on = features.is_on(tx, "workload-identity")
         try:
             existing = {p["alias"]: p for p in self.admin.list_identity_providers()}
         except (KeycloakError, httpx.HTTPError) as exc:
-            for issuer in identity_issuers.list_all(session):
+            for issuer in identity_issuers.list_all(tx):
                 issuer.sync_error = str(exc)[:500]
+                issuer.save()
             raise
         wanted = set()
-        for issuer in identity_issuers.list_all(session):
+        for issuer in identity_issuers.list_all(tx):
             alias = identity_issuers.alias(issuer.name)
             wanted.add(alias)
             try:
@@ -685,6 +687,7 @@ class IdentityReconciler:
             except (KeycloakError, httpx.HTTPError) as exc:
                 issuer.sync_error = str(exc)[:500]
                 log.warning("identity provider for issuer %s: %s", issuer.name, exc)
+            issuer.save()
         for alias, provider in existing.items():
             stale = alias.startswith(identity_issuers.ALIAS_PREFIX) and alias not in wanted
             if stale and (provider.get("config") or {}).get("agentgov.managed") == "true":
@@ -698,17 +701,15 @@ class IdentityReconciler:
         last synced (their identity_digest), or whose last sync failed."""
         synced = failed = 0
         scopes = _Scopes(self.admin, self.settings.people_apps())
-        with self.db.session() as session:
+        with self.db.transaction() as tx:
             # The identity providers first: agents' clients name them.
             try:
-                self.sync_issuers(session)
+                self.sync_issuers(tx)
             except (KeycloakError, httpx.HTTPError) as exc:
                 log.warning("identity issuers: %s", exc)
             found = [
                 agent.id
-                for agent in session.scalars(
-                    select(Agent).where(Agent.status != DISCOVERED).order_by(Agent.id)
-                ).unique()
+                for agent in Agent.objects.exclude(status=DISCOVERED).order_by("id")
                 if full
                 or agent.identity_error
                 or agent.identity_digest != identity_digest(agent, self.settings)
@@ -717,8 +718,8 @@ class IdentityReconciler:
         # the jobs that update many agents at once (the posture scan's risk scores) neither
         # wait for a pass over all of them nor deadlock with it.
         for agent_id in found:
-            with self.db.session() as session:
-                agent = session.get(Agent, agent_id)
+            with self.db.transaction():
+                agent = Agent.objects.filter(pk=agent_id).first()
                 if agent is None or agent.status == DISCOVERED:
                     continue
                 try:
@@ -727,6 +728,7 @@ class IdentityReconciler:
                 except (KeycloakError, httpx.HTTPError) as exc:
                     failed += 1
                     agent.identity_error = str(exc)[:500]
+                    agent.save()
                     log.warning("identity sync failed for %s: %s", agent.name, exc)
         return {"synced": synced, "failed": failed}
 

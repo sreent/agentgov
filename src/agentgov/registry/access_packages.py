@@ -20,13 +20,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from django.db.models import Q
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.models import DELETED, AccessAssignment, AccessPackage, Agent, Blueprint
+from agentgov.db.models import DELETED, AccessAssignment, AccessPackage, Agent, Blueprint
 from agentgov.registry import features, findings, issues, validation
 from agentgov.registry.errors import (
     Conflict,
@@ -75,17 +74,15 @@ DECIDERS = frozenset({"admin", "approver"})
 # --------------------------------------------------------------------- packages
 
 
-def get(session: Session, ref: str) -> AccessPackage:
-    package = session.scalar(
-        select(AccessPackage).where((AccessPackage.name == ref) | (AccessPackage.id == ref))
-    )
+def get(tx: db.Transaction, ref: str) -> AccessPackage:
+    package = AccessPackage.objects.filter(Q(name=ref) | Q(id=ref)).first()
     if package is None:
         raise NotFound(f"access package {ref!r} not found")
     return package
 
 
-def list_all(session: Session) -> list[AccessPackage]:
-    return list(session.scalars(select(AccessPackage).order_by(AccessPackage.name)))
+def list_all(tx: db.Transaction) -> list[AccessPackage]:
+    return list(AccessPackage.objects.order_by("name"))
 
 
 def _days(value: Any, field: str) -> int:
@@ -94,7 +91,7 @@ def _days(value: Any, field: str) -> int:
     return value
 
 
-def _apply(session: Session, package: AccessPackage, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Transaction, package: AccessPackage, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in FIELDS:
         if key not in data:
@@ -108,9 +105,8 @@ def _apply(session: Session, package: AccessPackage, data: dict[str, Any]) -> li
             value = validation.agent_access(value)
         elif key == "blueprints":
             value = list(dict.fromkeys(validation.string_list(value, "blueprints")))
-            missing = [
-                b for b in value if not session.scalar(select(Blueprint).where(Blueprint.name == b))
-            ]
+            known = set(Blueprint.objects.filter(name__in=value).values_list("name", flat=True))
+            missing = [b for b in value if b not in known]
             if missing:
                 raise ValidationError(f"blueprint(s) {', '.join(missing)} not found")
         elif key == "duration_days":
@@ -141,10 +137,10 @@ def _known(data: dict[str, Any]) -> None:
         )
 
 
-def create(session: Session, data: dict[str, Any], *, actor: str) -> AccessPackage:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str) -> AccessPackage:
     _known(data)
     name = validation.slug(data.get("name"), "name")
-    if session.scalar(select(AccessPackage).where(AccessPackage.name == name)):
+    if AccessPackage.objects.filter(name=name).exists():
         raise Conflict(f"access package {name!r} already exists")
     package = AccessPackage(
         id=ids.new_id(ids.ACCESS_PACKAGE),
@@ -159,12 +155,11 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> AccessPacka
         review_days=None,
         labels={},
     )
-    _apply(session, package, data)
-    session.add(package)
-    session.flush()
-    mark_changed(session, "access")
+    _apply(tx, package, data)
+    package.save(force_insert=True)
+    mark_changed(tx, "access")
     ledger.append(
-        session,
+        tx,
         type="access_package.created",
         actor=actor,
         resource=f"access-package/{name}",
@@ -174,23 +169,24 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> AccessPacka
 
 
 def update(
-    session: Session,
+    tx: db.Transaction,
     package: AccessPackage,
     data: dict[str, Any],
     *,
     actor: str,
     version: int | None = None,
 ) -> list[str]:
-    start_edit(session, package, version, f"access package {package.name}")
+    start_edit(tx, package, version, f"access package {package.name}")
     _known(data)
     if "name" in data and data["name"] != package.name:
         raise ValidationError("an access package's name can't change: assignments name it")
-    changed = _apply(session, package, data)
+    changed = _apply(tx, package, data)
     if changed:
         edited(package)
-        mark_changed(session, "access")
+        package.save()
+        mark_changed(tx, "access")
         ledger.append(
-            session,
+            tx,
             type="access_package.updated",
             actor=actor,
             resource=f"access-package/{package.name}",
@@ -199,27 +195,24 @@ def update(
     return changed
 
 
-def delete(session: Session, package: AccessPackage, *, actor: str) -> None:
-    held = session.scalar(
-        select(AccessAssignment.id).where(
-            AccessAssignment.package_id == package.id,
-            AccessAssignment.status.in_((REQUESTED, *HELD)),
-        )
-    )
+def delete(tx: db.Transaction, package: AccessPackage, *, actor: str) -> None:
+    held = AccessAssignment.objects.filter(
+        package_id=package.id, status__in=(REQUESTED, *HELD)
+    ).exists()
     if held:
         raise Conflict(
             f"agents hold or ask for access package {package.name!r}: revoke or deny those "
             "assignments first"
         )
     ledger.append(
-        session,
+        tx,
         type="access_package.deleted",
         actor=actor,
         resource=f"access-package/{package.name}",
         severity="warning",
     )
-    session.delete(package)
-    mark_changed(session, "access")
+    package.delete()
+    mark_changed(tx, "access")
 
 
 def _details(package: AccessPackage) -> dict[str, Any]:
@@ -236,10 +229,10 @@ def _details(package: AccessPackage) -> dict[str, Any]:
     }
 
 
-def to_dict(session: Session, package: AccessPackage) -> dict[str, Any]:
+def to_dict(tx: db.Transaction, package: AccessPackage) -> dict[str, Any]:
     counts: dict[str, int] = {}
-    for status in session.scalars(
-        select(AccessAssignment.status).where(AccessAssignment.package_id == package.id)
+    for status in AccessAssignment.objects.filter(package_id=package.id).values_list(
+        "status", flat=True
     ):
         counts[status] = counts.get(status, 0) + 1
     return {
@@ -256,37 +249,37 @@ def to_dict(session: Session, package: AccessPackage) -> dict[str, Any]:
 # ------------------------------------------------------------------ assignments
 
 
-def assignment(session: Session, assignment_id: str) -> AccessAssignment:
-    row = session.get(AccessAssignment, assignment_id)
+def assignment(tx: db.Transaction, assignment_id: str) -> AccessAssignment:
+    row = AccessAssignment.objects.filter(pk=assignment_id).first()
     if row is None:
         raise NotFound(f"access assignment {assignment_id} not found")
     return row
 
 
 def assignments(
-    session: Session,
+    tx: db.Transaction,
     *,
     status: str | None = None,
     agent_id: str | None = None,
     package_id: str | None = None,
     limit: int = 500,
 ) -> list[AccessAssignment]:
-    stmt = select(AccessAssignment).order_by(AccessAssignment.created_at.desc()).limit(limit)
+    rows = AccessAssignment.objects.order_by("-created_at")
     if status and status != "all":
         if status not in STATUSES:
             raise ValidationError(f"status is one of {', '.join(STATUSES)} or all")
-        stmt = stmt.where(AccessAssignment.status == status)
+        rows = rows.filter(status=status)
     if agent_id:
-        stmt = stmt.where(AccessAssignment.agent_id == agent_id)
+        rows = rows.filter(agent_id=agent_id)
     if package_id:
-        stmt = stmt.where(AccessAssignment.package_id == package_id)
-    return list(session.scalars(stmt))
+        rows = rows.filter(package_id=package_id)
+    return list(rows[:limit])
 
 
-def responsible(session: Session, agent: Agent) -> set[str]:
+def responsible(tx: db.Transaction, agent: Agent) -> set[str]:
     """The agent's owner and sponsors, as people sign in (lower case), with the members
     and addresses of teams named as either."""
-    directory = issues.Directory(session)
+    directory = issues.Directory(tx)
     names: set[str] = set()
     for name in [agent.owner, *(agent.sponsors or [])]:
         who = directory.recipient(str(name or ""))
@@ -298,8 +291,8 @@ def responsible(session: Session, agent: Agent) -> set[str]:
     return names
 
 
-def may_request(session: Session, roles: frozenset[str], name: str | None, agent: Agent) -> bool:
-    return bool(roles & REQUESTERS) or (name or "").lower() in responsible(session, agent)
+def may_request(tx: db.Transaction, roles: frozenset[str], name: str | None, agent: Agent) -> bool:
+    return bool(roles & REQUESTERS) or (name or "").lower() in responsible(tx, agent)
 
 
 def asked_by(row: AccessAssignment, actor: str) -> bool:
@@ -317,7 +310,7 @@ def _resource(row: AccessAssignment, package: AccessPackage, agent: Agent) -> st
 
 
 def _record(
-    session: Session,
+    tx: db.Transaction,
     row: AccessAssignment,
     change: str,
     actor: str,
@@ -325,10 +318,11 @@ def _record(
     severity: str = "info",
     **extra: Any,
 ) -> None:
-    package, agent = session.get(AccessPackage, row.package_id), session.get(Agent, row.agent_id)
+    package = AccessPackage.objects.filter(pk=row.package_id).first()
+    agent = Agent.objects.filter(pk=row.agent_id).first()
     assert package is not None and agent is not None
     ledger.append(
-        session,
+        tx,
         type=f"access.{change}",
         actor=actor,
         severity=severity,
@@ -350,18 +344,14 @@ def _not_deleted(agent: Agent | None) -> None:
         raise InvalidTransition(f"{agent.name} is deleted: restore it first")
 
 
-def _held(session: Session, agent_id: str, package_id: str) -> AccessAssignment | None:
-    return session.scalar(
-        select(AccessAssignment).where(
-            AccessAssignment.agent_id == agent_id,
-            AccessAssignment.package_id == package_id,
-            AccessAssignment.status.in_(HELD),
-        )
-    )
+def _held(tx: db.Transaction, agent_id: str, package_id: str) -> AccessAssignment | None:
+    return AccessAssignment.objects.filter(
+        agent_id=agent_id, package_id=package_id, status__in=HELD
+    ).first()
 
 
 def request(
-    session: Session,
+    tx: db.Transaction,
     *,
     agent: Agent,
     package: AccessPackage,
@@ -372,7 +362,7 @@ def request(
 ) -> AccessAssignment:
     """Ask for a package for an agent (again, to renew it). Granted at once when the package
     needs no approval, or when an administrator assigns it (``approve``)."""
-    if not features.is_on(session, FEATURE):
+    if not features.is_on(tx, FEATURE):
         raise InvalidTransition("access packages are off: turn them on in Features first")
     _not_deleted(agent)
     days = _days(package.duration_days if days is None else days, "days")
@@ -393,13 +383,11 @@ def request(
             f"{agent.name} is on {blueprint or 'no blueprint'}"
         )
     # One request at a time per agent: two at once would both find none waiting.
-    lock(session, agent)
-    pending = session.scalar(
-        select(AccessAssignment.id).where(
-            AccessAssignment.agent_id == agent.id,
-            AccessAssignment.package_id == package.id,
-            AccessAssignment.status == REQUESTED,
-        )
+    lock(tx, agent)
+    pending = (
+        AccessAssignment.objects.filter(agent_id=agent.id, package_id=package.id, status=REQUESTED)
+        .values_list("id", flat=True)
+        .first()
     )
     if pending:
         raise Conflict(f"{agent.name} already asked for {package.name!r}: {pending} waits")
@@ -412,94 +400,96 @@ def request(
         reason=reason,
         requested_by=actor,
     )
-    session.add(row)
-    session.flush()
-    held = _held(session, agent.id, package.id)
-    _record(session, row, "requested", actor, days=days, renews=held.id if held else None)
+    row.save(force_insert=True)
+    held = _held(tx, agent.id, package.id)
+    _record(tx, row, "requested", actor, days=days, renews=held.id if held else None)
     if approve or not package.approval:
-        _grant(session, row, actor=actor if approve else SYSTEM, note=None)
+        _grant(tx, row, actor=actor if approve else SYSTEM, note=None)
     return row
 
 
-def _grant(session: Session, row: AccessAssignment, *, actor: str, note: str | None) -> None:
+def _grant(tx: db.Transaction, row: AccessAssignment, *, actor: str, note: str | None) -> None:
     now = ids.utcnow()
     until = now + timedelta(days=row.days)
-    held = _held(session, row.agent_id, row.package_id)
+    held = _held(tx, row.agent_id, row.package_id)
     if held is not None:
         # A renewal: it carries on from the one it replaces, and never ends sooner.
         if held.expires_at and held.expires_at > until:
             until = held.expires_at
         held.status = RENEWED
         held.ended_at = now
-        _settle(session, held, actor=actor)
+        held.save()
+        _settle(tx, held, actor=actor)
     row.status = ACTIVE
     row.decided_by, row.decided_at, row.note = actor, now, note
     row.starts_at, row.expires_at, row.reviewed_at = now, until, now
-    mark_changed(session, "access")
-    _record(session, row, "approved", actor, note=note, renewed=held.id if held else None)
+    row.save()
+    mark_changed(tx, "access")
+    _record(tx, row, "approved", actor, note=note, renewed=held.id if held else None)
 
 
 def decide(
-    session: Session, row: AccessAssignment, *, approve: bool, actor: str, note: Any = None
+    tx: db.Transaction, row: AccessAssignment, *, approve: bool, actor: str, note: Any = None
 ) -> AccessAssignment:
-    lock(session, row)
+    lock(tx, row)
     if row.status != REQUESTED:
         raise InvalidTransition(f"assignment {row.id} is {row.status}, not requested")
     if asked_by(row, actor):
         raise Forbidden("someone other than who asked for it decides a request")
     note = str(note).strip()[:2000] if note else None
     if approve:
-        _not_deleted(session.get(Agent, row.agent_id))
-        _grant(session, row, actor=actor, note=note)
+        _not_deleted(Agent.objects.filter(pk=row.agent_id).first())
+        _grant(tx, row, actor=actor, note=note)
     else:
         row.status = DENIED
         row.decided_by, row.decided_at, row.note = actor, ids.utcnow(), note
-        _record(session, row, "denied", actor, note=note)
+        row.save()
+        _record(tx, row, "denied", actor, note=note)
     return row
 
 
 def revoke(
-    session: Session, row: AccessAssignment, *, actor: str, reason: Any = None
+    tx: db.Transaction, row: AccessAssignment, *, actor: str, reason: Any = None
 ) -> AccessAssignment:
-    lock(session, row)
+    lock(tx, row)
     if row.status not in HELD:
         raise InvalidTransition(f"assignment {row.id} is {row.status}: only held ones are revoked")
     row.status = REVOKED
     row.ended_at = ids.utcnow()
-    _settle(session, row, actor=actor)
-    mark_changed(session, "access")
-    _record(
-        session, row, "revoked", actor, severity="warning", why=str(reason or "")[:2000] or None
-    )
+    row.save()
+    _settle(tx, row, actor=actor)
+    mark_changed(tx, "access")
+    _record(tx, row, "revoked", actor, severity="warning", why=str(reason or "")[:2000] or None)
     return row
 
 
 def review(
-    session: Session, row: AccessAssignment, *, keep: bool, actor: str, note: Any = None
+    tx: db.Transaction, row: AccessAssignment, *, keep: bool, actor: str, note: Any = None
 ) -> AccessAssignment:
     """Someone looked at whether the agent still needs it: kept, or revoked."""
-    lock(session, row)
+    lock(tx, row)
     if row.status not in HELD:
         raise InvalidTransition(f"assignment {row.id} is {row.status}: only held ones are reviewed")
     if not keep:
-        return revoke(session, row, actor=actor, reason=note or "removed in its review")
+        return revoke(tx, row, actor=actor, reason=note or "removed in its review")
     row.reviewed_at = ids.utcnow()
-    findings.resolve_key(session, f"{REVIEW_DUE}:{row.id}", actor=actor)
-    _record(session, row, "reviewed", actor, kept=True, note=str(note or "")[:2000] or None)
+    row.save()
+    findings.resolve_key(tx, f"{REVIEW_DUE}:{row.id}", actor=actor)
+    _record(tx, row, "reviewed", actor, kept=True, note=str(note or "")[:2000] or None)
     return row
 
 
-def _settle(session: Session, row: AccessAssignment, *, actor: str) -> None:
+def _settle(tx: db.Transaction, row: AccessAssignment, *, actor: str) -> None:
     """It no longer needs anyone's attention: its open issues are resolved."""
     for type_ in FINDING_TYPES:
-        findings.resolve_key(session, f"{type_}:{row.id}", actor=actor)
+        findings.resolve_key(tx, f"{type_}:{row.id}", actor=actor)
 
 
 # ----------------------------------------------------------------------- rounds
 
 
 def _raise(
-    session: Session,
+    tx: db.Transaction,
     row: AccessAssignment,
     type_: str,
     severity: str,
@@ -509,7 +499,7 @@ def _raise(
     remediation: str,
 ) -> None:
     findings.raise_finding(
-        session,
+        tx,
         type=type_,
         severity=severity,
         subject=row.id,
@@ -521,31 +511,29 @@ def _raise(
     )
 
 
-def check(session: Session, settings: Settings, now: datetime | None = None) -> dict[str, int]:
+def check(tx: db.Transaction, settings: Settings, now: datetime | None = None) -> dict[str, int]:
     """Expire assignments whose time is up, tell agents' people about those expiring, and
     ask for the reviews that are due. Nothing while the feature is off."""
-    if not features.is_on(session, FEATURE):
+    if not features.is_on(tx, FEATURE):
         return {}
     now = now or ids.utcnow()
-    enforced = features.mode(session, FEATURE) == features.ENFORCE
+    enforced = features.mode(tx, FEATURE) == features.ENFORCE
     counts = {"expired": 0, "expiring": 0, "reviews": 0}
-    rows = session.scalars(select(AccessAssignment).where(AccessAssignment.status == ACTIVE)).all()
-    for row in rows:
-        package, agent = (
-            session.get(AccessPackage, row.package_id),
-            session.get(Agent, row.agent_id),
-        )
+    packages = AccessPackage.objects.in_bulk()
+    for row in list(AccessAssignment.objects.filter(status=ACTIVE)):
+        package, agent = packages.get(row.package_id), Agent.objects.filter(pk=row.agent_id).first()
         # A deleted agent's packages wait for it to be restored (or purged).
         if package is None or agent is None or agent.status == DELETED or row.expires_at is None:
             continue
         left = row.expires_at - now
         if left <= timedelta(0):
             row.status = EXPIRED
-            mark_changed(session, "access")
-            _record(session, row, "expired", SYSTEM, severity="warning")
-            findings.resolve_key(session, f"{EXPIRING}:{row.id}", actor=SYSTEM)
+            row.save()
+            mark_changed(tx, "access")
+            _record(tx, row, "expired", SYSTEM, severity="warning")
+            findings.resolve_key(tx, f"{EXPIRING}:{row.id}", actor=SYSTEM)
             _raise(
-                session,
+                tx,
                 row,
                 EXPIRED_TYPE,
                 "medium",
@@ -563,7 +551,7 @@ def check(session: Session, settings: Settings, now: datetime | None = None) -> 
         if left <= timedelta(days=min(REMIND_DAYS, row.days / 3)):
             days = max(1, int(left.total_seconds() // 86400))
             _raise(
-                session,
+                tx,
                 row,
                 EXPIRING,
                 "high" if left <= timedelta(days=1) else "medium" if days <= 7 else "low",
@@ -577,7 +565,7 @@ def check(session: Session, settings: Settings, now: datetime | None = None) -> 
             since = row.reviewed_at or row.starts_at or row.created_at
             if since + timedelta(days=package.review_days) <= now:
                 _raise(
-                    session,
+                    tx,
                     row,
                     REVIEW_DUE,
                     "low",
@@ -593,17 +581,11 @@ def check(session: Session, settings: Settings, now: datetime | None = None) -> 
 # --------------------------------------------------------------------- policy
 
 
-def held(session: Session) -> dict[str, list[dict[str, Any]]]:
+def held(tx: db.Transaction) -> dict[str, list[dict[str, Any]]]:
     """What each agent holds, for OPA (data.registry.agents[id].packages): each package's
     grants, and when they end."""
     out: dict[str, list[dict[str, Any]]] = {}
-    rows = session.execute(
-        select(AccessAssignment, AccessPackage)
-        .join(AccessPackage, AccessPackage.id == AccessAssignment.package_id)
-        .where(AccessAssignment.status.in_(HELD))
-        .order_by(AccessPackage.name)
-    )
-    for row, package in rows:
+    for row, package in _with_packages(AccessAssignment.objects.filter(status__in=HELD)):
         out.setdefault(row.agent_id, []).append(
             {
                 "name": package.name,
@@ -616,20 +598,16 @@ def held(session: Session) -> dict[str, list[dict[str, Any]]]:
     return out
 
 
-def current(session: Session, agent_id: str) -> dict[str, list[Any]]:
+def current(tx: db.Transaction, agent_id: str) -> dict[str, list[Any]]:
     """What an agent's packages grant it now, as OPA decides: those in force, and expired
     ones while the feature is monitored. Off, nothing."""
     out: dict[str, list[Any]] = {"permissions": [], "model_access": [], "agent_access": []}
-    mode = features.mode(session, FEATURE)
+    mode = features.mode(tx, FEATURE)
     if mode == features.OFF:
         return out
     now = ids.utcnow()
-    rows = session.execute(
-        select(AccessAssignment, AccessPackage)
-        .join(AccessPackage, AccessPackage.id == AccessAssignment.package_id)
-        .where(AccessAssignment.agent_id == agent_id, AccessAssignment.status.in_(HELD))
-    )
-    for row, package in rows:
+    theirs = AccessAssignment.objects.filter(agent_id=agent_id, status__in=HELD)
+    for row, package in _with_packages(theirs):
         lapsed = row.status == EXPIRED or (row.expires_at is not None and row.expires_at <= now)
         if lapsed and mode == features.ENFORCE:
             continue
@@ -643,8 +621,16 @@ def current(session: Session, agent_id: str) -> dict[str, list[Any]]:
     return out
 
 
-def assignment_dict(session: Session, row: AccessAssignment) -> dict[str, Any]:
-    package, agent = session.get(AccessPackage, row.package_id), session.get(Agent, row.agent_id)
+def _with_packages(rows: Any) -> list[tuple[AccessAssignment, AccessPackage]]:
+    """The assignments with their packages, by the packages' names."""
+    packages = AccessPackage.objects.in_bulk()
+    found = [(row, packages[row.package_id]) for row in rows if row.package_id in packages]
+    return sorted(found, key=lambda pair: pair[1].name)
+
+
+def assignment_dict(tx: db.Transaction, row: AccessAssignment) -> dict[str, Any]:
+    package = AccessPackage.objects.filter(pk=row.package_id).first()
+    agent = Agent.objects.filter(pk=row.agent_id).first()
     expired = row.status == EXPIRED or (
         row.status == ACTIVE and row.expires_at is not None and row.expires_at <= ids.utcnow()
     )

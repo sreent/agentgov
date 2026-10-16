@@ -55,18 +55,18 @@ def overview(request: HttpRequest) -> dict[str, Any]:
     given in AgentGov, and the identity provider."""
     rt = runtime(request)
     signing_in = provider(rt)  # may read the provider's discovery document
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         if signing_in is not None:
             # What someone gets who signs in with no role given to them: the person role,
             # or nothing (refused).
-            signing_in["without_role"] = sso.without_role(s, rt.settings)
+            signing_in["without_role"] = sso.without_role(tx, rt.settings)
         return {
             "sso_enabled": rt.settings.sso_enabled,
             "bootstrap_token": bool(rt.settings.admin_token),
             "provider": signing_in,
-            "people": access.people(s),
-            "sessions": [access.session_to_dict(r) for r in access.live_sessions(s)],
-            "grants": [access.grant_to_dict(g) for g in access.grants(s)],
+            "people": access.people(tx),
+            "sessions": [access.session_to_dict(r) for r in access.live_sessions(tx)],
+            "grants": [access.grant_to_dict(g) for g in access.grants(tx)],
             # How long new API keys work by default, and at most (0: no limit).
             "api_keys": {
                 "default_days": rt.settings.api_key_days,
@@ -90,9 +90,9 @@ def give_role(request: HttpRequest, body: Grant = Body(...)) -> dict[str, Any]:
     """Give a person an AgentGov role, by the email address their identity provider vouches
     for: from their next sign-in, beside the roles the provider gives them. With ``team``,
     for that team's agents only."""
-    with runtime(request).db.session() as s:
+    with runtime(request).db.transaction() as tx:
         record = access.grant(
-            s, body.email, body.role, actor=request.auth.actor, reason=body.reason, team=body.team
+            tx, body.email, body.role, actor=request.auth.actor, reason=body.reason, team=body.team
         )
         return access.grant_to_dict(record)
 
@@ -101,8 +101,8 @@ def give_role(request: HttpRequest, body: Grant = Body(...)) -> dict[str, Any]:
 def take_role(request: HttpRequest, email: str, role: str) -> dict[str, int]:
     """Take away a role given in AgentGov; the person's sessions end with it."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        ended = access.revoke(s, email, role, actor=request.auth.actor)
+    with rt.db.transaction() as tx:
+        ended = access.revoke(tx, email, role, actor=request.auth.actor)
     if rt.delegations is not None:
         rt.delegations.forget(*ended)
     return {"ended": len(ended)}
@@ -112,8 +112,8 @@ def take_role(request: HttpRequest, email: str, role: str) -> dict[str, int]:
 def end_session(request: HttpRequest, session_id: str) -> dict[str, int]:
     """End one session. The person signs in again, which re-reads their roles."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        ended = access.end_session(s, session_id, actor=request.auth.actor)
+    with rt.db.transaction() as tx:
+        ended = access.end_session(tx, session_id, actor=request.auth.actor)
     if rt.delegations is not None:
         rt.delegations.forget(session_id)
     return {"ended": ended}
@@ -123,9 +123,9 @@ def end_session(request: HttpRequest, session_id: str) -> dict[str, int]:
 def sign_out(request: HttpRequest, subject: str) -> dict[str, int]:
     """End every session of one person (by the identity provider's subject)."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        ended_ids = access.session_ids(s, subject)
-        ended = access.sign_out(s, subject, actor=request.auth.actor)
+    with rt.db.transaction() as tx:
+        ended_ids = access.session_ids(tx, subject)
+        ended = access.sign_out(tx, subject, actor=request.auth.actor)
     if rt.delegations is not None:
         rt.delegations.forget(*ended_ids)
     return {"ended": ended}

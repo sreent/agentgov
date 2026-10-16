@@ -63,13 +63,13 @@ def migrated_database(tmp_path_factory: pytest.TempPathFactory) -> Path | str:
             connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {TEMPLATE} WITH (FORCE)")
             connection.exec_driver_sql(f"CREATE DATABASE {TEMPLATE}")
         db = Database(make_url(POSTGRES).set(database=TEMPLATE).render_as_string(False))
-        migrations.upgrade(db.engine)
+        migrations.upgrade(db)
         db.dispose()
         admin.dispose()
         return TEMPLATE
     path = tmp_path_factory.mktemp("schema") / "agentgov.db"
     db = Database(f"sqlite:///{path}")
-    migrations.upgrade(db.engine)
+    migrations.upgrade(db)
     with db.engine.connect() as connection:
         # Everything into the main file before it is copied (outside a transaction).
         connection.connection.dbapi_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -162,6 +162,6 @@ def signed_in(client: TestClient, email: str, *roles: str) -> dict[str, str]:
 
     rt = client.app.state.rt  # type: ignore[attr-defined]
     who = sso.Identity(subject=email, name=email, roles=list(roles), id_token="", email=email)
-    with rt.db.session() as s:
-        token, _ = sso.start_session(s, rt.settings, who)
+    with rt.db.transaction() as tx:
+        token, _ = sso.start_session(tx, rt.settings, who)
     return {"Authorization": f"Bearer {token}"}

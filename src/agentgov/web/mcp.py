@@ -54,11 +54,11 @@ def list_servers(
         since = _since(updated_since)
     except ValueError:
         return _answer({"error": "updated_since must be an RFC 3339 date and time"}, 400)
-    with rt.db.session() as s:
-        if not features.is_on(s, "mcp-registry"):
+    with rt.db.transaction() as tx:
+        if not features.is_on(tx, "mcp-registry"):
             return _closed()
         page = mcp_registry.server_list(
-            s,
+            tx,
             rt.settings,
             cursor=cursor,
             limit=limit,
@@ -75,10 +75,10 @@ def get_version(
     request: HttpRequest, name: str, version: str, include_deleted: bool = False
 ) -> HttpResponse:
     rt = runtime(request)
-    with rt.db.session() as s:
-        if not features.is_on(s, "mcp-registry"):
+    with rt.db.transaction() as tx:
+        if not features.is_on(tx, "mcp-registry"):
             return _closed()
-        ts = mcp_registry.find(s, rt.settings, name, include_deleted=include_deleted)
+        ts = mcp_registry.find(tx, rt.settings, name, include_deleted=include_deleted)
         if ts is None or version not in ("latest", mcp_registry.version(ts)):
             return _answer({"error": f"Server {name} version {version} not found"}, 404)
         return _answer(mcp_registry.server_response(ts, rt.settings))
@@ -88,10 +88,10 @@ def get_version(
 def list_versions(request: HttpRequest, name: str, include_deleted: bool = False) -> HttpResponse:
     """AgentGov keeps one version of each server: its current one."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        if not features.is_on(s, "mcp-registry"):
+    with rt.db.transaction() as tx:
+        if not features.is_on(tx, "mcp-registry"):
             return _closed()
-        ts = mcp_registry.find(s, rt.settings, name, include_deleted=include_deleted)
+        ts = mcp_registry.find(tx, rt.settings, name, include_deleted=include_deleted)
         if ts is None:
             return _answer({"error": f"Server {name} not found"}, 404)
         return _answer(
@@ -103,10 +103,10 @@ def list_versions(request: HttpRequest, name: str, include_deleted: bool = False
 def registry_view(request: HttpRequest) -> dict[str, Any]:
     """What developers' MCP clients see in the registry, and where they read it."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        servers = mcp_registry.listed(s)
+    with rt.db.transaction() as tx:
+        servers = mcp_registry.listed(tx)
         return {
-            "enabled": features.is_on(s, "mcp-registry"),
+            "enabled": features.is_on(tx, "mcp-registry"),
             "url": f"{rt.settings.public_url.rstrip('/')}/registry",
             "namespace": mcp_registry.namespace(rt.settings),
             "servers": [mcp_registry.server_response(ts, rt.settings) for ts in servers],
@@ -118,8 +118,8 @@ def managed_settings(request: HttpRequest) -> dict[str, Any]:
     """The registry as the allowlist of GitHub Copilot's enterprise managed settings
     (managed-settings.json), which matches servers by URL and command."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        return mcp_registry.managed_settings(s, rt.settings)
+    with rt.db.transaction() as tx:
+        return mcp_registry.managed_settings(tx, rt.settings)
 
 
 @router.post("/v1/mcp/sightings", auth=reporter)
@@ -128,11 +128,11 @@ def report_sightings(request: HttpRequest, body: dict[str, Any] = Body(...)) -> 
     (``{"machine", "user", "servers": [...]}``); they replace that machine and person's
     previous report."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        if not features.is_on(s, "mcp-discovery"):
+    with rt.db.transaction() as tx:
+        if not features.is_on(tx, "mcp-discovery"):
             raise Conflict("discovery of developers' MCP servers is off (feature mcp-discovery)")
         return mcp_sightings.report(
-            s,
+            tx,
             rt.settings,
             machine=body.get("machine"),
             user=body.get("user"),
@@ -146,5 +146,5 @@ def list_sightings(request: HttpRequest) -> list[dict[str, Any]]:
     """Every MCP server developers reported, with how many machines and people have it,
     and whether it is approved."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        return mcp_sightings.view(s, rt.settings)
+    with rt.db.transaction() as tx:
+        return mcp_sightings.view(tx, rt.settings)

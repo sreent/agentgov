@@ -6,12 +6,11 @@ from typing import Any
 
 from django.http import HttpRequest
 from ninja import Body
-from sqlalchemy import select
 
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES
 from agentgov.api.versions import if_match
-from agentgov.models import Agent
+from agentgov.db.models import Agent
 from agentgov.registry import model_providers, model_usage
 from agentgov.registry.errors import NotFound
 from agentgov.registry.validation import known_fields
@@ -26,8 +25,8 @@ admin = require("admin")
 
 @router.get("/v1/models/providers", auth=read)
 def list_providers(request: HttpRequest) -> list[dict[str, Any]]:
-    with runtime(request).db.session() as s:
-        return [model_providers.to_dict(p) for p in model_providers.list_all(s)]
+    with runtime(request).db.transaction() as tx:
+        return [model_providers.to_dict(p) for p in model_providers.list_all(tx)]
 
 
 @router.post("/v1/models/providers", status_code=201, auth=admin)
@@ -36,15 +35,15 @@ def create_provider(request: HttpRequest, body: dict[str, Any] = Body(...)) -> d
     read its API key (``key_file``)."""
     known_fields(body, {"name", *model_providers.FIELDS}, "a model provider")
     rt = runtime(request)
-    with rt.db.session() as s:
-        provider = model_providers.create(s, body, actor=request.auth.actor, settings=rt.settings)
+    with rt.db.transaction() as tx:
+        provider = model_providers.create(tx, body, actor=request.auth.actor, settings=rt.settings)
         return model_providers.to_dict(provider)
 
 
 @router.get("/v1/models/providers/{ref}", auth=read)
 def get_provider(request: HttpRequest, ref: str) -> dict[str, Any]:
-    with runtime(request).db.session() as s:
-        return model_providers.to_dict(model_providers.get(s, ref))
+    with runtime(request).db.transaction() as tx:
+        return model_providers.to_dict(model_providers.get(tx, ref))
 
 
 @router.patch("/v1/models/providers/{ref}", auth=admin)
@@ -53,10 +52,10 @@ def update_provider(
 ) -> dict[str, Any]:
     known_fields(body, model_providers.FIELDS, "a model provider's edit")
     rt = runtime(request)
-    with rt.db.session() as s:
-        provider = model_providers.get(s, ref)
+    with rt.db.transaction() as tx:
+        provider = model_providers.get(tx, ref)
         model_providers.update(
-            s,
+            tx,
             provider,
             body,
             actor=request.auth.actor,
@@ -72,17 +71,17 @@ def provider_action(request: HttpRequest, ref: str, action: str) -> dict[str, An
     if action not in ("block", "unblock"):
         raise NotFound(f"no action {action!r}: block or unblock")
     principal = request.auth
-    with runtime(request).db.session() as s:
-        handoff.check_kill_switch(s, principal, action)
-        provider = model_providers.get(s, ref)
-        model_providers.set_status(s, provider, action, actor=principal.actor)
+    with runtime(request).db.transaction() as tx:
+        handoff.check_kill_switch(tx, principal, action)
+        provider = model_providers.get(tx, ref)
+        model_providers.set_status(tx, provider, action, actor=principal.actor)
         return model_providers.to_dict(provider)
 
 
 @router.delete("/v1/models/providers/{ref}", status_code=204, auth=admin)
 def delete_provider(request: HttpRequest, ref: str) -> None:
-    with runtime(request).db.session() as s:
-        model_providers.delete(s, model_providers.get(s, ref), actor=request.auth.actor)
+    with runtime(request).db.transaction() as tx:
+        model_providers.delete(tx, model_providers.get(tx, ref), actor=request.auth.actor)
 
 
 @router.get("/v1/models/usage", auth=guard(reach.read))
@@ -96,21 +95,21 @@ def get_usage(
     the same added up per owner and per sponsor of the agents; and each agent's tokens
     today against its budget. For someone with roles for some teams only, their agents'."""
     principal = request.auth
-    with runtime(request).db.session() as s:
-        agent_id = reach.agent(s, principal, agent).id if agent else None
+    with runtime(request).db.transaction() as tx:
+        agent_id = reach.agent(tx, principal, agent).id if agent else None
         rows = model_usage.usage(
-            s, days=min(max(days, 1), 90), agent_id=agent_id, provider=provider
+            tx, days=min(max(days, 1), 90), agent_id=agent_id, provider=provider
         )
-        used = model_usage.tokens_used(s)
-        reached = reach.agent_ids(s, principal, *READ_ROLES)
+        used = model_usage.tokens_used(tx)
+        reached = reach.agent_ids(tx, principal, *READ_ROLES)
         if reached is not None:
             rows = [r for r in rows if r.agent_id in reached]
             used = {k: v for k, v in used.items() if k in reached}
         ids = {r.agent_id for r in rows}
-        names = {a.id: a.name for a in s.scalars(select(Agent).where(Agent.id.in_(ids))).unique()}
+        names = dict(Agent.objects.filter(id__in=ids).values_list("id", "name"))
         budgets = []
         wanted = set(used) | ({agent_id} if agent_id else set())
-        for a in s.scalars(select(Agent).where(Agent.id.in_(wanted))).unique():
+        for a in Agent.objects.filter(id__in=wanted):
             budget = model_providers.effective_budget(a)
             budgets.append(
                 {
@@ -121,7 +120,7 @@ def get_usage(
                     "over_budget": model_usage.over_budget(budget, used.get(a.id, 0)),
                 }
             )
-        spend = model_usage.spend(s, rows)
+        spend = model_usage.spend(tx, rows)
         return {
             "day": model_usage.today(),
             "rows": [{**model_usage.to_dict(r), "agent_name": names.get(r.agent_id)} for r in rows],

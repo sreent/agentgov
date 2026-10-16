@@ -104,14 +104,15 @@ def test_a_processor_that_cant_reach_opa_refuses_every_call(client) -> None:
 
 
 def test_in_touch_processors_and_ones_that_went_quiet(client) -> None:
-    from agentgov.models import ComponentReport
+    from agentgov.db.models import ComponentReport
 
     report(client, processor())
     assert feature(client, "least-privilege")["status"] == "active"
     rt = client.app.state.rt
-    with rt.db.session() as s:
-        row = s.get(ComponentReport, ("processor", "processor-0"))
+    with rt.db.transaction():
+        row = ComponentReport.objects.get(component="processor", instance="processor-0")
         row.reported_at -= timedelta(minutes=10)
+        row.save()
     found = feature(client, "least-privilege")
     assert found["status"] == "inactive"
     assert "since" in found["problems"][0]

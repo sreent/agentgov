@@ -12,8 +12,8 @@ from starlette.testclient import TestClient
 
 from agentgov import cli, ids
 from agentgov.config import Settings
+from agentgov.db.models import ApprovalRequest, ModelUsage
 from agentgov.identity import sso as sso_svc
-from agentgov.models import ApprovalRequest, ModelUsage
 from agentgov.registry import discovery, findings
 from tests.conftest import ADMIN
 from tests.test_cli import _Shared, ok, runner
@@ -47,9 +47,9 @@ def agent(client: TestClient, name: str, **fields: Any) -> dict[str, Any]:
 
 
 def finding(client: TestClient, agent_id: str, title: str) -> str:
-    with _rt(client).db.session() as s:
+    with _rt(client).db.transaction() as tx:
         raised, _ = findings.raise_finding(
-            s, type="test.thing", severity="medium", subject=agent_id, agent_id=agent_id,
+            tx, type="test.thing", severity="medium", subject=agent_id, agent_id=agent_id,
             title=title,
         )  # fmt: skip
         return raised.id
@@ -58,11 +58,18 @@ def finding(client: TestClient, agent_id: str, title: str) -> str:
 def request(client: TestClient, agent: dict[str, Any]) -> str:
     """An approval request from ``agent``, waiting for an approver."""
     now = ids.utcnow()
-    with _rt(client).db.session() as s:
-        s.add(ApprovalRequest(id=f"apr_{agent['name']}", agent_id=agent["id"],
-                              agent_name=agent["name"], action="tools/call", resource="crm/x",
-                              arguments_hash="h", status="pending", requested_at=now,
-                              expires_at=now + timedelta(hours=1)))  # fmt: skip
+    with _rt(client).db.transaction():
+        ApprovalRequest.objects.create(
+            id=f"apr_{agent['name']}",
+            agent_id=agent["id"],
+            agent_name=agent["name"],
+            action="tools/call",
+            resource="crm/x",
+            arguments_hash="h",
+            status="pending",
+            requested_at=now,
+            expires_at=now + timedelta(hours=1),
+        )
     return f"apr_{agent['name']}"
 
 
@@ -207,10 +214,12 @@ class TestReading:
         finding(client, org["hr"]["id"], "HR thing")
         request(client, org["sales"])
         request(client, org["hr"])
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction():
             day = ids.utcnow().strftime("%Y-%m-%d")
             for a in (org["sales"], org["hr"]):
-                s.add(ModelUsage(agent_id=a["id"], day=day, provider="p", model="m", calls=1))
+                ModelUsage.objects.create(
+                    agent_id=a["id"], day=day, provider="p", model="m", calls=1
+                )
         sales = key(client, "auditor")
         issues = client.get("/v1/findings", headers=sales)
         assert [f["id"] for f in issues.json()] == [mine]
@@ -652,8 +661,8 @@ class TestLoosening:
         )
         assert fewer.status_code == 200, fewer.text
         # Adopting it, too.
-        with _rt(client).db.session() as s:
-            assert discovery.observe(s, source="test", name="found-bot") is not None
+        with _rt(client).db.transaction() as tx:
+            assert discovery.observe(tx, source="test", name="found-bot") is not None
         client.patch(
             "/v1/agents/found-bot",
             json={"team": "sales", "blueprint": "support-only"},

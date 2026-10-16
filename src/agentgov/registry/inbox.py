@@ -19,11 +19,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids
-from agentgov.models import DISCOVERED, PENDING, Agent, Finding, ToolServer
+from agentgov import db, ids
+from agentgov.db.models import DISCOVERED, PENDING, Agent, Finding, ToolServer
 from agentgov.registry import access_packages, approvals, findings, issues, platforms
 from agentgov.secops import handoff
 
@@ -35,7 +32,7 @@ DRIFT = "toolserver.tool_drift"
 
 
 def gather(
-    session: Session,
+    tx: db.Transaction,
     principal: Any,
     roles_at: Callable[[str | None], frozenset[str]] | None = None,
 ) -> dict[str, Any]:
@@ -50,10 +47,10 @@ def gather(
         items = [view(r) for r in rows[:SHOWN]]
         kinds.append({"kind": name, "title": title, "count": len(rows), "items": items})
 
-    deciding = handoff.at_least(session, handoff.DECIDE)
+    deciding = handoff.at_least(tx, handoff.DECIDE)
     calls = [
         r
-        for r in approvals.list_requests(session, status=approvals.PENDING, limit=1000)
+        for r in approvals.list_requests(tx, status=approvals.PENDING, limit=1000)
         if approvals.may_decide(r, at(r.agent_id), principal.subject, secops=deciding)
     ]
     kind("calls", "Calls held for a decision", calls, approvals.to_dict)
@@ -61,61 +58,42 @@ def gather(
     if held & DECIDERS:
         asked = [
             r
-            for r in access_packages.assignments(session, status=access_packages.REQUESTED)
+            for r in access_packages.assignments(tx, status=access_packages.REQUESTED)
             if not access_packages.asked_by(r, principal.actor) and at(r.agent_id) & DECIDERS
         ]
         kind(
             "access",
             "Access packages asked for agents",
             asked,
-            lambda r: access_packages.assignment_dict(session, r),
+            lambda r: access_packages.assignment_dict(tx, r),
         )
 
-    triage = handoff.at_least(session, handoff.TRIAGE)
+    triage = handoff.at_least(tx, handoff.TRIAGE)
 
     def triages(roles: frozenset[str]) -> bool:
         return bool(roles & DECIDERS) or (triage and "secops" in roles)
 
     if triages(frozenset(held)):
-        # The key as text: SQLite's JSON values come quoted, and a missing key would read
-        # as the text null rather than NULL.
-        asking = Finding.details[issues.ASKED].as_string().is_not(None)
         risks = [
             f
-            for f in session.scalars(
-                select(Finding)
-                .where(Finding.status == "open", asking)
-                .order_by(Finding.last_seen.desc())
-            )
-            if triages(at(f.agent_id))
+            for f in Finding.objects.filter(status="open").order_by("-last_seen")
+            if (f.details or {}).get(issues.ASKED) is not None and triages(at(f.agent_id))
         ]
-        kind("risks", "Risks asked to be accepted", risks, lambda f: _risk(session, f))
+        kind("risks", "Risks asked to be accepted", risks, lambda f: _risk(tx, f))
 
     if "admin" in held:
         waiting = [
             a
-            for a in session.scalars(
-                select(Agent).where(Agent.status == PENDING).order_by(Agent.created_at)
-            )
+            for a in Agent.objects.filter(status=PENDING).order_by("created_at")
             if "admin" in at(a.id)
         ]
         kind("agents", "Agents waiting for approval", waiting, _agent)
     if principal.is_admin:
-        servers = list(
-            session.scalars(
-                select(ToolServer).where(ToolServer.status == PENDING).order_by(ToolServer.name)
-            )
-        )
+        servers = list(ToolServer.objects.filter(status=PENDING).order_by("name"))
         kind("toolservers", "Tool servers waiting for approval", servers, _server)
-        drifted = list(
-            session.scalars(
-                select(Finding)
-                .where(Finding.status == "open", Finding.type == DRIFT)
-                .order_by(Finding.first_seen)
-            )
-        )
+        drifted = list(Finding.objects.filter(status="open", type=DRIFT).order_by("first_seen"))
         kind("definitions", "Tool definitions changed since they were approved", drifted, _drift)
-        unreviewed = _unreviewed(session)
+        unreviewed = _unreviewed(tx)
         kinds.append(
             {
                 "kind": "platform_agents",
@@ -127,8 +105,8 @@ def gather(
     return {"total": sum(k["count"] for k in kinds), "kinds": kinds}
 
 
-def _risk(session: Session, f: Finding) -> dict[str, Any]:
-    agent = session.get(Agent, f.agent_id) if f.agent_id else None
+def _risk(tx: db.Transaction, f: Finding) -> dict[str, Any]:
+    agent = Agent.objects.filter(pk=f.agent_id).first() if f.agent_id else None
     return {
         **findings.to_dict(f),
         "agent_name": agent.name if agent is not None else None,
@@ -166,15 +144,13 @@ def _drift(f: Finding) -> dict[str, Any]:
     return {"finding_id": f.id, "server": server, "tool": tool, "since": since}
 
 
-def _unreviewed(session: Session) -> dict[str, int]:
+def _unreviewed(tx: db.Transaction) -> dict[str, int]:
     """Agents found on each platform with nobody's review yet (gone ones aren't)."""
-    gone = platforms.gone_agents(session)
+    gone = platforms.gone_agents(tx)
     counts: dict[str, int] = {}
-    for agent_id, source in session.execute(
-        select(Agent.id, Agent.source).where(
-            Agent.status == DISCOVERED, Agent.source.like("platform:%")
-        )
-    ):
+    for agent_id, source in Agent.objects.filter(
+        status=DISCOVERED, source__startswith="platform:"
+    ).values_list("id", "source"):
         if agent_id in gone:
             continue
         name = platforms.SOURCES.get(source.removeprefix("platform:"))
@@ -183,6 +159,6 @@ def _unreviewed(session: Session) -> dict[str, int]:
     return counts
 
 
-def total(session: Session, principal: Any) -> int:
+def total(tx: db.Transaction, principal: Any) -> int:
     """How many decisions wait for ``principal``."""
-    return int(gather(session, principal)["total"])
+    return int(gather(tx, principal)["total"])

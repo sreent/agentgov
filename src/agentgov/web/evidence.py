@@ -7,11 +7,10 @@ import base64
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
-from sqlalchemy import select
 
 from agentgov import compliance, ids, ledger, retention, timestamping, transparency, witness
 from agentgov.api.auth import READ_ROLES
-from agentgov.models import LedgerCheckpoint
+from agentgov.db.models import LedgerCheckpoint
 from agentgov.runtime import JOB_WAIT_SECONDS
 from agentgov.web.api import (
     HTTPException,
@@ -30,12 +29,8 @@ admin = require("admin")
 @router.get("/v1/ledger/checkpoints", auth=read)
 def list_checkpoints(request: HttpRequest, limit: int = 100) -> list[dict[str, Any]]:
     """The ledger's checkpoints, newest first: their time-stamps and archives."""
-    with runtime(request).db.session() as s:
-        rows = s.scalars(
-            select(LedgerCheckpoint)
-            .order_by(LedgerCheckpoint.seq.desc())
-            .limit(max(1, min(limit, 1000)))
-        )
+    with runtime(request).db.transaction():
+        rows = LedgerCheckpoint.objects.order_by("-seq")[: max(1, min(limit, 1000))]
         return [ledger.checkpoint_dict(c) for c in rows]
 
 
@@ -58,8 +53,8 @@ def ledger_witness(request: HttpRequest) -> dict[str, Any]:
     path = rt.settings.witness_file()
     if path is None:
         return {"configured": False}
-    with rt.db.session() as s:
-        return {"configured": True, **witness.compare(s, path).to_dict()}
+    with rt.db.transaction() as tx:
+        return {"configured": True, **witness.compare(tx, path).to_dict()}
 
 
 @router.post("/v1/ledger/witness/accept", auth=admin)
@@ -75,8 +70,8 @@ def accept_rewind(request: HttpRequest) -> dict[str, Any]:
 def checkpoint_timestamp(request: HttpRequest, seq: int) -> HttpResponse:
     """The authority's time-stamp of a checkpoint (a TimeStampResp), for
     ``openssl ts -verify -in checkpoint.tsr -data statement.txt -CAfile ...``."""
-    with runtime(request).db.session() as s:
-        point = s.get(LedgerCheckpoint, seq)
+    with runtime(request).db.transaction():
+        point = LedgerCheckpoint.objects.filter(pk=seq).first()
         if point is None:
             raise HTTPException(404, f"no checkpoint at entry {seq}")
         if point.timestamp is None:
@@ -93,8 +88,8 @@ def checkpoint_log_entry(request: HttpRequest, seq: int) -> HttpResponse:
     """A checkpoint's entry in the transparency log, as a Sigstore bundle, for
     ``cosign verify-blob --key agentgov.pub --bundle ... --trusted-root ... statement.txt``
     or ``agentgov ledger verify-log-entry``."""
-    with runtime(request).db.session() as s:
-        point = s.get(LedgerCheckpoint, seq)
+    with runtime(request).db.transaction():
+        point = LedgerCheckpoint.objects.filter(pk=seq).first()
         if point is None:
             raise HTTPException(404, f"no checkpoint at entry {seq}")
         if point.tlog_entry is None:
@@ -140,15 +135,10 @@ def retention_view(request: HttpRequest) -> dict[str, Any]:
     the database starts."""
     rt = runtime(request)
     settings = rt.settings
-    with rt.db.session() as s:
-        floor, floor_hash = ledger.base(s)
-        archived = s.scalars(
-            select(LedgerCheckpoint)
-            .where(LedgerCheckpoint.pruned_at.is_not(None))
-            .order_by(LedgerCheckpoint.seq.desc())
-            .limit(1)
-        ).first()
-        latest = retention.latest_checkpoint(s)
+    with rt.db.transaction() as tx:
+        floor, floor_hash = ledger.base(tx)
+        archived = LedgerCheckpoint.objects.filter(pruned_at__isnull=False).order_by("-seq").first()
+        latest = retention.latest_checkpoint(tx)
         return {
             "ledger_retention_days": settings.ledger_retention_days,
             "archive_dir": bool(settings.ledger_archive_dir),
@@ -202,8 +192,8 @@ def evidence_report(
             404, f"framework is one of {', '.join(compliance.FRAMEWORKS)} (got {framework!r})"
         )
     rt = runtime(request)
-    with rt.db.session() as s:
-        return compliance.report(compliance.facts(s, rt.settings, _days(days)), framework)
+    with rt.db.transaction() as tx:
+        return compliance.report(compliance.facts(tx, rt.settings, _days(days)), framework)
 
 
 @router.get("/v1/evidence/register", auth=read)
@@ -212,8 +202,8 @@ def classification_register(request: HttpRequest) -> list[dict[str, Any]]:
     under the EU AI Act (category, role, basis, purpose), who classified it and when."""
     from agentgov.registry import agents, classification
 
-    with runtime(request).db.session() as s:
-        return [classification.row(a) for a in agents.list_agents(s)]
+    with runtime(request).db.transaction() as tx:
+        return [classification.row(a) for a in agents.list_agents(tx)]
 
 
 @router.get("/v1/evidence/pack", auth=read)
@@ -221,8 +211,8 @@ def evidence_pack(request: HttpRequest, days: int = 90) -> StreamingHttpResponse
     """The reports, the ledger for the period, the checkpoints and their time-stamps, the
     inventory and the registry as code, in one zip, for whoever assesses compliance."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        zipped = compliance.pack(s, rt.settings, _days(days))
+    with rt.db.transaction() as tx:
+        zipped = compliance.pack(tx, rt.settings, _days(days))
     stamp = ids.utcnow().strftime("%Y%m%d-%H%M%S")
 
     def chunks() -> Any:

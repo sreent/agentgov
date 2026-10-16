@@ -20,12 +20,11 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from django.db.models import F, Sum
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.db import mark_changed
-from agentgov.models import Agent, IdentityIssuer, ModelUsage
+from agentgov.db.models import Agent, IdentityIssuer, ModelUsage
 from agentgov.registry import discovery, model_providers
 from agentgov.telemetry import attrs_of
 
@@ -38,15 +37,15 @@ def today() -> str:
     return ids.utcnow().date().isoformat()
 
 
-def tokens_used(session: Session, day: str | None = None) -> dict[str, int]:
+def tokens_used(tx: db.Transaction, day: str | None = None) -> dict[str, int]:
     """Tokens (input and output) each agent used on ``day`` (today by default)."""
-    rows = session.execute(
-        select(
-            ModelUsage.agent_id,
-            func.sum(ModelUsage.input_tokens + ModelUsage.output_tokens),
-        )
-        .where(ModelUsage.day == (day or today()), ModelUsage.agent_id != "")
-        .group_by(ModelUsage.agent_id)
+    rows = (
+        ModelUsage.objects.filter(day=day or today())
+        .exclude(agent_id="")
+        .values("agent_id")
+        .annotate(total=Sum(F("input_tokens") + F("output_tokens")))
+        .order_by()
+        .values_list("agent_id", "total")
     )
     return {agent_id: int(total or 0) for agent_id, total in rows}
 
@@ -100,7 +99,7 @@ def _int(value: Any) -> int:
 
 
 def _metered(
-    session: Session,
+    tx: db.Transaction,
     agent_id: Any,
     client_id: Any,
     issuer: Any,
@@ -108,22 +107,30 @@ def _metered(
 ) -> Agent | None:
     """The agent a model call was made by, as the gateway's access log names it."""
     if agent_id or client_id:
-        return discovery.find(session, agent_id=agent_id, client_id=client_id)
+        return discovery.find(tx, agent_id=agent_id, client_id=client_id)
     if not (issuer and subject):
         return None
-    return session.scalar(
-        select(Agent)
-        .join(IdentityIssuer, IdentityIssuer.name == Agent.workload_issuer)
-        .where(IdentityIssuer.issuer == str(issuer), Agent.workload_subject == str(subject))
-    )
+    names = IdentityIssuer.objects.filter(issuer=str(issuer)).values_list("name", flat=True)
+    return Agent.objects.filter(
+        workload_issuer__in=list(names), workload_subject=str(subject)
+    ).first()
 
 
-def ingest_logs(session: Session, payload: dict[str, Any]) -> dict[str, int]:
+# A row's counts, which each model call adds to.
+COUNTS = ("calls", "refused", "input_tokens", "output_tokens", "cost_usd")
+
+
+def ingest_logs(tx: db.Transaction, payload: dict[str, Any]) -> dict[str, int]:
     """Meter the model calls in agentgateway's access logs (OTLP logs)."""
     stats = {"records": 0, "model_calls": 0, "unidentified": 0}
-    providers = {p.name: p for p in model_providers.list_all(session)}
+    providers = {p.name: p for p in model_providers.list_all(tx)}
     agents: dict[tuple[str | None, ...], Agent | None] = {}
     spent: dict[tuple[str, str], int] = {}  # tokens per (agent, day) in this batch
+    # What this batch adds to each row (agent, day, provider, model), and to each agent's
+    # activity on a day.
+    added: dict[tuple[str, str, str, str], dict[str, float]] = {}
+    activity: dict[tuple[str, str], dict[str, Any]] = {}
+    last_seen: dict[str, datetime] = {}
     for attrs, record in iter_log_records(payload):
         stats["records"] += 1
         route = str(attrs.get("route") or "").rsplit("/", 1)[-1]
@@ -145,56 +152,64 @@ def ingest_logs(session: Session, payload: dict[str, Any]) -> dict[str, int]:
             attrs.get("agentgov.subject"),
         )
         if identity not in agents:
-            agents[identity] = _metered(session, *identity)
+            agents[identity] = _metered(tx, *identity)
         agent = agents[identity]
         if agent is None:
             stats["unidentified"] += 1
         day = when.date().isoformat()
         key = (agent.id if agent else "", day, provider, model[:128])
-        row = session.get(ModelUsage, key)
-        if row is None:
-            row = ModelUsage(
-                agent_id=key[0], day=day, provider=provider, model=key[3],
-                calls=0, refused=0, input_tokens=0, output_tokens=0, cost_usd=0.0,
-            )  # fmt: skip
-            session.add(row)
-        row.calls += 1
-        row.refused += 1 if status in REFUSED else 0
-        row.input_tokens += tokens_in
-        row.output_tokens += tokens_out
+        row = added.setdefault(key, dict.fromkeys(COUNTS, 0))
+        row["calls"] += 1
+        row["refused"] += 1 if status in REFUSED else 0
+        row["input_tokens"] += tokens_in
+        row["output_tokens"] += tokens_out
         price = model_providers.price_of(providers.get(provider), model)
         if price:
-            row.cost_usd += (tokens_in * price["input"] + tokens_out * price["output"]) / 1e6
+            row["cost_usd"] += (tokens_in * price["input"] + tokens_out * price["output"]) / 1e6
         if agent is not None:
-            agent.last_seen_at = max(agent.last_seen_at or when, when)
-            discovery.record_activity(
-                session,
-                agent.id,
-                when=when,
-                model_calls=1,
-                input_tokens=tokens_in,
-                output_tokens=tokens_out,
+            last_seen[agent.id] = max(last_seen.get(agent.id, when), when)
+            seen = activity.setdefault(
+                (agent.id, day),
+                {"when": when, "model_calls": 0, "input_tokens": 0, "output_tokens": 0},
             )
+            seen["model_calls"] += 1
+            seen["input_tokens"] += tokens_in
+            seen["output_tokens"] += tokens_out
             spent[(agent.id, day)] = spent.get((agent.id, day), 0) + tokens_in + tokens_out
-    session.flush()
-    _budgets_reached(session, spent)
+    for (agent_id, day, provider, model), counts in added.items():
+        _add(agent_id, day, provider, model, counts)
+    for (agent_id, _), counts in activity.items():
+        discovery.record_activity(tx, agent_id, **counts)
+    for agent_id, when in last_seen.items():
+        discovery.seen(agent_id, when)
+    _budgets_reached(tx, spent)
     return stats
 
 
-def _budgets_reached(session: Session, spent: dict[tuple[str, str], int]) -> None:
+def _add(agent_id: str, day: str, provider: str, model: str, counts: dict[str, float]) -> None:
+    """Add to the usage of an agent (or of unidentified callers: ``""``) on a day, with a
+    provider's model."""
+    key = {"agent_id": agent_id, "day": day, "provider": provider, "model": model}
+    if not ModelUsage.objects.filter(**key).update(
+        **{name: F(name) + n for name, n in counts.items()}
+    ):
+        ModelUsage.objects.create(**key, **counts)
+
+
+def _budgets_reached(tx: db.Transaction, spent: dict[tuple[str, str], int]) -> None:
     """Record the agents whose usage today reached their budget in this batch, and have OPA
     refuse their further calls."""
     day = today()
-    used = tokens_used(session, day) if any(d == day for _, d in spent) else {}
+    used = tokens_used(tx, day) if any(d == day for _, d in spent) else {}
     for (agent_id, spent_day), tokens in spent.items():
-        agent = session.get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         budget = model_providers.effective_budget(agent) if agent else None
         if spent_day != day or budget is None:
             continue
         after = used.get(agent_id, 0)
         if after - tokens < budget <= after:
             ledger.append(
-                session,
+                tx,
                 type="model.budget_reached",
                 actor="system:usage",
                 agent=agent,
@@ -202,21 +217,20 @@ def _budgets_reached(session: Session, spent: dict[tuple[str, str], int]) -> Non
                 reason=f"{after} of {budget} tokens used today",
                 details={"budget": budget, "used": after, "day": day},
             )
-            mark_changed(session, "agents")
+            mark_changed(tx, "agents")
 
 
 SPEND_BY = ("owner", "sponsor")
 
 
-def spend(session: Session, rows: list[ModelUsage]) -> dict[str, list[dict[str, Any]]]:
+def spend(tx: db.Transaction, rows: list[ModelUsage]) -> dict[str, list[dict[str, Any]]]:
     """``rows`` added up per owner and per sponsor of their agents, the costliest first.
 
     An agent with several sponsors counts in full for each; an agent without an owner
     or sponsors counts under ``None``. Calls from unidentified callers aren't included.
     """
     ids_ = {r.agent_id for r in rows if r.agent_id}
-    found = session.scalars(select(Agent).where(Agent.id.in_(ids_))).unique() if ids_ else []
-    agents = {a.id: a for a in found}
+    agents = Agent.objects.in_bulk(ids_) if ids_ else {}
     groups: dict[str, dict[str | None, dict[str, Any]]] = {by: {} for by in SPEND_BY}
     for row in rows:
         agent = agents.get(row.agent_id)
@@ -248,7 +262,7 @@ def spend(session: Session, rows: list[ModelUsage]) -> dict[str, list[dict[str, 
 
 
 def usage(
-    session: Session,
+    tx: db.Transaction,
     *,
     days: int = 7,
     agent_id: str | None = None,
@@ -256,11 +270,9 @@ def usage(
 ) -> list[ModelUsage]:
     """Usage rows for the last ``days`` days (today included), newest first."""
     since = (ids.utcnow().date() - timedelta(days=max(days, 1) - 1)).isoformat()
-    stmt = select(ModelUsage).where(ModelUsage.day >= since)
+    rows = ModelUsage.objects.filter(day__gte=since)
     if agent_id is not None:
-        stmt = stmt.where(ModelUsage.agent_id == agent_id)
+        rows = rows.filter(agent_id=agent_id)
     if provider:
-        stmt = stmt.where(ModelUsage.provider == provider)
-    return list(
-        session.scalars(stmt.order_by(ModelUsage.day.desc(), ModelUsage.provider, ModelUsage.model))
-    )
+        rows = rows.filter(provider=provider)
+    return list(rows.order_by("-day", "provider", "model"))

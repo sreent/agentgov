@@ -16,6 +16,9 @@ Either is a critical finding, and the file is left as it is, until an administra
 knows why (a restore, after a failed upgrade, say) accepts it: AgentGov then writes what
 is missing into the ledger itself (``ledger.rewound``), so that the gap is part of the
 evidence, and goes on from the head it has.
+
+The functions here read the database in the caller's transaction (agentgov.db), on
+Django's ORM.
 """
 
 from __future__ import annotations
@@ -28,12 +31,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import LEDGER_MIN_DAYS
-from agentgov.models import Finding, LedgerCheckpoint, LedgerEntry, LedgerHead
+from agentgov.db.models import Finding, LedgerCheckpoint, LedgerEntry, LedgerHead
 
 OK, BEHIND, FORKED, NEW = "ok", "behind", "forked", "new"
 FINDING = "ledger.rewound"
@@ -141,21 +141,21 @@ def write(path: str, seq: int, hash_: str | None, ts: str | None = None) -> None
         raise WitnessError(f"can't write {path}: {exc.strerror}") from None
 
 
-def head(session: Session) -> tuple[int, str | None]:
-    row = session.get(LedgerHead, 1, populate_existing=True)
-    return (row.last_seq, row.last_hash) if row is not None else (0, None)
+def head(tx: db.Transaction) -> tuple[int, str | None]:
+    row = LedgerHead.objects.filter(id=1).values_list("last_seq", "last_hash").first()
+    return row if row is not None else (0, None)
 
 
-def written(session: Session, seq: int) -> str | None:
+def written(tx: db.Transaction, seq: int) -> str | None:
     """When the database's entry ``seq`` was written, if it has it."""
-    entry = session.get(LedgerEntry, seq) if seq else None
-    return ids.isoformat(entry.ts) if entry is not None else None
+    ts = LedgerEntry.objects.filter(seq=seq).values_list("ts", flat=True).first() if seq else None
+    return ids.isoformat(ts)
 
 
-def compare(session: Session, path: str) -> Status:
+def compare(tx: db.Transaction, path: str) -> Status:
     """The database's ledger against the file."""
-    seq, hash_ = head(session)
-    status = Status(NEW, path, seq, hash_, written(session, seq))
+    seq, hash_ = head(tx)
+    status = Status(NEW, path, seq, hash_, written(tx, seq))
     try:
         kept = read(path)
     except WitnessError as exc:
@@ -171,32 +171,32 @@ def compare(session: Session, path: str) -> Status:
     if kept["seq"] > seq:
         status.state = BEHIND
     else:
-        entry = session.get(LedgerEntry, kept["seq"])
-        if entry is not None:
-            status.state = OK if entry.hash == kept["hash"] else FORKED
-        elif _archived(session, kept):
+        found = LedgerEntry.objects.filter(seq=kept["seq"]).values_list("hash", flat=True).first()
+        if found is not None:
+            status.state = OK if found == kept["hash"] else FORKED
+        elif _archived(tx, kept):
             status.state = OK
         else:
             status.state, status.gone = FORKED, True
     if status.rewound:
         # Noticed before, about this same head (whatever became of the finding since: it is
         # kept until an administrator accepts the restore, which writes a new head).
-        noticed = session.scalar(select(Finding).where(Finding.key == f"{FINDING}:ledger"))
+        noticed = Finding.objects.filter(key=f"{FINDING}:ledger").first()
         details = (noticed.details or {}) if noticed is not None else {}
         if details.get("witness") == kept_head(status):
             status.restored_at = details.get("restored_at")
     return status
 
 
-def _archived(session: Session, kept: dict[str, Any]) -> bool:
+def _archived(tx: db.Transaction, kept: dict[str, Any]) -> bool:
     """Whether the entry the file names, gone from the database, went with an archive: at
     or before where the chain in the database starts, as the chain itself says, the
     checkpoint there (if any) naming it; and written before the least retention period, as
     the file says, when it says."""
-    floor = ledger.vouched_floor(session)
+    floor = ledger.vouched_floor(tx)
     if floor is None or kept["seq"] > floor[0]:
         return False
-    point = session.get(LedgerCheckpoint, kept["seq"])
+    point = LedgerCheckpoint.objects.filter(seq=kept["seq"]).first()
     if point is not None and point.hash != kept["hash"]:
         return False
     oldest = ids.utcnow() - timedelta(days=LEDGER_MIN_DAYS)

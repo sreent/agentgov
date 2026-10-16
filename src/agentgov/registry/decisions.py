@@ -6,12 +6,10 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
+from agentgov.db.models import Agent
 from agentgov.identity import people
-from agentgov.models import Agent
 from agentgov.opa import WHAT_IF
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings, risk
@@ -53,7 +51,7 @@ def _parse_ts(value: Any) -> datetime:
 
 
 def record_mcp_decisions(
-    session: Session, settings: Settings, records: list[Any]
+    tx: db.Transaction, settings: Settings, records: list[Any]
 ) -> tuple[int, int]:
     """Store decision records sent by the governance processor: on tool calls, and on
     model calls (``kind: "model"``), whose activity the gateway's access logs count. Each
@@ -64,12 +62,10 @@ def record_mcp_decisions(
     stored = rejected = 0
     for rec in records:
         try:
-            with session.begin_nested():
+            with tx.savepoint():
                 if not isinstance(rec, dict):
                     raise ValidationError("a decision record is a JSON object")
-                found = _record_mcp(session, clean(rec))
-                # What it wrote fails here, with it, rather than with a later one.
-                session.flush()
+                found = _record_mcp(tx, clean(rec))
         except Exception as exc:  # one record never costs the others theirs
             rejected += 1
             log.warning("a decision record couldn't be stored: %s: %s", type(exc).__name__, exc)
@@ -77,23 +73,23 @@ def record_mcp_decisions(
         stored += 1
         touched |= found
     if rejected:
-        record_dropped(session, rejected, rejected=True)
+        record_dropped(tx, rejected, rejected=True)
     for agent in touched.values():
-        agents_svc.refresh_risk(session, settings, agent)
+        agents_svc.refresh_risk(tx, settings, agent)
     return stored, rejected
 
 
-def _record_mcp(session: Session, rec: dict[str, Any]) -> dict[str, Agent]:
+def _record_mcp(tx: db.Transaction, rec: dict[str, Any]) -> dict[str, Agent]:
     """One decision record into the ledger, the agent's activity and risk signals: the
     agents it touched."""
     touched: dict[str, Agent] = {}
     kind = rec.get("kind")
     if kind == "classifier":
-        return {a.id: a for a in _classified(session, rec)}
+        return {a.id: a for a in _classified(tx, rec)}
     model_call = kind == "model"
     a2a = kind == "a2a"
     agent_info = rec.get("agent") or {}
-    agent = session.get(Agent, agent_info.get("id")) if agent_info.get("id") else None
+    agent = Agent.objects.filter(pk=agent_info["id"]).first() if agent_info.get("id") else None
     identity = rec.get("identity") or {}
     # The person the agent acted for, if it acted for one.
     user = rec["user"] if isinstance(rec.get("user"), dict) else None
@@ -114,7 +110,7 @@ def _record_mcp(session: Session, rec: dict[str, Any]) -> dict[str, Agent]:
         reason = "monitored: " + "; ".join(monitored)
     delegation = rec["delegation"] if isinstance(rec.get("delegation"), dict) else None
     ledger.append(
-        session,
+        tx,
         type=f"decision.{kind}.{phase}" if model_call or a2a else f"decision.{phase}",
         actor=actor,
         agent=agent,
@@ -162,29 +158,30 @@ def _record_mcp(session: Session, rec: dict[str, Any]) -> dict[str, Agent]:
     if agent is None:
         return touched
     agent.last_seen_at = when
+    agent.save()
     touched[agent.id] = agent
     if model_call:
-        _model_signals(session, agent, phase, effect, detections, resource, user)
+        _model_signals(tx, agent, phase, effect, detections, resource, user)
     elif a2a and phase == "response":
-        answered = _answer_signals(session, agent, rec, effect, detections, resource)
+        answered = _answer_signals(tx, agent, rec, effect, detections, resource)
         if answered is not None:
             touched[answered.id] = answered
     elif a2a:
         discovery.record_activity(
-            session, agent.id, when=when, tool_calls=0, denied=1 if effect == "deny" else 0
+            tx, agent.id, when=when, tool_calls=0, denied=1 if effect == "deny" else 0
         )
         if effect == "deny":
-            risk.add_signal(session, agent.id, "policy_denied", resource)
+            risk.add_signal(tx, agent.id, "policy_denied", resource)
     elif phase == "request":
         discovery.record_activity(
-            session, agent.id, when=when, tool_calls=1, denied=1 if effect == "deny" else 0
+            tx, agent.id, when=when, tool_calls=1, denied=1 if effect == "deny" else 0
         )
         if effect == "deny":
-            risk.add_signal(session, agent.id, "policy_denied", resource)
+            risk.add_signal(tx, agent.id, "policy_denied", resource)
         if "secret" in categories:
-            risk.add_signal(session, agent.id, "secret_detected", resource)
+            risk.add_signal(tx, agent.id, "secret_detected", resource)
             findings.raise_finding(
-                session,
+                tx,
                 type="agent.credential_exfiltration_attempt",
                 severity="high",
                 subject=agent.id,
@@ -202,9 +199,9 @@ def _record_mcp(session: Session, rec: dict[str, Any]) -> dict[str, Agent]:
                 "and rotate them.",
             )
     elif detections.get("prompt_injection"):
-        risk.add_signal(session, agent.id, "prompt_injection", resource)
+        risk.add_signal(tx, agent.id, "prompt_injection", resource)
         findings.raise_finding(
-            session,
+            tx,
             type="toolserver.prompt_injection",
             severity="high",
             subject=str(resource),
@@ -250,19 +247,19 @@ def _chain(
     return out
 
 
-def _answered_by(session: Session, rec: dict[str, Any]) -> Agent | None:
+def _answered_by(tx: db.Transaction, rec: dict[str, Any]) -> Agent | None:
     """The agent that sent an answer (a decision on an answer names it under "a2a")."""
     target = rec.get("a2a") if isinstance(rec.get("a2a"), dict) else {}
     target_id = target.get("target_id")
-    return session.get(Agent, target_id) if target_id else None
+    return Agent.objects.filter(pk=target_id).first() if target_id else None
 
 
 def _injected_answer(
-    session: Session, called: Agent, caller: Agent, resource: Any, how: str
+    tx: db.Transaction, called: Agent, caller: Agent, resource: Any, how: str
 ) -> None:
-    risk.add_signal(session, called.id, "prompt_injection", resource)
+    risk.add_signal(tx, called.id, "prompt_injection", resource)
     findings.raise_finding(
-        session,
+        tx,
         type="agent.prompt_injection_in_answers",
         severity="high",
         subject=called.id,
@@ -277,7 +274,7 @@ def _injected_answer(
 
 
 def _answer_signals(
-    session: Session,
+    tx: db.Transaction,
     caller: Agent,
     rec: dict[str, Any],
     effect: str | None,
@@ -286,7 +283,7 @@ def _answer_signals(
 ) -> Agent | None:
     """Risk signals and findings from a decision on an answer one agent sent another:
     about the agent that answered, which it returns."""
-    called = _answered_by(session, rec)
+    called = _answered_by(tx, rec)
     if called is None:
         return None
     if detections.get("prompt_injection"):
@@ -296,12 +293,12 @@ def _answer_signals(
             if effect == "deny"
             else f"It reached {caller.name}: prompt-injection defence is not enforced."
         )
-        _injected_answer(session, called, caller, resource, f"({reasons}) {outcome}")
+        _injected_answer(tx, called, caller, resource, f"({reasons}) {outcome}")
     if "secret" in set(detections.get("categories") or []):
-        risk.add_signal(session, called.id, "secret_detected", resource)
+        risk.add_signal(tx, called.id, "secret_detected", resource)
         masked = "secret" in (rec.get("redacted") or [])
         findings.raise_finding(
-            session,
+            tx,
             type="agent.credentials_in_answers",
             severity="high",
             subject=called.id,
@@ -324,12 +321,12 @@ def _answer_signals(
 _FOUND = {"injection": "instructions aimed at the agent", "jailbreak": "a jailbreak attempt"}
 
 
-def _classified(session: Session, rec: dict[str, Any]) -> list[Agent]:
+def _classified(tx: db.Transaction, rec: dict[str, Any]) -> list[Agent]:
     """A verdict the classifier gave in the background, after the call went on: the
     ledger has it, and what it flagged is a risk signal and a finding, as what the rules
     flag is. The agents whose risk it changed."""
     agent_info = rec.get("agent") or {}
-    agent = session.get(Agent, agent_info.get("id")) if agent_info.get("id") else None
+    agent = Agent.objects.filter(pk=agent_info["id"]).first() if agent_info.get("id") else None
     identity = rec.get("identity") or {}
     user = rec["user"] if isinstance(rec.get("user"), dict) else None
     verdict = rec.get("classifier") if isinstance(rec.get("classifier"), dict) else {}
@@ -339,7 +336,7 @@ def _classified(session: Session, rec: dict[str, Any]) -> list[Agent]:
     found = _FOUND.get(criterion, criterion)
     caller = identity.get("client_id") or "unknown"
     ledger.append(
-        session,
+        tx,
         type="detection.classifier",
         actor=f"agent:{agent.name}" if agent else f"client:{caller}",
         agent=agent,
@@ -369,15 +366,15 @@ def _classified(session: Session, rec: dict[str, Any]) -> list[Agent]:
     )
     if subject == "answer":
         # Another agent's answer: the agent that answered carries it.
-        called = _answered_by(session, rec)
+        called = _answered_by(tx, rec)
         if called is None:
             return []
-        _injected_answer(session, called, agent, resource, f"The classifier found them. {after}")
+        _injected_answer(tx, called, agent, resource, f"The classifier found them. {after}")
         return [called]
     if criterion == "jailbreak":
-        risk.add_signal(session, agent.id, "jailbreak_attempt", resource)
+        risk.add_signal(tx, agent.id, "jailbreak_attempt", resource)
         findings.raise_finding(
-            session,
+            tx,
             type="agent.jailbreak_attempts",
             severity="medium",
             subject=agent.id,
@@ -396,11 +393,11 @@ def _classified(session: Session, rec: dict[str, Any]) -> list[Agent]:
             + ", and check that the agent's instructions hold up against such prompts.",
         )
         return [agent]
-    risk.add_signal(session, agent.id, "prompt_injection", resource)
+    risk.add_signal(tx, agent.id, "prompt_injection", resource)
     if rec.get("phase") == "response":
         # A tool's result: the tool server's data carries it.
         findings.raise_finding(
-            session,
+            tx,
             type="toolserver.prompt_injection",
             severity="high",
             subject=str(resource),
@@ -413,7 +410,7 @@ def _classified(session: Session, rec: dict[str, Any]) -> list[Agent]:
         )
     else:
         findings.raise_finding(
-            session,
+            tx,
             type="agent.prompt_injection",
             severity="high",
             subject=agent.id,
@@ -430,7 +427,7 @@ def _classified(session: Session, rec: dict[str, Any]) -> list[Agent]:
 
 
 def _model_signals(
-    session: Session,
+    tx: db.Transaction,
     agent: Agent,
     phase: str,
     effect: str | None,
@@ -441,11 +438,11 @@ def _model_signals(
     """Risk signals and findings from a decision on a prompt or an answer."""
     categories = set(detections.get("categories") or [])
     if phase == "request" and effect == "deny":
-        risk.add_signal(session, agent.id, "policy_denied", resource)
+        risk.add_signal(tx, agent.id, "policy_denied", resource)
     if phase == "request" and "secret" in categories:
-        risk.add_signal(session, agent.id, "secret_detected", resource)
+        risk.add_signal(tx, agent.id, "secret_detected", resource)
         findings.raise_finding(
-            session,
+            tx,
             type="agent.credential_exfiltration_attempt",
             severity="high",
             subject=agent.id,
@@ -463,9 +460,9 @@ def _model_signals(
             "rotate them.",
         )
     if phase == "request" and detections.get("prompt_injection"):
-        risk.add_signal(session, agent.id, "prompt_injection", resource)
+        risk.add_signal(tx, agent.id, "prompt_injection", resource)
         findings.raise_finding(
-            session,
+            tx,
             type="agent.prompt_injection",
             severity="high",
             subject=agent.id,
@@ -485,9 +482,9 @@ def _model_signals(
             "answer.",
         )
     if phase == "request" and detections.get("jailbreak"):
-        risk.add_signal(session, agent.id, "jailbreak_attempt", resource)
+        risk.add_signal(tx, agent.id, "jailbreak_attempt", resource)
         findings.raise_finding(
-            session,
+            tx,
             type="agent.jailbreak_attempts",
             severity="medium",
             subject=agent.id,
@@ -512,7 +509,7 @@ def _model_signals(
         )
 
 
-def record_dropped(session: Session, count: int, *, rejected: bool = False) -> None:
+def record_dropped(tx: db.Transaction, count: int, *, rejected: bool = False) -> None:
     """Decision records the ledger misses: lost by a governance processor whose queue
     overflowed while the control plane couldn't take them, or (``rejected``) sent but not
     storable, even cleaned, which the control plane logged. The calls were decided; the
@@ -525,7 +522,7 @@ def record_dropped(session: Session, count: int, *, rejected: bool = False) -> N
         "control plane couldn't take them"
     )
     ledger.append(
-        session,
+        tx,
         type="decisions.dropped",
         actor="service:processor",
         severity="warning",
@@ -545,7 +542,7 @@ def in_process(event: Any) -> bool:
     return not (isinstance(inp, dict) and inp.get(WHAT_IF) is True)
 
 
-def record_opa_decisions(session: Session, events: list[Any]) -> dict[str, int]:
+def record_opa_decisions(tx: db.Transaction, events: list[Any]) -> dict[str, int]:
     """Store OPA decision-log events of in-process enforcement (the toolkit's); skip the
     rest. Each on its own, cleaned first, as decision records are: what an agent gives its
     OPA is in them."""
@@ -555,29 +552,28 @@ def record_opa_decisions(session: Session, events: list[Any]) -> dict[str, int]:
             skipped += 1
             continue
         try:
-            with session.begin_nested():
-                _record_opa(session, clean(event))
-                session.flush()
+            with tx.savepoint():
+                _record_opa(tx, clean(event))
         except Exception as exc:  # one event never costs the others theirs
             rejected += 1
             log.warning("an OPA decision log couldn't be stored: %s: %s", type(exc).__name__, exc)
             continue
         stored += 1
     if rejected:
-        record_dropped(session, rejected, rejected=True)
+        record_dropped(tx, rejected, rejected=True)
     return {"stored": stored, "skipped": skipped, **({"rejected": rejected} if rejected else {})}
 
 
-def _record_opa(session: Session, event: dict[str, Any]) -> None:
+def _record_opa(tx: db.Transaction, event: dict[str, Any]) -> None:
     """One in-process decision into the ledger, the agent's activity and risk signals. What
     the agent gave its OPA (the input) is whatever it chose to send: taken as text."""
     inp = event.get("input") or {}
     result = event.get("result")
     name, tool = ledger.storable(inp.get("agent_id")), ledger.storable(inp.get("tool_name"))
-    agent = discovery.find(session, name=name) if name else None
+    agent = discovery.find(tx, name=name) if name else None
     allowed = result is True or (isinstance(result, dict) and result.get("allow") is True)
     ledger.append(
-        session,
+        tx,
         type="decision.inprocess",
         actor="service:opa",
         agent=agent,
@@ -595,6 +591,6 @@ def _record_opa(session: Session, event: dict[str, Any]) -> None:
         ts=_parse_ts(event.get("timestamp")),
     )
     if agent is not None:
-        discovery.record_activity(session, agent.id, tool_calls=1, denied=0 if allowed else 1)
+        discovery.record_activity(tx, agent.id, tool_calls=1, denied=0 if allowed else 1)
         if not allowed:
-            risk.add_signal(session, agent.id, "policy_denied", tool)
+            risk.add_signal(tx, agent.id, "policy_denied", tool)

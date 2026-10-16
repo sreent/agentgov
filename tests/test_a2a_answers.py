@@ -340,9 +340,7 @@ def test_the_classifier_reads_answers_too() -> None:
 
 
 def test_findings_are_about_the_agent_that_answered(client) -> None:
-    from sqlalchemy import select
-
-    from agentgov.models import Finding, LedgerEntry
+    from agentgov.db.models import Finding, LedgerEntry
     from tests.conftest import ADMIN, SERVICE, seed
 
     caller = seed(client)
@@ -384,9 +382,10 @@ def test_findings_are_about_the_agent_that_answered(client) -> None:
     resp = client.post("/v1/internal/decisions", json={"records": records}, headers=SERVICE)
     assert resp.status_code == 200, resp.text
     rt = client.app.state.rt  # type: ignore[attr-defined]
-    with rt.db.session() as s:
-        found = {f.type: f for f in s.scalars(select(Finding)).all()}
-        types = s.scalars(select(LedgerEntry.type).where(LedgerEntry.type.like("decision.%")))
+    with rt.db.transaction():
+        found = {f.type: f for f in Finding.objects.all()}
+        decided = LedgerEntry.objects.filter(type__startswith="decision.").order_by("seq")
+        types = decided.values_list("type", flat=True)
         assert list(types) == ["decision.a2a.response", "decision.a2a.response"]
     injected = found["agent.prompt_injection_in_answers"]
     assert injected.agent_id == called["id"] and "It was withheld" in injected.description

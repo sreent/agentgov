@@ -10,12 +10,17 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids
+from agentgov import db, ids
 from agentgov.config import Settings
-from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, IntegrationState, ToolServer
+from agentgov.db.models import (
+    ACTIVE,
+    BLOCKED,
+    DELETED,
+    PENDING,
+    Agent,
+    IntegrationState,
+    ToolServer,
+)
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import (
     apikeys,
@@ -90,31 +95,27 @@ def _people_who_left(agent: Agent, gone: list[dict[str, Any]], flag: Any) -> Non
 
 
 def scan(
-    session: Session, settings: Settings, *, tested: dict[str, Any] | None = None
+    tx: db.Transaction, settings: Settings, *, tested: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """``tested``: what calling each agent's A2A URL around the gateway found, by agent ID,
     when the scan's test ran (registry/reachability); None when it didn't."""
     now = ids.utcnow()
     present: set[str] = set()
-    modes = features.modes(session)
+    modes = features.modes(tx)
 
     def flag(type_: str, subject: str, severity: str, title: str, **kw: Any) -> None:
         findings.raise_finding(
-            session, type=type_, severity=severity, subject=subject, title=title, **kw
+            tx, type=type_, severity=severity, subject=subject, title=title, **kw
         )
         present.add(f"{type_}:{subject}")
 
     # Copilot Studio checks (connector allowlist, sharing) first: they count towards risk.
-    platform_findings = platforms.evaluate(session)
+    platform_findings = platforms.evaluate(tx)
     # In one order, as the other jobs that update many agents at once take them: none of
     # them waits for a row another holds while holding one the other wants.
-    agents = (
-        session.scalars(select(Agent).where(Agent.status != DELETED).order_by(Agent.id))
-        .unique()
-        .all()
-    )
+    agents = list(Agent.objects.exclude(status=DELETED).order_by("id"))
     # The people who left (docs/issues.md#people-who-leave), read once.
-    left = people.gone(session)
+    left = people.gone(tx)
     for agent in agents:
         managed = agent.status in (ACTIVE, PENDING, BLOCKED)
         # Agents run by another platform (Microsoft 365, Copilot Studio) never call
@@ -183,7 +184,7 @@ def scan(
                 remediation="Assign an IT-approved blueprint.",
             )
         if managed and left:
-            _people_who_left(agent, people.who_left(session, agent, left), flag)
+            _people_who_left(agent, people.who_left(tx, agent, left), flag)
         if managed and agent.identity_error:
             flag(
                 "agent.identity_error",
@@ -213,12 +214,12 @@ def scan(
         if reachability.checked(agent, modes):
             # Calls around the gateway: what its owners say stops them, and the test.
             reachability.scan(
-                session, agent, flag, tested=tested.get(agent.id) if tested is not None else None
+                tx, agent, flag, tested=tested.get(agent.id) if tested is not None else None
             )
-        agents_svc.refresh_risk(session, settings, agent)
-    platforms.review_summary(session)
+        agents_svc.refresh_risk(tx, settings, agent)
+    platforms.review_summary(tx)
 
-    for issuer in identity_issuers.list_all(session):
+    for issuer in identity_issuers.list_all(tx):
         if issuer.sync_error:
             # A block that hasn't reached Keycloak leaves the issuer's agents signing in.
             flag(
@@ -231,7 +232,7 @@ def scan(
                 "as it last did, blocked or not.",
             )
 
-    for destination in destinations.list_all(session):
+    for destination in destinations.list_all(tx):
         if destination.status == destinations.ACTIVE and destination.failures >= FAILING:
             # The security team isn't getting the evidence or the alerts it expects.
             flag(
@@ -246,7 +247,7 @@ def scan(
                 "once it works again.",
             )
 
-    for ts in session.scalars(select(ToolServer)):
+    for ts in ToolServer.objects.order_by("name"):
         if ts.status == "approved" and ts.trust_level != "verified":
             flag(
                 "toolserver.unverified",
@@ -263,7 +264,7 @@ def scan(
                 f"Tool server {ts.name} is waiting for review",
             )
 
-    for key in apikeys.list_all(session):
+    for key in apikeys.list_all(tx):
         # A key in use that stops working soon, or did: what uses it needs a new one.
         when = apikeys.expiring(key, settings.api_key_max_days, now)
         if when is not None:
@@ -294,13 +295,14 @@ def scan(
         if looked:
             checked.add(type_)
         else:
-            findings.mark_unverified(session, types={type_}, reason=why)
-    resolved = findings.resolve_absent(session, types=checked, present_keys=present)
+            findings.mark_unverified(tx, types={type_}, reason=why)
+    resolved = findings.resolve_absent(tx, types=checked, present_keys=present)
     # When it last ran, for the compliance reports: a check set up but never run shows
     # nothing working (agentgov.compliance).
-    row = session.get(IntegrationState, SCANNED) or IntegrationState(key=SCANNED, data={})
+    row = IntegrationState.objects.filter(pk=SCANNED).first()
+    row = row or IntegrationState(key=SCANNED, data={})
     row.data, row.updated_at = {"at": ids.isoformat(now), "agents": len(agents)}, now
-    session.add(row)
+    row.save(force_insert=row._state.adding)
     return {
         "checked_agents": len(agents),
         "open_posture_findings": len(present),

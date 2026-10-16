@@ -106,7 +106,7 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
 ignore = [
   "B008",   # Django Ninja's parameters are calls in defaults (Body(...), Query(...))
   "S101",   # asserts are fine in tests
-  "RUF012", # mutable class attributes are idiomatic for SQLAlchemy/pydantic
+  "RUF012", # mutable class attributes are idiomatic for Django/pydantic
 ]
 
 [tool.ruff.lint.per-file-ignores]

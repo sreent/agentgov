@@ -74,17 +74,73 @@ The data layer:
   job locks, row locks, changes after commit. Rather than prototypes, Django runs every
   transaction now (`agentgov.db`, `tests/test_transactions.py`): its checks and the ledger's
   entries come before Django commits, and `transaction.on_commit` announces what changed. The
-  SQLAlchemy sessions the modules still use ride on Django's connection, in the same
-  transaction, so modules can move one at a time. Connections are pooled, in psycopg's pool on
+  SQLAlchemy sessions the modules used rode on Django's connection, in the same transaction,
+  so that modules could move one at a time. Connections are pooled, in psycopg's pool on
   PostgreSQL (15 a process, as SQLAlchemy's was) and in one of AgentGov's on SQLite.
 - [x] Django models for every table, unmanaged, with a test that compares them with the
   migrated schema (`agentgov.db.models`, `tests/test_django_models.py`): the columns,
-  keys, constraints, indexes and defaults, and the values each ORM writes, read by the
-  other. Times are UTC without a zone and JSON is in `json` columns, as SQLAlchemy made
-  them (`agentgov.db.fields`); Django's ORM uses the database whose transaction is open.
-- [ ] The modules, the ledger first, each with its tests.
-- [ ] Django's migrations: the first one matches the last Alembic revision; a release runs
-  both; then Alembic goes.
+  keys, constraints, indexes and defaults, and the values as the databases hold them.
+  Times are UTC without a zone and JSON is in `json` columns, as SQLAlchemy made them
+  (`agentgov.db.fields`); Django's ORM uses the database whose transaction is open.
+- [x] The modules, the ledger first, each with its tests. A module that moved ran its queries
+  on Django's ORM in the caller's transaction, and took the transaction or, from a module
+  still on SQLAlchemy, its session: Django's queries saw what the session held, which it
+  wrote first, as it did before its own queries. A model's `save()` writes the fields that
+  changed since the row was read, as SQLAlchemy did: two transactions that change different
+  fields of one row (a job and a person) keep both changes. They moved in this order: the
+  ledger, its retention and its witness (`agentgov.ledger`, `agentgov.retention`,
+  `agentgov.witness`); sign-in, access and API keys (`agentgov.identity.sso`,
+  `agentgov.identity.delegation`, `agentgov.registry.access`, `agentgov.registry.apikeys`, and
+  the views and authentication that use them); tool servers, the MCP registry and developers'
+  MCP servers, model providers, and identity issuers and their keys
+  (`agentgov.registry.toolservers`, `mcp_registry`, `mcp_sightings`, `model_providers`,
+  `identity_issuers`, `agentgov.identity.issuer_keys`); findings, the issues they are and
+  their kinds, their messages and daily digests, their tickets in service desks,
+  destinations, and what goes to the security team (`agentgov.registry.findings`,
+  `finding_types`, `issues`, `digest`, `tickets`, `destinations`, `agentgov.notify`,
+  `agentgov.ticketing`, `agentgov.secops`); features and their exceptions, policies, teams,
+  the people in the directory, where an organisation starts, and what integrations keep
+  between runs (`agentgov.registry.features`, `scopes`, `policies`, `teams`, `people`,
+  `start`, and the state that connections, threat detection, posture scans and the OPA
+  bundle keep); what platforms report of their agents and how each sync went, the connector
+  allowlist, access packages and their assignments, and management rules and the agents they
+  match (`agentgov.registry.platforms`, `connector_policy`, `access_packages`, `rules`);
+  approval requests, risk signals, agents' daily activity and model usage, and their
+  instructions (`agentgov.registry.approvals`, `risk`, `model_usage`, `instructions`, and
+  `discovery`'s counters, which add up in the database rather than in memory); agents and
+  blueprints, with everything that reads or changes them: their lifecycle, discovery,
+  decisions and telemetry, platforms' inventories, posture scans, rules, the identity
+  provider's clients, the gateway's configuration and the OPA bundle
+  (`agentgov.registry.agents`, `blueprints`, `discovery`, `decisions`, `agentgov.telemetry`,
+  `agentgov.identity.keycloak`, `agentgov.gateway`, `agentgov.opa.bundle`, and the rest of
+  the registry); and last, the views, the compliance reports, the components' health and
+  the runtime (`agentgov.web`, `agentgov.compliance`, `agentgov.health`, `agentgov.runtime`).
+  An agent is read with its blueprint, as SQLAlchemy's relationship read it
+  (`Agent.objects`). Each read gives another object, where SQLAlchemy's session gave the
+  same one: a row is locked and read afresh before it is changed (`agentgov.db.lock`, on
+  SQLite too), and what was changed before is saved first. A part of a transaction that
+  rolls back on its own (one of many findings acted on at once, say) is Django's savepoint
+  (`Transaction.savepoint`). Then the sessions went, with what let them share Django's
+  transaction: the modules take the transaction they run in (`agentgov.db.Transaction`).
+  SQLAlchemy's models of the tables stay for Alembic alone (`agentgov.models`), until
+  Django's migrations take over; its engine runs the migrations and the replicas'
+  coordination.
+- [x] Django's migrations: the first one matches the last Alembic revision; a release runs
+  both. Django's first migration (`agentgov/db/migrations/0001_initial.py`) builds the schema
+  Alembic's last revision (0032) leaves, which `tests/test_migrations.py` checks on SQLite
+  and PostgreSQL: the same tables, columns, keys, constraints, indexes and defaults. Django's
+  PostgreSQL backend adds no indexes of its own for that (`agentgov.db.postgresql`: none of
+  the `_like` ones for `LIKE` on keys). `agentgov db upgrade`, and the control plane as it
+  starts, run both, one replica at a time (a PostgreSQL advisory lock): Alembic's up to their
+  last, then Django's, the first recorded as applied rather than run, since Alembic's built
+  its tables (`agentgov.migrations`). `agentgov db status` and `--sql` cover both, and a
+  migration of either that this version doesn't know is refused. New migrations are
+  Django's (`scripts/new-migration.sh`, `makemigrations`); SQLAlchemy's models of the
+  tables, which Alembic's were written from, are gone. One difference stays on a database
+  Django's migrations build: the foreign key from an agent to its blueprint sets it to null
+  in Django, not in the database, which Django 5.2 can't declare.
+- [ ] Alembic goes, in a release after the one that runs both: databases from before it are
+  brought up to date by that release first.
 
 ## Consequences
 

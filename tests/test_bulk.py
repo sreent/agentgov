@@ -149,9 +149,9 @@ class TestAgents:
 
 
 def _finding(client: TestClient, agent_id: str, type_: str, title: str) -> str:
-    with _rt(client).db.session() as s:
+    with _rt(client).db.transaction() as tx:
         raised, _ = findings.raise_finding(
-            s, type=type_, severity="medium", subject=agent_id, agent_id=agent_id, title=title
+            tx, type=type_, severity="medium", subject=agent_id, agent_id=agent_id, title=title
         )
         return raised.id
 

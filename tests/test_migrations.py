@@ -1,33 +1,32 @@
-"""The database schema's migrations: they build the models' schema, adopt databases
-created before migrations, and refuse schemas this version doesn't know."""
+"""The database schema's migrations: Alembic's, then Django's (docs/adr/0007-django.md). They
+build the models' schema, adopt databases created before migrations and databases Alembic's
+alone migrated, and refuse schemas this version doesn't know."""
 
 from __future__ import annotations
 
 import os
+import threading
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from alembic import command
-from alembic.autogenerate import compare_metadata
-from alembic.runtime.migration import MigrationContext
+from django.core.management import call_command
+from django.db import connections
+from django.db.migrations.loader import MigrationLoader
 from sqlalchemy import inspect, text
 from typer.testing import CliRunner
 
-from agentgov import cli, migrations, models
+from agentgov import cli, migrations
 from agentgov.config import Settings
-from agentgov.db import Base, Database
+from agentgov.db import Database
+from agentgov.db.models import Agent, Blueprint, ToolServer
 from agentgov.runtime import Runtime
+from tests.test_django_models import database_tables
 
 runner = CliRunner()
-
-
-def _urls(tmp_path: Path) -> list[str]:
-    urls = [f"sqlite:///{tmp_path / 'schema.db'}"]
-    # Also check a real PostgreSQL when one is offered (it must be empty).
-    if os.environ.get("AGENTGOV_TEST_POSTGRES_URL"):
-        urls.append(os.environ["AGENTGOV_TEST_POSTGRES_URL"])
-    return urls
+POSTGRES = os.environ.get("AGENTGOV_TEST_POSTGRES_URL")
 
 
 @pytest.fixture
@@ -37,40 +36,155 @@ def db(tmp_path: Path) -> Iterator[Database]:
     database.dispose()
 
 
-def test_the_migrations_build_the_models_schema(tmp_path: Path) -> None:
-    for url in _urls(tmp_path):
-        database = Database(url)
-        try:
-            migrations.upgrade(database.engine)
-            with database.engine.connect() as connection:
-                context = MigrationContext.configure(connection, opts={"compare_type": True})
-                differences = compare_metadata(context, Base.metadata)
-            # A model changed without a migration: add one to agentgov/migrations/versions.
-            assert differences == [], differences
-        finally:
-            if url.startswith("postgresql"):
-                with database.engine.begin() as connection:
-                    connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
-            database.dispose()
+@pytest.fixture(params=["sqlite", "postgresql"])
+def empty(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[list[Database]]:
+    """Empty databases on SQLite, and on PostgreSQL when the tests have one."""
+    if request.param == "sqlite":
+        yield [Database(f"sqlite:///{tmp_path / f'{n}.db'}") for n in range(2)]
+        return
+    if not POSTGRES:
+        pytest.skip("needs AGENTGOV_TEST_POSTGRES_URL")
+    from sqlalchemy import make_url
+
+    from tests.conftest import postgres_admin
+
+    names = [f"agentgov_empty_{uuid.uuid4().hex[:12]}" for _ in range(2)]
+    admin = postgres_admin()
+    with admin.connect() as connection:
+        for name in names:
+            connection.exec_driver_sql(f"CREATE DATABASE {name}")
+    try:
+        yield [
+            Database(make_url(POSTGRES).set(database=name).render_as_string(False))
+            for name in names
+        ]
+    finally:
+        from agentgov import db as database
+
+        for opened in database.live():
+            opened.dispose()
+        with admin.connect() as connection:
+            for name in names:
+                connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+        admin.dispose()
+
+
+def _alembic_only(db: Database, revision: str = "head") -> None:
+    """Alembic's migrations, up to ``revision``, as the versions before Django's ran them."""
+    with migrations._migrating(db.engine) as connection:
+        command.upgrade(migrations._config(connection), revision)
+
+
+def _recorded(db: Database) -> list[str]:
+    """Django's migrations the database has recorded as applied."""
+    try:
+        with connections[db.alias].cursor() as cursor:
+            cursor.execute("SELECT name FROM django_migrations WHERE app = 'agentgov' ORDER BY id")
+            return [name for (name,) in cursor.fetchall()]
+    finally:
+        connections[db.alias].close()
+
+
+def test_djangos_first_migration_builds_the_schema_alembics_last_leaves(
+    empty: list[Database],
+) -> None:
+    by_alembic, by_django = empty
+    _alembic_only(by_alembic)
+    try:
+        call_command("migrate", migrations.APP, database=by_django.alias, verbosity=0)
+    finally:
+        connections[by_django.alias].close()
+    built, made = database_tables(by_alembic), database_tables(by_django)
+    assert sorted(built) == sorted(made)
+    for table in sorted(built):
+        for part in ("columns", "primary key", "unique", "indexes", "foreign keys", "defaults"):
+            assert made[table][part] == built[table][part], (table, part)
+
+
+def test_the_migrations_have_every_change_to_the_models() -> None:
+    try:
+        call_command("makemigrations", migrations.APP, check=True, dry_run=True, verbosity=0)
+    except SystemExit as exc:  # a model changed without a migration
+        pytest.fail(f"a model changed without a migration: run scripts/new-migration.sh ({exc})")
 
 
 def test_one_line_of_history() -> None:
     assert len(migrations.scripts().get_heads()) == 1, "merge the migration branches"
     assert migrations.scripts().get_revision(migrations.BASELINE).down_revision is None
+    leaves = MigrationLoader(None, ignore_no_migrations=True).graph.leaf_nodes(migrations.APP)
+    assert len(leaves) == 1, "merge Django's migrations (makemigrations --merge)"
 
 
 def test_status_check_and_upgrade(db: Database) -> None:
-    every = [s.revision for s in reversed(list(migrations.scripts().walk_revisions()))]
-    state = migrations.status(db.engine)
+    alembic = [s.revision for s in reversed(list(migrations.scripts().walk_revisions()))]
+    every = alembic + migrations.django_migrations()
+    state = migrations.status(db)
     assert (state.current, state.pending, state.up_to_date) == (None, every, False)
     with pytest.raises(migrations.SchemaError, match="agentgov db upgrade"):
-        migrations.check(db.engine)
+        migrations.check(db)
 
-    assert migrations.upgrade(db.engine) == every
-    state = migrations.status(db.engine)
+    assert migrations.upgrade(db) == every
+    state = migrations.status(db)
     assert (state.current, state.pending, state.up_to_date) == (migrations.head(), [], True)
-    migrations.check(db.engine)
-    assert migrations.upgrade(db.engine) == []  # nothing left to do
+    migrations.check(db)
+    assert migrations.upgrade(db) == []  # nothing left to do
+    assert _recorded(db) == migrations.django_migrations()
+
+
+def test_a_database_alembic_migrated_takes_djangos_first_migration_as_applied(
+    db: Database,
+) -> None:
+    """A database the versions before Django's migrations migrated: Alembic's last revision,
+    and the tables Django's first migration would make, so it is recorded, not run."""
+    _alembic_only(db)
+    with db.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO blueprints (id, name, description, risk_tier, permissions, "
+                "require_sponsor, labels, created_at, updated_at) VALUES ('bp_1', 'support', "
+                "'', 'medium', '[]', 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+    state = migrations.status(db)
+    assert (state.current, state.pending) == (migrations.alembic_head(), ["0001_initial"])
+    sql = migrations.upgrade_sql(db)
+    assert "CREATE TABLE agents" not in sql
+    assert "INSERT INTO django_migrations" in sql and "'0001_initial'" in sql
+
+    assert migrations.upgrade(db) == ["0001_initial"]
+    assert migrations.status(db).up_to_date
+    assert _recorded(db) == ["0001_initial"]
+    with db.transaction():
+        assert Blueprint.objects.get(pk="bp_1").name == "support"  # data kept
+
+
+def test_replicas_starting_together_migrate_one_at_a_time(empty: list[Database]) -> None:
+    """Two upgrades of one database at once: one migrates, then the other finds nothing to
+    do, and Django's first migration is recorded once. (Several replicas need PostgreSQL;
+    on SQLite there is one control plane.)"""
+    first = empty[0]
+    if first.sqlite:
+        pytest.skip("several replicas need PostgreSQL")
+    other = Database(first.url)
+    done: list[list[str]] = []
+    failed: list[BaseException] = []
+
+    def migrate(db: Database) -> None:
+        try:
+            done.append(migrations.upgrade(db))
+        except BaseException as exc:  # reported below
+            failed.append(exc)
+
+    threads = [threading.Thread(target=migrate, args=(db,)) for db in (first, other)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(120)
+    assert failed == []
+    every = [s.revision for s in reversed(list(migrations.scripts().walk_revisions()))]
+    assert sorted(done) == [[], every + migrations.django_migrations()]
+    assert migrations.status(first).up_to_date
+    assert _recorded(first) == migrations.django_migrations()
 
 
 def _before_migrations(db: Database, *, lacking: str | None = None) -> None:
@@ -93,23 +207,37 @@ def test_a_database_from_before_migrations_is_adopted(db: Database) -> None:
                 "'', 'medium', '[]', 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             )
         )
-    assert migrations.status(db.engine).unversioned
+    assert migrations.status(db).unversioned
 
-    migrations.upgrade(db.engine)
+    migrations.upgrade(db)
 
-    assert migrations.status(db.engine).up_to_date
+    assert migrations.status(db).up_to_date
     assert "integration_state" in inspect(db.engine).get_table_names()
-    with db.session() as session:
-        assert session.get(models.Blueprint, "bp_1").name == "support"  # data kept
+    with db.transaction():
+        assert Blueprint.objects.get(pk="bp_1").name == "support"  # data kept
 
 
 def test_a_schema_from_a_newer_version_is_refused(db: Database) -> None:
-    migrations.upgrade(db.engine)
+    migrations.upgrade(db)
     with db.engine.begin() as connection:
         connection.execute(text("UPDATE alembic_version SET version_num = '9999'"))
     for attempt in (migrations.status, migrations.check, migrations.upgrade):
         with pytest.raises(migrations.SchemaError, match="newer version"):
-            attempt(db.engine)
+            attempt(db)
+
+
+def test_a_django_migration_from_a_newer_version_is_refused(db: Database) -> None:
+    migrations.upgrade(db)
+    with db.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO django_migrations (app, name, applied) "
+                "VALUES ('agentgov', '0002_from_the_future', CURRENT_TIMESTAMP)"
+            )
+        )
+    for attempt in (migrations.status, migrations.check, migrations.upgrade):
+        with pytest.raises(migrations.SchemaError, match="'0002_from_the_future'"):
+            attempt(db)
 
 
 def test_the_control_plane_can_leave_migrating_to_a_job(settings: Settings, tmp_path: Path) -> None:
@@ -121,7 +249,7 @@ def test_the_control_plane_can_leave_migrating_to_a_job(settings: Settings, tmp_
     try:
         with pytest.raises(migrations.SchemaError, match="agentgov db upgrade"):
             rt.init_db()
-        migrations.upgrade(rt.db.engine)  # what the job does
+        migrations.upgrade(rt.db)  # what the job does
         rt.init_db()
     finally:
         rt.db.dispose()
@@ -132,25 +260,25 @@ def test_what_was_blocked_before_is_read_from_the_ledger(db: Database, settings:
     from their blocks' ledger entries: unblocked, a pending one waits for approval again."""
     from agentgov.registry import agents, toolservers
 
-    migrations.upgrade(db.engine)
-    with db.session() as s:
-        made = agents.register(s, settings, {"name": "new-bot", "sponsors": ["a"]}, actor="t")
-        agents.transition(s, settings, made, "block", actor="t")
+    migrations.upgrade(db)
+    with db.transaction() as tx:
+        made = agents.register(tx, settings, {"name": "new-bot", "sponsors": ["a"]}, actor="t")
+        agents.transition(tx, settings, made, "block", actor="t")
         ts = toolservers.create(
-            s, {"name": "byo", "url": "http://byo/mcp"}, actor="t", approve=False
+            tx, {"name": "byo", "url": "http://byo/mcp"}, actor="t", approve=False
         )
-        toolservers.set_status(s, ts, "block", actor="t")
+        toolservers.set_status(tx, ts, "block", actor="t")
     with migrations._migrating(db.engine) as connection:
         command.downgrade(migrations._config(connection), "0031")
     assert "blocked_from" not in {c["name"] for c in inspect(db.engine).get_columns("agents")}
-    migrations.upgrade(db.engine)
-    with db.session() as s:
-        assert s.get(models.Agent, made.id).blocked_from == "pending"
-        assert s.get(models.ToolServer, ts.id).blocked_from == "pending"
+    migrations.upgrade(db)
+    with db.transaction():
+        assert Agent.objects.get(pk=made.id).blocked_from == "pending"
+        assert ToolServer.objects.get(pk=ts.id).blocked_from == "pending"
 
 
 def test_foreign_keys_are_enforced_again_after_migrating(db: Database) -> None:
-    migrations.upgrade(db.engine)
+    migrations.upgrade(db)
     with db.engine.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
 
@@ -163,9 +291,11 @@ class TestCli:
     def test_status_then_upgrade(self, env: dict[str, str]) -> None:
         before = runner.invoke(cli.app, ["db", "status"], env=env)
         assert before.exit_code == 1 and f"pending: {migrations.BASELINE}" in before.output
+        assert before.output.rstrip().endswith(migrations.head())
 
         sql = runner.invoke(cli.app, ["db", "upgrade", "--sql"], env=env)
         assert sql.exit_code == 0 and "CREATE TABLE agents" in sql.output
+        assert "INSERT INTO django_migrations" in sql.output
 
         done = runner.invoke(cli.app, ["db", "upgrade"], env=env)
         assert done.exit_code == 0, done.output
@@ -173,6 +303,7 @@ class TestCli:
 
         after = runner.invoke(cli.app, ["db", "status"], env=env)
         assert after.exit_code == 0 and "the schema is up to date" in after.output
+        assert f"current: {migrations.head()}" in after.output
         again = runner.invoke(cli.app, ["db", "upgrade"], env=env)
         assert "already up to date" in again.output
 

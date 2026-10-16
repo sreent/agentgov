@@ -14,13 +14,12 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.models import Destination, Finding, Ticket
+from agentgov.db.models import Destination, Ticket
 from agentgov.registry import desks, destinations, findings, issues, teams
 from agentgov.registry.errors import ValidationError
 from agentgov.runtime import Runtime
@@ -286,9 +285,9 @@ def issue(
 ) -> str:
     """A finding, routed to its people: an issue."""
     rt = rt_of(client)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         finding, _ = findings.raise_finding(
-            s,
+            tx,
             type=type_,
             severity=severity,
             subject=agent_id,
@@ -299,8 +298,8 @@ def issue(
             category=category,
         )
         fid = finding.id
-    with rt.db.session() as s:
-        issues.route(s, rt.settings)
+    with rt.db.transaction() as tx:
+        issues.route(tx, rt.settings)
     return fid
 
 
@@ -326,9 +325,9 @@ def basic(pair: str) -> str:
 def agent(desks_client: TestClient) -> dict[str, Any]:
     """support-bot, its team cx (with a ServiceNow group), and the default team."""
     created = seed(desks_client, sponsors=["alice@example.com"])
-    with rt_of(desks_client).db.session() as s:
-        teams.create(s, {"name": "cx", "emails": ["cx@example.com"]}, actor="admin:test")
-        teams.create(s, {"name": "ai-governance", "default": True}, actor="admin:test")
+    with rt_of(desks_client).db.transaction() as tx:
+        teams.create(tx, {"name": "cx", "emails": ["cx@example.com"]}, actor="admin:test")
+        teams.create(tx, {"name": "ai-governance", "default": True}, actor="admin:test")
     desks_client.patch(
         f"/v1/agents/{created['id']}", json={"owner": "cx"}, headers=ADMIN
     ).raise_for_status()
@@ -474,8 +473,8 @@ class TestServiceNow:
         run(desks_client)
         assert len(fake.requests) == before
         # AgentGov's check no longer finds it: the incident is resolved.
-        with rt_of(desks_client).db.session() as s:
-            findings.set_status(s, fid, "resolved", "system:posture-scan")
+        with rt_of(desks_client).db.transaction() as tx:
+            findings.set_status(tx, fid, "resolved", "system:posture-scan")
         run(desks_client)
         assert record["state"] == "6" and record["close_code"] == "Solution provided"
         assert "no longer finds the problem" in record["close_notes"]
@@ -489,9 +488,10 @@ class TestServiceNow:
         fid = issue(desks_client, agent["id"])
         run(desks_client)
         fake.snow["sys1"].update(state="2", assigned_to="Dana Lee")
-        with rt_of(desks_client).db.session() as s:
-            for t in s.scalars(select(Ticket)):
+        with rt_of(desks_client).db.transaction():
+            for t in Ticket.objects.all():
                 t.synced_at = ids.utcnow() - timedelta(minutes=10)
+                t.save()
         run(desks_client)
         f = desks_client.get(f"/v1/findings/{fid}", headers=ADMIN).json()
         assert f["acknowledged_by"] == "Dana Lee (itsm INC0000001)"
@@ -508,15 +508,15 @@ class TestServiceNow:
         fid = issue(desks_client, agent["id"])
         run(desks_client)
         rt = rt_of(desks_client)
-        with rt.db.session() as s:
-            issues.route(s, rt.settings, ids.utcnow() + timedelta(hours=30))  # nobody took it on
+        with rt.db.transaction() as tx:
+            issues.route(tx, rt.settings, ids.utcnow() + timedelta(hours=30))  # nobody took it on
         run(desks_client)
         assert (
             "Nobody took it on in time: it now goes to alice@example.com"
             in fake.snow["sys1"]["notes"][-1]
         )
-        with rt.db.session() as s:
-            issues.acknowledge(s, findings.get(s, fid), actor="person:alice@example.com")
+        with rt.db.transaction() as tx:
+            issues.acknowledge(tx, findings.get(tx, fid), actor="person:alice@example.com")
         run(desks_client)
         assert "person:alice@example.com took it on in AgentGov." in fake.snow["sys1"]["notes"][-1]
 
@@ -530,9 +530,10 @@ class TestServiceNow:
         rt = rt_of(desks_client)
 
         def read_again() -> None:
-            with rt.db.session() as s:
-                for t in s.scalars(select(Ticket)):
+            with rt.db.transaction():
+                for t in Ticket.objects.all():
                     t.synced_at = ids.utcnow() - timedelta(minutes=10)
+                    t.save()
             run(desks_client)
 
         read_again()
@@ -554,9 +555,10 @@ class TestServiceNow:
         fid = issue(desks_client, agent["id"], type_="platform.threat", category=findings.THREAT)
         run(desks_client)
         fake.snow["sys1"].update(state="7")
-        with rt_of(desks_client).db.session() as s:
-            for t in s.scalars(select(Ticket)):
+        with rt_of(desks_client).db.transaction():
+            for t in Ticket.objects.all():
                 t.synced_at = None
+                t.save()
         run(desks_client)
         f = desks_client.get(f"/v1/findings/{fid}", headers=ADMIN).json()
         assert (f["status"], f["resolved_by"]) == ("resolved", "itsm INC0000001")
@@ -641,10 +643,11 @@ class TestFailures:
         rt = rt_of(desks_client)
         rt.delivery.http = httpx.Client(transport=httpx.MockTransport(lost))
         assert run(desks_client)["desk_failures"] == 1
-        with rt.db.session() as s:
-            row = s.scalar(select(Destination).where(Destination.name == "itsm"))
+        with rt.db.transaction():
+            row = Destination.objects.get(name="itsm")
             assert "ReadTimeout" in (row.last_error or "") and row.retry_at is not None
             row.retry_at = None
+            row.save()
         rt.delivery.http = httpx.Client(transport=httpx.MockTransport(fake))
         assert run(desks_client)["tickets_opened"] == 1
         assert len(fake.snow) == 1 and ticket_of(desks_client, fid)["key"] == "INC0000001"
@@ -657,8 +660,8 @@ class TestFailures:
         fake.next.append(("POST", "/api/now", httpx.Response(429, headers={"Retry-After": "120"})))
         run(desks_client)
         rt = rt_of(desks_client)
-        with rt.db.session() as s:
-            row = s.scalar(select(Destination).where(Destination.name == "itsm"))
+        with rt.db.transaction():
+            row = Destination.objects.get(name="itsm")
             wait = (row.retry_at - ids.utcnow()).total_seconds()
             assert 100 < wait <= 120
         assert run(desks_client).get("tickets_opened", 0) == 0  # not yet
@@ -709,12 +712,12 @@ def test_a_desk_on_a_host_not_listed_gets_nothing(
         refused = client.post("/v1/destinations", json=body, headers=ADMIN)
         assert refused.status_code == 422
         assert "AGENTGOV_CREDENTIAL_HOSTS doesn't list acme.atlassian.net" in refused.text
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             # Set up before the deployment listed the hosts.
-            destinations.create(s, body, actor="admin:test")
+            destinations.create(tx, body, actor="admin:test")
         created = seed(client, sponsors=["alice@example.com"])
-        with rt.db.session() as s:
-            teams.create(s, {"name": "ai-governance", "default": True}, actor="admin:test")
+        with rt.db.transaction() as tx:
+            teams.create(tx, {"name": "ai-governance", "default": True}, actor="admin:test")
         issue(client, created["id"])
         run(client)
         state = client.get("/v1/destinations/jsm", headers=ADMIN).json()["delivery"]
@@ -749,14 +752,15 @@ class TestJira:
         assert t["url"] == f"{JIRA}/browse/{made['key']}"
         # Taken on there.
         made["status"], made["assignee"] = ("In Progress", "indeterminate"), "Dana Lee"
-        with rt_of(desks_client).db.session() as s:
-            for row in s.scalars(select(Ticket)):
+        with rt_of(desks_client).db.transaction():
+            for row in Ticket.objects.all():
                 row.synced_at = None
+                row.save()
         run(desks_client)
         assert desks_client.get(f"/v1/findings/{fid}", headers=ADMIN).json()["acknowledged_at"]
         # Dismissed in AgentGov: resolved there, with an internal comment.
-        with rt_of(desks_client).db.session() as s:
-            findings.dismiss(s, s.get(Finding, fid), actor="admin:ada", reason="a test agent")
+        with rt_of(desks_client).db.transaction() as tx:
+            findings.dismiss(tx, findings.get(tx, fid), actor="admin:ada", reason="a test agent")
         run(desks_client)
         assert made["status"] == ("Done", "done")
         (comment,) = made["comments"]
@@ -814,10 +818,10 @@ class TestWhatOthersWrote:
         assert "[~" not in made["fields"]["description"]
         # A reason someone gives goes as a comment, as written too.
         rt = rt_of(desks_client)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             issues.ask_exception(
-                s,
-                findings.get(s, fid),
+                tx,
+                findings.get(tx, fid),
                 actor="person:alice@example.com",
                 name="alice@example.com",
                 reason=written,
@@ -862,18 +866,18 @@ class TestWhatOthersWrote:
         fid = issue(desks_client, agent["id"], title=f"{written} has no owner")
         run(desks_client)
         rt = rt_of(desks_client)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             issues.ask_exception(
-                s,
-                findings.get(s, fid),
+                tx,
+                findings.get(tx, fid),
                 actor="person:alice@example.com",
                 name="alice@example.com",
                 reason=written,
                 until=30,
             )
         run(desks_client)
-        with rt.db.session() as s:
-            findings.dismiss(s, s.get(Finding, fid), actor="admin:ada", reason=written)
+        with rt.db.transaction() as tx:
+            findings.dismiss(tx, findings.get(tx, fid), actor="admin:ada", reason=written)
         run(desks_client)
         record = fake.snow["sys1"]
         texts = [
@@ -913,12 +917,13 @@ class TestFreshservice:
         assert fake.requests[0].headers["Authorization"] == basic("key123:X")
         assert ticket_of(desks_client, fid)["key"] == f"#{made['id']}"
         made["responder_id"] = 7
-        with rt_of(desks_client).db.session() as s:
-            for row in s.scalars(select(Ticket)):
+        with rt_of(desks_client).db.transaction() as tx:
+            for row in Ticket.objects.all():
                 row.synced_at = None
-            f = s.get(Finding, fid)
+                row.save()
+            f = findings.get(tx, fid)
             issues.accept(
-                s,
+                tx,
                 f,
                 reason="Retiring it next week",
                 until=30,

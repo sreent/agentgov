@@ -8,6 +8,8 @@ stored entry is detectable by :func:`verify`.
 Checkpoints keep points of the chain for good (docs/evidence.md). Once the entries
 up to a checkpoint are archived and removed (agentgov.retention), the chain in the
 database goes on from it, and :func:`verify_records` checks the archives offline.
+
+The functions here run in the caller's transaction (agentgov.db), on Django's ORM.
 """
 
 from __future__ import annotations
@@ -23,23 +25,18 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import event, func, select, update
-from sqlalchemy.orm import Session, SessionTransaction
+from django.db.models import F, Max, QuerySet, Subquery
 
 from agentgov import db, ids, timestamping
 from agentgov.db import mark_changed
-from agentgov.models import Agent, LedgerCheckpoint, LedgerEntry, LedgerHead
+from agentgov.db.models import Agent, LedgerCheckpoint, LedgerEntry, LedgerHead
 
 if TYPE_CHECKING:
-    from sqlalchemy.sql.elements import ColumnElement
-
     from agentgov.config import Settings
 
 GENESIS = "0" * 64
-# A transaction's entries, until it commits; and how many there were when each of its
-# savepoints began.
+# A transaction's entries, until it commits.
 _PENDING = "agentgov.ledger.pending"
-_SAVEPOINTS = "agentgov.ledger.savepoints"
 # What archiving writes into the chain (agentgov.retention): the range it archived and
 # removed, so that the chain itself says where it may start; and each checkpoint's
 # time-stamp, so that one replaced later shows.
@@ -52,13 +49,11 @@ MAX_PROBLEMS = 50
 STAMP_ROUND = timedelta(hours=1)
 CHECKPOINT_HOURS = 24
 # The columns' lengths, which what is stored is cut to.
-_LENGTHS = {c.name: getattr(c.type, "length", None) for c in LedgerEntry.__table__.columns}
+_LENGTHS = {f.column: f.max_length for f in LedgerEntry._meta.concrete_fields}
 
 
-def ensure_head(session: Session) -> None:
-    if session.get(LedgerHead, 1) is None:
-        session.add(LedgerHead(id=1, last_seq=0, last_hash=GENESIS))
-        session.flush()
+def ensure_head(tx: db.Transaction) -> None:
+    LedgerHead.objects.get_or_create(id=1, defaults={"last_seq": 0, "last_hash": GENESIS})
 
 
 def _canonical(payload: dict[str, Any]) -> bytes:
@@ -154,7 +149,7 @@ def _utc(value: datetime | None) -> datetime | None:
 
 
 def append(
-    session: Session | db.Transaction,
+    tx: db.Transaction,
     *,
     type: str,
     actor: str,
@@ -198,7 +193,6 @@ def append(
         trace_id=storable(trace_id, _LENGTHS["trace_id"]),
         on_behalf_of=storable(on_behalf_of, _LENGTHS["on_behalf_of"]),
     )
-    tx = db.transaction_of(session)
     tx.info.setdefault(_PENDING, []).append(entry)
     # For what sends the ledger on (agentgov.secops.delivery), once this commits.
     mark_changed(tx, "ledger")
@@ -211,13 +205,10 @@ def _write_pending(tx: db.Transaction) -> None:
     pending: list[LedgerEntry] | None = tx.info.pop(_PENDING, None)
     if not pending:
         return
-    session = tx.orm()
-    ensure_head(session)
-    session.execute(
-        update(LedgerHead).where(LedgerHead.id == 1).values(last_seq=LedgerHead.last_seq)
-    )
-    head = session.get(LedgerHead, 1, populate_existing=True)
-    assert head is not None
+    ensure_head(tx)
+    heads = LedgerHead.objects.filter(id=1)
+    heads.update(last_seq=F("last_seq"))
+    head = heads.get()
     for entry in pending:
         entry.seq = head.last_seq + 1
         # When it was written, unless the caller said when it happened: in the chain's order.
@@ -225,8 +216,8 @@ def _write_pending(tx: db.Transaction) -> None:
         entry.prev_hash = head.last_hash
         entry.hash = compute_hash(head.last_hash, entry)
         head.last_seq, head.last_hash = entry.seq, entry.hash
-        session.add(entry)
-    session.flush()
+    LedgerEntry.objects.bulk_create(pending)
+    heads.update(last_seq=head.last_seq, last_hash=head.last_hash)
 
 
 db.WRITE_LAST.append(_write_pending)
@@ -248,85 +239,68 @@ def _savepoint(tx: db.Transaction) -> Callable[[], None]:
 db.SAVEPOINTS.append(_savepoint)
 
 
-@event.listens_for(Session, "after_transaction_create")
-def _savepoint_begins(session: Session, transaction: SessionTransaction) -> None:
-    if transaction.nested:
-        tx = db.transaction_of(session)
-        marks = tx.info.setdefault(_SAVEPOINTS, {})
-        marks[transaction] = len(tx.info.get(_PENDING) or ())
-
-
-@event.listens_for(Session, "after_soft_rollback")
-def _rolled_back(session: Session, previous: SessionTransaction) -> None:
-    """Entries appended since a savepoint of the session's (begin_nested) that rolled back
-    go with it."""
-    if previous.nested:
-        tx = db.transaction_of(session)
-        start = (tx.info.get(_SAVEPOINTS) or {}).get(previous)
-        pending = tx.info.get(_PENDING)
-        if start is not None and pending is not None:
-            del pending[start:]
-
-
 def iter_entries(
-    session: Session, *, batch: int = 1000, after: int = 0, until: int | None = None
+    tx: db.Transaction, *, batch: int = 1000, after: int = 0, until: int | None = None
 ) -> Iterator[LedgerEntry]:
     last = after
     while True:
-        stmt = select(LedgerEntry).where(LedgerEntry.seq > last)
+        rows = LedgerEntry.objects.filter(seq__gt=last)
         if until is not None:
-            stmt = stmt.where(LedgerEntry.seq <= until)
-        rows = session.scalars(stmt.order_by(LedgerEntry.seq).limit(batch)).all()
-        if not rows:
+            rows = rows.filter(seq__lte=until)
+        page = list(rows.order_by("seq")[:batch])
+        if not page:
             return
-        yield from rows
-        last = rows[-1].seq
+        yield from page
+        last = page[-1].seq
 
 
-def _chain_head(session: Session) -> tuple[int, str] | None:
+def _chain_head(tx: db.Transaction) -> tuple[int, str] | None:
     """The chain's head as the database has it now: its last entry's seq and hash."""
-    row = session.get(LedgerHead, 1, populate_existing=True)
-    return (row.last_seq, row.last_hash) if row is not None else None
+    return LedgerHead.objects.filter(id=1).values_list("last_seq", "last_hash").first()
 
 
-def head_seq(session: Session) -> int:
+def head_seq(tx: db.Transaction) -> int:
     """Where the chain ends: rows stored past it aren't the ledger's."""
-    head = _chain_head(session)
+    head = _chain_head(tx)
     return head[0] if head is not None else 0
 
 
-def in_chain() -> ColumnElement[bool]:
-    """Entries the chain's head accounts for. A row stored past the head was written
+def chain() -> QuerySet[LedgerEntry]:
+    """The entries the chain's head accounts for. A row stored past the head was written
     around the chain: nothing verifies it, so nothing serves or counts it as the ledger's."""
-    return LedgerEntry.seq <= (
-        select(LedgerHead.last_seq).where(LedgerHead.id == 1).scalar_subquery()
+    return LedgerEntry.objects.filter(
+        seq__lte=Subquery(LedgerHead.objects.filter(id=1).values("last_seq"))
     )
 
 
-def base(session: Session) -> tuple[int, str]:
+def of_type(entries: QuerySet[LedgerEntry], pattern: str) -> QuerySet[LedgerEntry]:
+    """The entries whose type is ``pattern``, where ``*`` stands for any text
+    (``decision.*``)."""
+    if "*" not in pattern:
+        return entries.filter(type=pattern)
+    return entries.filter(type__regex="^" + ".*".join(map(re.escape, pattern.split("*"))) + "$")
+
+
+def base(tx: db.Transaction) -> tuple[int, str]:
     """Where the chain in the database starts: the checkpoint the entries before it were
     archived up to, or the beginning."""
-    checkpoint = session.scalar(
-        select(LedgerCheckpoint)
-        .where(LedgerCheckpoint.pruned_at.is_not(None))
-        .order_by(LedgerCheckpoint.seq.desc())
-        .limit(1)
-    )
-    return (checkpoint.seq, checkpoint.hash) if checkpoint is not None else (0, GENESIS)
+    return _floor(LedgerCheckpoint.objects.all())
 
 
-def _previous_floor(session: Session, seq: int) -> tuple[int, str]:
-    point = session.scalar(
-        select(LedgerCheckpoint)
-        .where(LedgerCheckpoint.pruned_at.is_not(None), LedgerCheckpoint.seq < seq)
-        .order_by(LedgerCheckpoint.seq.desc())
-        .limit(1)
+def _previous_floor(tx: db.Transaction, seq: int) -> tuple[int, str]:
+    return _floor(LedgerCheckpoint.objects.filter(seq__lt=seq))
+
+
+def _floor(points: QuerySet[LedgerCheckpoint]) -> tuple[int, str]:
+    """The last of ``points`` the entries before were archived up to, or the beginning."""
+    found = (
+        points.filter(pruned_at__isnull=False).order_by("-seq").values_list("seq", "hash").first()
     )
-    return (point.seq, point.hash) if point is not None else (0, GENESIS)
+    return found if found is not None else (0, GENESIS)
 
 
 def _vouching(
-    session: Session, floor: tuple[int, str], archived: list[LedgerEntry]
+    tx: db.Transaction, floor: tuple[int, str], archived: list[LedgerEntry]
 ) -> tuple[tuple[int, str] | None, str | None]:
     """Whether one of the chain's ``ledger.archived`` entries (``archived``, after the
     floor) says the entries up to the floor were archived: exactly that range, up to that
@@ -344,8 +318,8 @@ def _vouching(
         ), None
     entry = named[-1]
     details = entry.details or {}
-    previous = _previous_floor(session, seq)
-    point = session.get(LedgerCheckpoint, seq)
+    previous = _previous_floor(tx, seq)
+    point = LedgerCheckpoint.objects.filter(seq=seq).first()
     if details.get("hash") != hash_ or details.get("from") != previous[0] + 1:
         return (
             entry.seq,
@@ -373,20 +347,14 @@ def _vouching(
     return None, None
 
 
-def vouched_floor(session: Session) -> tuple[int, str] | None:
+def vouched_floor(tx: db.Transaction) -> tuple[int, str] | None:
     """Where the chain in the database starts, when the chain says the entries before it
     were archived (or nothing was): None when it doesn't, which :func:`verify` reports."""
-    floor = base(session)
+    floor = base(tx)
     if floor[0] == 0:
         return floor
-    archived = list(
-        session.scalars(
-            select(LedgerEntry).where(
-                LedgerEntry.type == ARCHIVED, LedgerEntry.seq > floor[0], in_chain()
-            )
-        )
-    )
-    problem, _ = _vouching(session, floor, archived)
+    archived = list(chain().filter(type=ARCHIVED, seq__gt=floor[0]).order_by("seq"))
+    problem, _ = _vouching(tx, floor, archived)
     return None if problem else floor
 
 
@@ -398,7 +366,7 @@ def stamp_window(checkpoint_hours: int) -> timedelta:
 
 
 def verify(
-    session: Session,
+    tx: db.Transaction,
     *,
     start: tuple[int, str] | None = None,
     settings: Settings | None = None,
@@ -419,15 +387,12 @@ def verify(
     hours = settings.ledger_checkpoint_hours if settings else CHECKPOINT_HOURS
     # The head is read first and the chain checked up to it: entries committed while
     # we read are beyond it, so concurrent appends cannot look like a broken chain.
-    head = _chain_head(session)
-    floor = base(session)
+    head = _chain_head(tx)
+    floor = base(tx)
     incremental = start is not None and start[0] >= floor[0]
     checked, prev = start if start is not None and incremental else floor
     since = checked if incremental else 0
-    points = {
-        p.seq: p
-        for p in session.scalars(select(LedgerCheckpoint).where(LedgerCheckpoint.seq > since))
-    }
+    points = {p.seq: p for p in LedgerCheckpoint.objects.filter(seq__gt=since)}
     problems: list[tuple[int | None, str]] = []
     # Past MAX_PROBLEMS, the chain's breaks are counted, not kept: they come in its order.
     uncounted = 0
@@ -437,7 +402,7 @@ def verify(
     hashes: dict[int, str] = {}
     times: dict[int, datetime] = {}
     expected = checked + 1
-    for entry in iter_entries(session, after=checked, until=head[0] if head else None):
+    for entry in iter_entries(tx, after=checked, until=head[0] if head else None):
         broken = []
         if entry.seq != expected:
             broken.append((entry.seq, f"missing entry before seq {entry.seq}"))
@@ -465,9 +430,9 @@ def verify(
     # Past the head: rows nothing appended through the chain, or checkpoints of a chain
     # that was longer. Appends committed since the head was read account for theirs.
     ceiling = head[0] if head is not None else checked
-    top = session.scalar(select(func.max(LedgerEntry.seq))) or 0
+    top = LedgerEntry.objects.aggregate(top=Max("seq"))["top"] or 0
     if head is not None and (top > ceiling or any(seq > ceiling for seq in points)):
-        now = _chain_head(session)
+        now = _chain_head(tx)
         ceiling = now[0] if now is not None else ceiling
     if top > ceiling:
         problems.append(
@@ -486,9 +451,7 @@ def verify(
             )
         )
     if not incremental and floor[0]:
-        remaining = session.scalar(
-            select(func.max(LedgerEntry.seq)).where(LedgerEntry.seq <= floor[0])
-        )
+        remaining = LedgerEntry.objects.filter(seq__lte=floor[0]).aggregate(seq=Max("seq"))["seq"]
         if remaining is not None:
             problems.append(
                 (
@@ -497,7 +460,7 @@ def verify(
                     f"{floor[0]} left it with an archive",
                 )
             )
-        problem, warning = _vouching(session, floor, archived)
+        problem, warning = _vouching(tx, floor, archived)
         problems += [problem] if problem else []
         warnings += [warning] if warning else []
     found = check_checkpoints(
@@ -509,7 +472,7 @@ def verify(
     )
     problems += found["problems"]
     for seq, stamps in sorted(recorded.items()):
-        point = session.get(LedgerCheckpoint, seq)
+        point = LedgerCheckpoint.objects.filter(seq=seq).first()
         problems += recorded_problems(
             seq, stamps, (point.hash, _token(point)) if point is not None else None
         )
@@ -687,24 +650,20 @@ def recorded_problems(
     return []
 
 
-def checkpoint(session: Session) -> LedgerCheckpoint | None:
+def checkpoint(tx: db.Transaction) -> LedgerCheckpoint | None:
     """Keep the chain's current head as a checkpoint (the one there already is, if the
     chain hasn't grown since). None while the ledger is empty."""
-    head = session.get(LedgerHead, 1, populate_existing=True)
-    if head is None or head.last_seq == 0:
+    head = _chain_head(tx)
+    if head is None or head[0] == 0:
         return None
-    existing = session.get(LedgerCheckpoint, head.last_seq)
+    seq, hash_ = head
+    existing = LedgerCheckpoint.objects.filter(seq=seq).first()
     if existing is not None:
         return existing
-    entry = session.get(LedgerEntry, head.last_seq)
-    point = LedgerCheckpoint(
-        seq=head.last_seq,
-        hash=head.last_hash,
-        entry_ts=entry.ts if entry is not None else ids.utcnow(),
+    written = LedgerEntry.objects.filter(seq=seq).values_list("ts", flat=True).first()
+    return LedgerCheckpoint.objects.create(
+        seq=seq, hash=hash_, entry_ts=written if written is not None else ids.utcnow()
     )
-    session.add(point)
-    session.flush()
-    return point
 
 
 def checkpoint_dict(point: LedgerCheckpoint) -> dict[str, Any]:
@@ -748,16 +707,14 @@ class IntegrityMonitor:
         self._last: dict[str, Any] | None = None
         self._full_at = 0.0
 
-    def check(self, session: Session) -> dict[str, Any]:
+    def check(self, tx: db.Transaction) -> dict[str, Any]:
         with self._lock:
             last, now = self._last, time.monotonic()
             if last is None or not last["valid"] or now - self._full_at >= self.full_every:
-                result = verify(session, settings=self.settings)
+                result = verify(tx, settings=self.settings)
                 self._full_at = now
             else:
-                result = verify(
-                    session, start=(last["checked"], last["head"]), settings=self.settings
-                )
+                result = verify(tx, start=(last["checked"], last["head"]), settings=self.settings)
             self._last = result
             return dict(result)
 

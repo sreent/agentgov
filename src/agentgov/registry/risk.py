@@ -12,11 +12,10 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from django.db.models import Count
 
-from agentgov import ids
-from agentgov.models import DISCOVERED, Agent, Finding, RiskSignal
+from agentgov import db, ids
+from agentgov.db.models import DISCOVERED, Agent, Finding, RiskSignal
 from agentgov.registry import validation
 
 TIER_POINTS = {"minimal": 0, "low": 5, "medium": 10, "high": 25, "critical": 40}
@@ -78,11 +77,13 @@ class RiskResult:
     factors: list[dict[str, Any]] = field(default_factory=list)
 
 
-def add_signal(session: Session, agent_id: str, kind: str, detail: str | None = None) -> None:
-    session.add(RiskSignal(id=ids.new_id(ids.SIGNAL), agent_id=agent_id, kind=kind, detail=detail))
+def add_signal(tx: db.Transaction, agent_id: str, kind: str, detail: str | None = None) -> None:
+    RiskSignal.objects.create(
+        id=ids.new_id(ids.SIGNAL), agent_id=agent_id, kind=kind, detail=detail
+    )
 
 
-def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
+def evaluate(tx: db.Transaction, agent: Agent, window_hours: int) -> RiskResult:
     factors: list[dict[str, Any]] = []
 
     def factor(name: str, points: int, detail: str = "") -> None:
@@ -110,30 +111,28 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
         factor("Unrestricted tool permissions (*/*)", 15)
 
     since = ids.utcnow() - timedelta(hours=window_hours)
-    rows = session.execute(
-        select(RiskSignal.kind, func.count())
-        .where(RiskSignal.agent_id == agent.id, RiskSignal.ts >= since)
-        .group_by(RiskSignal.kind)
-    ).all()
+    rows = (
+        RiskSignal.objects.filter(agent_id=agent.id, ts__gte=since)
+        .values("kind")
+        .annotate(n=Count("id"))
+        .order_by("kind")
+        .values_list("kind", "n")
+    )
     for kind, count in rows:
         per, cap = SIGNAL_WEIGHTS.get(kind, (2, 10))
         factor(SIGNAL_LABELS.get(kind, kind), min(cap, per * count), f"{count} in {window_hours}h")
 
-    unsafe = session.scalar(
-        select(Finding.severity).where(
-            Finding.key == f"agent.unsafe_instructions:{agent.id}", Finding.status == "open"
-        )
+    unsafe = (
+        Finding.objects.filter(key=f"agent.unsafe_instructions:{agent.id}", status="open")
+        .values_list("severity", flat=True)
+        .first()
     )
     if unsafe:
         factor("Unsafe instructions", INSTRUCTION_POINTS.get(unsafe, 10), unsafe)
     if agent.on_platform:
-        open_types = session.scalars(
-            select(Finding.type).where(
-                Finding.agent_id == agent.id,
-                Finding.status == "open",
-                Finding.type.in_(FINDING_WEIGHTS),
-            )
-        )
+        open_types = Finding.objects.filter(
+            agent_id=agent.id, status="open", type__in=list(FINDING_WEIGHTS)
+        ).values_list("type", flat=True)
         for type_ in sorted(set(open_types)):
             factor(*FINDING_WEIGHTS[type_])
 
@@ -143,15 +142,15 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
     # score adds up to, the agent is at high risk at least (not critical, which would block
     # it where risk-based access is enforced).
     if level in ("low", "medium"):
-        worst = session.scalar(
-            select(Finding.title)
-            .where(
-                Finding.agent_id == agent.id,
-                Finding.status == "open",
-                Finding.severity.in_(("high", "critical")),
-                Finding.type.in_((*FINDING_WEIGHTS, "agent.unsafe_instructions")),
+        worst = (
+            Finding.objects.filter(
+                agent_id=agent.id,
+                status="open",
+                severity__in=("high", "critical"),
+                type__in=(*FINDING_WEIGHTS, "agent.unsafe_instructions"),
             )
-            .limit(1)
+            .values_list("title", flat=True)
+            .first()
         )
         if worst:
             level = "high"

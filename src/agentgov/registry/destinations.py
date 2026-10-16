@@ -36,14 +36,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.models import DESTINATION_KINDS, Destination, LedgerHead, Team
-from agentgov.registry import desks, validation
+from agentgov.db.models import DESTINATION_KINDS, Destination
+from agentgov.registry import desks, teams, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
 
@@ -87,23 +84,22 @@ def category(entry_type: str) -> str:
     return "changes"
 
 
-def head(session: Session) -> int:
+def head(tx: db.Transaction) -> int:
     """The last ledger entry's sequence number."""
-    row = session.get(LedgerHead, 1)
-    return row.last_seq if row is not None else 0
+    return ledger.head_seq(tx)
 
 
-def get(session: Session, ref: str) -> Destination:
-    destination = session.get(Destination, ref) or session.scalar(
-        select(Destination).where(Destination.name == ref)
+def get(tx: db.Transaction, ref: str) -> Destination:
+    destination = (
+        Destination.objects.filter(pk=ref).first() or Destination.objects.filter(name=ref).first()
     )
     if destination is None:
         raise NotFound(f"destination {ref!r} not found")
     return destination
 
 
-def list_all(session: Session) -> list[Destination]:
-    return list(session.scalars(select(Destination).order_by(Destination.name)))
+def list_all(tx: db.Transaction) -> list[Destination]:
+    return list(Destination.objects.order_by("name"))
 
 
 # ------------------------------------------------------------------ credentials
@@ -334,11 +330,11 @@ def _known(data: dict[str, Any], also: tuple[str, ...]) -> None:
 
 
 def create(
-    session: Session, data: dict[str, Any], *, actor: str, settings: Settings | None = None
+    tx: db.Transaction, data: dict[str, Any], *, actor: str, settings: Settings | None = None
 ) -> Destination:
     _known(data, ("name", "kind", "status", "backfill"))
     name = validation.slug(data.get("name"), "name")
-    if session.scalar(select(Destination).where(Destination.name == name)):
+    if Destination.objects.filter(name=name).exists():
         raise Conflict(f"destination {name!r} already exists")
     kind = validation.one_of(data.get("kind"), DESTINATION_KINDS, "kind")
     backfill = bool(data.get("backfill"))
@@ -359,21 +355,20 @@ def create(
         status=status,
         labels={},
         # From now on, unless it should get the ledger from its start.
-        cursor=0 if backfill else head(session),
+        cursor=0 if backfill else head(tx),
         delivered=0,
         failures=0,
         created_by=actor,
     )
     _apply(destination, data, settings)
-    session.add(destination)
-    session.flush()
+    destination.save(force_insert=True)
     if kind in DESK and not backfill:
         # Tickets for the issues that start from now on, not the ones already open.
         from agentgov.registry import tickets
 
-        tickets.skip_open(session, destination)
+        tickets.skip_open(tx, destination)
     ledger.append(
-        session,
+        tx,
         type="destination.created",
         actor=actor,
         resource=f"destination/{name}",
@@ -385,12 +380,12 @@ def create(
             "backfill": backfill,
         },
     )
-    mark_changed(session, "destinations")
+    mark_changed(tx, "destinations")
     return destination
 
 
 def update(
-    session: Session,
+    tx: db.Transaction,
     destination: Destination,
     data: dict[str, Any],
     *,
@@ -398,20 +393,24 @@ def update(
     version: int | None = None,
     settings: Settings | None = None,
 ) -> list[str]:
-    start_edit(session, destination, version, f"destination {destination.name}")
+    start_edit(tx, destination, version, f"destination {destination.name}")
     _known(data, ("name", "kind"))
     if "kind" in data and data["kind"] != destination.kind:
         raise ValidationError("a destination's kind can't change: add another destination")
     changed = _apply(destination, data, settings)
+    if changed:
+        edited(destination)
+    # Saved even when nothing asked for changed: checking it may have put its settings in
+    # today's form.
+    destination.save()
     if changed and destination.kind in DESK:
         # Tickets the desk refused may go now: try them again.
         from agentgov.registry import tickets
 
-        tickets.retry_failed(session, destination)
+        tickets.retry_failed(tx, destination)
     if changed:
-        edited(destination)
         ledger.append(
-            session,
+            tx,
             type="destination.updated",
             actor=actor,
             resource=f"destination/{destination.name}",
@@ -420,40 +419,41 @@ def update(
                 "changes": changes(destination),
             },
         )
-        mark_changed(session, "destinations")
+        mark_changed(tx, "destinations")
     return changed
 
 
 def set_status(
-    session: Session, destination: Destination, action: str, *, actor: str
+    tx: db.Transaction, destination: Destination, action: str, *, actor: str
 ) -> Destination:
     """Pause a destination (it keeps its place in the ledger), or resume it."""
     if action not in ("pause", "resume"):
         raise ValidationError(f"unknown action {action!r}")
     target = PAUSED if action == "pause" else ACTIVE
-    lock(session, destination)
+    lock(tx, destination)
     if destination.status == target:
         raise InvalidTransition(f"destination is already {target}")
     destination.status = target
     destination.retry_at = None
+    destination.save()
     ledger.append(
-        session,
+        tx,
         type=f"destination.{action}",
         actor=actor,
         resource=f"destination/{destination.name}",
         severity="warning" if action == "pause" else "info",
     )
-    mark_changed(session, "destinations")
+    mark_changed(tx, "destinations")
     return destination
 
 
-def replay(session: Session, destination: Destination, after: Any, *, actor: str) -> Destination:
+def replay(tx: db.Transaction, destination: Destination, after: Any, *, actor: str) -> Destination:
     """Send a SIEM the ledger again, from after entry ``after`` (0: from its start)."""
     if destination.kind not in SIEM:
         raise ValidationError("replay is for SIEMs: chats and desks get what happens as it does")
     if isinstance(after, bool) or not isinstance(after, int) or after < 0:
         raise ValidationError("after is a ledger entry's sequence number (0: from the start)")
-    last = head(session)
+    last = head(tx)
     if after > last:
         raise ValidationError(f"the ledger ends at entry {last}")
     if after >= destination.cursor:
@@ -464,20 +464,21 @@ def replay(session: Session, destination: Destination, after: Any, *, actor: str
         )
     previous, destination.cursor = destination.cursor, after
     destination.retry_at = None
+    destination.save()
     ledger.append(
-        session,
+        tx,
         type="destination.replay",
         actor=actor,
         resource=f"destination/{destination.name}",
         details={"from": previous, "to": after},
     )
-    mark_changed(session, "destinations")
+    mark_changed(tx, "destinations")
     return destination
 
 
-def delete(session: Session, destination: Destination, *, actor: str) -> None:
+def delete(tx: db.Transaction, destination: Destination, *, actor: str) -> None:
     posting = sorted(
-        t.name for t in session.scalars(select(Team)) if destination.name in (t.destinations or [])
+        t.name for t in teams.list_all(tx) if destination.name in (t.destinations or [])
     )
     if posting:
         raise Conflict(
@@ -485,7 +486,7 @@ def delete(session: Session, destination: Destination, *, actor: str) -> None:
             "them first"
         )
     ledger.append(
-        session,
+        tx,
         type="destination.deleted",
         actor=actor,
         resource=f"destination/{destination.name}",
@@ -495,9 +496,9 @@ def delete(session: Session, destination: Destination, *, actor: str) -> None:
         # Its tickets stay in the desk; AgentGov stops keeping them in step.
         from agentgov.registry import tickets
 
-        tickets.forget(session, destination)
-    session.delete(destination)
-    mark_changed(session, "destinations")
+        tickets.forget(tx, destination)
+    destination.delete()
+    mark_changed(tx, "destinations")
 
 
 def to_dict(

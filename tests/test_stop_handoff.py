@@ -5,11 +5,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import cli
-from agentgov.models import FeatureSetting, Finding
+from agentgov.db.models import FeatureSetting, Finding, PlatformAgent
 from agentgov.platforms import databricks, foundry
 from agentgov.platforms.base import Found, Inventory
 from agentgov.registry import platforms
@@ -29,11 +28,8 @@ STILL = platforms.STILL_RUNNING
 
 
 def issue(client: TestClient, agent_id: str) -> Finding | None:
-    with client.app.state.rt.db.session() as s:  # type: ignore[attr-defined]
-        found = s.scalar(select(Finding).where(Finding.key == f"{STILL}:{agent_id}"))
-        if found is not None:
-            s.expunge(found)
-        return found
+    with client.app.state.rt.db.transaction():  # type: ignore[attr-defined]
+        return Finding.objects.filter(key=f"{STILL}:{agent_id}").first()
 
 
 def block(client: TestClient, name: str, action: str = "block") -> dict[str, Any]:
@@ -139,11 +135,9 @@ class TestCopilotStudio:
 
     def test_with_threat_detection_enforced_it_makes_no_tool_calls(self, client) -> None:
         import_inventory(client)
-        with client.app.state.rt.db.session() as s:
-            s.add(
-                FeatureSetting(
-                    key=platforms.THREAT_DETECTION, mode="enforce", changed_by="admin:test"
-                )
+        with client.app.state.rt.db.transaction():
+            FeatureSetting.objects.create(
+                key=platforms.THREAT_DETECTION, mode="enforce", changed_by="admin:test"
             )
         sales = agent_named(client, "sales-helper")
         block(client, "sales-helper")
@@ -156,9 +150,10 @@ class TestCopilotStudio:
         import_inventory(m365, [bot("bot-exp", "Expenses (Copilot Studio)", entra_id="entra-exp")])
         expenses = agent_named(m365, "expense-helper")
         rt = m365.app.state.rt  # type: ignore[attr-defined]
-        with rt.db.session() as s:
-            record = s.get(platforms.PlatformAgent, "microsoft-365:T_expenses")
+        with rt.db.transaction():
+            record = PlatformAgent.objects.get(pk="microsoft-365:T_expenses")
             record.data = {**record.data, "blocked": True}
+            record.save()
         done = block(m365, "expense-helper")
         assert done["still_runs_in"] == "Copilot Studio"
         found = issue(m365, expenses["id"])
@@ -171,11 +166,11 @@ class TestCopilotStudio:
 class TestOtherPlatforms:
     def record(self, client: TestClient, *found: Found, read: set[str] | None = None) -> None:
         rt = client.app.state.rt  # type: ignore[attr-defined]
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             platforms.record_inventory(
-                s, "aws", Inventory(found=list(found), read=read or {"us-east-1"})
+                tx, "aws", Inventory(found=list(found), read=read or {"us-east-1"})
             )
-            platforms.refresh_risk(s, rt.settings)
+            platforms.refresh_risk(tx, rt.settings)
 
     def agent(self, *, stopped: bool | None = None) -> Found:
         return Found(

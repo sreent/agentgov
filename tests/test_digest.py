@@ -10,11 +10,10 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov.config import Settings
-from agentgov.models import Finding, IntegrationState, LedgerEntry
+from agentgov.db.models import Finding, IntegrationState, LedgerEntry
 from agentgov.notify import Notifier
 from agentgov.registry import destinations, digest, features, findings, issues, teams
 from agentgov.secops.delivery import Delivery
@@ -75,24 +74,24 @@ def _issues(client: TestClient, agent_id: str, settings: Settings) -> tuple[str,
     one medium, one low (below the severity sent one by one)."""
     rt = _rt(client)
     medium = _raise(client, agent_id)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         low, _ = findings.raise_finding(
-            s,
+            tx,
             type="agent.attestation_overdue",
             severity="low",
             subject=agent_id,
             agent_id=agent_id,
             title="Its review is overdue",
         )
-        for f in s.scalars(select(Finding)):
-            f.first_seen = MONDAY - timedelta(hours=1)
-        issues.route(s, settings, MONDAY - timedelta(hours=1))
+        Finding.objects.update(first_seen=MONDAY - timedelta(hours=1))
+        issues.route(tx, settings, MONDAY - timedelta(hours=1))
         return medium, low.id
 
 
 def _ledger(client: TestClient, type_: str) -> list[dict[str, Any]]:
-    with _rt(client).db.session() as s:
-        return [e.details for e in s.scalars(select(LedgerEntry).where(LedgerEntry.type == type_))]
+    with _rt(client).db.transaction():
+        entries = LedgerEntry.objects.filter(type=type_).order_by("seq")
+        return list(entries.values_list("details", flat=True))
 
 
 class TestTheDigest:
@@ -120,8 +119,8 @@ class TestTheDigest:
         # Once a day.
         assert notifier.digest(MONDAY + timedelta(hours=3)) == {}
         # The next day: what was taken on says so, and nothing is new.
-        with _rt(client).db.session() as s:
-            issues.acknowledge(s, findings.get(s, medium), actor="person:cx-team@example.com")
+        with _rt(client).db.transaction() as tx:
+            issues.acknowledge(tx, findings.get(tx, medium), actor="person:cx-team@example.com")
         assert notifier.digest(MONDAY + timedelta(days=1))["digests_sent"] == 1
         body = outbox[1].get_content()
         assert outbox[1]["Subject"] == (
@@ -135,10 +134,10 @@ class TestTheDigest:
         settings = at(_rt(client).settings)
         notifier = _notifier(client, settings, smtp=lambda: _SMTP(outbox))
         _issues(client, agent["id"], settings)
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             # A week on, nobody took them on: they are with the sponsors. bob has no
             # address: AgentGov lists them for him.
-            issues.route(s, settings, MONDAY + timedelta(days=7))
+            issues.route(tx, settings, MONDAY + timedelta(days=7))
         notifier.digest(MONDAY + timedelta(days=7))
         assert [m["To"] for m in outbox] == ["alice@example.com"]
 
@@ -164,10 +163,10 @@ class TestTheDigest:
         )
         rt.settings = dataclasses.replace(rt.settings, destination_secrets_dir=str(tmp_path))
         (tmp_path / "cx-slack").write_text("https://hooks.slack.example/T/B/x")
-        with rt.db.session() as s:
-            destinations.create(s, {"name": "cx-slack", "kind": "slack"}, actor="admin:test")
+        with rt.db.transaction() as tx:
+            destinations.create(tx, {"name": "cx-slack", "kind": "slack"}, actor="admin:test")
             teams.update_team(
-                s, teams.get(s, "cx"), {"destinations": ["cx-slack"]}, actor="admin:test"
+                tx, teams.get(tx, "cx"), {"destinations": ["cx-slack"]}, actor="admin:test"
             )
         settings = dataclasses.replace(at(rt.settings), smtp_url=None)
         _issues(client, agent["id"], settings)
@@ -183,9 +182,9 @@ class TestTheDigest:
         _issues(client, agent["id"], settings)
         off = dataclasses.replace(settings, issues_digest_at=None)
         assert _notifier(client, off, smtp=lambda: _SMTP(outbox)).digest(MONDAY) == {}
-        with rt.db.session() as s:
-            features.set_mode(s, rt.settings, "issues", "off", actor="admin:test")
+        with rt.db.transaction() as tx:
+            features.set_mode(tx, rt.settings, "issues", "off", actor="admin:test")
         assert _notifier(client, settings, smtp=lambda: _SMTP(outbox)).digest(MONDAY) == {}
         assert outbox == []
-        with rt.db.session() as s:
-            assert s.get(IntegrationState, digest.STATE) is None
+        with rt.db.transaction():
+            assert not IntegrationState.objects.filter(pk=digest.STATE).exists()

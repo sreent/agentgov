@@ -164,8 +164,8 @@ tests its URL, as a role that may create databases:
 | `src/agentgov/coordination.py` | Several control-plane replicas: changes to every replica, the leader, jobs one at a time |
 | `src/agentgov/tls.py` | Mutual TLS between the components, and making their certificates |
 | `src/agentgov/mcp_scan.py` | The MCP servers set up on a developer's machine (`agentgov mcp scan`) |
-| `src/agentgov/db` | The database's connections and transactions, which Django runs with the rules every transaction keeps; the tables as Django models (`models.py`); and the SQLAlchemy sessions the modules use until they move to Django's ORM ([ADR 0007](docs/adr/0007-django.md)) |
-| `src/agentgov/models.py`, `src/agentgov/migrations` | The database schema and its migrations (Alembic) |
+| `src/agentgov/db` | The database's connections and transactions, which Django runs with the rules every transaction keeps; the tables as Django models (`models.py`), and their migrations (`migrations`) ([ADR 0007](docs/adr/0007-django.md)) |
+| `src/agentgov/migrations` | Bringing a database's schema up to date: Alembic's migrations (`versions`), which built it before Django's, then Django's |
 | `src/agentgov/config.py`, `src/agentgov/cli.py` | The settings, and the `agentgov` command |
 | `ui` | The admin UI: React and TypeScript (`src`: a module per page in `pages`, the sign-in page and the menu in `shell`, and what pages share in `components` and `lib`), built with Vite into `src/agentgov/ui` (not in git), and its browser tests (`e2e`, Playwright) |
 | `deploy/compose`, `deploy/helm` | The Compose stack and the Helm chart (keep the chart's realm file in step with Compose's: CI compares them) |
@@ -186,28 +186,34 @@ capability is a feature they can turn off. Add it to the catalog in
 `src/agentgov/registry/features.py`, with its modes and what each does, and describe it in
 `docs/features.md` (a test checks both). Then check its mode where it acts: in Rego with
 `ctx.enforced(...)`, in the processor with the modes it reads from OPA, and in the control
-plane with `features.mode(session, ...)`. A control that decides about calls should
+plane with `features.mode(tx, ...)`. A control that decides about calls should
 support monitor mode: decide, record what it would have done, and let the call through.
 
 ## Changing the database schema
 
-Every change to `src/agentgov/models.py` needs a migration in
-`src/agentgov/migrations/versions`, and a test fails until it has one. Write it with:
+The tables are the Django models in `src/agentgov/db/models.py`, and every change to them
+needs a migration in `src/agentgov/db/migrations` (a test fails until it has one). Write it
+with:
 
 ```bash
-scripts/new-migration.sh "Add model grants to blueprints"
+scripts/new-migration.sh add_model_grants_to_blueprints
 ```
 
-Alembic compares a database built by the existing migrations with the models and writes
-the difference as the next numbered revision. Read it before you commit: Alembic can't
-tell a renamed column from a dropped and an added one, and moving data between columns is
-yours to write. Keep each migration working on both PostgreSQL and SQLite (the helper
-writes SQLite-compatible batch operations), and give new columns on existing tables a
-`server_default` or make them nullable, because tables already have rows.
+Django compares the models with the migrations and writes the difference as the next
+numbered one. Read it before you commit: Django asks whether a field was renamed when it
+can't tell, and moving data between columns is yours to write (`RunPython` or `RunSQL`).
+Keep each migration working on both PostgreSQL and SQLite, and give a new column a
+`db_default` or make it nullable: while an upgrade rolls out, the version before still
+writes rows without it. Alembic's migrations (`src/agentgov/migrations/versions`) built the
+schema before Django's ([ADR 0007](docs/adr/0007-django.md)): they still run first, up to
+their last, and take no new ones.
 
-While the modules move to Django's ORM ([ADR 0007](docs/adr/0007-django.md)), the Django
-models in `src/agentgov/db/models.py` name the same tables: change them in step, and
-`tests/test_django_models.py` checks them against the database the migrations build.
+Code that uses the database takes the transaction it runs in (`agentgov.db.Transaction`,
+which `db.transaction()` opens) and queries with Django's models. A model's `save()` writes
+the fields that changed since the row was read, so set a JSON field to a new value rather
+than changing the one there; and a change is saved, or it is lost. Each read gives another
+object: lock a row (`db.lock`) before you decide on it, and it is read afresh. A part of
+the transaction that rolls back on its own is the transaction's `savepoint()`.
 
 ## Pull requests
 

@@ -124,7 +124,7 @@ def analyze_tool_execution(request: HttpRequest, response: HttpResponse) -> Any:
 
 def _record(rt: Any, verdict: Verdict, correlation_id: str) -> None:
     try:
-        with rt.db.session() as s:
-            threat_detection.record(s, rt.settings, verdict, correlation_id=correlation_id)
+        with rt.db.transaction() as tx:
+            threat_detection.record(tx, rt.settings, verdict, correlation_id=correlation_id)
     except Exception:  # the answer has gone; never let the evidence fail loudly
         log.exception("could not record a Copilot Studio decision")

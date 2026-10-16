@@ -29,14 +29,13 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids, migrations
 from agentgov.api.app import api_routes, create_app
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.models import AdminSession, ApiKey, ApprovalRequest
+from agentgov.db.models import AdminSession, ApiKey, ApprovalRequest
 from agentgov.registry import findings, issues, model_usage
 from agentgov.runtime import Runtime
 from tests.test_models import access_log, logs
@@ -201,9 +200,9 @@ def seed(client: TestClient, provider: FakeProvider) -> Seeded:
         )
         seeded.assignment[team] = asked["id"]
         now = ids.utcnow()
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             raised, _ = findings.raise_finding(
-                s,
+                tx,
                 type="test.thing",
                 severity="medium",
                 subject=made["id"],
@@ -212,25 +211,23 @@ def seed(client: TestClient, provider: FakeProvider) -> Seeded:
             )
             seeded.finding[team] = raised.id
             approval = f"apr_{team}_matrix"
-            s.add(
-                ApprovalRequest(
-                    id=approval,
-                    agent_id=made["id"],
-                    agent_name=f"{team}-bot",
-                    action="tools/call",
-                    resource="crm/update",
-                    arguments_hash="h",
-                    status="pending",
-                    requested_at=now,
-                    expires_at=now + timedelta(hours=1),
-                )
+            ApprovalRequest.objects.create(
+                id=approval,
+                agent_id=made["id"],
+                agent_name=f"{team}-bot",
+                action="tools/call",
+                resource="crm/update",
+                arguments_hash="h",
+                status="pending",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
             )
             seeded.approval[team] = approval
     # Each issue to its agent's owner and sponsor (as the issues job does); and each agent's
     # model calls, metered.
-    with rt.db.session() as s:
-        issues.route(s, rt.settings)
-        model_usage.ingest_logs(s, logs(*(access_log(agent_id=i) for i in seeded.agent.values())))
+    with rt.db.transaction() as tx:
+        issues.route(tx, rt.settings)
+        model_usage.ingest_logs(tx, logs(*(access_log(agent_id=i) for i in seeded.agent.values())))
     seeded.checkpoint = int(post("/v1/ledger/checkpoints", {})["seq"])
     for role in ROLES:
         made = post("/v1/apikeys", {"name": f"{role}-key", "role": role})
@@ -244,11 +241,9 @@ def seed(client: TestClient, provider: FakeProvider) -> Seeded:
     person = cli_session(client, provider, sub="pat", email="pat@example.com", roles=[])
     seeded.tokens["person"] = person["token"]
     cli_session(client, provider, sub="decoy", email="decoy@example.com", roles=[])
-    with rt.db.session() as s:
-        seeded.decoy_key = s.scalars(select(ApiKey.id).where(ApiKey.name == "decoy")).one()
-        seeded.decoy_session = s.scalars(
-            select(AdminSession.id).where(AdminSession.subject == "decoy")
-        ).one()
+    with rt.db.transaction():
+        seeded.decoy_key = ApiKey.objects.get(name="decoy").id
+        seeded.decoy_session = AdminSession.objects.get(subject="decoy").id
     return seeded
 
 
@@ -401,7 +396,7 @@ def observe(workdir: Path) -> Observed:
     provider = FakeProvider()
     template = workdir / "template.db"
     db = Database(f"sqlite:///{template}")
-    migrations.upgrade(db.engine)
+    migrations.upgrade(db)
     db.dispose()
     with client_for(template, provider) as client:
         seeded = seed(client, provider)

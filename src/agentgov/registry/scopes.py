@@ -10,10 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov.models import Agent, Blueprint, FeatureSetting, ManagementRule, Team
+from agentgov import db
+from agentgov.db.models import Agent, Blueprint, FeatureSetting, ManagementRule, Team
 from agentgov.registry import validation
 from agentgov.registry.errors import ValidationError
 
@@ -58,11 +56,11 @@ def parse(value: Any, what: str = "scope") -> dict[str, Any]:
     return out
 
 
-def known(session: Session) -> dict[str, set[str]]:
+def known(tx: db.Transaction) -> dict[str, set[str]]:
     """The names a scope may use: the teams and blueprints there are, and the platforms."""
     return {
-        "teams": set(session.scalars(select(Team.name))),
-        "blueprints": set(session.scalars(select(Blueprint.name))),
+        "teams": set(Team.objects.values_list("name", flat=True)),
+        "blueprints": set(Blueprint.objects.values_list("name", flat=True)),
         "platforms": set(PLATFORMS),
     }
 
@@ -78,7 +76,7 @@ def missing(scope: dict[str, Any], names: dict[str, set[str]]) -> list[str]:
 
 
 def check_names(
-    session: Session,
+    tx: db.Transaction,
     scope: dict[str, Any],
     what: str = "scope",
     *,
@@ -90,7 +88,7 @@ def check_names(
     before: set[str] = set()
     for old in had or []:
         before |= {f"{w} {n}" for k, w in WORDS.items() for n in old.get(k) or []}
-    gone = [m for m in missing(scope, known(session)) if m not in before]
+    gone = [m for m in missing(scope, known(tx)) if m not in before]
     if gone:
         where = (
             f"; the platforms are {', '.join(PLATFORMS)}"
@@ -102,18 +100,18 @@ def check_names(
         )
 
 
-def naming(session: Session, key: str, name: str) -> list[str]:
+def naming(tx: db.Transaction, key: str, name: str) -> list[str]:
     """The controls' exceptions and management rules that name ``name``, a team or a
     blueprint (``key``): without it, their scopes would match no agent, and a rule that
     gives agents an owner couldn't give them that team."""
     found = [
         f"the exceptions to {row.key}"
-        for row in session.scalars(select(FeatureSetting).order_by(FeatureSetting.key))
+        for row in FeatureSetting.objects.order_by("key")
         if any(name in ((e.get("scope") or {}).get(key) or []) for e in row.scopes or [])
     ]
     found += [
         f"management rule {rule.name}"
-        for rule in session.scalars(select(ManagementRule).order_by(ManagementRule.name))
+        for rule in ManagementRule.objects.order_by("name")
         if name in ((rule.scope or {}).get(key) or [])
         or (key == "teams" and (rule.params or {}).get("owner") == name)
     ]

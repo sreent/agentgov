@@ -31,13 +31,12 @@ from collections import defaultdict
 from collections.abc import Iterator
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from django.db.models import Count
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import mark_changed
-from agentgov.models import (
+from agentgov.db.models import (
     BLOCKED,
     DELETED,
     DISCOVERED,
@@ -112,18 +111,18 @@ def connector_key(value: Any) -> str | None:
     return value.strip().rstrip("/").rsplit("/", 1)[-1]
 
 
-def _entra_index(session: Session) -> dict[str, str]:
+def _entra_index(tx: db.Transaction) -> dict[str, str]:
     """Registry agent ids by Entra agent ID, to match an agent both sources report."""
     index = {}
-    for record in session.scalars(select(PlatformAgent)):
-        entra_id = (record.data or {}).get("entra_agent_id")
+    for agent_id, data in PlatformAgent.objects.values_list("agent_id", "data"):
+        entra_id = (data or {}).get("entra_agent_id")
         if entra_id:
-            index[str(entra_id)] = record.agent_id
+            index[str(entra_id)] = agent_id
     return index
 
 
 def upsert(
-    session: Session,
+    tx: db.Transaction,
     *,
     source: str,
     external_id: str,
@@ -136,17 +135,17 @@ def upsert(
 ) -> tuple[Agent, bool]:
     """Record one agent as the platform reports it; returns ``(agent, created)``."""
     key = f"{source}:{external_id}"
-    record = session.get(PlatformAgent, key)
-    agent = session.get(Agent, record.agent_id) if record is not None else None
+    record = PlatformAgent.objects.filter(pk=key).first()
+    agent = Agent.objects.filter(pk=record.agent_id).first() if record is not None else None
     entra_id = external_ids.get("entra_agent_id")
     if agent is None and entra_id and entra_id in entra_index:
         # A Copilot Studio agent published to Microsoft 365 is in both sources.
-        agent = session.get(Agent, entra_index[entra_id])
+        agent = Agent.objects.filter(pk=entra_index[entra_id]).first()
     created = agent is None
     if agent is None:
         agent = Agent(
             id=ids.new_id(ids.AGENT),
-            name=discovery.unique_name(session, discovery.slugify(name)),
+            name=discovery.unique_name(tx, discovery.slugify(name)),
             description=description or "",
             status=DISCOVERED,
             source=f"platform:{source}",
@@ -158,10 +157,9 @@ def upsert(
             external_ids=external_ids,
             created_by=f"system:{source}",
         )
-        session.add(agent)
-        session.flush()
+        agent.save(force_insert=True)
         ledger.append(
-            session,
+            tx,
             type="agent.discovered",
             actor=f"system:{source}",
             agent=agent,
@@ -169,23 +167,25 @@ def upsert(
         )
         # Not a finding of its own: one per platform says how many are left to review
         # (review_summary), so that an import of 300 agents raises one issue, not 300.
-        mark_changed(session, "agents")
+        mark_changed(tx, "agents")
     else:
         agent.external_ids = {**(agent.external_ids or {}), **external_ids}
         if not agent.platform or agent.platform == ENTRA_PLATFORM:
             agent.platform = platform
         if description and not agent.description:
             agent.description = description
+        agent.save()
     if entra_id:
         entra_index[entra_id] = agent.id
+    adding = record is None
     if record is None:
         record = PlatformAgent(id=key, source=source, external_id=external_id, agent_id=agent.id)
-        session.add(record)
     elif details.get("quarantined") is None and (record.data or {}).get("quarantined") is not None:
         # The inventory may not report quarantines: keep the one AgentGov made.
         details = {**details, "quarantined": record.data["quarantined"]}
     record.agent_id, record.name, record.data = agent.id, name, details
     record.synced_at = ids.utcnow()
+    record.save(force_insert=adding)
     return agent, created
 
 
@@ -200,18 +200,16 @@ def _scope(value: Any) -> str | None:
     return lowered
 
 
-def instructions_checked(session: Session) -> dict[str, Any]:
+def instructions_checked(tx: db.Transaction) -> dict[str, Any]:
     """For each catalog package, the version (last change) whose instructions were read."""
     return {
         record.external_id: (record.data or {}).get("instructions_checked")
-        for record in session.scalars(
-            select(PlatformAgent).where(PlatformAgent.source == "microsoft-365")
-        )
+        for record in PlatformAgent.objects.filter(source="microsoft-365")
     }
 
 
 def record_microsoft_365(
-    session: Session,
+    tx: db.Transaction,
     packages: list[dict[str, Any]],
     *,
     include_types: set[str],
@@ -225,7 +223,7 @@ def record_microsoft_365(
     declarative agents' instructions (None when there are none)."""
     agent_instructions = agent_instructions or {}
     counts = {"created": 0, "updated": 0, "skipped": 0}
-    index = _entra_index(session)
+    index = _entra_index(tx)
     seen: set[str] = set()
     for pkg in packages:
         package_id = pkg.get("id")
@@ -256,7 +254,7 @@ def record_microsoft_365(
             "last_modified": pkg.get("lastModifiedDateTime"),
             "in_catalog": True,
         }
-        previous = session.get(PlatformAgent, f"microsoft-365:{package_id}")
+        previous = PlatformAgent.objects.filter(pk=f"microsoft-365:{package_id}").first()
         details["instructions_checked"] = (
             pkg.get("lastModifiedDateTime")
             if package_id in agent_instructions
@@ -266,7 +264,7 @@ def record_microsoft_365(
         if pkg.get("agentIdentityId"):
             external_ids["entra_agent_id"] = str(pkg["agentIdentityId"])
         agent, created = upsert(
-            session,
+            tx,
             source="microsoft-365",
             external_id=package_id,
             name=str(pkg.get("displayName") or package_id),
@@ -281,7 +279,7 @@ def record_microsoft_365(
         if text:
             with contextlib.suppress(ValidationError):  # too long to keep
                 instructions_svc.report(
-                    session,
+                    tx,
                     agent,
                     source="microsoft-365",
                     text=text,
@@ -289,12 +287,11 @@ def record_microsoft_365(
                     classify=classify,
                 )
     # Agents that left the catalog stay in the registry, marked as gone.
-    for record in session.scalars(
-        select(PlatformAgent).where(PlatformAgent.source == "microsoft-365")
-    ):
+    for record in PlatformAgent.objects.filter(source="microsoft-365"):
         if record.id not in seen and (record.data or {}).get("in_catalog", True):
             record.data = {**(record.data or {}), "in_catalog": False}
-    set_sync(session, "microsoft-365", ok=True, counts=counts, actor=actor)
+            record.save()
+    set_sync(tx, "microsoft-365", ok=True, counts=counts, actor=actor)
     return counts
 
 
@@ -335,14 +332,14 @@ def _connectors(props: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def import_copilot_studio(
-    session: Session, payload: Any, *, actor: str, complete: bool = False
+    tx: db.Transaction, payload: Any, *, actor: str, complete: bool = False
 ) -> dict[str, int]:
     """Store a Power Platform inventory export of Copilot Studio agents. ``complete``: it is
     the whole inventory (as a sync reads it), so the agents missing from it are gone from
     Copilot Studio: they stay in the registry, marked gone, and their findings close. An
     export may cover only some environments, so without it they are left as they were."""
     counts = {"created": 0, "updated": 0, "skipped": 0}
-    index = _entra_index(session)
+    index = _entra_index(tx)
     seen: set[str] = set()
     for row in _rows(payload):
         if str(row.get("type", INVENTORY_TYPE)).lower() != INVENTORY_TYPE:
@@ -396,7 +393,7 @@ def import_copilot_studio(
         if props.get("entraAgentId"):
             external_ids["entra_agent_id"] = str(props["entraAgentId"])
         _, created = upsert(
-            session,
+            tx,
             source="copilot-studio",
             external_id=agent_id,
             name=str(props.get("displayName") or agent_id),
@@ -409,25 +406,23 @@ def import_copilot_studio(
     # An export with no agents at all is more likely the wrong file than an empty tenant.
     if complete and seen:
         gone = 0
-        for record in session.scalars(
-            select(PlatformAgent).where(PlatformAgent.source == "copilot-studio")
-        ):
+        for record in PlatformAgent.objects.filter(source="copilot-studio"):
             if record.id not in seen and (record.data or {}).get("in_inventory", True):
                 record.data = {**(record.data or {}), "in_inventory": False}
+                record.save()
                 gone += 1
         if gone:
             counts["gone"] = gone
-    session.flush()
-    counts["findings"] = evaluate(session)
-    set_sync(session, "copilot-studio", ok=True, counts=counts, actor=actor)
+    counts["findings"] = evaluate(tx)
+    set_sync(tx, "copilot-studio", ok=True, counts=counts, actor=actor)
     return counts
 
 
-def gone_agents(session: Session) -> set[str]:
+def gone_agents(tx: db.Transaction) -> set[str]:
     """The agents that no platform reporting them reports any more."""
     there: set[str] = set()
     gone: set[str] = set()
-    for agent_id, data in session.execute(select(PlatformAgent.agent_id, PlatformAgent.data)):
+    for agent_id, data in PlatformAgent.objects.values_list("agent_id", "data"):
         data = data or {}
         missing = data.get("in_inventory", True) is False or data.get("in_catalog", True) is False
         (gone if missing else there).add(agent_id)
@@ -438,11 +433,11 @@ def gone_agents(session: Session) -> set[str]:
 
 
 def record_agent_identities(
-    session: Session, identities: list[dict[str, Any]], *, actor: str | None = None
+    tx: db.Transaction, identities: list[dict[str, Any]], *, actor: str | None = None
 ) -> dict[str, int]:
     """Store the tenant's Entra agent identities (Graph ``agentIdentity`` objects)."""
     counts = {"created": 0, "updated": 0, "skipped": 0, "linked": 0}
-    index = _entra_index(session)
+    index = _entra_index(tx)
     seen: set[str] = set()
     present: set[str] = set()
     for identity in identities:
@@ -474,7 +469,7 @@ def record_agent_identities(
             "in_directory": True,
         }
         agent, created = upsert(
-            session,
+            tx,
             source="entra-agent-id",
             external_id=identity_id,
             name=str(identity.get("displayName") or identity_id),
@@ -486,7 +481,7 @@ def record_agent_identities(
         counts["created" if created else "updated"] += 1
         if disabled_by_microsoft:
             finding, _ = findings.raise_finding(
-                session,
+                tx,
                 type="entra.disabled_by_microsoft",
                 severity="high",
                 subject=agent.id,
@@ -501,7 +496,7 @@ def record_agent_identities(
             present.add(finding.key)
     # Gone from two syncs in a row: one odd page from Microsoft Graph doesn't close it.
     findings.resolve_absent(
-        session,
+        tx,
         types={"entra.disabled_by_microsoft"},
         present_keys=present,
         actor=SYSTEM_ACTOR,
@@ -509,95 +504,84 @@ def record_agent_identities(
     )
     # Identities deleted from Entra stay in the registry, marked as gone.
     others = set(
-        session.scalars(
-            select(PlatformAgent.agent_id).where(PlatformAgent.source != "entra-agent-id")
-        )
+        PlatformAgent.objects.exclude(source="entra-agent-id").values_list("agent_id", flat=True)
     )
-    for record in session.scalars(
-        select(PlatformAgent).where(PlatformAgent.source == "entra-agent-id")
-    ):
+    for record in PlatformAgent.objects.filter(source="entra-agent-id"):
         if record.id not in seen and (record.data or {}).get("in_directory", True):
             record.data = {**(record.data or {}), "in_directory": False}
+            record.save()
         # Linked: the identity of an agent that another source reports too.
         counts["linked"] += 1 if record.id in seen and record.agent_id in others else 0
-    set_sync(session, "entra-agent-id", ok=True, counts=counts, actor=actor)
+    set_sync(tx, "entra-agent-id", ok=True, counts=counts, actor=actor)
     return counts
 
 
-def approved_connectors(session: Session) -> list[ApprovedConnector]:
-    return list(session.scalars(select(ApprovedConnector).order_by(ApprovedConnector.connector_id)))
+def approved_connectors(tx: db.Transaction) -> list[ApprovedConnector]:
+    return list(ApprovedConnector.objects.order_by("connector_id"))
 
 
-def approve_connector(session: Session, connector_id: str, *, note: str, actor: str) -> None:
+def approve_connector(tx: db.Transaction, connector_id: str, *, note: str, actor: str) -> None:
     key = connector_key(connector_id)
     if key is None or not _CONNECTOR_ID.match(key):
         raise ValidationError(f"{connector_id!r} is not a connector ID (e.g. shared_office365)")
-    existing = session.get(ApprovedConnector, key)
+    existing = ApprovedConnector.objects.filter(pk=key).first()
     if existing is not None:
         existing.note = note or existing.note
+        existing.save()
         return
-    session.add(ApprovedConnector(connector_id=key, note=note or "", added_by=actor))
-    session.flush()
-    mark_changed(session, "connectors")  # OPA enforces the allowlist through threat detection
+    ApprovedConnector.objects.create(connector_id=key, note=note or "", added_by=actor)
+    mark_changed(tx, "connectors")  # OPA enforces the allowlist through threat detection
     ledger.append(
-        session,
+        tx,
         type="connector.approved",
         actor=actor,
         resource=f"connector/{key}",
         reason=note or None,
     )
-    evaluate(session)
+    evaluate(tx)
 
 
-def remove_approval(session: Session, connector_id: str, *, actor: str) -> None:
+def remove_approval(tx: db.Transaction, connector_id: str, *, actor: str) -> None:
     key = connector_key(connector_id) or connector_id
-    existing = session.get(ApprovedConnector, key)
+    existing = ApprovedConnector.objects.filter(pk=key).first()
     if existing is None:
         raise NotFound(f"connector {key!r} is not on the allowlist")
-    session.delete(existing)
-    session.flush()
-    mark_changed(session, "connectors")
+    existing.delete()
+    mark_changed(tx, "connectors")
     ledger.append(
-        session,
+        tx,
         type="connector.approval_removed",
         actor=actor,
         severity="warning",
         resource=f"connector/{key}",
     )
-    evaluate(session)
+    evaluate(tx)
 
 
 # ------------------------------------------------------------------- checks
 
 
-def _records(session: Session, source: str) -> list[PlatformAgent]:
+def _records(tx: db.Transaction, source: str) -> list[PlatformAgent]:
     """The source's agents that are still in the registry (not deleted)."""
-    return list(
-        session.scalars(
-            select(PlatformAgent)
-            .join(Agent, Agent.id == PlatformAgent.agent_id)
-            .where(PlatformAgent.source == source, Agent.status != DELETED)
-            .order_by(PlatformAgent.name)
-        )
-    )
+    deleted = set(Agent.objects.filter(status=DELETED).values_list("id", flat=True))
+    found = PlatformAgent.objects.filter(source=source).order_by("name")
+    return [r for r in found if r.agent_id not in deleted]
 
 
-def subjects(session: Session, source: str) -> set[str]:
+def subjects(tx: db.Transaction, source: str) -> set[str]:
     """The agents a source reports, deleted or not: its findings are about them, and other
     sources raise findings of the same types about theirs."""
-    return set(
-        session.scalars(select(PlatformAgent.agent_id).where(PlatformAgent.source == source))
-    )
+    return set(PlatformAgent.objects.filter(source=source).values_list("agent_id", flat=True))
 
 
-def evaluate(session: Session) -> int:
+def evaluate(tx: db.Transaction) -> int:
     """Raise or resolve the Copilot Studio findings; returns how many are open."""
-    approved = {c.connector_id for c in approved_connectors(session)}
+    approved = {c.connector_id for c in approved_connectors(tx)}
     present: set[str] = set()
 
     def flag(type_: str, record: PlatformAgent, severity: str, title: str, **kw: Any) -> None:
         finding, _ = findings.raise_finding(
-            session,
+            tx,
             type=type_,
             severity=severity,
             subject=record.agent_id,
@@ -607,7 +591,7 @@ def evaluate(session: Session) -> int:
         )
         present.add(finding.key)
 
-    for record in _records(session, "copilot-studio"):
+    for record in _records(tx, "copilot-studio"):
         data = record.data or {}
         if data.get("in_inventory", True) is False:
             continue  # gone from Copilot Studio: its findings close
@@ -666,53 +650,46 @@ def evaluate(session: Session) -> int:
                 "should have it and ask an approver to accept its risk.",
             )
     findings.resolve_absent(
-        session,
+        tx,
         types=FINDING_TYPES,
         present_keys=present,
         actor=SYSTEM_ACTOR,
-        subjects=subjects(session, "copilot-studio"),
+        subjects=subjects(tx, "copilot-studio"),
     )
-    sync = session.get(PlatformSync, "copilot-studio")
+    sync = PlatformSync.objects.filter(pk="copilot-studio").first()
     if sync is not None and not sync.ok:
         # Raised again from what an earlier sync stored, which may no longer hold: they stay
         # unverified until a sync succeeds.
         findings.mark_unverified(
-            session,
+            tx,
             types=FINDING_TYPES,
-            subjects=subjects(session, "copilot-studio"),
+            subjects=subjects(tx, "copilot-studio"),
             reason=failed_sync("copilot-studio", sync.message),
         )
     return len(present)
 
 
 @contextlib.contextmanager
-def first_sync(session: Session, source: str) -> Iterator[None]:
+def first_sync(tx: db.Transaction, source: str) -> Iterator[None]:
     """Around a sync of ``source``: if it is its first, what it finds about its agents
     (theirs, and AgentGov's own, such as unmanaged or high risk) was there before AgentGov
     looked, so it is marked as such (findings.BASELINE) and reaches people in AgentGov
     rather than in their inboxes (AGENTGOV_ISSUES_QUIET_FIRST_SYNC)."""
-    last = session.get(PlatformSync, source)
+    last = PlatformSync.objects.filter(pk=source).first()
     # None read anything before (a sync that failed reads nothing).
     first = last is None or (
-        not last.ok
-        and session.scalar(select(PlatformAgent.id).where(PlatformAgent.source == source).limit(1))
-        is None
+        not last.ok and not PlatformAgent.objects.filter(source=source).exists()
     )
     since = ids.utcnow()
     yield
     if not first:
         return
-    for finding in session.scalars(
-        select(Finding).where(
-            Finding.status == "open",
-            Finding.level.is_(None),
-            Finding.first_seen >= since,
-            Finding.agent_id.in_(
-                select(PlatformAgent.agent_id).where(PlatformAgent.source == source)
-            ),
-        )
-    ):
-        finding.details = {**(finding.details or {}), findings.BASELINE: True}
+    theirs = subjects(tx, source)
+    found = Finding.objects.filter(status="open", level__isnull=True, first_seen__gte=since)
+    for finding in found:
+        if finding.agent_id in theirs:
+            finding.details = {**(finding.details or {}), findings.BASELINE: True}
+            finding.save()
 
 
 def failed_sync(source: str, message: str | None) -> str:
@@ -723,7 +700,7 @@ def failed_sync(source: str, message: str | None) -> str:
 
 
 def record_inventory(
-    session: Session,
+    tx: db.Transaction,
     source: str,
     inventory: Inventory,
     *,
@@ -740,7 +717,7 @@ def record_inventory(
     present: set[str] = set()
     partial: dict[str, str] = {}  # agents read in part: their findings can't be resolved
     # An agent with an Entra agent identity (Foundry's) is the agent Entra Agent ID reports.
-    index = _entra_index(session)
+    index = _entra_index(tx)
     for item in inventory.found:
         key = f"{source}:{item.external_id}"
         if key in seen:
@@ -753,7 +730,7 @@ def record_inventory(
         if item.stopped is not None:
             details["stopped"] = item.stopped
         agent, created = upsert(
-            session,
+            tx,
             source=source,
             external_id=item.external_id,
             name=item.name,
@@ -773,7 +750,7 @@ def record_inventory(
         if item.instructions and item.instructions.strip():
             with contextlib.suppress(ValidationError):  # too long to keep
                 instructions_svc.report(
-                    session,
+                    tx,
                     agent,
                     source=source,
                     text=item.instructions,
@@ -782,7 +759,7 @@ def record_inventory(
                 )
         for risk in item.risks:
             finding, _ = findings.raise_finding(
-                session,
+                tx,
                 type=risk.type,
                 severity=risk.severity,
                 subject=agent.id,
@@ -796,7 +773,7 @@ def record_inventory(
     # Agents gone from what was read stay in the registry, marked as gone.
     unread: dict[str, str] = dict(partial)  # agent: why its findings can't be checked
     name = SOURCES[source]
-    for record in session.scalars(select(PlatformAgent).where(PlatformAgent.source == source)):
+    for record in PlatformAgent.objects.filter(source=source):
         part = (record.data or {}).get("part")
         if part in inventory.failed:
             unread[record.agent_id] = (
@@ -808,9 +785,10 @@ def record_inventory(
             )
         elif record.id not in seen and (record.data or {}).get("in_inventory", True):
             record.data = {**(record.data or {}), "in_inventory": False}
-    checked = subjects(session, source) - set(unread)
+            record.save()
+    checked = subjects(tx, source) - set(unread)
     findings.resolve_absent(
-        session,
+        tx,
         types=INVENTORY_FINDINGS,
         present_keys=present,
         actor=SYSTEM_ACTOR,
@@ -822,40 +800,40 @@ def record_inventory(
         by_reason.setdefault(why, set()).add(agent_id)
     for why, agent_ids in by_reason.items():
         findings.mark_unverified(
-            session, types=INVENTORY_FINDINGS, subjects=agent_ids, present_keys=present, reason=why
+            tx, types=INVENTORY_FINDINGS, subjects=agent_ids, present_keys=present, reason=why
         )
     counts["findings"] = len(present)
     if inventory.failed:
         counts["failed"] = len(inventory.failed)
     message = inventory.failures()
-    set_sync(session, source, ok=not inventory.failed, counts=counts, message=message, actor=actor)
+    set_sync(tx, source, ok=not inventory.failed, counts=counts, message=message, actor=actor)
     return counts
 
 
-def sync_failed(session: Session, source: str, message: str, *, actor: str | None) -> None:
+def sync_failed(tx: db.Transaction, source: str, message: str, *, actor: str | None) -> None:
     """A connector couldn't read its platform at all: its agents' findings stay open,
     unverified, until a sync succeeds."""
-    set_sync(session, source, ok=False, counts={}, message=message, actor=actor)
+    set_sync(tx, source, ok=False, counts={}, message=message, actor=actor)
     findings.mark_unverified(
-        session,
+        tx,
         types=INVENTORY_FINDINGS,
-        subjects=subjects(session, source),
+        subjects=subjects(tx, source),
         reason=failed_sync(source, message),
     )
 
 
-def refresh_risk(session: Session, settings: Settings) -> None:
+def refresh_risk(tx: db.Transaction, settings: Settings) -> None:
     """After a sync: recompute platform agents' risk now rather than at the next posture
     scan, how many of them are left to review, and which of those blocked in AgentGov their
     platform still runs."""
-    for agent in session.scalars(
-        select(Agent)
-        .where(Agent.source.like("platform:%"), Agent.status != DELETED)
-        .order_by(Agent.id)  # in the posture scan's order (registry/posture)
-    ).unique():
-        agents_svc.refresh_risk(session, settings, agent)
-    review_summary(session)
-    check_stops(session, settings)
+    for agent in (
+        Agent.objects.filter(source__startswith="platform:")
+        .exclude(status=DELETED)
+        .order_by("id")  # in the posture scan's order (registry/posture)
+    ):
+        agents_svc.refresh_risk(tx, settings, agent)
+    review_summary(tx)
+    check_stops(tx, settings)
 
 
 TO_REVIEW = "platform.agents_to_review"
@@ -863,34 +841,32 @@ TO_REVIEW = "platform.agents_to_review"
 NAMED = 5
 
 
-def review_summary(session: Session) -> None:
+def review_summary(tx: db.Transaction) -> None:
     """One issue per platform with agents found there and not reviewed yet: how many, and
     a few of their names. It goes to the catch-all team, and resolves once none is left.
     (Agents found on platforms each had a finding of their own before: those resolve.)"""
     left: dict[str, list[str]] = defaultdict(list)
     platform_agents = []
     # Gone from their platforms: there is nothing left to adopt.
-    gone = gone_agents(session)
-    for agent in session.scalars(
-        select(Agent).where(Agent.source.like("platform:%"), Agent.status != DELETED)
-    ).unique():
+    gone = gone_agents(tx)
+    for agent in Agent.objects.filter(source__startswith="platform:").exclude(status=DELETED):
         platform_agents.append(agent.id)
         source = (agent.source or "").removeprefix("platform:")
         if agent.status == DISCOVERED and source in SOURCES and agent.id not in gone:
             left[source].append(agent.name)
     for agent_id in platform_agents:
-        findings.resolve_key(session, f"agent.unmanaged:{agent_id}", actor="system:platforms")
+        findings.resolve_key(tx, f"agent.unmanaged:{agent_id}", actor="system:platforms")
     for source, label in SOURCES.items():
         names = sorted(left.get(source, []), key=str.lower)
         key = f"{TO_REVIEW}:platform:{source}"
         if not names:
-            findings.resolve_key(session, key, actor="system:platforms")
+            findings.resolve_key(tx, key, actor="system:platforms")
             continue
         shown = ", ".join(names[:NAMED])
         if len(names) > NAMED:
             shown += f" and {len(names) - NAMED} more"
         findings.raise_finding(
-            session,
+            tx,
             type=TO_REVIEW,
             severity="medium",
             subject=f"platform:{source}",
@@ -907,13 +883,10 @@ def review_summary(session: Session) -> None:
 # ------------------------------------------------- acting in Microsoft's platforms
 
 
-def target(session: Session, agent: Agent) -> dict[str, str]:
+def target(tx: db.Transaction, agent: Agent) -> dict[str, str]:
     """Where to block ``agent`` in its own platform: the Copilot Studio agent (quarantine
     needs no Agent 365 licence) when there is one, otherwise the Microsoft 365 package."""
-    records = {
-        r.source: r
-        for r in session.scalars(select(PlatformAgent).where(PlatformAgent.agent_id == agent.id))
-    }
+    records = _by_source(tx, agent)
     studio = records.get("copilot-studio")
     if studio is not None:
         environment = (studio.data or {}).get("environment_id")
@@ -929,7 +902,7 @@ def target(session: Session, agent: Agent) -> dict[str, str]:
 
 
 def record_platform_block(
-    session: Session,
+    tx: db.Transaction,
     settings: Settings,
     agent: Agent,
     where: dict[str, str],
@@ -938,12 +911,13 @@ def record_platform_block(
     actor: str,
 ) -> None:
     """Remember that ``actor`` blocked (or unblocked) the agent in its platform."""
-    record = session.get(PlatformAgent, f"{where['source']}:{where['id']}")
+    record = PlatformAgent.objects.filter(pk=f"{where['source']}:{where['id']}").first()
     if record is not None:
         flag = "quarantined" if where["source"] == "copilot-studio" else "blocked"
         record.data = {**(record.data or {}), flag: blocked}
+        record.save()
     ledger.append(
-        session,
+        tx,
         type="platform.agent_blocked" if blocked else "platform.agent_unblocked",
         actor=actor,
         agent=agent,
@@ -951,7 +925,7 @@ def record_platform_block(
         resource=f"{where['source']}/{where['id']}",
         details={"platform": SOURCES[where["source"]], **where},
     )
-    check_stop(session, settings, agent, actor=actor)
+    check_stop(tx, settings, agent, actor=actor)
 
 
 # ----------------------------------- agents blocked in AgentGov that their platform still runs
@@ -1028,15 +1002,14 @@ def _stopped(record: PlatformAgent) -> bool:
     return data.get("stopped") is True
 
 
-def _by_source(session: Session, agent: Agent) -> dict[str, PlatformAgent]:
-    query = select(PlatformAgent).where(PlatformAgent.agent_id == agent.id)
-    return {r.source: r for r in session.scalars(query)}
+def _by_source(tx: db.Transaction, agent: Agent) -> dict[str, PlatformAgent]:
+    return {r.source: r for r in PlatformAgent.objects.filter(agent_id=agent.id)}
 
 
-def runs_on(session: Session, agent: Agent) -> PlatformAgent | None:
+def runs_on(tx: db.Transaction, agent: Agent) -> PlatformAgent | None:
     """The record of the platform that still runs ``agent``: None once the platform that
     runs it reports it stopped, or none that reported it has it any more."""
-    records = _by_source(session, agent)
+    records = _by_source(tx, agent)
     for source in RUNS_ON:
         record = records.get(source)
         if record is not None and not _gone(record):
@@ -1044,14 +1017,14 @@ def runs_on(session: Session, agent: Agent) -> PlatformAgent | None:
     return None
 
 
-def still_runs_in(session: Session, agent: Agent) -> str | None:
+def still_runs_in(tx: db.Transaction, agent: Agent) -> str | None:
     """The platform that still runs ``agent`` while it is blocked in AgentGov."""
-    record = runs_on(session, agent) if agent.status == BLOCKED else None
+    record = runs_on(tx, agent) if agent.status == BLOCKED else None
     return SOURCES[record.source] if record is not None else None
 
 
 def check_stop(
-    session: Session, settings: Settings, agent: Agent, *, actor: str = SYSTEM_ACTOR
+    tx: db.Transaction, settings: Settings, agent: Agent, *, actor: str = SYSTEM_ACTOR
 ) -> None:
     """Blocking an agent in AgentGov doesn't stop it in its platform, and AgentGov can stop it
     there only as an administrator who signs in (Copilot Studio, Microsoft 365), if at all.
@@ -1059,14 +1032,15 @@ def check_stop(
     who can and how. It closes once a sync shows the platform stopped it or no longer has it,
     or once the agent isn't blocked in AgentGov any more."""
     key = f"{STILL_RUNNING}:{agent.id}"
-    record = runs_on(session, agent) if agent.status == BLOCKED else None
+    record = runs_on(tx, agent) if agent.status == BLOCKED else None
     if record is None:
         # Over, whatever became of it (dismissed, or its risk accepted): blocked again, it
         # is raised afresh.
-        finding = session.scalar(select(Finding).where(Finding.key == key))
+        finding = findings.by_key(tx, key)
         if finding is not None and finding.status != "resolved":
-            findings.set_status(session, finding.id, "resolved", actor)
+            finding = findings.set_status(tx, finding.id, "resolved", actor)
             finding.accepted_until = None
+            finding.save()
         return
     name = SOURCES[record.source]
     done, how = STOPPING[record.source]
@@ -1078,13 +1052,13 @@ def check_stop(
     description = f"Blocking it in AgentGov doesn't stop it in {name}. {where}."
     if (
         record.source == "copilot-studio"
-        and features.mode_for(session, agent, THREAT_DETECTION) == features.ENFORCE
+        and features.mode_for(tx, agent, THREAT_DETECTION) == features.ENFORCE
     ):
         description += (
             " Copilot Studio asks AgentGov before each of its tool calls, so it makes none, "
             "but it still answers people."
         )
-    others = _by_source(session, agent)
+    others = _by_source(tx, agent)
     for other in others.values():
         if other.source != record.source and not _gone(other) and _stopped(other):
             description += (
@@ -1109,7 +1083,7 @@ def check_stop(
         + f". If you stop it in a way {name} doesn't report, dismiss this issue saying how."
     )
     findings.raise_finding(
-        session,
+        tx,
         type=STILL_RUNNING,
         severity="high",
         subject=agent.id,
@@ -1127,27 +1101,25 @@ def check_stop(
     )
 
 
-def check_stops(session: Session, settings: Settings) -> None:
+def check_stops(tx: db.Transaction, settings: Settings) -> None:
     """:func:`check_stop` for the agents blocked in AgentGov that platforms report, and for
     those with the issue open."""
-    blocked = select(PlatformAgent.agent_id).join(Agent, Agent.id == PlatformAgent.agent_id)
-    agent_ids = set(session.scalars(blocked.where(Agent.status == BLOCKED)))
+    reported = set(PlatformAgent.objects.values_list("agent_id", flat=True))
+    agent_ids = reported & set(Agent.objects.filter(status=BLOCKED).values_list("id", flat=True))
     agent_ids |= set(
-        session.scalars(
-            select(Finding.agent_id).where(Finding.type == STILL_RUNNING, Finding.status == "open")
-        )
+        Finding.objects.filter(type=STILL_RUNNING, status="open").values_list("agent_id", flat=True)
     )
     for agent_id in sorted(a for a in agent_ids if a):
-        agent = session.get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         if agent is not None:
-            check_stop(session, settings, agent)
+            check_stop(tx, settings, agent)
 
 
 # -------------------------------------------------------------------- views
 
 
 def set_sync(
-    session: Session,
+    tx: db.Transaction,
     source: str,
     *,
     ok: bool,
@@ -1157,21 +1129,21 @@ def set_sync(
 ) -> None:
     """Remember how the latest sync or import went; one a person started is in the ledger.
     The findings a failed sync would have checked are unverified until one succeeds."""
-    sync = session.get(PlatformSync, source) or PlatformSync(source=source)
+    sync = PlatformSync.objects.filter(pk=source).first() or PlatformSync(source=source)
     sync.synced_at, sync.ok, sync.message, sync.counts = ids.utcnow(), ok, message, counts
-    session.add(sync)
+    sync.save(force_insert=sync._state.adding)
     if source in SYNCED_FINDINGS:
         findings.mark_unverified(
-            session,
+            tx,
             types=SYNCED_FINDINGS[source],
             verified=ok,
             # Defender's and Entra's findings come from those sources alone.
-            subjects=subjects(session, source) if source == "copilot-studio" else None,
+            subjects=subjects(tx, source) if source == "copilot-studio" else None,
             reason=failed_sync(source, message),
         )
     if actor:
         ledger.append(
-            session,
+            tx,
             type="platform.imported" if source == "copilot-studio" else "platform.synced",
             actor=actor,
             severity="info" if ok else "warning",
@@ -1182,22 +1154,21 @@ def set_sync(
 
 
 def overview(
-    session: Session, *, m365_configured: bool, connected: set[str] | None = None
+    tx: db.Transaction, *, m365_configured: bool, connected: set[str] | None = None
 ) -> dict[str, Any]:
     """Each source, how many agents it reports and how its last sync went. ``connected``:
     the INVENTORY_SOURCES whose connector is configured."""
     connected = connected or set()
+    deleted = list(Agent.objects.filter(status=DELETED).values_list("id", flat=True))
     agents = dict(
-        session.execute(
-            select(PlatformAgent.source, func.count())
-            .join(Agent, Agent.id == PlatformAgent.agent_id)
-            .where(Agent.status != DELETED)
-            .group_by(PlatformAgent.source)
-        ).all()
+        PlatformAgent.objects.exclude(agent_id__in=deleted)
+        .values("source")
+        .annotate(n=Count("id"))
+        .values_list("source", "n")
     )
     sources = []
     for source, name in SOURCES.items():
-        sync = session.get(PlatformSync, source)
+        sync = PlatformSync.objects.filter(pk=source).first()
         extra: dict[str, Any] = {}
         if source in INVENTORY_SOURCES:
             configured = source in connected
@@ -1205,7 +1176,7 @@ def overview(
             if feature is None:
                 continue  # no connector for it yet
             extra = {
-                "turned_on": feature is not None and features.is_on(session, source),
+                "turned_on": feature is not None and features.is_on(tx, source),
                 "needs": feature.needs if feature else None,
             }
         else:
@@ -1228,18 +1199,18 @@ def overview(
                 else None,
             }
         )
-    return {"sources": sources, "allowlist_active": bool(approved_connectors(session))}
+    return {"sources": sources, "allowlist_active": bool(approved_connectors(tx))}
 
 
-def connector_usage(session: Session) -> dict[str, Any]:
+def connector_usage(tx: db.Transaction) -> dict[str, Any]:
     """Every connector Copilot Studio agents use, approved or not, and who uses it."""
-    approved = {c.connector_id: c for c in approved_connectors(session)}
+    approved = {c.connector_id: c for c in approved_connectors(tx)}
 
     def unused() -> dict[str, Any]:
         return {"agents": [], "operations": set(), "maker_connections": 0}
 
     usage: dict[str, dict[str, Any]] = defaultdict(unused)
-    for record in _records(session, "copilot-studio"):
+    for record in _records(tx, "copilot-studio"):
         for connector in (record.data or {}).get("connectors") or []:
             entry = usage[connector["connector_id"]]
             entry["agents"].append({"id": record.agent_id, "name": record.name})
@@ -1268,13 +1239,11 @@ def connector_usage(session: Session) -> dict[str, Any]:
     return {"allowlist_active": bool(approved), "connectors": rows}
 
 
-def for_agent(session: Session, agent_id: str) -> list[dict[str, Any]]:
+def for_agent(tx: db.Transaction, agent_id: str) -> list[dict[str, Any]]:
     """What each platform reports about one agent, with connectors' allowlist status."""
-    approved = {c.connector_id for c in approved_connectors(session)}
+    approved = {c.connector_id for c in approved_connectors(tx)}
     views = []
-    for record in session.scalars(
-        select(PlatformAgent).where(PlatformAgent.agent_id == agent_id).order_by(PlatformAgent.id)
-    ):
+    for record in PlatformAgent.objects.filter(agent_id=agent_id).order_by("id"):
         data = dict(record.data or {})
         if "connectors" in data:
             data["connectors"] = [

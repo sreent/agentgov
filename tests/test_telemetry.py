@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
-
 from agentgov import telemetry
-from agentgov.models import AgentActivity, Finding
+from agentgov.db.models import AgentActivity, Finding
 from agentgov.registry import agents, blueprints
 
 
@@ -58,24 +56,24 @@ def test_attribute_decoding() -> None:
 
 
 def test_unknown_agents_are_discovered(rt) -> None:
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         stats = telemetry.ingest(
-            s, payload("notebook-agent", span("execute_tool", gen_ai__tool__name="search"))
+            tx, payload("notebook-agent", span("execute_tool", gen_ai__tool__name="search"))
         )
     assert stats["discovered"] == 1
-    with rt.db.session() as s:
-        agent = agents.get(s, "notebook-agent")
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, "notebook-agent")
         assert agent.status == "discovered"
         assert agent.framework == "openai.agents"
 
 
 def test_registered_agent_activity_and_ungranted_tools(rt, settings) -> None:
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         blueprints.create(
-            s, {"name": "bp", "permissions": [{"server": "local", "tools": ["search"]}]}, actor="t"
+            tx, {"name": "bp", "permissions": [{"server": "local", "tools": ["search"]}]}, actor="t"
         )
         agents.register(
-            s,
+            tx,
             settings,
             {"name": "bot", "blueprint": "bp", "sponsors": ["a"]},
             actor="t",
@@ -92,8 +90,8 @@ def test_registered_agent_activity_and_ungranted_tools(rt, settings) -> None:
             gen_ai__usage__output_tokens=30,
         ),
     )
-    with rt.db.session() as s:
-        stats = telemetry.ingest(s, batch)
+    with rt.db.transaction() as tx:
+        stats = telemetry.ingest(tx, batch)
     assert stats == {
         "spans": 3,
         "genai_spans": 3,
@@ -103,17 +101,17 @@ def test_registered_agent_activity_and_ungranted_tools(rt, settings) -> None:
         "instructions": 0,
         "around_the_gateway": 0,
     }
-    with rt.db.session() as s:
-        activity = s.scalars(select(AgentActivity)).one()
+    with rt.db.transaction() as tx:
+        activity = AgentActivity.objects.get()
         assert (activity.tool_calls, activity.model_calls, activity.input_tokens) == (2, 1, 120)
-        assert agents.get(s, "bot").models == ["gpt-5"]
-        finding = s.scalars(select(Finding).where(Finding.type == "agent.ungranted_tool_use")).one()
+        assert agents.get(tx, "bot").models == ["gpt-5"]
+        finding = Finding.objects.get(type="agent.ungranted_tool_use")
         assert "local/shell" in finding.title
 
 
 def test_infrastructure_spans_are_ignored(rt) -> None:
-    with rt.db.session() as s:
-        stats = telemetry.ingest(s, payload("agentgateway", span("chat")))
+    with rt.db.transaction() as tx:
+        stats = telemetry.ingest(tx, payload("agentgateway", span("chat")))
     assert stats["genai_spans"] == 0
 
 

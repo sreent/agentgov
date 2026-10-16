@@ -34,7 +34,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from agentgov.models import SEVERITIES
+from agentgov.db.models import SEVERITIES
 from agentgov.registry import validation
 from agentgov.registry.errors import ValidationError
 

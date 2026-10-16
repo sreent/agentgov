@@ -14,12 +14,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids
+from agentgov import db, ids
 from agentgov.config import Settings
-from agentgov.models import ApprovedConnector, IntegrationState, PlatformSync
+from agentgov.db.models import ApprovedConnector, IntegrationState, PlatformSync
 from agentgov.registry import features
 
 # Where the permissions granted to AgentGov's app registration are remembered.
@@ -125,25 +122,25 @@ BY_KEY = {c.key: c for c in CONNECTIONS}
 APP_CONNECTIONS = tuple(c.key for c in CONNECTIONS if c.via == "app")
 
 
-def load_state(session: Session, key: str) -> dict[str, Any]:
-    state = session.get(IntegrationState, key)
+def load_state(tx: db.Transaction, key: str) -> dict[str, Any]:
+    state = IntegrationState.objects.filter(pk=key).first()
     return dict(state.data or {}) if state is not None else {}
 
 
-def save_state(session: Session, key: str, data: dict[str, Any]) -> None:
-    state = session.get(IntegrationState, key) or IntegrationState(key=key)
+def save_state(tx: db.Transaction, key: str, data: dict[str, Any]) -> None:
+    state = IntegrationState.objects.filter(pk=key).first() or IntegrationState(key=key)
     state.data, state.updated_at = data, ids.utcnow()
-    session.add(state)
+    state.save(force_insert=state._state.adding)
 
 
-def remember_grants(session: Session, roles: frozenset[str] | None) -> None:
+def remember_grants(tx: db.Transaction, roles: frozenset[str] | None) -> None:
     """Remember which application permissions the app registration holds."""
-    save_state(session, APP_STATE, {"roles": sorted(roles) if roles is not None else None})
+    save_state(tx, APP_STATE, {"roles": sorted(roles) if roles is not None else None})
 
 
-def granted(session: Session) -> frozenset[str] | None:
+def granted(tx: db.Transaction) -> frozenset[str] | None:
     """The app's application permissions as last seen; ``None`` if unknown."""
-    state = session.get(IntegrationState, APP_STATE)
+    state = IntegrationState.objects.filter(pk=APP_STATE).first()
     roles = (state.data or {}).get("roles") if state is not None else None
     return frozenset(roles) if isinstance(roles, list) else None
 
@@ -154,13 +151,13 @@ def runnable(connection: Connection, roles: frozenset[str] | None) -> bool:
 
 
 def state(
-    session: Session, settings: Settings, *, threat_detection: dict[str, Any] | None = None
+    tx: db.Transaction, settings: Settings, *, threat_detection: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
     """Each connection, what it needs and how it is doing."""
-    roles = granted(session)
+    roles = granted(tx)
     rows = []
     for c in CONNECTIONS:
-        sync = session.get(PlatformSync, c.key)
+        sync = PlatformSync.objects.filter(pk=c.key).first()
         last = (
             {
                 "at": ids.isoformat(sync.synced_at),
@@ -173,7 +170,7 @@ def state(
         )
         needs: list[str] = []
         if c.via == "app":
-            if not features.is_on(session, c.key):
+            if not features.is_on(tx, c.key):
                 status = "turned_off"  # in Features
             elif not settings.m365_enabled:
                 status = "off"
@@ -191,8 +188,8 @@ def state(
                 needs.append(f"the application permission {c.permission}")
         elif c.via == "admin":
             if settings.microsoft_admin_actions and c.key == "connector-policies":
-                pushed = load_state(session, c.key).get("connectors")
-                current = sorted(session.scalars(select(ApprovedConnector.connector_id)))
+                pushed = load_state(tx, c.key).get("connectors")
+                current = sorted(ApprovedConnector.objects.values_list("connector_id", flat=True))
                 if pushed is None:
                     status = "available"
                 else:
@@ -225,7 +222,7 @@ def state(
             "needs": needs,
             "last_run": last,
         }
-        if c.key == ENTRA_ACCESS and features.mode(session, c.key) == features.MANAGE:
+        if c.key == ENTRA_ACCESS and features.mode(tx, c.key) == features.MANAGE:
             # Managing writes into Entra: with the permission, or a catalog role Entra
             # doesn't put in the app's token (so AgentGov tries, and says what Entra said).
             row["manage"] = "unknown" if roles is None or WRITE not in roles else "ok"

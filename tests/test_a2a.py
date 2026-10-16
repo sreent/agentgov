@@ -20,15 +20,14 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import a2a_auth, cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.db.models import ACTIVE, BLOCKED, PENDING, Agent, LedgerEntry
 from agentgov.gateway import render
 from agentgov.identity import chains
-from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, LedgerEntry
 from agentgov.opa.bundle import registry_snapshot
 from agentgov.processor import a2a_guard
 from agentgov.processor.control_plane import DecisionRecorder
@@ -761,7 +760,7 @@ class TestGatewayRoutes:
         }
 
     def test_model_calls_pass_the_delegation_to_the_processor(self) -> None:
-        from agentgov.models import ModelProvider
+        from agentgov.db.models import ModelProvider
 
         provider = ModelProvider(name="openai", kind="openai", status="approved")
         config = render([], self.settings, {}, [provider], [])
@@ -810,8 +809,8 @@ class TestRegistry:
             json={"a2a_url": "http://support-bot:9600", "agent_access": ["kb"]},
             headers=ADMIN,
         ).raise_for_status()
-        with rt.db.session() as s:
-            data = registry_snapshot(s)
+        with rt.db.transaction() as tx:
+            data = registry_snapshot(tx)
         agent_id = data["agent_names"]["support-bot"]
         assert data["agents"][agent_id]["a2a"] is True
         assert data["agents"][agent_id]["agent_access"] == ["kb"]
@@ -831,11 +830,11 @@ spec:
   agent_access: [kb]
 """
         )
-        with rt.db.session() as s:
-            [result] = manifests.apply(s, rt.settings, docs, actor="admin:ada")
+        with rt.db.transaction() as tx:
+            [result] = manifests.apply(tx, rt.settings, docs, actor="admin:ada")
             assert result["action"] == "configured"
             exported = next(
-                d for d in manifests.export(s) if d["metadata"]["name"] == "support-bot"
+                d for d in manifests.export(tx) if d["metadata"]["name"] == "support-bot"
             )
         assert exported["spec"]["a2a_url"] == "http://support-bot:9600"
         assert exported["spec"]["agent_access"] == ["kb"]
@@ -858,8 +857,8 @@ spec:
             "a2a": {"target": "billing-agent", "target_id": "agt_2", "context_id": "ctx-1"},
             "delegation": {"chain": [chains.person_link(SAM)], "uid": "dlg_1", "parent_uid": None},
         }
-        with rt.db.session() as s:
-            decisions.record_mcp_decisions(s, rt.settings, [record])
+        with rt.db.transaction() as tx:
+            decisions.record_mcp_decisions(tx, rt.settings, [record])
         entry = client.get("/v1/ledger", params={"type": "decision.a2a.request"}, headers=ADMIN)
         [got] = entry.json()
         assert (got["action"], got["resource"], got["on_behalf_of"]) == (
@@ -873,8 +872,8 @@ spec:
             "billing-agent",
         ]
         assert got["details"]["delegation"] == {"uid": "dlg_1"}
-        with rt.db.session() as s:
-            row = s.scalar(select(LedgerEntry).where(LedgerEntry.id == got["id"]))
+        with rt.db.transaction() as tx:
+            row = LedgerEntry.objects.get(id=got["id"])
             event = ocsf.event(row)
         assert event["activity_name"] == "Agent call"
         assert event["api"]["service"]["name"] == "billing-agent"
@@ -958,8 +957,8 @@ class TestApiAndCli:
         ).json()  # fmt: skip
         records = [_a2a_record(bot, "billing-agent", "allow")] * 2
         records.append(_a2a_record(bot, "kb", "deny"))
-        with rt.db.session() as s:
-            decisions.record_mcp_decisions(s, rt.settings, records)
+        with rt.db.transaction() as tx:
+            decisions.record_mcp_decisions(tx, rt.settings, records)
         graph = client.get("/v1/graph", headers=ADMIN).json()
         calls = {
             (e["to"], e["kind"]): (e["calls"], e["denied"])

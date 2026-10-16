@@ -28,13 +28,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.db import Database
+from agentgov.db import Database, Transaction
+from agentgov.db.models import Agent, IntegrationState
 from agentgov.identity.entra_calls import EntraCallers
-from agentgov.models import Agent, IntegrationState
 from agentgov.processor.detectors import scan_local
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, features, findings, microsoft_signals, risk
@@ -151,15 +150,14 @@ class AgentLookup:
         age = time.monotonic() - self._built
         agent_id = microsoft_signals.match_agent(self._index, platform_id)
         if age > self.REFRESH_SECONDS or (agent_id is None and age > self.MISS_REFRESH_SECONDS):
-            with self._lock, db.session() as session:
-                self._index = microsoft_signals.agent_index(session)
+            with self._lock, db.transaction() as tx:
+                self._index = microsoft_signals.agent_index(tx)
                 self._built = time.monotonic()
             agent_id = microsoft_signals.match_agent(self._index, platform_id)
         if agent_id is None:
             return None
-        with db.session() as session:
-            agent = session.get(Agent, agent_id)
-            return (agent.id, agent.name) if agent is not None else None
+        with db.transaction():
+            return Agent.objects.filter(pk=agent_id).values_list("id", "name").first()
 
 
 class ThreatDetection:
@@ -187,14 +185,14 @@ class ThreatDetection:
     @staticmethod
     def mode(db: Database) -> str:
         """The feature's mode: "off", "monitor" or "enforce"."""
-        with db.session() as session:
-            return features.mode(session, FEATURE)
+        with db.transaction() as tx:
+            return features.mode(tx, FEATURE)
 
     def decide(self, db: Database, payload: dict[str, Any]) -> Verdict:
         started = time.monotonic()
         call = _call(payload)
-        with db.session() as session:
-            modes = features.modes(session)
+        with db.transaction() as tx:
+            modes = features.modes(tx)
         mode = modes[FEATURE]
         # Short reads: no transaction stays open while OPA decides.
         known = self.agents.find(db, call["agent"]["platform_id"])
@@ -275,11 +273,11 @@ class ThreatDetection:
         )
 
 
-def record(session: Session, settings: Settings, verdict: Verdict, *, correlation_id: str) -> None:
+def record(tx: Transaction, settings: Settings, verdict: Verdict, *, correlation_id: str) -> None:
     """The evidence for one decision: a ledger entry, the agent's activity and risk."""
     call = verdict.call
     tool = call["tool"]
-    agent = session.get(Agent, verdict.agent_id) if verdict.agent_id else None
+    agent = Agent.objects.filter(pk=verdict.agent_id).first() if verdict.agent_id else None
     platform_id = call["agent"]["platform_id"]
     when = ids.utcnow()
     resource = f"{tool.get('connector') or 'copilot-studio'}/{tool['name']}"
@@ -291,7 +289,7 @@ def record(session: Session, settings: Settings, verdict: Verdict, *, correlatio
     elif verdict.monitored and not verdict.block:
         reason = "monitored: " + "; ".join(verdict.monitored)
     ledger.append(
-        session,
+        tx,
         type="decision.copilot_studio",
         actor=f"agent:{agent.name}" if agent else f"copilot-studio:{platform_id or 'unknown'}",
         agent=agent,
@@ -318,10 +316,10 @@ def record(session: Session, settings: Settings, verdict: Verdict, *, correlatio
             "monitored": verdict.monitored,
         },
     )
-    _count(session, blocked=verdict.block, would_block=would_block)
+    _count(tx, blocked=verdict.block, would_block=would_block)
     if agent is None:
         findings.raise_finding(
-            session,
+            tx,
             type="copilot_studio.unknown_agent",
             severity="medium",
             subject=platform_id or "unknown",
@@ -337,15 +335,16 @@ def record(session: Session, settings: Settings, verdict: Verdict, *, correlatio
         )
         return
     agent.last_seen_at = when
+    agent.save()
     discovery.record_activity(
-        session, agent.id, when=when, tool_calls=1, denied=1 if verdict.block else 0
+        tx, agent.id, when=when, tool_calls=1, denied=1 if verdict.block else 0
     )
     if verdict.block:
-        risk.add_signal(session, agent.id, "policy_denied", resource)
+        risk.add_signal(tx, agent.id, "policy_denied", resource)
     if "secret" in verdict.detections.get("categories", []):
-        risk.add_signal(session, agent.id, "secret_detected", resource)
+        risk.add_signal(tx, agent.id, "secret_detected", resource)
         findings.raise_finding(
-            session,
+            tx,
             type="agent.credential_exfiltration_attempt",
             severity="high",
             subject=agent.id,
@@ -359,9 +358,9 @@ def record(session: Session, settings: Settings, verdict: Verdict, *, correlatio
             "secrets and rotate them.",
         )
     if verdict.detections.get("prompt_injection"):
-        risk.add_signal(session, agent.id, "prompt_injection", resource)
+        risk.add_signal(tx, agent.id, "prompt_injection", resource)
         findings.raise_finding(
-            session,
+            tx,
             type="copilot_studio.prompt_injection",
             severity="high",
             subject=agent.id,
@@ -376,23 +375,24 @@ def record(session: Session, settings: Settings, verdict: Verdict, *, correlatio
             remediation="Find where that tool's data comes from: untrusted content may be "
             "targeting your agents.",
         )
-    agents_svc.refresh_risk(session, settings, agent)
+    agents_svc.refresh_risk(tx, settings, agent)
 
 
-def _count(session: Session, *, blocked: bool, would_block: bool) -> None:
-    state = session.get(IntegrationState, STATE_KEY) or IntegrationState(key=STATE_KEY, data={})
+def _count(tx: Transaction, *, blocked: bool, would_block: bool) -> None:
+    state = IntegrationState.objects.filter(pk=STATE_KEY).first()
+    state = state or IntegrationState(key=STATE_KEY, data={})
     data = dict(state.data or {})
     data["calls"] = int(data.get("calls", 0)) + 1
     data["blocked"] = int(data.get("blocked", 0)) + (1 if blocked else 0)
     data["would_block"] = int(data.get("would_block", 0)) + (1 if would_block else 0)
     data["last_call_at"] = ids.isoformat(ids.utcnow())
     state.data, state.updated_at = data, ids.utcnow()
-    session.add(state)
+    state.save(force_insert=state._state.adding)
 
 
-def summary(session: Session, mode: str) -> dict[str, Any]:
+def summary(tx: Transaction, mode: str) -> dict[str, Any]:
     """How threat detection is doing, for the Platforms page."""
-    state = session.get(IntegrationState, STATE_KEY)
+    state = IntegrationState.objects.filter(pk=STATE_KEY).first()
     data = dict(state.data or {}) if state is not None else {}
     return {
         "mode": mode,

@@ -19,12 +19,12 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_, select
+from django.db.models import F, Q
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.models import Destination, Finding, Ticket
+from agentgov.db.models import Destination, Finding, Ticket
 from agentgov.registry import desks, destinations, features, tickets
 from agentgov.registry.destinations import SecretError
 from agentgov.registry.tickets import CLOSED, DONE, OPEN, PENDING, Seen
@@ -54,13 +54,14 @@ class Ticketing:
     # -- rounds ---------------------------------------------------------------------
     def run(self, now: datetime | None = None) -> dict[str, int]:
         """Open, read back and update the desks' tickets; returns how many of each."""
-        with self.db.session() as s:
-            if not features.is_on(s, "issues"):
+        with self.db.transaction() as tx:
+            if not features.is_on(tx, "issues"):
                 return {}
-            planned = tickets.plan(s, self.settings)
+            planned = tickets.plan(tx, self.settings)
         now = now or ids.utcnow()  # after planning: what it planned is due now
-        with self.db.session() as s:
-            due = [d.id for d in tickets.active_desks(s) if d.retry_at is None or d.retry_at <= now]
+        with self.db.transaction() as tx:
+            desks = tickets.active_desks(tx)
+            due = [d.id for d in desks if d.retry_at is None or d.retry_at <= now]
         totals: Counter[str] = Counter()
         for desk_id in due:
             totals.update(self._desk(desk_id, now))
@@ -71,8 +72,8 @@ class Ticketing:
 
     def _desk(self, desk_id: str, now: datetime) -> Counter[str]:
         done: Counter[str] = Counter()
-        with self.db.session() as s:
-            row = s.get(Destination, desk_id)
+        with self.db.transaction():
+            row = Destination.objects.filter(pk=desk_id).first()
             if row is None:
                 return done
             name = row.name
@@ -82,42 +83,26 @@ class Ticketing:
                 problem = str(exc)
             else:
                 problem = None
-            mine = select(Ticket.id).where(
-                Ticket.destination_id == desk_id, Ticket.next_attempt_at <= now
-            )
+            mine = Ticket.objects.filter(destination_id=desk_id, next_attempt_at__lte=now)
             to_open = list(
-                s.scalars(
-                    mine.where(Ticket.status == PENDING).order_by(Ticket.created_at).limit(TO_OPEN)
-                )
+                mine.filter(status=PENDING)
+                .order_by("created_at")
+                .values_list("id", flat=True)[:TO_OPEN]
             )
+            unread = Q(synced_at__isnull=True) | Q(synced_at__lte=now - tickets.READ_EVERY)
             to_read = list(
-                s.scalars(
-                    mine.where(
-                        Ticket.status == OPEN,
-                        or_(
-                            Ticket.synced_at.is_(None),
-                            Ticket.synced_at <= now - tickets.READ_EVERY,
-                        ),
-                    )
-                    .order_by(Ticket.synced_at.is_not(None), Ticket.synced_at)
-                    .limit(TO_READ)
-                )
+                mine.filter(unread, status=OPEN)
+                .order_by(F("synced_at").asc(nulls_first=True))
+                .values_list("id", flat=True)[:TO_READ]
             )
             # Those whose issue changed since the desk was last told (read back first, below,
             # so that what the desk did is known before AgentGov tells it anything).
+            live = list(mine.filter(status=OPEN).order_by("updated_at"))
+            issues = Finding.objects.in_bulk({t.finding_id for t in live})
             to_tell = [
                 t.id
-                for t, f in s.execute(
-                    select(Ticket, Finding)
-                    .join(Finding, Finding.id == Ticket.finding_id)
-                    .where(
-                        Ticket.destination_id == desk_id,
-                        Ticket.status == OPEN,
-                        Ticket.next_attempt_at <= now,
-                    )
-                    .order_by(Ticket.updated_at)
-                ).all()
-                if tickets.work(t, f)
+                for t in live
+                if t.finding_id in issues and tickets.work(t, issues[t.finding_id])
             ][:TO_TELL]
         if problem is not None:
             self._desk_failed(desk_id, problem, None, now)
@@ -158,8 +143,8 @@ class Ticketing:
     ) -> None:
         """The desk failed; ``whole``: as a whole (it is left alone until it is tried again),
         rather than refusing its tickets one by one."""
-        with self.db.session() as s:
-            row = s.get(Destination, desk_id)
+        with self.db.transaction():
+            row = Destination.objects.filter(pk=desk_id).first()
             if row is None:
                 return
             row.failures += 1
@@ -168,33 +153,37 @@ class Ticketing:
                 row.retry_at = now + (
                     timedelta(seconds=retry_after) if retry_after else backoff(row.failures)
                 )
+            row.save()
 
     def _desk_ok(self, desk_id: str, count: int, now: datetime) -> None:
-        with self.db.session() as s:
-            row = s.get(Destination, desk_id)
+        with self.db.transaction():
+            row = Destination.objects.filter(pk=desk_id).first()
             if row is None:
                 return
             row.failures, row.last_error, row.retry_at = 0, None, None
             if count:
                 row.delivered += count
                 row.delivered_at = now
+            row.save()
 
     # -- opening ------------------------------------------------------------------------
     def _open(self, desk: Desk, desk_id: str, ticket_id: str) -> str:
-        with self.db.session() as s:
-            t, f, d = s.get(Ticket, ticket_id), None, s.get(Destination, desk_id)
+        with self.db.transaction() as tx:
+            t, d = _ticket(ticket_id), Destination.objects.filter(pk=desk_id).first()
             if t is None or d is None or t.status != PENDING:
                 return "tickets_skipped"
-            f = s.get(Finding, t.finding_id)
+            f = Finding.objects.filter(pk=t.finding_id).first()
             if f is None or f.status != "open":
                 t.status = CLOSED  # gone, or over, before it was opened
+                t.save()
                 return "tickets_skipped"
-            new = tickets.new_ticket(s, self.settings, d, t, f)
+            new = tickets.new_ticket(tx, self.settings, d, t, f)
             state = tickets.snapshot(f)
             # Tried before, or stopped midway (the desk may have opened it without AgentGov
             # hearing back): it may be there already.
             look_first = t.attempts > 0 or bool((t.told or {}).get("opening"))
             t.told = {"opening": True}
+            t.save()
         try:
             remote = desk.find(new.marker) if look_first else None
             if remote is None:
@@ -203,15 +192,15 @@ class Ticketing:
             if exc.whole_desk:
                 raise
             return self._ticket_failed(desk_id, ticket_id, str(exc))
-        with self.db.session() as s:
-            t, d = s.get(Ticket, ticket_id), s.get(Destination, desk_id)
+        with self.db.transaction() as tx:
+            t, d = _ticket(ticket_id), Destination.objects.filter(pk=desk_id).first()
             if t is None or d is None:
                 return "tickets_skipped"
             tickets.opened(
-                s,
+                tx,
                 d,
                 t,
-                s.get(Finding, t.finding_id),
+                Finding.objects.filter(pk=t.finding_id).first(),
                 key=remote.key,
                 remote_id=remote.remote_id,
                 url=remote.url,
@@ -222,16 +211,16 @@ class Ticketing:
     def _ticket_failed(self, desk_id: str, ticket_id: str, error: str) -> str:
         log.info("ticket %s: %s", ticket_id, error)
         self.last_error = error
-        with self.db.session() as s:
-            t, d = s.get(Ticket, ticket_id), s.get(Destination, desk_id)
+        with self.db.transaction() as tx:
+            t, d = _ticket(ticket_id), Destination.objects.filter(pk=desk_id).first()
             if t is not None and d is not None:
-                tickets.failed(s, d, t, s.get(Finding, t.finding_id), error)
+                tickets.failed(tx, d, t, Finding.objects.filter(pk=t.finding_id).first(), error)
         return "tickets_failing"
 
     # -- reading back -------------------------------------------------------------------
     def _read(self, desk: Desk, desk_id: str, ticket_id: str, now: datetime) -> str:
-        with self.db.session() as s:
-            t = s.get(Ticket, ticket_id)
+        with self.db.transaction():
+            t = _ticket(ticket_id)
             if t is None or t.status != OPEN or not t.remote_id:
                 return "tickets_skipped"
             remote = Remote(t.remote_id, t.key or t.remote_id, t.url)
@@ -242,32 +231,35 @@ class Ticketing:
                 raise
             if not exc.missing:
                 self.last_error = str(exc)
-                with self.db.session() as s:
-                    t = s.get(Ticket, ticket_id)
+                with self.db.transaction():
+                    t = _ticket(ticket_id)
                     if t is not None:
                         t.synced_at, t.last_error = now, str(exc)[:1000]
+                        t.save()
                 return "tickets_failing"
             seen = Seen("deleted there", DONE)
-        with self.db.session() as s:
-            t, d = s.get(Ticket, ticket_id), s.get(Destination, desk_id)
+        with self.db.transaction() as tx:
+            t, d = _ticket(ticket_id), Destination.objects.filter(pk=desk_id).first()
             if t is None or d is None:
                 return "tickets_skipped"
-            f = s.get(Finding, t.finding_id)
+            f = Finding.objects.filter(pk=t.finding_id).first()
             if f is None:
                 t.status = CLOSED
+                t.save()
                 return "tickets_skipped"
-            happened = tickets.seen(s, self.settings, d, t, f, seen, now)
+            happened = tickets.seen(tx, self.settings, d, t, f, seen, now)
         return "tickets_read" if not happened else "tickets_changed_there"
 
     # -- telling ------------------------------------------------------------------------
     def _tell(self, desk: Desk, desk_id: str, ticket_id: str) -> str | None:
-        with self.db.session() as s:
-            t, d = s.get(Ticket, ticket_id), s.get(Destination, desk_id)
+        with self.db.transaction():
+            t, d = _ticket(ticket_id), Destination.objects.filter(pk=desk_id).first()
             if t is None or d is None or t.status != OPEN or not t.remote_id:
                 return None
-            f = s.get(Finding, t.finding_id)
+            f = Finding.objects.filter(pk=t.finding_id).first()
             if f is None:
                 t.status = CLOSED
+                t.save()
                 return None
             todo = tickets.work(t, f)
             if not todo:
@@ -284,18 +276,19 @@ class Ticketing:
                 raise
             if exc.missing:
                 # Deleted there: AgentGov stops keeping it in step.
-                with self.db.session() as s:
-                    t = s.get(Ticket, ticket_id)
+                with self.db.transaction():
+                    t = _ticket(ticket_id)
                     if t is not None:
                         t.status, t.phase, t.state = CLOSED, DONE, "deleted there"
+                        t.save()
                 return "tickets_closed"
             return self._ticket_failed(desk_id, ticket_id, str(exc))
-        with self.db.session() as s:
-            t, d = s.get(Ticket, ticket_id), s.get(Destination, desk_id)
-            f = s.get(Finding, t.finding_id) if t is not None else None
+        with self.db.transaction() as tx:
+            t, d = _ticket(ticket_id), Destination.objects.filter(pk=desk_id).first()
+            f = Finding.objects.filter(pk=t.finding_id).first() if t is not None else None
             if t is None or d is None or f is None:
                 return None
-            tickets.told(s, d, t, f, todo)
+            tickets.told(tx, d, t, f, todo)
         return "tickets_updated"
 
     def _send(
@@ -334,8 +327,8 @@ class Ticketing:
         """Sign in to a desk and look at where its tickets go, now; changes nothing there.
         The outcome is in the ledger."""
         error = message = None
-        with self.db.session() as s:
-            row = destinations.get(s, ref)
+        with self.db.transaction() as tx:
+            row = destinations.get(tx, ref)
             name = row.name
             try:
                 desk: Desk | None = self._client(row)
@@ -346,9 +339,9 @@ class Ticketing:
                 message = desk.test()
             except DeskError as exc:
                 error = str(exc)
-        with self.db.session() as s:
+        with self.db.transaction() as tx:
             ledger.append(
-                s,
+                tx,
                 type="destination.tested",
                 actor=actor,
                 resource=f"destination/{name}",
@@ -357,3 +350,7 @@ class Ticketing:
                 details={"ok": error is None},
             )
         return {"ok": error is None, "error": error, "message": message}
+
+
+def _ticket(ticket_id: str) -> Ticket | None:
+    return Ticket.objects.filter(pk=ticket_id).first()

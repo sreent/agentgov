@@ -20,12 +20,10 @@ from datetime import datetime
 from typing import Any
 
 import httpx
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
-from agentgov import ids
+from agentgov import db, ids
 from agentgov.db import mark_changed
-from agentgov.models import IdentityIssuer
+from agentgov.db.models import IdentityIssuer
 
 log = logging.getLogger(__name__)
 
@@ -91,13 +89,13 @@ def fetch(where: str, http: httpx.Client) -> list[dict[str, Any]]:
     return vet(_key_set(http, where), where)
 
 
-def targets(session: Session, names: list[str] | None = None) -> list[tuple[str, str]]:
+def targets(tx: db.Transaction, names: list[str] | None = None) -> list[tuple[str, str]]:
     """The issuers the gateway is set to trust (all, or those ``names``), by ID, with where
     their keys are: blocked ones too, whose keys stay current for when they are unblocked."""
-    stmt = select(IdentityIssuer).where(IdentityIssuer.gateway.is_(True))
+    issuers = IdentityIssuer.objects.filter(gateway=True)
     if names is not None:
-        stmt = stmt.where(IdentityIssuer.name.in_(names))
-    return [(i.id, keys_location(i)) for i in session.scalars(stmt.order_by(IdentityIssuer.name))]
+        issuers = issuers.filter(name__in=names)
+    return [(i.id, keys_location(i)) for i in issuers.order_by("name")]
 
 
 def fetch_all(
@@ -114,7 +112,7 @@ def fetch_all(
 
 
 def store(
-    session: Session,
+    tx: db.Transaction,
     found: dict[str, list[dict[str, Any]] | IssuerKeysError],
     *,
     now: datetime | None = None,
@@ -125,13 +123,14 @@ def store(
     changed: list[str] = []
     failed: list[str] = []
     for issuer_id, keys in found.items():
-        issuer = session.get(IdentityIssuer, issuer_id)
+        issuer = IdentityIssuer.objects.filter(pk=issuer_id).first()
         if issuer is None or not issuer.gateway:
             continue  # gone, or no longer trusted at the gateway, meanwhile
         if isinstance(keys, IssuerKeysError):
             message = str(keys)[:500]
             if issuer.keys_error != message:
                 issuer.keys_error = message
+                issuer.save()
                 changed.append(issuer.name)
             failed.append(issuer.name)
             log.warning("keys of identity issuer %s: %s", issuer.name, message)
@@ -140,7 +139,8 @@ def store(
             issuer.gateway_keys, issuer.keys_error = keys, None
             changed.append(issuer.name)
         issuer.keys_at = when
+        issuer.save()
     if changed:
         # The gateway's configuration takes them (agentgov.gateway).
-        mark_changed(session, "issuer-keys")
+        mark_changed(tx, "issuer-keys")
     return {"changed": changed, "failed": failed}

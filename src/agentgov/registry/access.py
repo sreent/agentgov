@@ -19,12 +19,11 @@ import re
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from django.db.models.functions import Lower
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
+from agentgov.db.models import AdminSession, RoleGrant
 from agentgov.identity.sso import GIVABLE, TEAM_ROLES, for_team
-from agentgov.models import AdminSession, LedgerEntry, RoleGrant
 from agentgov.registry import teams
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
@@ -32,14 +31,8 @@ SIGN_IN_EVENTS = ("admin.login", "admin.login_denied")
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-def live_sessions(session: Session) -> list[AdminSession]:
-    return list(
-        session.scalars(
-            select(AdminSession)
-            .where(AdminSession.expires_at > ids.utcnow())
-            .order_by(AdminSession.created_at.desc())
-        )
-    )
+def live_sessions(tx: db.Transaction) -> list[AdminSession]:
+    return list(AdminSession.objects.filter(expires_at__gt=ids.utcnow()).order_by("-created_at"))
 
 
 def session_to_dict(record: AdminSession) -> dict[str, Any]:
@@ -53,17 +46,13 @@ def session_to_dict(record: AdminSession) -> dict[str, Any]:
     }
 
 
-def people(session: Session) -> list[dict[str, Any]]:
+def people(tx: db.Transaction) -> list[dict[str, Any]]:
     """Everyone who has signed in or been refused, most recently active first."""
     by_subject: dict[str, list[AdminSession]] = defaultdict(list)
-    for record in live_sessions(session):
+    for record in live_sessions(tx):
         by_subject[record.subject].append(record)
     found: dict[str, dict[str, Any]] = {}
-    entries = session.scalars(
-        select(LedgerEntry)
-        .where(LedgerEntry.type.in_(SIGN_IN_EVENTS), ledger.in_chain())
-        .order_by(LedgerEntry.seq)
-    )
+    entries = ledger.chain().filter(type__in=SIGN_IN_EVENTS).order_by("seq")
     for entry in entries:
         subject = (entry.details or {}).get("subject")
         if not subject:
@@ -106,10 +95,10 @@ def people(session: Session) -> list[dict[str, Any]]:
     return result
 
 
-def _end(session: Session, records: list[AdminSession], *, actor: str) -> int:
+def _end(tx: db.Transaction, records: list[AdminSession], *, actor: str) -> int:
     if records:
         ledger.append(
-            session,
+            tx,
             type="admin.session_ended",
             actor=actor,
             severity="warning",
@@ -119,27 +108,25 @@ def _end(session: Session, records: list[AdminSession], *, actor: str) -> int:
                 "session_ids": [r.id for r in records],
             },
         )
-    for record in records:
-        session.delete(record)
+    AdminSession.objects.filter(id__in=[r.id for r in records]).delete()
     return len(records)
 
 
-def end_session(session: Session, session_id: str, *, actor: str) -> int:
+def end_session(tx: db.Transaction, session_id: str, *, actor: str) -> int:
     """End one session (an admin's action; the person's own sign-out is admin.logout)."""
-    record = session.get(AdminSession, session_id)
+    record = AdminSession.objects.filter(pk=session_id).first()
     if record is None:
         raise NotFound(f"session {session_id!r} not found")
-    return _end(session, [record], actor=actor)
+    return _end(tx, [record], actor=actor)
 
 
-def session_ids(session: Session, subject: str) -> list[str]:
-    return list(session.scalars(select(AdminSession.id).where(AdminSession.subject == subject)))
+def session_ids(tx: db.Transaction, subject: str) -> list[str]:
+    return list(AdminSession.objects.filter(subject=subject).values_list("id", flat=True))
 
 
-def sign_out(session: Session, subject: str, *, actor: str) -> int:
+def sign_out(tx: db.Transaction, subject: str, *, actor: str) -> int:
     """End every session of one person; returns how many were ended."""
-    records = list(session.scalars(select(AdminSession).where(AdminSession.subject == subject)))
-    return _end(session, records, actor=actor)
+    return _end(tx, list(AdminSession.objects.filter(subject=subject)), actor=actor)
 
 
 # ------------------------------------------------------------- roles given here
@@ -163,11 +150,11 @@ def grant_to_dict(grant: RoleGrant) -> dict[str, Any]:
     }
 
 
-def grants(session: Session) -> list[RoleGrant]:
-    return list(session.scalars(select(RoleGrant).order_by(RoleGrant.email, RoleGrant.role)))
+def grants(tx: db.Transaction) -> list[RoleGrant]:
+    return list(RoleGrant.objects.order_by("email", "role"))
 
 
-def team_role(session: Session, role: Any, team: Any, allowed: tuple[str, ...]) -> str:
+def team_role(tx: db.Transaction, role: Any, team: Any, allowed: tuple[str, ...]) -> str:
     """``role``, held for team ``team`` when one is given (``approver@sales``): one of
     ``allowed``, and for a team, one of the roles that can be held for a team, and a team
     there is."""
@@ -179,12 +166,12 @@ def team_role(session: Session, role: Any, team: Any, allowed: tuple[str, ...]) 
         raise ValidationError(
             f"the {role} role is for every team: one team takes {', '.join(TEAM_ROLES)}"
         )
-    name = teams.reference(session, team)
+    name = teams.reference(tx, team)
     return for_team(role, str(name))
 
 
 def grant(
-    session: Session,
+    tx: db.Transaction,
     email: str,
     role: str,
     *,
@@ -195,23 +182,18 @@ def grant(
     """Give a person an AgentGov role, from their next sign-in: for every team, or for
     ``team``'s agents only."""
     email = _email(email)
-    role = team_role(session, role, team, GIVABLE)
-    existing = session.scalar(
-        select(RoleGrant).where(RoleGrant.email == email, RoleGrant.role == role)
-    )
-    if existing is not None:
+    role = team_role(tx, role, team, GIVABLE)
+    if RoleGrant.objects.filter(email=email, role=role).exists():
         raise Conflict(f"{email} already has the {role} role in AgentGov")
-    record = RoleGrant(
+    record = RoleGrant.objects.create(
         id=ids.new_id(ids.ROLE_GRANT),
         email=email,
         role=role,
         granted_by=actor,
         reason=(reason or "").strip() or None,
     )
-    session.add(record)
-    session.flush()
     ledger.append(
-        session,
+        tx,
         type="access.role_granted",
         actor=actor,
         resource=email,
@@ -221,26 +203,22 @@ def grant(
     return record
 
 
-def revoke(session: Session, email: str, role: str, *, actor: str) -> list[str]:
+def revoke(tx: db.Transaction, email: str, role: str, *, actor: str) -> list[str]:
     """Take a role given in AgentGov away, and end the person's sessions, so that it no
     longer applies; returns the IDs of the sessions ended."""
     email = _email(email)
-    record = session.scalar(
-        select(RoleGrant).where(RoleGrant.email == email, RoleGrant.role == role)
-    )
+    record = RoleGrant.objects.filter(email=email, role=role).first()
     if record is None:
         raise NotFound(f"{email} has no {role} role given in AgentGov")
-    session.delete(record)
+    record.delete()
     ledger.append(
-        session,
+        tx,
         type="access.role_revoked",
         actor=actor,
         resource=email,
         severity="warning",
         details={"email": email, "role": role},
     )
-    theirs = list(
-        session.scalars(select(AdminSession).where(func.lower(AdminSession.name) == email))
-    )
-    _end(session, theirs, actor=actor)
+    theirs = list(AdminSession.objects.alias(lowered=Lower("name")).filter(lowered=email))
+    _end(tx, theirs, actor=actor)
     return [r.id for r in theirs]

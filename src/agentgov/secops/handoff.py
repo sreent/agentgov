@@ -18,8 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy.orm import Session
-
+from agentgov import db
 from agentgov.identity import sso
 from agentgov.registry import features
 from agentgov.registry.errors import Forbidden
@@ -35,12 +34,12 @@ MAY = {
 }
 
 
-def level(session: Session) -> str:
-    return features.mode(session, FEATURE)
+def level(tx: db.Transaction) -> str:
+    return features.mode(tx, FEATURE)
 
 
-def at_least(session: Session, needed: str) -> bool:
-    return LEVELS.index(level(session)) >= LEVELS.index(needed)
+def at_least(tx: db.Transaction, needed: str) -> bool:
+    return LEVELS.index(level(tx)) >= LEVELS.index(needed)
 
 
 def _held(principal: Any) -> set[str]:
@@ -56,11 +55,11 @@ def acting_as_secops(principal: Any, *also: str) -> bool:
     return ROLE in _held(principal) and not principal.roles & ({"admin"} | set(also))
 
 
-def check(session: Session, principal: Any, needed: str, *, also: tuple[str, ...] = ()) -> None:
+def check(tx: db.Transaction, principal: Any, needed: str, *, also: tuple[str, ...] = ()) -> None:
     """Refuse the secops role what the hand-off level doesn't give it."""
     if not acting_as_secops(principal, *also):
         return
-    current = level(session)
+    current = level(tx)
     if LEVELS.index(current) < LEVELS.index(needed):
         raise Forbidden(
             f"the hand-off to security operations is at {current}: the secops role may "
@@ -69,7 +68,7 @@ def check(session: Session, principal: Any, needed: str, *, also: tuple[str, ...
         )
 
 
-def check_kill_switch(session: Session, principal: Any, action: str) -> None:
+def check_kill_switch(tx: db.Transaction, principal: Any, action: str) -> None:
     """Block and unblock: what the secops role may do to agents, tool servers, model
     providers and identity issuers, from contain on. Nothing else of theirs, and nothing at
     all of anyone's but administrators' (``principal`` as it is where the agent is, for an
@@ -80,16 +79,16 @@ def check_kill_switch(session: Session, principal: Any, action: str) -> None:
         raise Forbidden(f"role {principal.role!r} may not do this")
     if action not in ("block", "unblock"):
         raise Forbidden(f"role {principal.role!r} may block and unblock, nothing else here")
-    check(session, principal, CONTAIN)
+    check(tx, principal, CONTAIN)
 
 
-def reached(session: Session) -> list[str]:
+def reached(tx: db.Transaction) -> list[str]:
     """The levels the hand-off has reached, beyond off."""
-    return list(LEVELS[1 : LEVELS.index(level(session)) + 1])
+    return list(LEVELS[1 : LEVELS.index(level(tx)) + 1])
 
 
-def describe(session: Session) -> dict[str, Any]:
-    current = level(session)
+def describe(tx: db.Transaction) -> dict[str, Any]:
+    current = level(tx)
     reached = LEVELS.index(current)
     return {
         "level": current,

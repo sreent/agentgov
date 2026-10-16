@@ -13,13 +13,12 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
-from sqlalchemy import select, text
 
 from agentgov import ledger
 from agentgov.config import Settings
 from agentgov.coordination import LOCK_SPACE, Coordinator, JobBusy, JobLost, lock_key
 from agentgov.db import Database, mark_changed
-from agentgov.models import LedgerEntry
+from agentgov.db.models import LedgerEntry
 from agentgov.registry import agents
 from agentgov.runtime import Runtime
 from agentgov.web import evidence as evidence_routes
@@ -47,8 +46,8 @@ def test_one_process_leads_on_sqlite(settings: Settings) -> None:
     rt.init_db()
     assert rt.coordination.leading and rt.coordination.listening
     assert not rt.coordination.shared
-    with rt.db.session() as s:
-        [this] = rt.coordination.replicas(s)
+    with rt.db.transaction() as tx:
+        [this] = rt.coordination.replicas(tx)
     assert this["name"] == rt.coordination.name and this["this"] and this["leader"]
     rt.db.dispose()
 
@@ -134,8 +133,8 @@ def test_one_replica_leads_and_another_takes_over(pair: tuple[Runtime, Runtime])
     time.sleep(0.5)  # and the other doesn't, however often it tries
     assert a.coordination.leading != b.coordination.leading
     leader, other = (a, b) if a.coordination.leading else (b, a)
-    with other.db.session() as s:
-        seen = other.coordination.replicas(s)
+    with other.db.transaction() as tx:
+        seen = other.coordination.replicas(tx)
     assert {r["name"] for r in seen} == {a.coordination.name, b.coordination.name}
     assert [r["name"] for r in seen if r["leader"]] == [leader.coordination.name]
     assert [r["this"] for r in seen if r["name"] == other.coordination.name] == [True]
@@ -155,8 +154,8 @@ def test_another_agentgov_on_the_server_is_apart(pair: tuple[Runtime, Runtime]) 
     try:
         until(lambda: neighbour.leading)
         until(lambda: a.coordination.leading or b.coordination.leading)
-        with a.db.session() as s:
-            seen = {r["name"] for r in a.coordination.replicas(s)}
+        with a.db.transaction() as tx:
+            seen = {r["name"] for r in a.coordination.replicas(tx)}
         assert seen == {a.coordination.name, b.coordination.name}
     finally:
         neighbour.stop()
@@ -182,8 +181,8 @@ def test_every_connection_keeps_alive(settings: Settings) -> None:
 def test_a_replica_out_of_touch_lists_itself(settings: Settings) -> None:
     rt = Runtime(settings)
     rt.init_db()  # and its coordination not started: as when it lost the database
-    with rt.db.session() as s:
-        assert rt.coordination.replicas(s) == [
+    with rt.db.transaction() as tx:
+        assert rt.coordination.replicas(tx) == [
             {
                 "name": rt.coordination.name,
                 "leader": False,
@@ -202,25 +201,25 @@ def test_changes_reach_every_replica(pair: tuple[Runtime, Runtime]) -> None:
     until(lambda: a.coordination.listening and b.coordination.listening)
     heard: list[set[str] | None] = []
     b.coordination.on_remote = heard.append
-    with a.db.session() as s:
-        mark_changed(s, "agents", "ledger")
+    with a.db.transaction() as tx:
+        mark_changed(tx, "agents", "ledger")
     until(lambda: heard)
     assert heard == [{"agents"}]  # the ledger only to the replica that wrote it
-    with a.db.session() as s:
-        mark_changed(s, "ledger")
-    with a.db.session() as s:
-        mark_changed(s, "features")
+    with a.db.transaction() as tx:
+        mark_changed(tx, "ledger")
+    with a.db.transaction() as tx:
+        mark_changed(tx, "features")
     until(lambda: len(heard) == 2)
     assert heard[1] == {"features"}
     # Rolled back: nobody hears of it.
-    with pytest.raises(RuntimeError), a.db.session() as s:
-        mark_changed(s, "toolservers")
+    with pytest.raises(RuntimeError), a.db.transaction() as tx:
+        mark_changed(tx, "toolservers")
         raise RuntimeError("no")
     # A replica doesn't hear its own changes again.
     mine: list[Any] = []
     a.coordination.on_remote = mine.append
-    with a.db.session() as s:
-        mark_changed(s, "blueprints")
+    with a.db.transaction() as tx:
+        mark_changed(tx, "blueprints")
     until(lambda: len(heard) == 3)
     assert heard[2] == {"blueprints"} and mine == []
 
@@ -229,9 +228,9 @@ def test_changes_reach_every_replica(pair: tuple[Runtime, Runtime]) -> None:
 def test_blocking_reaches_opa_through_any_replica(pair: tuple[Runtime, Runtime]) -> None:
     a, b = pair
     until(lambda: a.coordination.listening and b.coordination.listening)
-    with a.db.session() as s:
+    with a.db.transaction() as tx:
         agent = agents.register(
-            s,
+            tx,
             a.settings,
             {"name": "support-bot", "owner": "cx", "sponsors": ["alice@example.com"]},
             actor="admin:test",
@@ -256,8 +255,8 @@ def test_blocking_reaches_opa_through_any_replica(pair: tuple[Runtime, Runtime])
 
 
 def block(rt: Runtime, agent_id: str) -> None:
-    with rt.db.session() as s:
-        agents.transition(s, rt.settings, agents.get(s, agent_id), "block", actor="admin:test")
+    with rt.db.transaction() as tx:
+        agents.transition(tx, rt.settings, agents.get(tx, agent_id), "block", actor="admin:test")
 
 
 @postgres
@@ -290,27 +289,26 @@ def test_a_job_that_lost_its_lock_stops(pair: tuple[Runtime, Runtime]) -> None:
     restarts): another replica may run the job now, and this run writes nothing more."""
     a, b = pair
     with a.coordination.job("retention"):
-        with a.db.session() as s:
-            ledger.append(s, type="test.before", actor="test")
-        with b.db.session() as s:
-            s.execute(
-                text(
-                    "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' "
-                    "AND classid = :space AND objid = :key AND objsubid = 2"
-                ),
-                {"space": LOCK_SPACE, "key": lock_key("retention") & 0xFFFFFFFF},
+        with a.db.transaction() as tx:
+            ledger.append(tx, type="test.before", actor="test")
+        with b.db.transaction() as tx:
+            tx.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND classid = %s AND objid = %s AND objsubid = 2",
+                (LOCK_SPACE, lock_key("retention") & 0xFFFFFFFF),
             )
         # The other replica runs it.
-        with b.coordination.job("retention", wait=5), b.db.session() as s:
-            ledger.append(s, type="test.elsewhere", actor="test")
-        with pytest.raises(JobLost, match="retention lost its lock"), a.db.session() as s:
-            ledger.append(s, type="test.after", actor="test")
-    with a.db.session() as s:
-        types = set(s.scalars(select(LedgerEntry.type).where(LedgerEntry.type.like("test.%"))))
+        with b.coordination.job("retention", wait=5), b.db.transaction() as tx:
+            ledger.append(tx, type="test.elsewhere", actor="test")
+        with pytest.raises(JobLost, match="retention lost its lock"), a.db.transaction() as tx:
+            ledger.append(tx, type="test.after", actor="test")
+    with a.db.transaction():
+        tested = LedgerEntry.objects.filter(type__startswith="test.")
+        types = set(tested.values_list("type", flat=True))
     assert types == {"test.before", "test.elsewhere"}
     # The next run takes the lock again, and writes as usual.
-    with a.coordination.job("retention", wait=5), a.db.session() as s:
-        ledger.append(s, type="test.again", actor="test")
+    with a.coordination.job("retention", wait=5), a.db.transaction() as tx:
+        ledger.append(tx, type="test.again", actor="test")
 
 
 @postgres
@@ -321,14 +319,11 @@ def test_a_replica_that_lost_the_database_hears_everything(
     until(lambda: b.coordination.listening)
     heard: list[Any] = []
     b.coordination.on_remote = heard.append
-    with b.db.session() as s:
+    with b.db.transaction() as tx:
         # The database drops replica b's coordination connection.
-        s.execute(
-            text(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE application_name = :name"
-            ),
-            {"name": f"agentgov/{b.coordination.name}"},
+        tx.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = %s",
+            (f"agentgov/{b.coordination.name}",),
         )
     until(lambda: None in heard, timeout=10)
     until(lambda: b.coordination.listening)
@@ -339,9 +334,9 @@ def test_the_database_tells_replicas_with_the_commit() -> None:
     db = Database("sqlite://")
     told: list[Any] = []
     db.before_commit = lambda tx, topics: told.append(topics)
-    with db.session() as s:
-        mark_changed(s, "agents")
-    with db.session():
+    with db.transaction() as tx:
+        mark_changed(tx, "agents")
+    with db.transaction():
         pass
     assert told == [{"agents"}]
     db.dispose()

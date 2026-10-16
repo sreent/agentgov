@@ -1,6 +1,6 @@
 """The Django models (agentgov.db.models) against the database the migrations build: the
-same tables, columns, keys, constraints, indexes and defaults; and what SQLAlchemy's models
-write, Django's read, and the other way round (docs/adr/0007-django.md)."""
+same tables, columns, keys, constraints, indexes and defaults, whether Alembic's migrations
+built it or Django's; and the values as the databases hold them (docs/adr/0007-django.md)."""
 
 from __future__ import annotations
 
@@ -12,10 +12,9 @@ from typing import Any
 from django.apps import apps
 from django.core import checks
 from django.db.models import Field, UniqueConstraint, Value
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect
 from sqlalchemy import types as sa
 
-from agentgov import models
 from agentgov.db import Database
 from agentgov.db import models as django_models
 
@@ -110,8 +109,8 @@ def database_tables(db: Database) -> dict[str, dict[str, Any]]:
     look = inspect(db.engine)
     tables = {}
     for name in look.get_table_names():
-        if name == "alembic_version":
-            continue
+        if name in ("alembic_version", "django_migrations"):
+            continue  # each tool's record of what it applied
         columns = look.get_columns(name)
         unique = {u["name"]: sorted(u["column_names"]) for u in look.get_unique_constraints(name)}
         indexes = {}
@@ -154,25 +153,27 @@ def test_django_finds_nothing_wrong_with_the_models() -> None:
     assert [str(issue) for issue in found if not issue.is_silenced()] == []
 
 
-# ------------------------------------------------------------- the values, both ways
+# ------------------------------------------------------------------ the values stored
 
 
 WHEN = datetime(2026, 10, 15, 8, 30, tzinfo=UTC)  # no microseconds: the format's edge case
 
 
-def test_each_reads_what_the_other_writes(database_url: str) -> None:
+def test_values_as_the_databases_hold_them(database_url: str) -> None:
+    """What AgentGov has always written: times in UTC without a zone (on SQLite, text that
+    always has microseconds, so that times compare as text), and JSON as text. The rows
+    there read as they should, and what is written now is stored the same way."""
     db = Database(database_url)
-    with db.session() as s:
-        s.add(
-            models.Team(
-                id="team_a",
-                name="written-by-sqlalchemy",
-                members=["a@example.com"],
-                created_at=WHEN,
-            )
+    teams = django_models.Team.objects
+    with db.transaction() as tx:
+        tx.execute(
+            "INSERT INTO teams (id, name, description, members, emails, destinations, "
+            "created_at, updated_at) VALUES ('team_a', 'written-before', '', "
+            "'[\"a@example.com\"]', '[]', '[]', '2026-10-15 08:30:00.000000', "
+            "'2026-10-15 08:30:00.000000')"
         )
-    with db.transaction():
-        team = django_models.Team.objects.get(pk="team_a")
+        team = teams.get(pk="team_a")
+        # The last two, the database's defaults.
         assert (team.members, team.emails, team.is_default, team.version) == (
             ["a@example.com"],
             [],
@@ -181,36 +182,37 @@ def test_each_reads_what_the_other_writes(database_url: str) -> None:
         )
         assert team.created_at == WHEN
         assert team.created_at.tzinfo is not None
-        django_models.Team.objects.create(
+        teams.create(
             id="team_b",
-            name="written-by-django",
+            name="written-now",
             members=[{"nested": True}],
-            created_at=WHEN + timedelta(microseconds=1),
-            # Without a zone: taken as UTC, as SQLAlchemy's models take it.
-            updated_at=datetime(2026, 10, 15, 9, 0),
+            # Without a zone: taken as UTC.
+            created_at=datetime(2026, 10, 15, 8, 30, 0, 1),
         )
-    with db.session() as s:
-        team = s.get(models.Team, "team_b")
-        assert team is not None
-        assert team.members == [{"nested": True}]
-        assert team.created_at == WHEN + timedelta(microseconds=1)
-        assert team.updated_at.tzinfo is not None
-        assert team.is_default is False and team.version == 1  # the database's defaults
-        # Times written by either compare in the database as they should.
-        names = s.scalars(select(models.Team.name).order_by(models.Team.created_at)).all()
-        assert names == ["written-by-sqlalchemy", "written-by-django"]
-        later = s.scalars(select(models.Team.name).where(models.Team.created_at > WHEN)).all()
-        assert later == ["written-by-django"]
+        [(created, members)] = tx.execute(
+            "SELECT created_at, members FROM teams WHERE id = 'team_b'"
+        )
+        if db.sqlite:
+            assert created == "2026-10-15 08:30:00.000001"
+            members = json.loads(members)
+        else:
+            assert created == datetime(2026, 10, 15, 8, 30, 0, 1)
+        assert members == [{"nested": True}]
+        # Times compare in the database as they should.
+        names = teams.order_by("created_at").values_list("name", flat=True)
+        assert list(names) == ["written-before", "written-now"]
+        later = teams.filter(created_at__gt=WHEN).values_list("name", flat=True)
+        assert list(later) == ["written-now"]
+        assert teams.get(pk="team_b").created_at == WHEN + timedelta(microseconds=1)
 
 
 def test_keys_of_several_columns_and_foreign_keys(database_url: str) -> None:
     db = Database(database_url)
-    with db.session() as s:
-        s.add(models.Blueprint(id="bp_1", name="support"))
-        s.add(models.Agent(id="agt_1", name="bot", blueprint_id="bp_1"))
     with db.transaction():
-        agent = django_models.Agent.objects.select_related("blueprint").get(pk="agt_1")
-        assert agent.blueprint.name == "support"
+        django_models.Blueprint.objects.create(id="bp_1", name="support")
+        django_models.Agent.objects.create(id="agt_1", name="bot", blueprint_id="bp_1")
+    with db.transaction():
+        assert django_models.Agent.objects.get(pk="agt_1").blueprint.name == "support"
         django_models.ModelUsage.objects.create(
             agent_id="agt_1",
             day="2026-10-15",
@@ -218,6 +220,57 @@ def test_keys_of_several_columns_and_foreign_keys(database_url: str) -> None:
             model="gpt",
             input_tokens=5,
         )
-    with db.session() as s:
-        usage = s.get(models.ModelUsage, ("agt_1", "2026-10-15", "openai", "gpt"))
-        assert usage is not None and usage.input_tokens == 5
+    with db.transaction():
+        usage = django_models.ModelUsage.objects.get(pk=("agt_1", "2026-10-15", "openai", "gpt"))
+        assert usage.input_tokens == 5
+
+
+# --------------------------------------------------------------------------- saving
+
+
+def test_a_save_writes_the_fields_that_changed(database_url: str) -> None:
+    """As SQLAlchemy did: two transactions that change different fields of one row keep
+    both changes, a save that changed nothing writes nothing, and the time the row was
+    updated moves with a change."""
+    db = Database(database_url)
+    teams = django_models.Team.objects
+    with db.transaction():
+        teams.create(id="tm_1", name="support")
+    with db.transaction():
+        first = teams.get(pk="tm_1")
+    with db.transaction():
+        second = teams.get(pk="tm_1")
+    made = first.updated_at
+    with db.transaction():
+        first.description = "first-line support"
+        first.save()
+    with db.transaction():
+        second.members = ["alice@example.com"]
+        second.save()
+    with db.transaction():
+        team = teams.get(pk="tm_1")
+        assert (team.description, team.members) == ("first-line support", ["alice@example.com"])
+        assert team.updated_at > made
+        updated = team.updated_at
+        team.save()
+        team.name = "support"  # what it was
+        team.save()
+    with db.transaction():
+        assert teams.get(pk="tm_1").updated_at == updated
+
+
+def test_a_row_read_in_part_or_again_writes_what_changed(database_url: str) -> None:
+    db = Database(database_url)
+    teams = django_models.Team.objects
+    with db.transaction():
+        teams.create(id="tm_1", name="support", description="before")
+    with db.transaction():
+        team = teams.only("id", "name").get(pk="tm_1")
+        team.description = "set without reading it"
+        team.save()
+    with db.transaction():
+        team = teams.get(pk="tm_1")
+        assert team.description == "set without reading it"
+        teams.filter(pk="tm_1").update(name="renamed meanwhile")
+        team.refresh_from_db()
+        assert team.name == "renamed meanwhile" and team.changed() == []

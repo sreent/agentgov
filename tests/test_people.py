@@ -12,13 +12,12 @@ from urllib.parse import unquote
 
 import httpx
 import pytest
-from sqlalchemy import update
 from starlette.testclient import TestClient
 
 from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.models import Person
+from agentgov.db.models import Person
 from agentgov.platforms.base import Found, Inventory, PlatformError
 from agentgov.platforms.microsoft import lookup_users
 from agentgov.registry import people, platforms
@@ -146,9 +145,9 @@ class TestWhoMadeIt:
             details={},
             maker="0a1b2c3d-1111-2222-3333-444455556666",  # a service principal
         )
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             platforms.record_inventory(
-                s, "databricks", Inventory(found=[found, machine], read={""})
+                tx, "databricks", Inventory(found=[found, machine], read={""})
             )  # fmt: skip
         claims = agent(client, "claims-helper")
         assert claims["makers"] == [
@@ -294,8 +293,8 @@ class TestLookedUpInGraph:
         rt = ms.app.state.rt
         del directory.users[DANA]
         assert rt.sync_people() == {"found": 0, "not_found": 0, "left": 0}  # read this week
-        with rt.db.session() as s:
-            s.execute(update(Person).values(checked_at=ids.utcnow() - timedelta(days=8)))
+        with rt.db.transaction():
+            Person.objects.update(checked_at=ids.utcnow() - timedelta(days=8))
         assert rt.sync_people(actor="admin:test") == {"found": 1, "not_found": 0, "left": 1}
         dana = agent(ms, "sales-helper")["makers"][0]
         assert dana["left"] is True and dana["left_at"]
@@ -458,12 +457,12 @@ def test_microsoft_places_look_up_people(client) -> None:
 def test_wanted_first_those_never_looked_up(client) -> None:
     import_studio(client, studio("bot-sales", "Sales Helper"))
     rt = client.app.state.rt
-    with rt.db.session() as s:
-        assert sorted(people.wanted(s)) == [DANA, FRANK]
-        people.record_lookup(s, [{"id": DANA, "displayName": "Dana"}], [])
-    with rt.db.session() as s:
-        assert people.wanted(s) == [FRANK]
-        assert people.wanted(s, ids.utcnow() + timedelta(days=8)) == [FRANK, DANA]
+    with rt.db.transaction() as tx:
+        assert sorted(people.wanted(tx)) == [DANA, FRANK]
+        people.record_lookup(tx, [{"id": DANA, "displayName": "Dana"}], [])
+    with rt.db.transaction() as tx:
+        assert people.wanted(tx) == [FRANK]
+        assert people.wanted(tx, ids.utcnow() + timedelta(days=8)) == [FRANK, DANA]
 
 
 # ------------------------------------------------------------- people who leave
@@ -502,8 +501,8 @@ class TestPeopleWhoLeave:
         rt = ms.app.state.rt
         rt.sync_people(actor="admin:test")
         del directory.users[DANA]
-        with rt.db.session() as s:
-            s.execute(update(Person).values(checked_at=ids.utcnow() - timedelta(days=8)))
+        with rt.db.transaction():
+            Person.objects.update(checked_at=ids.utcnow() - timedelta(days=8))
         assert rt.sync_people(actor="admin:test")["left"] == 1
         ms.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
         [flagged] = open_of(ms, "agent.owner_left")

@@ -12,12 +12,11 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
 from starlette.testclient import TestClient
 
 from agentgov import db, ledger
 from agentgov.config import Settings
-from agentgov.models import LedgerEntry
+from agentgov.db.models import LedgerEntry
 from agentgov.registry import access_packages, agents, approvals
 from agentgov.registry.errors import InvalidTransition
 from agentgov.runtime import Runtime
@@ -74,8 +73,8 @@ def test_what_the_scheduled_work_changes_isnt_an_edit(client: TestClient) -> Non
     client.post("/v1/agents/support-bot/block", json={}, headers=ADMIN).raise_for_status()
     client.post("/v1/agents/support-bot/unblock", json={}, headers=ADMIN).raise_for_status()
     rt = client.app.state.rt  # type: ignore[attr-defined]
-    with rt.db.session() as s:
-        agents.refresh_risk(s, rt.settings, agents.get(s, "support-bot"))
+    with rt.db.transaction() as tx:
+        agents.refresh_risk(tx, rt.settings, agents.get(tx, "support-bot"))
     resp = client.patch(
         "/v1/agents/support-bot",
         json={"description": "Still mine"},
@@ -215,9 +214,9 @@ def pg(settings: Settings) -> Runtime:
 
 
 def _agent(rt: Runtime) -> str:
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         agent = agents.register(
-            s,
+            tx,
             rt.settings,
             {"name": "support-bot", "owner": "cx", "sponsors": ["alice@example.com"]},
             actor="admin:test",
@@ -227,19 +226,17 @@ def _agent(rt: Runtime) -> str:
 
 
 def _entries(rt: Runtime, type_: str) -> int:
-    with rt.db.session() as s:
-        return s.scalar(
-            select(func.count()).select_from(LedgerEntry).where(LedgerEntry.type == type_)
-        )
+    with rt.db.transaction():
+        return LedgerEntry.objects.filter(type=type_).count()
 
 
 @postgres
 def test_two_approvers_decide_one_request(pg: Runtime) -> None:
     agent_id = _agent(pg)
-    with pg.db.session() as s:
+    with pg.db.transaction() as tx:
         _, req = approvals.check_or_request(
-            s,
-            agent=agents.get(s, agent_id),
+            tx,
+            agent=agents.get(tx, agent_id),
             action="tools/call",
             resource="crm/delete_customer",
             arguments={"customer_id": "c-1"},
@@ -250,9 +247,9 @@ def test_two_approvers_decide_one_request(pg: Runtime) -> None:
 
     def decide(approve: bool) -> Callable[[], Any]:
         def run() -> None:
-            with pg.db.session() as s:
-                req = approvals.get(s, request_id)  # both read it pending
-                approvals.decide(s, req, approve=approve, actor=f"approver:{approve}")
+            with pg.db.transaction() as tx:
+                req = approvals.get(tx, request_id)  # both read it pending
+                approvals.decide(tx, req, approve=approve, actor=f"approver:{approve}")
 
         return run
 
@@ -270,14 +267,14 @@ def test_one_approval_is_used_once(pg: Runtime) -> None:
         "reasons": ["destructive"],
         "ttl_seconds": 600,
     }
-    with pg.db.session() as s:
-        _, req = approvals.check_or_request(s, agent=agents.get(s, agent_id), **call)
-        approvals.decide(s, req, approve=True, actor="approver:test")
+    with pg.db.transaction() as tx:
+        _, req = approvals.check_or_request(tx, agent=agents.get(tx, agent_id), **call)
+        approvals.decide(tx, req, approve=True, actor="approver:test")
     used: list[str] = []
 
     def again() -> None:
-        with pg.db.session() as s:
-            outcome, _ = approvals.check_or_request(s, agent=agents.get(s, agent_id), **call)
+        with pg.db.transaction() as tx:
+            outcome, _ = approvals.check_or_request(tx, agent=agents.get(tx, agent_id), **call)
             used.append(outcome)
 
     together(again, again)
@@ -287,9 +284,9 @@ def test_one_approval_is_used_once(pg: Runtime) -> None:
 @postgres
 def test_two_people_decide_one_access_request(pg: Runtime) -> None:
     agent_id = _agent(pg)
-    with pg.db.session() as s:
+    with pg.db.transaction() as tx:
         package = access_packages.create(
-            s,
+            tx,
             {
                 "name": "crm-write",
                 "permissions": [{"server": "crm", "tools": ["update_customer"]}],
@@ -298,8 +295,8 @@ def test_two_people_decide_one_access_request(pg: Runtime) -> None:
             actor="admin:test",
         )
         row = access_packages.request(
-            s,
-            agent=agents.get(s, agent_id),
+            tx,
+            agent=agents.get(tx, agent_id),
             package=package,
             days=None,
             reason="Ticket CX-1",
@@ -309,9 +306,9 @@ def test_two_people_decide_one_access_request(pg: Runtime) -> None:
 
     def decide(approve: bool) -> Callable[[], Any]:
         def run() -> None:
-            with pg.db.session() as s:
-                row = access_packages.assignment(s, row_id)
-                access_packages.decide(s, row, approve=approve, actor=f"approver:{approve}")
+            with pg.db.transaction() as tx:
+                row = access_packages.assignment(tx, row_id)
+                access_packages.decide(tx, row, approve=approve, actor=f"approver:{approve}")
 
         return run
 
@@ -323,8 +320,8 @@ def test_two_blocks_at_once(pg: Runtime) -> None:
     agent_id = _agent(pg)
 
     def block() -> None:
-        with pg.db.session() as s:
-            agents.transition(s, pg.settings, agents.get(s, agent_id), "block", actor="a")
+        with pg.db.transaction() as tx:
+            agents.transition(tx, pg.settings, agents.get(tx, agent_id), "block", actor="a")
 
     assert together(block, block) == ["ok", "refused"]
     assert _entries(pg, "agent.block") == 1
@@ -341,22 +338,22 @@ def test_the_chain_head_is_locked_last(pg: Runtime) -> None:
 
     def append_then_lock() -> None:
         try:
-            with pg.db.session() as s:
-                ledger.append(s, type="test.first", actor="test")
+            with pg.db.transaction() as tx:
+                ledger.append(tx, type="test.first", actor="test")
                 appended.set()
                 assert locked.wait(5)
-                db.lock(s, agents.get(s, agent_id))  # waits for the other to commit
+                db.lock(tx, agents.get(tx, agent_id))  # waits for the other to commit
         except BaseException as exc:
             failed.append(exc)
 
     def lock_then_append() -> None:
         try:
-            with pg.db.session() as s:
+            with pg.db.transaction() as tx:
                 assert appended.wait(5)
-                db.lock(s, agents.get(s, agent_id))
+                db.lock(tx, agents.get(tx, agent_id))
                 locked.set()
                 time.sleep(0.3)  # the other is waiting for the row by now
-                ledger.append(s, type="test.second", actor="test")
+                ledger.append(tx, type="test.second", actor="test")
         except BaseException as exc:
             failed.append(exc)
 
@@ -366,10 +363,10 @@ def test_the_chain_head_is_locked_last(pg: Runtime) -> None:
     for thread in threads:
         thread.join(30)
     assert failed == []
-    with pg.db.session() as s:
-        types = list(s.scalars(select(LedgerEntry.type).order_by(LedgerEntry.seq)))
+    with pg.db.transaction() as tx:
+        types = list(LedgerEntry.objects.order_by("seq").values_list("type", flat=True))
         assert types[-2:] == ["test.second", "test.first"]  # in the order they committed
-        assert ledger.verify(s)["valid"] is True
+        assert ledger.verify(tx)["valid"] is True
 
 
 def test_the_cli_names_the_version_too(client: TestClient, monkeypatch) -> None:
@@ -398,17 +395,18 @@ def test_the_identity_sync_holds_no_agent_while_keycloak_answers(rt, settings) -
     the jobs that update many agents at once (the posture scan's risk scores), which would
     otherwise wait for the whole pass, or deadlock with it."""
     import httpx
-    from sqlalchemy import text
 
+    from agentgov.db.models import Agent
     from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
-    from agentgov.models import Agent
     from agentgov.registry import blueprints
     from tests.test_keycloak import FakeKeycloak
 
-    with rt.db.session() as s:
-        blueprints.create(s, {"name": "bp", "require_sponsor": False}, actor="t")
+    with rt.db.transaction() as tx:
+        blueprints.create(tx, {"name": "bp", "require_sponsor": False}, actor="t")
         made = [
-            agents.register(s, settings, {"name": name, "blueprint": "bp"}, actor="t", approve=True)
+            agents.register(
+                tx, settings, {"name": name, "blueprint": "bp"}, actor="t", approve=True
+            )
             for name in ("one", "two", "three")
         ]
         order = sorted((a.id, a.client_id) for a in made)
@@ -433,11 +431,12 @@ def test_the_identity_sync_holds_no_agent_while_keycloak_answers(rt, settings) -
         assert reached.wait(10)
         # Keycloak is answering about the second agent: the first is synced and committed,
         # and another transaction updates it, as the posture scan does, without waiting.
-        with rt.db.session() as s:
-            s.execute(text("SET LOCAL lock_timeout = '2s'"))
-            agent = s.get(Agent, first)
-            assert agent is not None and agent.identity_synced_at is not None
+        with rt.db.transaction() as tx:
+            tx.execute("SET LOCAL lock_timeout = '2s'")
+            agent = Agent.objects.get(pk=first)
+            assert agent.identity_synced_at is not None
             agent.risk_score = 7
+            agent.save()
     finally:
         go.set()
         sync.join(10)

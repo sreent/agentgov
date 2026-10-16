@@ -6,13 +6,12 @@ import fnmatch
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import delete, or_, select
-from sqlalchemy.orm import Session
+from django.db.models import Q
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.models import (
+from agentgov.db.models import (
     ACTIVE,
     AGENT_STATUSES,
     BLOCKED,
@@ -83,9 +82,10 @@ def client_id_for(name: str) -> str:
     return f"agent-{name}"
 
 
-def get(session: Session, ref: str) -> Agent:
-    agent = session.get(Agent, ref) or session.scalar(
-        select(Agent).where(or_(Agent.name == ref, Agent.client_id == ref))
+def get(tx: db.Transaction, ref: str) -> Agent:
+    agent = (
+        Agent.objects.filter(pk=ref).first()
+        or Agent.objects.filter(Q(name=ref) | Q(client_id=ref)).first()
     )
     if agent is None:
         raise NotFound(f"agent {ref!r} not found")
@@ -93,7 +93,7 @@ def get(session: Session, ref: str) -> Agent:
 
 
 def list_agents(
-    session: Session,
+    tx: db.Transaction,
     *,
     status: str | None = None,
     blueprint: str | None = None,
@@ -102,21 +102,20 @@ def list_agents(
     source: str | None = None,
     include_deleted: bool = False,
 ) -> list[Agent]:
-    stmt = select(Agent).order_by(Agent.name)
+    found = Agent.objects.order_by("name")
     if source:
-        stmt = stmt.where(Agent.source == source)
+        found = found.filter(source=source)
     if status:
-        stmt = stmt.where(Agent.status == status)
+        found = found.filter(status=status)
     elif not include_deleted:
-        stmt = stmt.where(Agent.status != DELETED)
+        found = found.exclude(status=DELETED)
     if blueprint:
-        stmt = stmt.where(Agent.blueprint_id == blueprints.get(session, blueprint).id)
+        found = found.filter(blueprint_id=blueprints.get(tx, blueprint).id)
     if risk_level:
-        stmt = stmt.where(Agent.risk_level == risk_level)
+        found = found.filter(risk_level=risk_level)
     if q:
-        like = f"%{q.lower()}%"
-        stmt = stmt.where(or_(Agent.name.like(like), Agent.description.ilike(like)))
-    return list(session.scalars(stmt).unique())
+        found = found.filter(Q(name__contains=q.lower()) | Q(description__icontains=q))
+    return list(found)
 
 
 def effective_grants(agent: Agent) -> list[dict[str, Any]]:
@@ -145,11 +144,11 @@ def a2a_published(agent: Agent) -> bool:
     return bool(agent.a2a_url) and agent.status in A2A_PUBLISHED and not agent.on_platform
 
 
-def _unpublished(session: Session, agent: Agent) -> str | None:
+def _unpublished(tx: db.Transaction, agent: Agent) -> str | None:
     """Why the gateway doesn't publish an agent that serves A2A, if it doesn't."""
     if not agent.a2a_url:
         return None
-    if features.mode(session, "a2a-gateway") == features.OFF:
+    if features.mode(tx, "a2a-gateway") == features.OFF:
         return "the a2a-gateway feature is off"
     if agent.on_platform:
         return "it runs on a platform AgentGov inventories"
@@ -168,16 +167,16 @@ def may_call(caller: Agent, target: Agent) -> bool:
 
 
 def a2a_view(
-    session: Session, settings: Settings, agent: Agent, *, reached: set[str] | None = None
+    tx: db.Transaction, settings: Settings, agent: Agent, *, reached: set[str] | None = None
 ) -> dict[str, Any]:
     """Agent to agent: where it is called through the gateway, whom it may call, and who
     may call it (of the agents ``reached``, by ID, for a role for some teams only)."""
     others = [
-        a for a in list_agents(session) if a.id != agent.id and (reached is None or a.id in reached)
+        a for a in list_agents(tx) if a.id != agent.id and (reached is None or a.id in reached)
     ]
     route = a2a_route(agent)
     gateway = settings.gateway_public_url.rstrip("/")
-    unpublished = _unpublished(session, agent)
+    unpublished = _unpublished(tx, agent)
     return {
         "serves": bool(agent.a2a_url),
         "published": bool(agent.a2a_url) and unpublished is None,
@@ -192,24 +191,23 @@ def a2a_view(
         # what its owners say stops them, and what AgentGov found when it last called the
         # agent's A2A URL itself.
         "around_gateway": {
-            "mode": features.mode(session, "calls-around-gateway"),
+            "mode": features.mode(tx, "calls-around-gateway"),
             "protection": agent.a2a_protection,
             "test": agent.a2a_probe,
         },
     }
 
 
-def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Transaction, agent: Agent, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in EDITABLE:
         if key not in data:
             continue
         value = data[key]
         if key == "blueprint":
-            bp = blueprints.get(session, value) if value else None
+            bp = blueprints.get(tx, value) if value else None
             if agent.blueprint_id != (bp.id if bp else None):
                 agent.blueprint = bp
-                agent.blueprint_id = bp.id if bp else None
                 if bp and "risk_tier" not in data:
                     agent.risk_tier = bp.risk_tier
                 changed.append(key)
@@ -217,7 +215,7 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
         if key in ("sponsors", "models"):
             value = validation.string_list(value, key)
         elif key == "team":
-            value = teams.reference(session, value)
+            value = teams.reference(tx, value)
         elif key == "labels":
             value = validation.labels(value)
         elif key == "permissions":
@@ -252,7 +250,7 @@ def _apply(session: Session, agent: Agent, data: dict[str, Any]) -> list[str]:
             changed.append(key)
     if "workload_identity" in data:
         # Its own identity, from an identity issuer, instead of a client secret.
-        identity = identity_issuers.workload_identity(session, agent, data["workload_identity"])
+        identity = identity_issuers.workload_identity(tx, agent, data["workload_identity"])
         issuer, subject = identity or (None, None)
         if (agent.workload_issuer, agent.workload_subject) != (issuer, subject):
             agent.workload_issuer, agent.workload_subject = issuer, subject
@@ -330,7 +328,7 @@ def reserved_changes(old: Any, new: Any) -> list[str]:
 
 
 def register(
-    session: Session,
+    tx: db.Transaction,
     settings: Settings,
     data: dict[str, Any],
     *,
@@ -349,7 +347,7 @@ def register(
         raise ValidationError(
             f"label(s) {', '.join(held)}: {RESERVED_WORDS} are set by administrators"
         )
-    if session.scalar(select(Agent).where(Agent.name == name)):
+    if Agent.objects.filter(name=name).exists():
         raise Conflict(f"agent {name!r} already exists")
     agent = Agent(
         id=ids.new_id(ids.AGENT),
@@ -368,11 +366,10 @@ def register(
         client_type=validation.SERVICE,
         redirect_uris=[],
     )
-    _apply(session, agent, data)
-    session.add(agent)
-    session.flush()
+    _apply(tx, agent, data)
+    agent.save(force_insert=True)
     ledger.append(
-        session,
+        tx,
         type="agent.registered",
         actor=actor,
         agent=agent,
@@ -383,14 +380,14 @@ def register(
             "source": agent.source,
         },
     )
-    mark_changed(session, "agents")
+    mark_changed(tx, "agents")
     if approve:
-        transition(session, settings, agent, "approve", actor=actor)
+        transition(tx, settings, agent, "approve", actor=actor)
     return agent
 
 
 def update(
-    session: Session,
+    tx: db.Transaction,
     agent: Agent,
     data: dict[str, Any],
     *,
@@ -398,21 +395,22 @@ def update(
     version: int | None = None,
     reason: str | None = None,
 ) -> list[str]:
-    start_edit(session, agent, version, f"agent {agent.name}")
+    start_edit(tx, agent, version, f"agent {agent.name}")
     if agent.status == DELETED:
         raise Conflict("restore the agent before editing it")
-    changed = _apply(session, agent, data)
+    changed = _apply(tx, agent, data)
     if changed:
         edited(agent)
+        agent.save()
         ledger.append(
-            session,
+            tx,
             type="agent.updated",
             actor=actor,
             agent=agent,
             reason=reason,
             details={"changed": changed, "changes": changes(agent)},
         )
-        mark_changed(session, "agents")
+        mark_changed(tx, "agents")
     return changed
 
 
@@ -433,7 +431,7 @@ def _check_activation(agent: Agent) -> None:
 
 
 def transition(
-    session: Session,
+    tx: db.Transaction,
     settings: Settings,
     agent: Agent,
     action: str,
@@ -443,7 +441,7 @@ def transition(
 ) -> Agent:
     if action not in TRANSITIONS:
         raise ValidationError(f"unknown lifecycle action {action!r}")
-    lock(session, agent)
+    lock(tx, agent)
     allowed, target = TRANSITIONS[action]
     if agent.status not in allowed:
         raise InvalidTransition(f"cannot {action} an agent that is {agent.status}")
@@ -467,8 +465,9 @@ def transition(
         agent.deleted_at = now
     elif action == "restore":
         agent.deleted_at = None
+    agent.save()
     ledger.append(
-        session,
+        tx,
         type=f"agent.{action}",
         actor=actor,
         agent=agent,
@@ -477,21 +476,21 @@ def transition(
         details={"from": previous, "to": target},
     )
     if action in ("block", "delete"):
-        approvals.cancel_for_agent(session, agent, actor=actor, reason=f"agent {target}")
+        approvals.cancel_for_agent(tx, agent, actor=actor, reason=f"agent {target}")
     if action == "adopt":
         # Adopting a discovered agent is the answer to its "unmanaged agent" finding.
-        findings.resolve_key(session, f"agent.unmanaged:{agent.id}", actor=actor)
+        findings.resolve_key(tx, f"agent.unmanaged:{agent.id}", actor=actor)
     from agentgov.registry import platforms  # it imports this module
 
     # Blocked here, an agent on another platform still runs there until someone stops it.
-    platforms.check_stop(session, settings, agent, actor=actor)
-    mark_changed(session, "agents")
+    platforms.check_stop(tx, settings, agent, actor=actor)
+    mark_changed(tx, "agents")
     return agent
 
 
-def attest(session: Session, agent: Agent, *, actor: str, note: str | None = None) -> Agent:
+def attest(tx: db.Transaction, agent: Agent, *, actor: str, note: str | None = None) -> Agent:
     """Record a sponsor's periodic confirmation that the agent is still needed."""
-    lock(session, agent)
+    lock(tx, agent)
     if agent.status not in (ACTIVE, BLOCKED, PENDING):
         raise InvalidTransition(f"cannot attest an agent that is {agent.status}")
     days = (agent.blueprint.attestation_days if agent.blueprint else None) or 90
@@ -499,64 +498,65 @@ def attest(session: Session, agent: Agent, *, actor: str, note: str | None = Non
     agent.attested_at = now
     agent.attested_by = actor
     agent.attestation_expires_at = now + timedelta(days=days)
+    agent.save()
     ledger.append(
-        session,
+        tx,
         type="agent.attested",
         actor=actor,
         agent=agent,
         reason=note,
         details={"expires_at": ids.isoformat(agent.attestation_expires_at)},
     )
-    mark_changed(session, "agents")
+    mark_changed(tx, "agents")
     return agent
 
 
-def purge(session: Session, agent: Agent, *, actor: str) -> None:
-    lock(session, agent)
+def purge(tx: db.Transaction, agent: Agent, *, actor: str) -> None:
+    lock(tx, agent)
     if agent.status != DELETED:
         raise InvalidTransition("only deleted agents can be purged")
-    ledger.append(session, type="agent.purged", actor=actor, agent=agent, severity="warning")
+    ledger.append(tx, type="agent.purged", actor=actor, agent=agent, severity="warning")
     # Its instructions and access packages go too: the ledger keeps their history (and the
     # instructions' hashes, not their text).
-    session.execute(delete(AgentInstructions).where(AgentInstructions.agent_id == agent.id))
-    session.execute(delete(AccessAssignment).where(AccessAssignment.agent_id == agent.id))
-    session.delete(agent)
-    mark_changed(session, "agents")
+    AgentInstructions.objects.filter(agent_id=agent.id).delete()
+    AccessAssignment.objects.filter(agent_id=agent.id).delete()
+    Agent.objects.filter(pk=agent.id).delete()
+    mark_changed(tx, "agents")
 
 
-def purge_expired(session: Session, settings: Settings) -> list[str]:
+def purge_expired(tx: db.Transaction, settings: Settings) -> list[str]:
     """Purge the agents deleted longer ago than the retention period (0 keeps them):
     until then they can be restored."""
     days = settings.soft_delete_retention_days
     if days <= 0:
         return []
     cutoff = ids.utcnow() - timedelta(days=days)
-    expired = session.scalars(
-        select(Agent)
-        .where(Agent.status == DELETED, Agent.deleted_at < cutoff)
-        .order_by(Agent.id)  # in the posture scan's order (registry/posture)
-    ).unique()
+    expired = Agent.objects.filter(status=DELETED, deleted_at__lt=cutoff).order_by(
+        "id"  # in the posture scan's order (registry/posture)
+    )
     names = []
     for agent in list(expired):
         names.append(agent.name)
-        purge(session, agent, actor="system:retention")
+        purge(tx, agent, actor="system:retention")
     return names
 
 
-def _high_risk(session: Session, agent: Agent, result: risk.RiskResult, *, raise_it: bool) -> None:
+def _high_risk(
+    tx: db.Transaction, agent: Agent, result: risk.RiskResult, *, raise_it: bool
+) -> None:
     """The finding that an agent at the gateway is high or critical risk: a threat when what
     it did adds to its risk, otherwise about how it is set up. It resolves once the risk is
     down. An agent on another platform has none: its risk is the sum of its own findings,
     each already raised."""
     key = f"agent.high_risk:{agent.id}"
     if agent.on_platform or result.level not in ("high", "critical"):
-        findings.resolve_key(session, key, actor="system:risk")
+        findings.resolve_key(tx, key, actor="system:risk")
         return
     if not raise_it:
         return
     acted = any(f["factor"] in risk.SIGNAL_LABELS.values() for f in result.factors)
     findings.raise_finding(
-        session,
+        tx,
         type="agent.high_risk",
         severity="critical" if result.level == "critical" else "high",
         subject=agent.id,
@@ -571,23 +571,24 @@ def _high_risk(session: Session, agent: Agent, result: risk.RiskResult, *, raise
     )
 
 
-def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.RiskResult:
+def refresh_risk(tx: db.Transaction, settings: Settings, agent: Agent) -> risk.RiskResult:
     """Recompute the agent's risk; publish level changes and apply auto-block."""
-    result = risk.evaluate(session, agent, settings.risk_window_hours)
+    result = risk.evaluate(tx, agent, settings.risk_window_hours)
     level_changed = result.level != agent.risk_level
     agent.risk_score = result.score
     agent.risk_level = result.level
     agent.risk_factors = result.factors
+    agent.save()
     if level_changed:
-        mark_changed(session, "agents")
-    _high_risk(session, agent, result, raise_it=level_changed)
+        mark_changed(tx, "agents")
+    _high_risk(tx, agent, result, raise_it=level_changed)
     # Auto-block is a gateway kill switch: it can't stop an agent on another platform.
     threshold = settings.auto_block_risk_score
     if threshold and result.score >= threshold and agent.status == ACTIVE and not agent.on_platform:
-        mode = features.mode_for(session, agent, "risk-based-access")
+        mode = features.mode_for(tx, agent, "risk-based-access")
         if mode == features.ENFORCE:
             transition(
-                session,
+                tx,
                 settings,
                 agent,
                 "block",
@@ -595,7 +596,7 @@ def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.Ris
                 reason=f"auto-blocked: risk score {result.score} >= {threshold}",
             )
             findings.raise_finding(
-                session,
+                tx,
                 type="agent.auto_blocked",
                 severity="critical",
                 subject=agent.id,
@@ -606,7 +607,7 @@ def refresh_risk(session: Session, settings: Settings, agent: Agent) -> risk.Ris
             )
         elif mode == features.MONITOR:
             findings.raise_finding(
-                session,
+                tx,
                 type="agent.would_auto_block",
                 severity="high",
                 subject=agent.id,

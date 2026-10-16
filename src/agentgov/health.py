@@ -21,20 +21,17 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
 
-from agentgov import ids, timestamping
+from agentgov import db, ids, timestamping
 from agentgov.config import FAILURE_SETTINGS, Settings
-from agentgov.models import (
+from agentgov.db.models import (
     ApprovedConnector,
     ComponentReport,
     Destination,
     IdentityIssuer,
     PlatformSync,
-    Team,
 )
-from agentgov.registry import features
+from agentgov.registry import features, teams
 from agentgov.registry.errors import ValidationError
 
 PROCESSOR = "processor"
@@ -141,7 +138,7 @@ class Cached:
 # ------------------------------------------------------------ the processors' reports
 
 
-def record(session: Session, body: Any) -> None:
+def record(tx: db.Transaction, body: Any) -> None:
     """Keep what one instance of a component said it can reach, in place of its last
     report, and forget the reports nobody sent for a week."""
     if not isinstance(body, dict):
@@ -163,9 +160,8 @@ def record(session: Session, body: Any) -> None:
     }
     interval = body.get("interval")
     now = ids.utcnow()
-    row = session.get(ComponentReport, (component, instance)) or ComponentReport(
-        component=component, instance=instance
-    )
+    row = ComponentReport.objects.filter(component=component, instance=instance).first()
+    row = row or ComponentReport(component=component, instance=instance)
     row.reported_at = now
     row.version = str(body.get("version") or "")[:32]
     row.interval = interval if isinstance(interval, int) and 0 < interval <= 86400 else 60
@@ -176,23 +172,19 @@ def record(session: Session, body: Any) -> None:
         for name in FAILURE_SETTINGS
         if isinstance(value := settings.get(name), str) and value in ("modes", "open", "closed")
     }
-    session.add(row)
-    session.execute(delete(ComponentReport).where(ComponentReport.reported_at < now - KEEP))
+    row.save(force_insert=row._state.adding)
+    ComponentReport.objects.filter(reported_at__lt=now - KEEP).delete()
 
 
 def _fresh(row: ComponentReport, now: datetime) -> bool:
     return row.reported_at >= now - timedelta(seconds=max(180, MISSED * row.interval))
 
 
-def reports(session: Session) -> list[dict[str, Any]]:
+def reports(tx: db.Transaction) -> list[dict[str, Any]]:
     """Every processor that reported in the last week, the newest first, with whether it
     is in touch (``fresh``)."""
     now = ids.utcnow()
-    rows = session.scalars(
-        select(ComponentReport)
-        .where(ComponentReport.component == PROCESSOR)
-        .order_by(ComponentReport.reported_at.desc())
-    )
+    rows = ComponentReport.objects.filter(component=PROCESSOR).order_by("-reported_at")
     return [
         {
             "component": row.component,
@@ -239,7 +231,7 @@ class Situation:
         return [p for p in self.processors if p["fresh"]]
 
 
-def situation(session: Session, settings: Settings, rt: Any) -> Situation:
+def situation(tx: db.Transaction, settings: Settings, rt: Any) -> Situation:
     """What the runtime ``rt`` knows now."""
     from agentgov.platforms import connections
     from agentgov.registry import destinations, platforms
@@ -248,7 +240,7 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
     rows = {
         source: {
             "configured": source in connected,
-            "last_sync": session.get(PlatformSync, source),
+            "last_sync": PlatformSync.objects.filter(pk=source).first(),
         }
         for source in platforms.INVENTORY_SOURCES
     }
@@ -256,30 +248,20 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
         settings=settings,
         # The strictest mode any agent has: a control enforced for some agents can refuse
         # their calls (docs/features.md#exceptions).
-        modes=features.strictest_modes(session),
+        modes=features.strictest_modes(tx),
         control_plane=rt.health.get(),
-        processors=reports(session),
-        connections={row["key"]: row for row in connections.state(session, settings)},
+        processors=reports(tx),
+        connections={row["key"]: row for row in connections.state(tx, settings)},
         platforms=rows,
-        destinations=len(list(session.scalars(select(Destination.id)))),
-        people_channels=len(
-            list(
-                session.scalars(
-                    select(Destination.id).where(
-                        Destination.kind.in_((*destinations.CHAT, *destinations.DESK))
-                    )
-                )
-            )
-        ),
-        approved_connectors=len(list(session.scalars(select(ApprovedConnector.connector_id)))),
-        default_team=session.scalar(select(Team.name).where(Team.is_default.is_(True))) is not None,
+        destinations=Destination.objects.count(),
+        people_channels=Destination.objects.filter(
+            kind__in=(*destinations.CHAT, *destinations.DESK)
+        ).count(),
+        approved_connectors=ApprovedConnector.objects.count(),
+        default_team=teams.default(tx) is not None,
         gateway_issuers=[
             {"name": i.name, "keys": len(i.gateway_keys or []), "error": i.keys_error}
-            for i in session.scalars(
-                select(IdentityIssuer)
-                .where(IdentityIssuer.gateway.is_(True))
-                .order_by(IdentityIssuer.name)
-            )
+            for i in IdentityIssuer.objects.filter(gateway=True).order_by("name")
         ],
     )
 

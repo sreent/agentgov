@@ -1016,7 +1016,7 @@ class Settings:
 
     def escalation_delays(self) -> dict[str, float]:
         """Hours an issue of each severity waits at a step of its chain."""
-        from agentgov.models import SEVERITIES
+        from agentgov.db.models import SEVERITIES
 
         delays: dict[str, float] = {}
         for item in filter(None, (p.strip() for p in self.issue_escalation_hours.split(","))):

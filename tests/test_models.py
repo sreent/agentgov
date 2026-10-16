@@ -6,10 +6,9 @@ import json
 from typing import Any
 
 import pytest
-from sqlalchemy import select
 
 from agentgov import cli, ids
-from agentgov.models import Agent, Finding, LedgerEntry, ModelUsage
+from agentgov.db.models import Agent, Finding, LedgerEntry, ModelUsage
 from agentgov.opa import bundle as opa_bundle
 from agentgov.registry import agents, blueprints, decisions, manifests, model_providers, model_usage
 from agentgov.registry.errors import Conflict, InvalidTransition, ValidationError
@@ -54,9 +53,9 @@ def logs(*records: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.fixture
 def provider(rt) -> str:
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         model_providers.create(
-            s,
+            tx,
             {
                 "name": "openai",
                 "kind": "openai",
@@ -69,9 +68,9 @@ def provider(rt) -> str:
 
 @pytest.fixture
 def bot(rt, settings, provider) -> str:
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         blueprints.create(
-            s,
+            tx,
             {
                 "name": "chat",
                 "model_access": [{"provider": "openai", "models": ["gpt-4o*"]}],
@@ -80,7 +79,7 @@ def bot(rt, settings, provider) -> str:
             actor="a",
         )
         agent = agents.register(
-            s, settings, {"name": "bot", "blueprint": "chat", "sponsors": ["a"]}, actor="a",
+            tx, settings, {"name": "bot", "blueprint": "chat", "sponsors": ["a"]}, actor="a",
             approve=True,
         )  # fmt: skip
         return agent.id
@@ -99,8 +98,8 @@ class TestProviders:
             ({"name": "Bad Name", "kind": "openai"}, "lowercase"),
         ]
         for data, message in cases:
-            with rt.db.session() as s, pytest.raises(ValidationError, match=message):
-                model_providers.create(s, data, actor="a")
+            with rt.db.transaction() as tx, pytest.raises(ValidationError, match=message):
+                model_providers.create(tx, data, actor="a")
 
     def test_a_key_is_a_file_in_the_model_keys_directory(self, rt) -> None:
         """The gateway sends the file as the provider's key: no other file it holds can be
@@ -113,43 +112,43 @@ class TestProviders:
         ):
             data = {"name": "x", "kind": "openai", "key_file": path}
             with (
-                rt.db.session() as s,
+                rt.db.transaction() as tx,
                 pytest.raises(ValidationError, match="a file in /model-keys"),
             ):
-                model_providers.create(s, data, actor="a")
-        with rt.db.session() as s:
+                model_providers.create(tx, data, actor="a")
+        with rt.db.transaction() as tx:
             data = {"name": "x", "kind": "openai", "key_file": "/model-keys/team-a//x"}
-            assert model_providers.create(s, data, actor="a").key_file == "/model-keys/team-a/x"
+            assert model_providers.create(tx, data, actor="a").key_file == "/model-keys/team-a/x"
 
     def test_a_key_goes_only_to_the_hosts_listed(self, rt, settings) -> None:
         listed = settings.with_overrides(credential_hosts="vllm,*.groq.com")
         data = {"name": "x", "kind": "openai-compatible", "base_url": "https://evil.example/v1"}
         refused = "AGENTGOV_CREDENTIAL_HOSTS doesn't list evil.example"
-        with rt.db.session() as s, pytest.raises(ValidationError, match=refused):
-            model_providers.create(s, data, actor="a", settings=listed)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx, pytest.raises(ValidationError, match=refused):
+            model_providers.create(tx, data, actor="a", settings=listed)
+        with rt.db.transaction() as tx:
             ok = {**data, "base_url": "https://api.groq.com/openai/v1"}
-            p = model_providers.create(s, ok, actor="a", settings=listed)
+            p = model_providers.create(tx, ok, actor="a", settings=listed)
             with pytest.raises(ValidationError, match=refused):
-                model_providers.update(s, p, data, actor="a", settings=listed)
+                model_providers.update(tx, p, data, actor="a", settings=listed)
             model_providers.update(
-                s, p, {"base_url": "http://vllm:8000/v1"}, actor="a", settings=listed
+                tx, p, {"base_url": "http://vllm:8000/v1"}, actor="a", settings=listed
             )
 
     def test_lifecycle_is_recorded(self, rt, provider) -> None:
-        with rt.db.session() as s:
-            p = model_providers.get(s, provider)
+        with rt.db.transaction() as tx:
+            p = model_providers.get(tx, provider)
             assert model_providers.to_dict(p)["key_file"] == "/model-keys/openai"
             assert model_providers.to_dict(p)["route"] == "/llm/openai"
             with pytest.raises(Conflict):
-                model_providers.create(s, {"name": "openai", "kind": "openai"}, actor="a")
-            model_providers.set_status(s, p, "block", actor="a")
+                model_providers.create(tx, {"name": "openai", "kind": "openai"}, actor="a")
+            model_providers.set_status(tx, p, "block", actor="a")
             with pytest.raises(InvalidTransition):
-                model_providers.set_status(s, p, "block", actor="a")
-            model_providers.set_status(s, p, "unblock", actor="a")
-            model_providers.delete(s, p, actor="a")
-        with rt.db.session() as s:
-            types = [e.type for e in s.scalars(select(LedgerEntry).order_by(LedgerEntry.seq))]
+                model_providers.set_status(tx, p, "block", actor="a")
+            model_providers.set_status(tx, p, "unblock", actor="a")
+            model_providers.delete(tx, p, actor="a")
+        with rt.db.transaction() as tx:
+            types = list(LedgerEntry.objects.order_by("seq").values_list("type", flat=True))
         assert [t for t in types if t.startswith("model_provider.")] == [
             "model_provider.registered",
             "model_provider.block",
@@ -158,9 +157,9 @@ class TestProviders:
         ]
 
     def test_prices_take_the_most_specific_glob(self, rt) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             p = model_providers.create(
-                s,
+                tx,
                 {
                     "name": "openai",
                     "kind": "openai",
@@ -198,10 +197,10 @@ class TestProviders:
 
 class TestModelAccess:
     def test_blueprint_and_agent_grants_merge(self, rt, bot) -> None:
-        with rt.db.session() as s:
-            agent = s.get(Agent, bot)
+        with rt.db.transaction() as tx:
+            agent = Agent.objects.get(pk=bot)
             agents.update(
-                s,
+                tx,
                 agent,
                 {
                     "model_access": [{"provider": "openai", "models": ["o3"]}],
@@ -227,12 +226,12 @@ class TestModelAccess:
             {"daily_token_budget": -1},
             {"daily_token_budget": "lots"},
         ):
-            with rt.db.session() as s, pytest.raises(ValidationError):
-                agents.update(s, s.get(Agent, bot), data, actor="a")
+            with rt.db.transaction() as tx, pytest.raises(ValidationError):
+                agents.update(tx, Agent.objects.get(pk=bot), data, actor="a")
 
     def test_opa_gets_providers_grants_and_budgets(self, rt, bot) -> None:
-        with rt.db.session() as s:
-            data = opa_bundle.registry_snapshot(s)
+        with rt.db.transaction() as tx:
+            data = opa_bundle.registry_snapshot(tx)
         assert data["model_providers"]["openai"]["status"] == "approved"
         snapshot = data["agents"][bot]
         assert snapshot["model_access"] == [{"provider": "openai", "models": ["gpt-4o*"]}]
@@ -241,9 +240,9 @@ class TestModelAccess:
 
 class TestMetering:
     def test_calls_are_metered_and_priced(self, rt, bot) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             stats = model_usage.ingest_logs(
-                s,
+                tx,
                 logs(
                     access_log(agent_id=bot),
                     access_log(agent_id=bot, tokens=(0, 0), status=403),
@@ -252,45 +251,42 @@ class TestMetering:
                 ),
             )
         assert stats == {"records": 4, "model_calls": 3, "unidentified": 1}
-        with rt.db.session() as s:
-            [row] = s.scalars(select(ModelUsage).where(ModelUsage.agent_id == bot)).all()
+        with rt.db.transaction() as tx:
+            [row] = ModelUsage.objects.filter(agent_id=bot)
             assert (row.calls, row.refused, row.input_tokens, row.output_tokens) == (2, 1, 100, 20)
             assert row.cost_usd == pytest.approx((100 * 2.5 + 20 * 10) / 1e6)
-            assert s.get(ModelUsage, ("", model_usage.today(), "openai", "gpt-4o-mini")).calls == 1
-            assert model_usage.tokens_used(s) == {bot: 120}
-            assert s.get(Agent, bot).last_seen_at is not None
+            unidentified = ModelUsage.objects.get(
+                agent_id="", day=model_usage.today(), provider="openai", model="gpt-4o-mini"
+            )
+            assert unidentified.calls == 1
+            assert model_usage.tokens_used(tx) == {bot: 120}
+            assert Agent.objects.get(pk=bot).last_seen_at is not None
 
     def test_reaching_the_budget_is_recorded_and_reaches_opa(self, rt, bot) -> None:
-        with rt.db.session() as s:
-            model_usage.ingest_logs(s, logs(access_log(agent_id=bot, tokens=(500, 100))))
-        with rt.db.session() as s:
-            assert not opa_bundle.registry_snapshot(s)["agents"][bot]["over_budget"]
-            model_usage.ingest_logs(s, logs(access_log(agent_id=bot, tokens=(300, 200))))
-        with rt.db.session() as s:
-            assert opa_bundle.registry_snapshot(s)["agents"][bot]["over_budget"] is True
-            [entry] = s.scalars(
-                select(LedgerEntry).where(LedgerEntry.type == "model.budget_reached")
-            ).all()
+        with rt.db.transaction() as tx:
+            model_usage.ingest_logs(tx, logs(access_log(agent_id=bot, tokens=(500, 100))))
+        with rt.db.transaction() as tx:
+            assert not opa_bundle.registry_snapshot(tx)["agents"][bot]["over_budget"]
+            model_usage.ingest_logs(tx, logs(access_log(agent_id=bot, tokens=(300, 200))))
+        with rt.db.transaction() as tx:
+            assert opa_bundle.registry_snapshot(tx)["agents"][bot]["over_budget"] is True
+            [entry] = LedgerEntry.objects.filter(type="model.budget_reached")
             assert entry.reason == "1100 of 1000 tokens used today"
             # Further calls don't record it again.
-            model_usage.ingest_logs(s, logs(access_log(agent_id=bot, tokens=(10, 10))))
-        with rt.db.session() as s:
-            count = len(
-                s.scalars(
-                    select(LedgerEntry).where(LedgerEntry.type == "model.budget_reached")
-                ).all()
-            )
+            model_usage.ingest_logs(tx, logs(access_log(agent_id=bot, tokens=(10, 10))))
+        with rt.db.transaction() as tx:
+            count = LedgerEntry.objects.filter(type="model.budget_reached").count()
             assert count == 1
 
     def test_budgets_start_again_each_day(self, rt, bot) -> None:
         yesterday = int((ids.utcnow().timestamp() - 86400) * 1e9)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             model_usage.ingest_logs(
-                s, logs(access_log(agent_id=bot, tokens=(5000, 0), when_ns=yesterday))
+                tx, logs(access_log(agent_id=bot, tokens=(5000, 0), when_ns=yesterday))
             )
-        with rt.db.session() as s:
-            assert not opa_bundle.registry_snapshot(s)["agents"][bot]["over_budget"]
-            assert model_usage.tokens_used(s) == {}
+        with rt.db.transaction() as tx:
+            assert not opa_bundle.registry_snapshot(tx)["agents"][bot]["over_budget"]
+            assert model_usage.tokens_used(tx) == {}
 
     def test_the_collector_posts_access_logs(self, client) -> None:
         resp = client.post("/v1/otlp/v1/logs", json=logs(access_log()), headers=SERVICE)
@@ -316,9 +312,9 @@ class TestMetering:
         assert len(only["rows"]) == 1
 
     def test_spend_per_owner_and_sponsor(self, rt, settings, client, bot) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             other = agents.register(
-                s, settings,
+                tx, settings,
                 {"name": "bot2", "blueprint": "chat", "owner": "cx", "sponsors": ["a", "b"]},
                 actor="a", approve=True,
             ).id  # fmt: skip
@@ -347,19 +343,15 @@ class TestDecisions:
             "reasons": ["The prompt contains credentials"],
             "detections": {"categories": ["secret"], "entities": ["AWS_ACCESS_KEY"]},
         }
-        with rt.db.session() as s:
-            decisions.record_mcp_decisions(s, settings, [record])
-        with rt.db.session() as s:
-            entry = s.scalars(
-                select(LedgerEntry).where(LedgerEntry.type == "decision.model.request")
-            ).one()
+        with rt.db.transaction() as tx:
+            decisions.record_mcp_decisions(tx, settings, [record])
+        with rt.db.transaction() as tx:
+            entry = LedgerEntry.objects.get(type="decision.model.request")
             assert (entry.decision, entry.resource) == ("deny", "openai/gpt-4o-mini")
-            finding = s.scalars(
-                select(Finding).where(Finding.type == "agent.credential_exfiltration_attempt")
-            ).one()
+            finding = Finding.objects.get(type="agent.credential_exfiltration_attempt")
             assert "model provider" in finding.title
             # Model calls' activity comes from the access logs, not from decisions.
-            assert model_usage.tokens_used(s) == {}
+            assert model_usage.tokens_used(tx) == {}
 
     def test_jailbreak_attempts_raise_a_finding(self, rt, settings, bot) -> None:
         record = {
@@ -378,17 +370,13 @@ class TestDecisions:
                 "jailbreak_reasons": ["instruction_override"],
             },
         }
-        with rt.db.session() as s:
-            decisions.record_mcp_decisions(s, settings, [record])
-        with rt.db.session() as s:
-            finding = s.scalars(
-                select(Finding).where(Finding.type == "agent.jailbreak_attempts")
-            ).one()
+        with rt.db.transaction() as tx:
+            decisions.record_mcp_decisions(tx, settings, [record])
+        with rt.db.transaction() as tx:
+            finding = Finding.objects.get(type="agent.jailbreak_attempts")
             assert finding.title == "People tried to jailbreak bot"
             assert "went through: jailbreak detection is not enforced" in finding.description
-            entry = s.scalars(
-                select(LedgerEntry).where(LedgerEntry.type == "decision.model.request")
-            ).one()
+            entry = LedgerEntry.objects.get(type="decision.model.request")
             assert entry.reason.startswith("monitored: jailbreak-detection")
 
 
@@ -405,14 +393,14 @@ class TestManifestsAndCli:
                 "prices": {"*": {"input": 0.1, "output": 0.2}},
             },
         }
-        with rt.db.session() as s:
-            assert manifests.apply(s, settings, [doc], actor="ci")[0]["action"] == "created"
-        with rt.db.session() as s:
-            assert manifests.apply(s, settings, [doc], actor="ci")[0]["action"] == "unchanged"
+        with rt.db.transaction() as tx:
+            assert manifests.apply(tx, settings, [doc], actor="ci")[0]["action"] == "created"
+        with rt.db.transaction() as tx:
+            assert manifests.apply(tx, settings, [doc], actor="ci")[0]["action"] == "unchanged"
             blocked = {**doc, "spec": {**doc["spec"], "status": "blocked"}}
-            assert manifests.apply(s, settings, [blocked], actor="ci")[0]["action"] == "configured"
-        with rt.db.session() as s:
-            [exported] = [d for d in manifests.export(s) if d["kind"] == "ModelProvider"]
+            assert manifests.apply(tx, settings, [blocked], actor="ci")[0]["action"] == "configured"
+        with rt.db.transaction() as tx:
+            [exported] = [d for d in manifests.export(tx) if d["kind"] == "ModelProvider"]
         assert exported["spec"] == {**doc["spec"], "status": "blocked"}
 
     def test_what_if_for_model_calls(self, monkeypatch) -> None:

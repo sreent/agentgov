@@ -12,8 +12,8 @@ from starlette.testclient import TestClient
 from agentgov import cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.db.models import LedgerEntry
 from agentgov.gateway import render
-from agentgov.models import LedgerEntry
 from agentgov.opa.bundle import registry_snapshot
 from agentgov.opa.client import OpaError
 from agentgov.processor.modes import FeatureModes
@@ -56,8 +56,8 @@ def team(client: TestClient, *names: str) -> None:
 
 
 def snapshot(client: TestClient) -> dict[str, Any]:
-    with client.app.state.rt.db.session() as s:
-        return registry_snapshot(s)
+    with client.app.state.rt.db.transaction() as tx:
+        return registry_snapshot(tx)
 
 
 # ----------------------------------------------------------------------------- choosing
@@ -73,13 +73,8 @@ class TestChoosing:
         assert exception["mode"] == "monitor" and exception["note"] == "not ready yet"
         assert exception["describe"] == "environment dev"
         # Weaker for some agents than for the others: a warning in the ledger.
-        with client.app.state.rt.db.session() as s:
-            entry = (
-                s.query(LedgerEntry)
-                .filter(LedgerEntry.type == "feature.changed")
-                .order_by(LedgerEntry.seq.desc())
-                .first()
-            )
+        with client.app.state.rt.db.transaction():
+            entry = LedgerEntry.objects.filter(type="feature.changed").order_by("-seq").first()
             assert entry.severity == "warning" and "monitor for environment dev" in entry.reason
             assert entry.details["scopes_to"] == DEV
         # Mode and exceptions together; an empty list removes them.
@@ -156,16 +151,14 @@ class TestNames:
         assert [e["scope"] for e in again.json()["scopes"]] == [e["scope"] for e in scopes]
 
     def test_a_name_from_before_doesnt_stop_editing_the_others(self, client) -> None:
-        from agentgov.models import FeatureSetting
+        from agentgov.db.models import FeatureSetting
 
-        with client.app.state.rt.db.session() as s:
-            s.add(
-                FeatureSetting(
-                    key="least-privilege",
-                    mode="enforce",
-                    changed_by="admin:test",
-                    scopes=[{"mode": "monitor", "scope": {"teams": ["gone"]}}],
-                )
+        with client.app.state.rt.db.transaction():
+            FeatureSetting.objects.create(
+                key="least-privilege",
+                mode="enforce",
+                changed_by="admin:test",
+                scopes=[{"mode": "monitor", "scope": {"teams": ["gone"]}}],
             )
         listed = client.get("/v1/features/least-privilege", headers=ADMIN).json()["scopes"]
         assert listed[0]["missing"] == ["team gone"] and listed[0]["agents"] == 0
@@ -276,11 +269,11 @@ class TestWhichAgents:
         put(client, "risk-based-access", {"scopes": DEV})
         bot = agent(client, "dev-bot", environment="dev")
         rt = client.app.state.rt
-        with rt.db.session() as s:
-            row = agents_svc.get(s, bot["id"])
-            assert features.mode_for(s, row, "risk-based-access") == "monitor"
-            other = agents_svc.get(s, "support-bot")
-            assert features.mode_for(s, other, "risk-based-access") == "enforce"
+        with rt.db.transaction() as tx:
+            row = agents_svc.get(tx, bot["id"])
+            assert features.mode_for(tx, row, "risk-based-access") == "monitor"
+            other = agents_svc.get(tx, "support-bot")
+            assert features.mode_for(tx, other, "risk-based-access") == "enforce"
 
 
 # --------------------------------------------------------- what the gateway is set up for
@@ -292,13 +285,13 @@ def test_the_gateway_is_ready_for_the_strictest_mode(client) -> None:
         if key_ != "least-privilege" and features.BY_KEY[key_].default == "enforce":
             put(client, key_, {"mode": "monitor"})
     put(client, "unknown-callers", {"mode": "monitor"})
-    with client.app.state.rt.db.session() as s:
-        assert features.fails_open("modes", features.strictest_modes(s))
+    with client.app.state.rt.db.transaction() as tx:
+        assert features.fails_open("modes", features.strictest_modes(tx))
     # Enforced for some agents: what the gateway can't check is refused.
     team(client, "pay", "a")
     put(client, "least-privilege", {"scopes": [{"mode": "enforce", "scope": {"teams": ["pay"]}}]})
-    with client.app.state.rt.db.session() as s:
-        strictest = features.strictest_modes(s)
+    with client.app.state.rt.db.transaction() as tx:
+        strictest = features.strictest_modes(tx)
         assert strictest["least-privilege"] == "enforce"
         assert not features.fails_open("modes", strictest)
     processor = routes(render(servers(), GATEWAY_SETTINGS, strictest))["mcp-crm"]["policies"][
@@ -456,8 +449,8 @@ def test_the_monitor_starting_point_monitors_exceptions_too(client) -> None:
     client.post("/v1/feature-presets/monitor", headers=ADMIN).raise_for_status()
     found = client.get("/v1/features/jailbreak-detection", headers=ADMIN).json()
     assert found["scopes"][0]["mode"] == "monitor"
-    with client.app.state.rt.db.session() as s:
-        assert features.fails_open("modes", features.strictest_modes(s))
+    with client.app.state.rt.db.transaction() as tx:
+        assert features.fails_open("modes", features.strictest_modes(tx))
 
 
 def test_compliance_reports_say_what_is_enforced_for_some_agents_only(client) -> None:

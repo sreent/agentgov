@@ -10,13 +10,13 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import func, select, update
+from django.db.models import Sum
 from starlette.testclient import TestClient
 
 from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.models import AgentActivity, IntegrationState
+from agentgov.db.models import AgentActivity, IntegrationState
 from agentgov.registry import platforms
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
@@ -360,8 +360,8 @@ class TestEntraAgentId:
         graph.identities[0]["disabledByMicrosoftStatus"] = "DisabledDueToSuspiciousActivity"
         sync(ms, "entra-agent-id").raise_for_status()
         rt = ms.app.state.rt
-        with rt.db.session() as s:
-            platforms.set_sync(s, "entra-agent-id", ok=False, counts={}, message="Graph is down")
+        with rt.db.transaction() as tx:
+            platforms.set_sync(tx, "entra-agent-id", ok=False, counts={}, message="Graph is down")
         (finding,) = ms.get(
             "/v1/findings", params={"type": "entra.disabled_by_microsoft"}, headers=ADMIN
         ).json()
@@ -401,8 +401,8 @@ class TestPurviewAudit:
         # How far back AgentGov knows agents' use: management rules count no further.
         graph.query_status = "succeeded"
         sync(ms, "purview-audit")
-        with ms.app.state.rt.db.session() as s:
-            state = s.get(IntegrationState, "purview-audit").data
+        with ms.app.state.rt.db.transaction():
+            state = IntegrationState.objects.get(pk="purview-audit").data
         assert state["usage_from"] == usage["filterStartDateTime"]
         assert state["usage_until"] == graph.queries["q-3"]["filterEndDateTime"]
 
@@ -415,12 +415,10 @@ class TestPurviewAudit:
         usage = sales["platforms"][0]["usage"]
         assert usage["recent_users"] == ["bob@contoso.com", "alice@contoso.com"]
         assert usage["hosts"] == {"Teams": 2}
-        with ms.app.state.rt.db.session() as s:
-            calls = s.scalar(
-                select(func.sum(AgentActivity.model_calls)).where(
-                    AgentActivity.agent_id == sales["id"]
-                )
-            )
+        with ms.app.state.rt.db.transaction():
+            calls = AgentActivity.objects.filter(agent_id=sales["id"]).aggregate(
+                n=Sum("model_calls")
+            )["n"]
         assert calls == 2  # each interaction counts as a model call on the agent
         open_ = ms.get("/v1/findings", params={"status": "open"}, headers=ADMIN).json()
         assert "agent.jailbreak_attempts" in {f["type"] for f in open_}
@@ -448,16 +446,13 @@ class TestPurviewAudit:
     def test_a_search_that_never_finishes_is_given_up(self, ms, graph) -> None:
         sync(ms, "purview-audit")
         rt = ms.app.state.rt
-        with rt.db.session() as s:
-            state = s.get(IntegrationState, "purview-audit")
+        with rt.db.transaction():
+            state = IntegrationState.objects.get(pk="purview-audit")
             stale = dict(state.data)
             for kind in ("usage", "makers"):
                 stale[kind] = {**stale[kind], "started": "2026-01-01T00:00:00+00:00"}
-            s.execute(
-                update(IntegrationState)
-                .where(IntegrationState.key == "purview-audit")
-                .values(data=stale, updated_at=ids.utcnow())
-            )
+            state.data, state.updated_at = stale, ids.utcnow()
+            state.save()
         sync(ms, "purview-audit")
         assert len(graph.queries) == 4
 

@@ -9,11 +9,10 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import cli, ids
-from agentgov.models import Finding, LedgerEntry, Notification
+from agentgov.db.models import Finding, LedgerEntry, Notification
 from agentgov.notify import MAX_ATTEMPTS, Notifier
 from agentgov.registry import destinations, features, findings, issues, teams
 from agentgov.registry.errors import Forbidden
@@ -26,22 +25,22 @@ def _rt(client: TestClient):  # type: ignore[no-untyped-def]
     return client.app.state.rt  # type: ignore[attr-defined]
 
 
-def _types(session) -> list[str]:  # type: ignore[no-untyped-def]
-    return [e.type for e in session.scalars(select(LedgerEntry).order_by(LedgerEntry.seq))]
+def _types(tx) -> list[str]:  # type: ignore[no-untyped-def]
+    return list(LedgerEntry.objects.order_by("seq").values_list("type", flat=True))
 
 
 @pytest.fixture
 def agent(client: TestClient) -> dict[str, Any]:
     """support-bot: owner cx (a team), sponsors alice and bob, blueprint support."""
     created = seed(client, sponsors=["alice@example.com", "bob"])
-    with _rt(client).db.session() as s:
+    with _rt(client).db.transaction() as tx:
         teams.create(
-            s,
+            tx,
             {"name": "cx", "emails": ["cx-team@example.com"], "destinations": []},
             actor="admin:test",
         )
         teams.create(
-            s,
+            tx,
             {"name": "ai-governance", "emails": ["gov@example.com"], "default": True},
             actor="admin:test",
         )
@@ -49,9 +48,9 @@ def agent(client: TestClient) -> dict[str, Any]:
 
 
 def _raise(client: TestClient, agent_id: str, severity: str = "medium") -> str:
-    with _rt(client).db.session() as s:
+    with _rt(client).db.transaction() as tx:
         finding, _ = findings.raise_finding(
-            s,
+            tx,
             type="agent.no_owner",
             severity=severity,
             subject=agent_id,
@@ -64,8 +63,8 @@ def _raise(client: TestClient, agent_id: str, severity: str = "medium") -> str:
 class TestChains:
     def test_an_agents_chain_goes_owner_sponsors_team(self, client, agent) -> None:
         fid = _raise(client, agent["id"])
-        with _rt(client).db.session() as s:
-            steps = issues.chain(s, findings.get(s, fid))
+        with _rt(client).db.transaction() as tx:
+            steps = issues.chain(tx, findings.get(tx, fid))
             assert [level for level, _ in steps] == ["owner", "sponsors", "team"]
             owner, sponsors, team = (people for _, people in steps)
             # The owner names a team; the sponsors are a person with an address and one
@@ -80,9 +79,9 @@ class TestChains:
     def test_the_blueprints_team_comes_before_the_default(self, client, agent) -> None:
         client.patch("/v1/blueprints/support", json={"team": "cx"}, headers=ADMIN)
         fid = _raise(client, agent["id"])
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             # The team step would repeat the owner's, so it is left out.
-            assert [level for level, _ in issues.chain(s, findings.get(s, fid))] == [
+            assert [level for level, _ in issues.chain(tx, findings.get(tx, fid))] == [
                 "owner",
                 "sponsors",
             ]
@@ -92,31 +91,31 @@ class TestChains:
         client.patch(
             "/v1/toolservers/crm", json={"owner": "dana@example.com"}, headers=ADMIN
         ).raise_for_status()
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             finding, _ = findings.raise_finding(
-                s,
+                tx,
                 type="toolserver.prompt_injection",
                 severity="high",
                 subject="crm/export_customers",
                 category=findings.THREAT,
                 title="Prompt-injection payload returned by crm/export_customers",
             )
-            steps = issues.chain(s, finding)
+            steps = issues.chain(tx, finding)
             assert [(level, [p.name for p in people]) for level, people in steps] == [
                 ("owner", ["dana@example.com"]),
                 ("team", ["ai-governance"]),
             ]
 
     def test_findings_about_agentgov_itself_go_to_the_default_team(self, client, agent) -> None:
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             finding, _ = findings.raise_finding(
-                s,
+                tx,
                 type="destination.failing",
                 severity="high",
                 subject="dst_1",
                 title="Destination soc is failing",
             )
-            steps = issues.chain(s, finding)
+            steps = issues.chain(tx, finding)
             assert [(level, [p.name for p in people]) for level, people in steps] == [
                 ("team", ["ai-governance"])
             ]
@@ -128,56 +127,56 @@ class TestRouting:
         settings = dataclasses.replace(rt.settings, smtp_url="smtp://mail:25", smtp_from="a@b.c")
         fid = _raise(client, agent["id"])
         now = ids.utcnow()
-        with rt.db.session() as s:
-            assert issues.route(s, settings, now) == {"assigned": 1, "escalated": 0}
-            f = findings.get(s, fid)
+        with rt.db.transaction() as tx:
+            assert issues.route(tx, settings, now) == {"assigned": 1, "escalated": 0}
+            f = findings.get(tx, fid)
             assert (f.level, f.assignees) == ("owner", ["team cx"])
             # Medium findings wait 72 hours at each step.
             assert f.escalate_at == now + timedelta(hours=72)
-            queued = s.scalars(select(Notification).where(Notification.finding_id == fid)).all()
+            queued = Notification.objects.filter(finding_id=fid)
             assert [(n.channel, n.recipient) for n in queued] == [("email", "cx-team@example.com")]
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             # Not yet due; then due.
-            assert issues.route(s, settings, now + timedelta(hours=1))["escalated"] == 0
-            assert issues.route(s, settings, now + timedelta(hours=73))["escalated"] == 1
-            f = findings.get(s, fid)
+            assert issues.route(tx, settings, now + timedelta(hours=1))["escalated"] == 0
+            assert issues.route(tx, settings, now + timedelta(hours=73))["escalated"] == 1
+            f = findings.get(tx, fid)
             assert (f.level, f.assignees) == ("sponsors", ["alice@example.com", "bob"])
-            assert issues.route(s, settings, now + timedelta(hours=146))["escalated"] == 1
-            assert findings.get(s, fid).level == "team"
+            assert issues.route(tx, settings, now + timedelta(hours=146))["escalated"] == 1
+            assert findings.get(tx, fid).level == "team"
             # The last step: it stays there.
-            assert findings.get(s, fid).escalate_at is None
-            assert issues.route(s, settings, now + timedelta(days=30))["escalated"] == 0
-        with rt.db.session() as s:
-            assert "finding.assigned" in _types(s) and _types(s).count("finding.escalated") == 2
+            assert findings.get(tx, fid).escalate_at is None
+            assert issues.route(tx, settings, now + timedelta(days=30))["escalated"] == 0
+        with rt.db.transaction() as tx:
+            assert "finding.assigned" in _types(tx) and _types(tx).count("finding.escalated") == 2
 
     def test_acknowledging_stops_it_going_further(self, client, agent) -> None:
         rt = _rt(client)
         fid = _raise(client, agent["id"])
         now = ids.utcnow()
-        with rt.db.session() as s:
-            issues.route(s, rt.settings, now)
-            issues.acknowledge(s, findings.get(s, fid), actor="person:cx-team@example.com")
-            assert issues.route(s, rt.settings, now + timedelta(days=10))["escalated"] == 0
-            f = findings.get(s, fid)
+        with rt.db.transaction() as tx:
+            issues.route(tx, rt.settings, now)
+            issues.acknowledge(tx, findings.get(tx, fid), actor="person:cx-team@example.com")
+            assert issues.route(tx, rt.settings, now + timedelta(days=10))["escalated"] == 0
+            f = findings.get(tx, fid)
             assert (f.level, f.acknowledged_by) == ("owner", "person:cx-team@example.com")
         # Without a mail server, nobody is emailed; the issue is in AgentGov.
-        with rt.db.session() as s:
-            assert s.scalars(select(Notification)).all() == []
+        with rt.db.transaction() as tx:
+            assert not Notification.objects.exists()
 
     def test_who_is_accountable_for_the_agent_doesnt_accept_its_risks(self, client, agent) -> None:
         """The people responsible for an agent acknowledge its issues; someone who isn't
         accountable for it accepts its risks (docs/issues.md)."""
         rt = _rt(client)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             teams.create(
-                s, {"name": "cx-devs", "members": ["tara@example.com"]}, actor="admin:test"
+                tx, {"name": "cx-devs", "members": ["tara@example.com"]}, actor="admin:test"
             )
         client.patch(
             "/v1/agents/support-bot", json={"team": "cx-devs"}, headers=ADMIN
         ).raise_for_status()
         fid = _raise(client, agent["id"])
-        with rt.db.session() as s:
-            f = findings.get(s, fid)
+        with rt.db.transaction() as tx:
+            f = findings.get(tx, fid)
             for person, why in (
                 ("cx-team@example.com", "You are in the team that owns support-bot"),
                 ("ALICE@example.com", "You sponsor support-bot"),
@@ -185,28 +184,30 @@ class TestRouting:
                 ("tara@example.com", "You are in the team of support-bot"),
             ):
                 with pytest.raises(Forbidden, match=why):
-                    issues.accept(s, f, reason="ok", until=30, actor="t", by=person)
+                    issues.accept(tx, f, reason="ok", until=30, actor="t", by=person)
             # The default team only gets what nobody else does: its people may.
             issues.accept(
-                s, f, reason="Pilot", until=30, actor="approver:gov", by="gov@example.com"
+                tx, f, reason="Pilot", until=30, actor="approver:gov", by="gov@example.com"
             )
             assert f.status == "accepted"
 
     def test_an_accepted_risk_opens_again_when_its_time_runs_out(self, client, agent) -> None:
         rt = _rt(client)
         fid = _raise(client, agent["id"])
-        with rt.db.session() as s:
-            issues.route(s, rt.settings)
-            f = findings.get(s, fid)
+        with rt.db.transaction() as tx:
+            issues.route(tx, rt.settings)
+            f = findings.get(tx, fid)
             with pytest.raises(Exception, match="why"):
-                issues.accept(s, f, reason="", until=30, actor="admin:test")
+                issues.accept(tx, f, reason="", until=30, actor="admin:test")
             with pytest.raises(Exception, match="a year at most"):
-                issues.accept(s, f, reason="ok", until=400, actor="admin:test")
-            issues.accept(s, f, reason="Pilot until the new owner joins", until=30, actor="admin:a")
+                issues.accept(tx, f, reason="ok", until=400, actor="admin:test")
+            issues.accept(
+                tx, f, reason="Pilot until the new owner joins", until=30, actor="admin:a"
+            )
             assert (f.status, f.escalate_at) == ("accepted", None)
             # While accepted, the condition holding doesn't open it again.
             findings.raise_finding(
-                s,
+                tx,
                 type="agent.no_owner",
                 severity="medium",
                 subject=agent["id"],
@@ -214,23 +215,23 @@ class TestRouting:
                 title="Agent support-bot has no owner",
             )
             assert f.status == "accepted"
-        with rt.db.session() as s:
-            assert issues.reopen_accepted(s, ids.utcnow() + timedelta(days=31)) == 1
-            f = findings.get(s, fid)
+        with rt.db.transaction() as tx:
+            assert issues.reopen_accepted(tx, ids.utcnow() + timedelta(days=31)) == 1
+            f = findings.get(tx, fid)
             # It starts its chain over.
             assert (f.status, f.level, f.round) == ("open", None, 1)
-            issues.route(s, rt.settings)
-            assert findings.get(s, fid).level == "owner"
+            issues.route(tx, rt.settings)
+            assert findings.get(tx, fid).level == "owner"
 
     def test_a_finding_raised_again_starts_its_chain_over(self, client, agent) -> None:
         rt = _rt(client)
         fid = _raise(client, agent["id"])
-        with rt.db.session() as s:
-            issues.route(s, rt.settings)
-            findings.set_status(s, fid, "resolved", "admin:test")
+        with rt.db.transaction() as tx:
+            issues.route(tx, rt.settings)
+            findings.set_status(tx, fid, "resolved", "admin:test")
         _raise(client, agent["id"])
-        with rt.db.session() as s:
-            f = findings.get(s, fid)
+        with rt.db.transaction() as tx:
+            f = findings.get(tx, fid)
             assert (f.status, f.level, f.assignees, f.round) == ("open", None, [], 1)
 
 
@@ -244,9 +245,9 @@ class TestQuiet:
             issues_notify_severity="high",
         )
         medium = _raise(client, agent["id"], severity="medium")
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             high, _ = findings.raise_finding(
-                s,
+                tx,
                 type="agent.stale",
                 severity="high",
                 subject=agent["id"],
@@ -254,18 +255,16 @@ class TestQuiet:
                 title="Agent support-bot is stale",
             )
             high_id = high.id
-        with rt.db.session() as s:
-            assert issues.route(s, settings)["assigned"] == 2
+        with rt.db.transaction() as tx:
+            assert issues.route(tx, settings)["assigned"] == 2
             # Both are with its owner; only the high one is in their inbox.
-            assert findings.get(s, medium).level == "owner"
-            sent = {n.finding_id for n in s.scalars(select(Notification))}
+            assert findings.get(tx, medium).level == "owner"
+            sent = set(Notification.objects.values_list("finding_id", flat=True))
             assert sent == {high_id}
-        with rt.db.session() as s:  # the ledger is written as the transaction commits
+        with rt.db.transaction() as tx:  # the ledger is written as the transaction commits
             [quiet] = [
                 e
-                for e in s.scalars(
-                    select(LedgerEntry).where(LedgerEntry.type == "finding.assigned")
-                )
+                for e in LedgerEntry.objects.filter(type="finding.assigned").order_by("seq")
                 if e.details["finding_id"] == medium
             ]
             assert quiet.details["quiet"] == "below high, the severity that is sent"
@@ -280,9 +279,9 @@ class TestQuiet:
 
 class TestStaleThreats:
     def _threat(self, client: TestClient, agent_id: str) -> str:
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             finding, _ = findings.raise_finding(
-                s,
+                tx,
                 type="agent.ungranted_tool",
                 severity="high",
                 subject=agent_id,
@@ -296,59 +295,57 @@ class TestStaleThreats:
         fid = self._threat(client, agent["id"])
         posture = _raise(client, agent["id"])
         later = ids.utcnow() + timedelta(days=31)
-        with _rt(client).db.session() as s:
-            assert findings.close_stale_threats(s, 30, ids.utcnow() + timedelta(days=29)) == 0
-            assert findings.close_stale_threats(s, 0, later) == 0  # 0: never
-            assert findings.close_stale_threats(s, 30, later) == 1
-            f = findings.get(s, fid)
+        with _rt(client).db.transaction() as tx:
+            assert findings.close_stale_threats(tx, 30, ids.utcnow() + timedelta(days=29)) == 0
+            assert findings.close_stale_threats(tx, 0, later) == 0  # 0: never
+            assert findings.close_stale_threats(tx, 30, later) == 1
+            f = findings.get(tx, fid)
             assert (f.status, f.resolved_by) == ("resolved", findings.SYSTEM)
             # Posture findings hold until their check finds them gone.
-            assert findings.get(s, posture).status == "open"
-        with _rt(client).db.session() as s:
-            [entry] = s.scalars(
-                select(LedgerEntry).where(LedgerEntry.type == "finding.resolved")
-            ).all()
+            assert findings.get(tx, posture).status == "open"
+        with _rt(client).db.transaction() as tx:
+            [entry] = LedgerEntry.objects.filter(type="finding.resolved")
             assert entry.details["why"] == "it hasn't happened for 30 days"
         # Happening again opens it again.
         self._threat(client, agent["id"])
-        with _rt(client).db.session() as s:
-            assert findings.get(s, fid).status == "open"
+        with _rt(client).db.transaction() as tx:
+            assert findings.get(tx, fid).status == "open"
 
     def test_the_issues_job_resolves_them(self, client, agent) -> None:
         fid = self._threat(client, agent["id"])
         rt = _rt(client)
-        with rt.db.session() as s:
-            findings.get(s, fid).last_seen = ids.utcnow() - timedelta(days=31)
+        with rt.db.transaction():
+            Finding.objects.filter(pk=fid).update(last_seen=ids.utcnow() - timedelta(days=31))
         assert rt.run_issues()["stale_threats"] == 1
 
 
 class TestChecks:
     def test_findings_from_syncs_close_after_two_clean_checks(self, client, agent) -> None:
         fid = _raise(client, agent["id"])
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             types = {"agent.no_owner"}
-            assert findings.resolve_absent(s, types=types, present_keys=set(), clean=2) == 0
-            assert findings.get(s, fid).status == "open"
-            assert findings.resolve_absent(s, types=types, present_keys=set(), clean=2) == 1
-            assert findings.get(s, fid).status == "resolved"
+            assert findings.resolve_absent(tx, types=types, present_keys=set(), clean=2) == 0
+            assert findings.get(tx, fid).status == "open"
+            assert findings.resolve_absent(tx, types=types, present_keys=set(), clean=2) == 1
+            assert findings.get(tx, fid).status == "resolved"
 
     def test_a_check_that_finds_it_again_starts_the_count_over(self, client, agent) -> None:
         fid = _raise(client, agent["id"])
-        with _rt(client).db.session() as s:
-            findings.resolve_absent(s, types={"agent.no_owner"}, present_keys=set(), clean=2)
+        with _rt(client).db.transaction() as tx:
+            findings.resolve_absent(tx, types={"agent.no_owner"}, present_keys=set(), clean=2)
         _raise(client, agent["id"])
-        with _rt(client).db.session() as s:
-            findings.resolve_absent(s, types={"agent.no_owner"}, present_keys=set(), clean=2)
-            assert findings.get(s, fid).status == "open"
+        with _rt(client).db.transaction() as tx:
+            findings.resolve_absent(tx, types={"agent.no_owner"}, present_keys=set(), clean=2)
+            assert findings.get(tx, fid).status == "open"
 
     def test_a_failed_sync_leaves_its_findings_open_and_unverified(self, client, agent) -> None:
         fid = _raise(client, agent["id"])
-        with _rt(client).db.session() as s:
-            assert findings.mark_unverified(s, types={"agent.no_owner"}) == 1
-            assert findings.to_dict(findings.get(s, fid))["verified"] is False
+        with _rt(client).db.transaction() as tx:
+            assert findings.mark_unverified(tx, types={"agent.no_owner"}) == 1
+            assert findings.to_dict(findings.get(tx, fid))["verified"] is False
         _raise(client, agent["id"])
-        with _rt(client).db.session() as s:
-            assert findings.get(s, fid).verified is True
+        with _rt(client).db.transaction() as tx:
+            assert findings.get(tx, fid).verified is True
 
 
 class _SMTP:
@@ -383,8 +380,8 @@ class TestSending:
         outbox: list[Any] = []
         settings, notifier = self._notifier(client, smtp=lambda: _SMTP(outbox))
         fid = _raise(client, agent["id"])
-        with rt.db.session() as s:
-            issues.route(s, settings)
+        with rt.db.transaction() as tx:
+            issues.route(tx, settings)
         assert notifier.run() == {"sent": 1, "failed": 0}
         (message,) = outbox
         assert message["To"] == "cx-team@example.com"
@@ -393,9 +390,9 @@ class TestSending:
         )
         assert f"/ui/#/findings/{fid}" in message.get_content()
         assert "as the team it escalates to" not in message.get_content()
-        with rt.db.session() as s:
-            assert "finding.notified" in _types(s)
-            assert issues.notifications(s, findings.get(s, fid))[0]["status"] == "sent"
+        with rt.db.transaction() as tx:
+            assert "finding.notified" in _types(tx)
+            assert issues.notifications(tx, findings.get(tx, fid))[0]["status"] == "sent"
         # Sent once.
         assert notifier.run() == {"sent": 0, "failed": 0}
 
@@ -403,20 +400,19 @@ class TestSending:
         rt = _rt(client)
         settings, notifier = self._notifier(client, smtp=lambda: _SMTP([], fail=True))
         fid = _raise(client, agent["id"])
-        with rt.db.session() as s:
-            issues.route(s, settings)
+        with rt.db.transaction() as tx:
+            issues.route(tx, settings)
         assert notifier.run() == {"sent": 0, "failed": 1}
         for _ in range(MAX_ATTEMPTS - 1):
-            with rt.db.session() as s:
-                for n in s.scalars(select(Notification)):
-                    n.next_attempt_at = ids.utcnow()  # its backoff is over
+            with rt.db.transaction():
+                Notification.objects.update(next_attempt_at=ids.utcnow())  # its backoff is over
             notifier.run()
-        with rt.db.session() as s:
-            (n,) = s.scalars(select(Notification)).all()
+        with rt.db.transaction() as tx:
+            (n,) = Notification.objects.all()
             assert (n.status, n.attempts) == ("failed", MAX_ATTEMPTS)
             assert "connection refused" in (n.last_error or "")
-            assert "finding.notification_failed" in _types(s)
-            assert issues.notifications(s, findings.get(s, fid))[0]["status"] == "failed"
+            assert "finding.notification_failed" in _types(tx)
+            assert issues.notifications(tx, findings.get(tx, fid))[0]["status"] == "failed"
 
     def test_a_title_that_breaks_stays_one_line(self, client, agent) -> None:
         """Titles carry names agents, platforms and developers give: a line break in one
@@ -424,9 +420,9 @@ class TestSending:
         rt = _rt(client)
         outbox: list[Any] = []
         settings, notifier = self._notifier(client, smtp=lambda: _SMTP(outbox))
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             findings.raise_finding(
-                s,
+                tx,
                 type="mcp.unapproved_server",
                 severity="medium",
                 subject="url:https://x.example",
@@ -434,7 +430,7 @@ class TestSending:
                 # A control character too (not NUL: PostgreSQL stores no text with one).
                 title="Developers use x\r\nBcc: mallory@evil.example\x07",
             )
-            issues.route(s, settings)
+            issues.route(tx, settings)
         assert notifier.run() == {"sent": 1, "failed": 0}
         (message,) = outbox
         assert message["Bcc"] is None
@@ -459,23 +455,23 @@ class TestSending:
         outbox: list[Any] = []
         settings, notifier = self._notifier(client, smtp=lambda: _SMTP(outbox))
         fid = _raise(client, agent["id"])
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             findings.raise_finding(
-                s,
+                tx,
                 type="agent.stale",
                 severity="medium",
                 subject=agent["id"],
                 agent_id=agent["id"],
                 title="Agent support-bot wasn't seen for 30 days",
             )
-            issues.route(s, settings)
+            issues.route(tx, settings)
         # The other one goes, in the same round; this one is given up on at once.
         assert notifier.run() == {"sent": 1, "failed": 1}
         assert "wasn't seen" in outbox[0]["Subject"]
-        with rt.db.session() as s:
-            (failed,) = issues.notifications(s, findings.get(s, fid))
+        with rt.db.transaction() as tx:
+            (failed,) = issues.notifications(tx, findings.get(tx, fid))
             assert failed["status"] == "failed" and "can't be a header" in failed["last_error"]
-            assert "finding.notification_failed" in _types(s)
+            assert "finding.notification_failed" in _types(tx)
         assert notifier.run() == {"sent": 0, "failed": 0}
 
     def test_teams_chats_get_a_message(self, client, agent, tmp_path: Path) -> None:
@@ -489,16 +485,16 @@ class TestSending:
         http = httpx.Client(transport=httpx.MockTransport(handler))
         rt.settings = dataclasses.replace(rt.settings, destination_secrets_dir=str(tmp_path))
         (tmp_path / "cx-slack").write_text("https://hooks.slack.example/T/B/x")
-        with rt.db.session() as s:
-            destinations.create(s, {"name": "cx-slack", "kind": "slack"}, actor="admin:test")
+        with rt.db.transaction() as tx:
+            destinations.create(tx, {"name": "cx-slack", "kind": "slack"}, actor="admin:test")
             teams.update_team(
-                s, teams.get(s, "cx"), {"destinations": ["cx-slack"]}, actor="admin:test"
+                tx, teams.get(tx, "cx"), {"destinations": ["cx-slack"]}, actor="admin:test"
             )
         settings = dataclasses.replace(rt.settings, smtp_url=None)
         notifier = Notifier(rt.db, settings, Delivery(rt.db, settings, http=http))
         _raise(client, agent["id"])
-        with rt.db.session() as s:
-            issues.route(s, settings)
+        with rt.db.transaction() as tx:
+            issues.route(tx, settings)
         assert notifier.run() == {"sent": 1, "failed": 0}
         (request,) = posted
         assert str(request.url) == "https://hooks.slack.example/T/B/x"
@@ -509,9 +505,9 @@ class TestSending:
         outbox: list[Any] = []
         settings, notifier = self._notifier(client, smtp=lambda: _SMTP(outbox))
         _raise(client, agent["id"])
-        with rt.db.session() as s:
-            issues.route(s, settings)
-            features.set_mode(s, rt.settings, "issues", "off", actor="admin:test")
+        with rt.db.transaction() as tx:
+            issues.route(tx, settings)
+            features.set_mode(tx, rt.settings, "issues", "off", actor="admin:test")
         assert notifier.run() == {}
         assert outbox == []
 
@@ -521,51 +517,50 @@ class TestWhoSeesWhat:
         rt = _rt(client)
         fid = _raise(client, agent["id"])
         now = ids.utcnow()
-        with rt.db.session() as s:
-            issues.route(s, rt.settings, now)
+        with rt.db.transaction() as tx:
+            issues.route(tx, rt.settings, now)
             # The owner team's address; not the sponsors, yet.
-            assert [f.id for f in issues.for_person(s, "CX-Team@example.com")] == [fid]
-            assert issues.for_person(s, "alice@example.com") == []
-            issues.route(s, rt.settings, now + timedelta(hours=73))
-            assert [f.id for f in issues.for_person(s, "alice@example.com")] == [fid]
-            assert [f.id for f in issues.for_person(s, "bob")] == [fid]
+            assert [f.id for f in issues.for_person(tx, "CX-Team@example.com")] == [fid]
+            assert issues.for_person(tx, "alice@example.com") == []
+            issues.route(tx, rt.settings, now + timedelta(hours=73))
+            assert [f.id for f in issues.for_person(tx, "alice@example.com")] == [fid]
+            assert [f.id for f in issues.for_person(tx, "bob")] == [fid]
             # The owner still sees it after it went further.
-            assert [f.id for f in issues.for_person(s, "cx-team@example.com")] == [fid]
-            assert issues.for_person(s, "mallory@example.com") == []
+            assert [f.id for f in issues.for_person(tx, "cx-team@example.com")] == [fid]
+            assert issues.for_person(tx, "mallory@example.com") == []
 
     def test_people_by_any_name_they_go_by(self, client, agent) -> None:
         # Sponsors are named by email address; a sponsor may sign in by their user principal
         # name, which the directory knows them by too.
-        from agentgov.models import Person
+        from agentgov.db.models import Person
 
         fid = _raise(client, agent["id"])
-        with _rt(client).db.session() as s:
-            s.add(
-                Person(
-                    id="oid-alice",
-                    email="Alice@example.com",
-                    upn="alice.smith@contoso.onmicrosoft.com",
-                    source="upload",
-                )
+        with _rt(client).db.transaction():
+            Person.objects.create(
+                id="oid-alice",
+                email="Alice@example.com",
+                upn="alice.smith@contoso.onmicrosoft.com",
+                source="upload",
             )
-        with _rt(client).db.session() as s:
-            finding = findings.get(s, fid)
+        with _rt(client).db.transaction() as tx:
+            finding = findings.get(tx, fid)
             finding.level = "sponsors"
-            assert issues.may_act(s, finding, "alice.smith@contoso.onmicrosoft.com")
-            assert issues.may_act(s, finding, "ALICE@example.com")
-            assert not issues.may_act(s, finding, "mallory@contoso.onmicrosoft.com")
-            mine = issues.for_person(s, "alice.smith@contoso.onmicrosoft.com")
+            finding.save()
+            assert issues.may_act(tx, finding, "alice.smith@contoso.onmicrosoft.com")
+            assert issues.may_act(tx, finding, "ALICE@example.com")
+            assert not issues.may_act(tx, finding, "mallory@contoso.onmicrosoft.com")
+            mine = issues.for_person(tx, "alice.smith@contoso.onmicrosoft.com")
             assert [f.id for f in mine] == [fid]
 
     def test_issues_route_only_while_the_feature_is_on(self, client, agent) -> None:
         rt = _rt(client)
         fid = _raise(client, agent["id"])
-        with rt.db.session() as s:
-            features.set_mode(s, rt.settings, "issues", "off", actor="admin:test")
+        with rt.db.transaction() as tx:
+            features.set_mode(tx, rt.settings, "issues", "off", actor="admin:test")
         assert "assigned" not in rt.run_issues()
-        with rt.db.session() as s:
-            assert s.get(Finding, fid).level is None
-            features.set_mode(s, rt.settings, "issues", "on", actor="admin:test")
+        with rt.db.transaction() as tx:
+            assert findings.get(tx, fid).level is None
+            features.set_mode(tx, rt.settings, "issues", "on", actor="admin:test")
         assert rt.run_issues()["assigned"] == 1
 
 

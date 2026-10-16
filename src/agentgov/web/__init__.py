@@ -3,7 +3,7 @@ behind the ASGI app ``agentgov.api.app.create_app`` makes.
 
 It answers as FastAPI did when it served the API (tests/fastapi_answers.py), so callers
 notice no difference. Each route runs in a transaction of its own, which Django runs
-(agentgov.db); the models are SQLAlchemy's until the ADR's second stage moves them to Django.
+(agentgov.db), on Django's models (agentgov.db.models).
 """
 
 from __future__ import annotations

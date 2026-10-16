@@ -22,12 +22,10 @@ from email.message import EmailMessage
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
-from sqlalchemy import select, update
-
 from agentgov import ids
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.models import SEVERITIES, Agent, Destination, Finding, Notification
+from agentgov.db.models import SEVERITIES, Agent, Destination, Finding, Notification
 from agentgov.registry import digest, features, findings
 from agentgov.registry.destinations import ACTIVE, SecretError
 from agentgov.registry.issues import EMAIL, OWNER, SPONSORS, SYSTEM
@@ -117,17 +115,14 @@ class Notifier:
     # -- rounds ---------------------------------------------------------------------
     def run(self) -> dict[str, int]:
         """Send the notifications that are due; returns how many went and how many failed."""
-        with self.db.session() as s:
-            if not features.is_on(s, "issues"):
+        with self.db.transaction() as tx:
+            if not features.is_on(tx, "issues"):
                 return {}
             now = ids.utcnow()
             due = list(
-                s.scalars(
-                    select(Notification.id)
-                    .where(Notification.status == "pending", Notification.next_attempt_at <= now)
-                    .order_by(Notification.created_at)
-                    .limit(PER_ROUND)
-                )
+                Notification.objects.filter(status="pending", next_attempt_at__lte=now)
+                .order_by("created_at")
+                .values_list("id", flat=True)[:PER_ROUND]
             )
         sent = failed = 0
         for notification_id in due:
@@ -145,24 +140,18 @@ class Notifier:
         return {"sent": sent, "failed": failed}
 
     def _claim(self, notification_id: str) -> _Due | None:
-        with self.db.session() as s:
+        with self.db.transaction():
             now = ids.utcnow()
-            claimed = s.execute(
-                update(Notification)
-                .where(
-                    Notification.id == notification_id,
-                    Notification.status == "pending",
-                    Notification.next_attempt_at <= now,
-                )
-                .values(next_attempt_at=now + LEASE)
-            ).rowcount
+            claimed = Notification.objects.filter(
+                id=notification_id, status="pending", next_attempt_at__lte=now
+            ).update(next_attempt_at=now + LEASE)
             if claimed != 1:
                 return None
-            n = s.get(Notification, notification_id)
-            f = s.get(Finding, n.finding_id) if n else None
+            n = Notification.objects.filter(pk=notification_id).first()
+            f = Finding.objects.filter(pk=n.finding_id).first() if n else None
             if n is None or f is None:
                 return None
-            agent = s.get(Agent, f.agent_id) if f.agent_id else None
+            agent = Agent.objects.filter(pk=f.agent_id).first() if f.agent_id else None
             return _Due(
                 id=n.id,
                 channel=n.channel,
@@ -179,8 +168,8 @@ class Notifier:
             )
 
     def _sent(self, item: _Due) -> None:
-        with self.db.session() as s:
-            n, f = s.get(Notification, item.id), s.get(Finding, item.finding_id)
+        with self.db.transaction() as tx:
+            n, f = _notification(item.id), Finding.objects.filter(pk=item.finding_id).first()
             if n is None or f is None:
                 return
             n.status, n.sent_at, n.attempts, n.last_error = (
@@ -189,8 +178,9 @@ class Notifier:
                 n.attempts + 1,
                 None,
             )
+            n.save()
             findings.record(
-                s,
+                tx,
                 f,
                 "notified",
                 SYSTEM,
@@ -202,8 +192,8 @@ class Notifier:
 
     def _failed(self, item: _Due, error: str, *, final: bool = False) -> None:
         log.warning("notification %s to %s: %s", item.id, item.recipient, error)
-        with self.db.session() as s:
-            n, f = s.get(Notification, item.id), s.get(Finding, item.finding_id)
+        with self.db.transaction() as tx:
+            n, f = _notification(item.id), Finding.objects.filter(pk=item.finding_id).first()
             if n is None or f is None:
                 return
             n.attempts += 1
@@ -211,7 +201,7 @@ class Notifier:
             if final or n.attempts >= MAX_ATTEMPTS:
                 n.status = "failed"
                 findings.record(
-                    s,
+                    tx,
                     f,
                     "notification_failed",
                     SYSTEM,
@@ -223,6 +213,7 @@ class Notifier:
                 )
             else:
                 n.next_attempt_at = ids.utcnow() + backoff(n.attempts)
+            n.save()
 
     # -- the daily digest -------------------------------------------------------------
     def digest(self, now: datetime | None = None) -> dict[str, int]:
@@ -232,14 +223,14 @@ class Notifier:
         day = digest.due(self.settings, now)
         if day is None:
             return {}
-        with self.db.session() as s:
-            if not features.is_on(s, "issues"):
+        with self.db.transaction() as tx:
+            if not features.is_on(tx, "issues"):
                 return {}
-            state = digest.start(s, day, now)
+            state = digest.start(tx, day, now)
             todo = {
                 target: lines
                 for target, lines in digest.gather(
-                    s, self.settings, digest.since(state, now)
+                    tx, self.settings, digest.since(state, now)
                 ).items()
                 if digest.waiting(state, target, now)
             }
@@ -257,8 +248,8 @@ class Notifier:
                 failed += 1
             else:
                 sent += 1
-            with self.db.session() as s:
-                digest.record(s, day, target, lines, now=now, error=error)
+            with self.db.transaction() as tx:
+                digest.record(tx, day, target, lines, now=now, error=error)
         return {"digests_sent": sent, "digests_failed": failed} if todo else {}
 
     def _ui(self, path: str) -> str:
@@ -405,8 +396,8 @@ class Notifier:
         return client
 
     def _destination(self, name: str) -> SimpleNamespace:
-        with self.db.session() as s:
-            row = s.scalar(select(Destination).where(Destination.name == name))
+        with self.db.transaction():
+            row = Destination.objects.filter(name=name).first()
             if row is None:
                 raise NotifyError(f"destination {name!r} no longer exists")
             if row.status != ACTIVE:
@@ -430,3 +421,7 @@ class Notifier:
                 link_label="Answer in AgentGov",
             ),
         )
+
+
+def _notification(notification_id: str) -> Notification | None:
+    return Notification.objects.filter(pk=notification_id).first()

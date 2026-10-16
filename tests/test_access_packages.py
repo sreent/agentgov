@@ -7,11 +7,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
-from agentgov.models import AccessAssignment, LedgerEntry
+from agentgov.db.models import AccessAssignment, Finding, LedgerEntry
 from agentgov.registry import access_packages, features, findings
 from tests.conftest import ADMIN, requires_opa, seed
 from tests.test_opa import _decide
@@ -51,13 +50,13 @@ def _ask(client: TestClient, headers: dict[str, str], **body: Any) -> Any:
 
 
 def _held(client: TestClient, agent_id: str) -> list[dict[str, Any]]:
-    with _rt(client).db.session() as s:
-        return access_packages.held(s).get(agent_id, [])
+    with _rt(client).db.transaction() as tx:
+        return access_packages.held(tx).get(agent_id, [])
 
 
 def _types(client: TestClient) -> list[str]:
-    with _rt(client).db.session() as s:
-        return [e.type for e in s.scalars(select(LedgerEntry).order_by(LedgerEntry.seq))]
+    with _rt(client).db.transaction():
+        return list(LedgerEntry.objects.order_by("seq").values_list("type", flat=True))
 
 
 class TestPackages:
@@ -166,12 +165,12 @@ class TestRequests:
         assert not_admin.status_code == 403
 
     def test_the_agents_owner_and_sponsors_may_ask(self, client, agent) -> None:
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             from agentgov.registry import agents
 
-            bot = agents.get(s, "support-bot")
-            assert access_packages.may_request(s, frozenset({"person"}), "Alice@Example.com", bot)
-            assert not access_packages.may_request(s, frozenset({"person"}), "mallory", bot)
+            bot = agents.get(tx, "support-bot")
+            assert access_packages.may_request(tx, frozenset({"person"}), "Alice@Example.com", bot)
+            assert not access_packages.may_request(tx, frozenset({"person"}), "mallory", bot)
 
     def test_nothing_is_asked_for_while_packages_are_off(self, client, agent) -> None:
         client.put("/v1/features/access-packages", json={"mode": "off"}, headers=ADMIN)
@@ -188,24 +187,22 @@ class TestLifecycle:
         rt = _rt(client)
         assignment_id = self._active(client, days=30)
         now = ids.utcnow()
-        with rt.db.session() as s:
-            assert access_packages.check(s, rt.settings, now) == {
+        with rt.db.transaction() as tx:
+            assert access_packages.check(tx, rt.settings, now) == {
                 "expired": 0,
                 "expiring": 0,
                 "reviews": 0,
             }
-            assert access_packages.check(s, rt.settings, now + timedelta(days=20))["expiring"] == 1
-            reminder = findings.get(s, s.scalar(select(findings.Finding.id)))
+            assert access_packages.check(tx, rt.settings, now + timedelta(days=20))["expiring"] == 1
+            reminder = Finding.objects.get()
             assert (reminder.type, reminder.severity) == ("access.expiring", "low")
-            access_packages.check(s, rt.settings, now + timedelta(days=29, hours=12))
-            assert findings.get(s, reminder.id).severity == "high"
-            assert access_packages.check(s, rt.settings, now + timedelta(days=31))["expired"] == 1
-            row = s.get(AccessAssignment, assignment_id)
+            access_packages.check(tx, rt.settings, now + timedelta(days=29, hours=12))
+            assert findings.get(tx, reminder.id).severity == "high"
+            assert access_packages.check(tx, rt.settings, now + timedelta(days=31))["expired"] == 1
+            row = AccessAssignment.objects.get(pk=assignment_id)
             assert row.status == "expired"
-            assert findings.get(s, reminder.id).status == "resolved"
-            expired = s.scalar(
-                select(findings.Finding).where(findings.Finding.type == "access.expired")
-            )
+            assert findings.get(tx, reminder.id).status == "resolved"
+            expired = Finding.objects.get(type="access.expired")
             assert "still uses" in expired.description  # monitored by default
         assert "access.expired" in _types(client)
         # Held still: OPA decides what an expired package grants, as the feature says.
@@ -217,8 +214,9 @@ class TestLifecycle:
         renewal = _ask(client, _key(client, "registrar"), days=7).json()
         approver = _key(client, "approver", "ann")
         client.post(f"/v1/access-assignments/{renewal['id']}/approve", headers=approver)
-        with rt.db.session() as s:
-            old, new = s.get(AccessAssignment, first), s.get(AccessAssignment, renewal["id"])
+        with rt.db.transaction():
+            old = AccessAssignment.objects.get(pk=first)
+            new = AccessAssignment.objects.get(pk=renewal["id"])
             assert (old.status, new.status) == ("renewed", "active")
             assert new.expires_at == old.expires_at  # 7 days from now would be sooner
         assert len(_held(client, agent["id"])) == 1
@@ -230,14 +228,14 @@ class TestLifecycle:
         deleted = client.post("/v1/agents/support-bot/delete", json={}, headers=ADMIN)
         assert deleted.status_code == 200, deleted.text
         later = ids.utcnow() + timedelta(days=31)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             # No reminders, expiry or reviews about an agent that is gone.
-            assert access_packages.check(s, rt.settings, later) == {
+            assert access_packages.check(tx, rt.settings, later) == {
                 "expired": 0,
                 "expiring": 0,
                 "reviews": 0,
             }
-            assert s.scalar(select(findings.Finding.id)) is None
+            assert not Finding.objects.exists()
         approver = _key(client, "approver", "ann")
         refused = client.post(f"/v1/access-assignments/{pending['id']}/approve", headers=approver)
         assert refused.status_code == 409 and "restore it first" in refused.text
@@ -250,9 +248,9 @@ class TestLifecycle:
         assert _ask(client, ADMIN, approve=True).status_code == 409
         # Restored, they are checked again.
         client.post("/v1/agents/support-bot/restore", json={}, headers=ADMIN)
-        with rt.db.session() as s:
-            assert access_packages.check(s, rt.settings, later)["expired"] == 1
-            assert s.get(AccessAssignment, assignment_id).status == "expired"
+        with rt.db.transaction() as tx:
+            assert access_packages.check(tx, rt.settings, later)["expired"] == 1
+            assert AccessAssignment.objects.get(pk=assignment_id).status == "expired"
         # Purged, they go with it, and the package can be deleted.
         client.post("/v1/agents/support-bot/delete", json={}, headers=ADMIN)
         assert client.delete("/v1/agents/support-bot", headers=ADMIN).status_code in (200, 204)
@@ -287,9 +285,9 @@ class TestLifecycle:
         rt = _rt(client)
         client.patch("/v1/access-packages/crm-write", json={"review_days": 7}, headers=ADMIN)
         assignment_id = self._active(client, days=30)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             assert (
-                access_packages.check(s, rt.settings, ids.utcnow() + timedelta(days=8))["reviews"]
+                access_packages.check(tx, rt.settings, ids.utcnow() + timedelta(days=8))["reviews"]
                 == 1
             )
         url = f"/v1/access-assignments/{assignment_id}/review"
@@ -297,10 +295,8 @@ class TestLifecycle:
         assert client.post(url, json={}, headers=approver).status_code == 422
         kept = client.post(url, json={"keep": True}, headers=approver).json()
         assert kept["status"] == "active" and kept["reviewed_at"]
-        with rt.db.session() as s:
-            due = s.scalar(
-                select(findings.Finding).where(findings.Finding.type == "access.review_due")
-            )
+        with rt.db.transaction() as tx:
+            due = Finding.objects.get(type="access.review_due")
             assert due.status == "resolved"
         removed = client.post(url, json={"keep": False}, headers=approver).json()
         assert removed["status"] == "revoked"
@@ -320,17 +316,17 @@ def test_opa_applies_expiry_as_the_feature_says(rt, settings, tmp_path: Path) ->
     from tests.test_opa import _seed
 
     _seed(rt, settings)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         from agentgov.registry import agents
 
         package = access_packages.create(
-            s,
+            tx,
             {"name": "crm-write", "permissions": [{"server": "crm", "tools": ["update_*"]}]},
             actor="t",
         )
         row = access_packages.request(
-            s,
-            agent=agents.get(s, "bot"),
+            tx,
+            agent=agents.get(tx, "bot"),
             package=package,
             days=30,
             reason="r",
@@ -346,16 +342,18 @@ def test_opa_applies_expiry_as_the_feature_says(rt, settings, tmp_path: Path) ->
         "detections": {"categories": []},
     }
     assert _decide(rt, tmp_path, call)["effect"] == "allow"
-    with rt.db.session() as s:
-        s.get(AccessAssignment, assignment_id).expires_at = ids.utcnow() - timedelta(minutes=1)
+    with rt.db.transaction():
+        AccessAssignment.objects.filter(pk=assignment_id).update(
+            expires_at=ids.utcnow() - timedelta(minutes=1)
+        )
     rt.bundles.notify()
     monitored = _decide(rt, tmp_path, call)
     assert monitored["effect"] == "allow" and monitored["monitored"] == [
         "access-packages: crm/update_customer was granted to agent bot by access package "
         "crm-write, which has expired"
     ]
-    with rt.db.session() as s:
-        features.set_mode(s, settings, "access-packages", "enforce", actor="t")
+    with rt.db.transaction() as tx:
+        features.set_mode(tx, settings, "access-packages", "enforce", actor="t")
     rt.bundles.notify()
     assert _decide(rt, tmp_path, call)["effect"] == "deny"
 

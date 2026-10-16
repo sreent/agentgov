@@ -490,13 +490,13 @@ class TestGovernance:
     def test_findings_come_a_page_at_a_time_with_their_total(self, client) -> None:
         seed(client)
         rt = client.app.state.rt
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             for n in range(3):
                 findings.raise_finding(
-                    s, type="destination.failing", severity="high", subject=f"d{n}", title=f"d{n}"
+                    tx, type="destination.failing", severity="high", subject=f"d{n}", title=f"d{n}"
                 )
             findings.raise_finding(
-                s, type="opa.bundle_error", severity="low", subject="o", title="o"
+                tx, type="opa.bundle_error", severity="low", subject="o", title="o"
             )
         first = client.get("/v1/findings", params={"limit": 2}, headers=ADMIN)
         assert (len(first.json()), first.headers["x-total-count"]) == (2, "4")

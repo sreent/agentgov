@@ -699,7 +699,7 @@ def db_status() -> None:
 
     db = _database()
     try:
-        state = migrations.status(db.engine)
+        state = migrations.status(db)
     except migrations.SchemaError as exc:
         _fail(str(exc))
     finally:
@@ -728,10 +728,10 @@ def db_upgrade(
     db = _database()
     try:
         if sql:
-            typer.echo(migrations.upgrade_sql(db.engine), nl=False)
+            typer.echo(migrations.upgrade_sql(db), nl=False)
             return
-        adopted = migrations.status(db.engine).unversioned
-        applied = migrations.upgrade(db.engine)
+        adopted = migrations.status(db).unversioned
+        applied = migrations.upgrade(db)
     except migrations.SchemaError as exc:
         _fail(str(exc))
     finally:

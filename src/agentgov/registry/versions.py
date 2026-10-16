@@ -20,10 +20,9 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import inspect
-from sqlalchemy.orm import Session
+from django.db.models import Model
 
-from agentgov.db import lock
+from agentgov import db
 from agentgov.registry.errors import RegistryError
 
 
@@ -64,10 +63,10 @@ LONGEST = 1000
 _BEFORE = "_agentgov_before"
 
 
-def start_edit(session: Session, obj: Any, version: int | None, what: str) -> None:
+def start_edit(tx: db.Transaction, obj: Any, version: int | None, what: str) -> None:
     """Lock the object for the edit (edits take turns), and refuse it if it was made from
     an older version than the one stored. What it is now is kept, for :func:`changes`."""
-    lock(session, obj)
+    db.lock(tx, obj)
     if version is not None and obj.version != version:
         raise EditConflict(
             f"{what} changed since you loaded it (version {version}; it is at version "
@@ -78,10 +77,15 @@ def start_edit(session: Session, obj: Any, version: int | None, what: str) -> No
 
 def _snapshot(obj: Any) -> dict[str, Any]:
     return {
-        attr.key: copy.deepcopy(getattr(obj, attr.key))
-        for attr in inspect(obj).mapper.column_attrs
-        if attr.key not in UNTRACKED and "secret" not in attr.key
+        key: copy.deepcopy(getattr(obj, key))
+        for key in _fields(obj)
+        if key not in UNTRACKED and "secret" not in key
     }
+
+
+def _fields(obj: Model) -> list[str]:
+    """The object's columns, by attribute."""
+    return [f.attname for f in obj._meta.concrete_fields]
 
 
 def _shown(value: Any) -> Any:

@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.models import ApiKey, Finding
+from agentgov.db.models import ApiKey, Finding
 from agentgov.registry import apikeys
 from tests.conftest import ADMIN
 from tests.test_cli import _Shared, ok, runner
@@ -35,18 +35,13 @@ def days_from_now(value: str) -> float:
 
 
 def set_key(client: TestClient, key_id: str, **values: Any) -> None:
-    with client.app.state.rt.db.session() as s:  # type: ignore[attr-defined]
-        record = s.get(ApiKey, key_id)
-        for name, value in values.items():
-            setattr(record, name, value)
+    with client.app.state.rt.db.transaction():  # type: ignore[attr-defined]
+        ApiKey.objects.filter(pk=key_id).update(**values)
 
 
 def issue(client: TestClient, key_id: str) -> Finding | None:
-    with client.app.state.rt.db.session() as s:  # type: ignore[attr-defined]
-        found = s.query(Finding).filter(Finding.key == f"{apikeys.EXPIRING}:{key_id}").one_or_none()
-        if found is not None:
-            s.expunge(found)
-        return found
+    with client.app.state.rt.db.transaction():  # type: ignore[attr-defined]
+        return Finding.objects.filter(key=f"{apikeys.EXPIRING}:{key_id}").first()
 
 
 def scan(client: TestClient) -> None:

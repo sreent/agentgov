@@ -1,13 +1,35 @@
-"""The database's tables, as Django models (docs/adr/0007-django.md).
+"""The database's tables, as Django models (docs/adr/0007-django.md), and the values some of
+their columns take.
 
-The same tables, columns and constraints as the SQLAlchemy models in agentgov.models, which
-the migrations build, for the modules to use as they move to Django's ORM one at a time
-(tests/test_django_models.py compares them with the database the migrations make). Django
-doesn't manage these tables yet (``managed = False``): Alembic does, until Django's
-migrations take over.
+The vocabulary mirrors Microsoft Agent 365 / Entra Agent ID so the parity
+matrix in docs/baseline-agent365.md maps one-to-one:
+
+* ``Blueprint``  - IT-approved template for a class of agents: the tools its
+                   agents may use, risk tier, sponsor and attestation rules
+                   (Entra "agent identity blueprint").
+* ``Agent``      - one agent identity with owner, sponsors and lifecycle state.
+                   Its credentials live in Keycloak, not here.
+* ``ToolServer`` - an approved MCP server: published through agentgateway for
+                   agents, listed in the MCP registry for developers' tools, or both.
+* ``ModelProvider`` - a model provider agents call through agentgateway.
+* ``Policy``     - an organisation Rego module distributed to OPA.
+* ``FeatureSetting`` - which of AgentGov's features are used, and how strictly.
+* ``Team``       - people and chat channels that own agents, and that issues about
+                   agents escalate to.
+* ``AccessPackage`` - grants an agent can hold for a while, once approved
+                   (``AccessAssignment``).
+* ``ManagementRule`` - acts on the agents that match it, after telling their people
+                   (``RuleMatch``).
+* ``McpSighting`` - an MCP server set up on a developer's machine, as reported.
+
+Django's migrations build them (agentgov/db/migrations): the first, the schema Alembic's
+migrations left, which databases they built have recorded as applied (agentgov.migrations).
+tests/test_django_models.py compares the models with the database the migrations make.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from django.db.models import (
     SET_NULL,
@@ -20,7 +42,9 @@ from django.db.models import (
     ForeignKey,
     Index,
     IntegerField,
+    Manager,
     Model,
+    QuerySet,
     TextField,
     UniqueConstraint,
 )
@@ -28,8 +52,112 @@ from django.db.models import (
 from agentgov.db.fields import JSONField, UTCDateTimeField
 from agentgov.ids import utcnow
 
+# Agent lifecycle (Agent 365 terms in brackets).
+PENDING = "pending"  # registration awaiting review ("Pending review")
+ACTIVE = "active"  # approved and usable ("Available")
+BLOCKED = "blocked"  # blocked by an admin, the kill switch or risk ("Blocked")
+DELETED = "deleted"  # soft-deleted, restorable for a retention period ("Deleted")
+DISCOVERED = "discovered"  # seen at runtime but never registered ("Unmanaged")
+AGENT_STATUSES = (PENDING, ACTIVE, BLOCKED, DELETED, DISCOVERED)
 
-class Blueprint(Model):
+# Tool server review states (bring-your-own MCP server approval flow).
+TOOLSERVER_STATUSES = (PENDING, "approved", BLOCKED)
+
+RISK_TIERS = ("minimal", "low", "medium", "high", "critical")
+RISK_LEVELS = ("low", "medium", "high", "critical")
+TRUST_LEVELS = ("verified", "unverified")
+DATA_CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
+SEVERITIES = ("info", "low", "medium", "high", "critical")
+# Model providers agentgateway can call with an API key. "openai-compatible" is any
+# server that speaks OpenAI's API (vLLM, Ollama, LiteLLM, hosted APIs) at base_url.
+MODEL_PROVIDER_KINDS = ("openai", "anthropic", "gemini", "openai-compatible")
+# Who a blueprint's agents act for, and who decides approvals made for a person.
+ACTS_FOR = ("people", "itself", "either")
+APPROVALS_BY = ("approvers", "person")
+# Identity providers whose tokens agents may authenticate with instead of a secret.
+ISSUER_KINDS = ("kubernetes", "spiffe", "oidc")
+# Where events and alerts go: SIEMs (OpenTelemetry logs, an HTTP input, Splunk's HTTP Event
+# Collector) and chats; and service desks, where issues become tickets.
+DESTINATION_KINDS = (
+    "otlp",
+    "webhook",
+    "splunk-hec",
+    "slack",
+    "teams",
+    "servicenow",
+    "jira",
+    "freshservice",
+)
+
+
+class Row(Model):
+    """A row of one of the tables: ``save()`` writes the fields that changed since it was
+    read, and the time it was updated with them, rather than every field. Two transactions
+    that change different fields of one row (a job its last sighting, a person its
+    description) keep both changes; a save that changed nothing writes nothing. A JSON
+    value counts as changed when another is set, not when the one there is changed in
+    place."""
+
+    class Meta:
+        abstract = True
+
+    @classmethod
+    def from_db(cls, db: str | None, field_names: Any, values: Any) -> Any:
+        row = super().from_db(db, field_names, values)
+        row._stored = row._values()
+        return row
+
+    def _values(self) -> dict[str, Any]:
+        """The fields loaded, as they are now."""
+        return {
+            f.attname: self.__dict__[f.attname]
+            for f in self._meta.concrete_fields
+            if f.attname in self.__dict__
+        }
+
+    def changed(self) -> list[str]:
+        """The fields set to another value since the row was read or last saved."""
+        stored: dict[str, Any] = self.__dict__.get("_stored", {})
+        keys = {f.attname for f in self._meta.pk_fields}
+        return [
+            name
+            for name, value in self._values().items()
+            if name not in keys and (name not in stored or value != stored[name])
+        ]
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        if (
+            "_stored" in self.__dict__
+            and not self._state.adding
+            and not args
+            and kwargs.get("update_fields") is None
+            and not kwargs.get("force_insert")
+        ):
+            fields = self.changed()
+            if fields:
+                fields += [
+                    f.attname
+                    for f in self._meta.concrete_fields
+                    if getattr(f, "auto_now", False) and f.attname not in fields
+                ]
+            kwargs["update_fields"] = fields
+        super().save(*args, **kwargs)
+        self._stored = self._values()
+
+    def refresh_from_db(self, *args: Any, **kwargs: Any) -> None:
+        fields = kwargs.get("fields", args[1] if len(args) > 1 else None)
+        deferred = self.get_deferred_fields()
+        super().refresh_from_db(*args, **kwargs)
+        read = (
+            set(fields)
+            if fields is not None
+            else {f.attname for f in self._meta.concrete_fields} - deferred
+        )
+        stored = self.__dict__.setdefault("_stored", {})
+        stored.update({name: value for name, value in self._values().items() if name in read})
+
+
+class Blueprint(Row):
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=128)
     description = TextField(default="")
@@ -62,14 +190,23 @@ class Blueprint(Model):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "blueprints"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_blueprints_name"),
         ]
 
 
-class Agent(Model):
+class _WithBlueprint(Manager):
+    """Agents, read with their blueprints: most of what is worked out about an agent is
+    its blueprint's too."""
+
+    def get_queryset(self) -> QuerySet[Any]:
+        return super().get_queryset().select_related("blueprint")
+
+
+class Agent(Row):
+    objects = _WithBlueprint()
+
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=200)
     description = TextField(default="")
@@ -149,7 +286,6 @@ class Agent(Model):
     deleted_at = UTCDateTimeField(null=True)
 
     class Meta:
-        managed = False
         db_table = "agents"
         indexes = [
             Index(fields=["blueprint"], name="ix_agents_blueprint_id"),
@@ -163,8 +299,13 @@ class Agent(Model):
             UniqueConstraint(fields=["client_id"], name="agents_client_id_key"),
         ]
 
+    @property
+    def on_platform(self) -> bool:
+        """Run by another platform (Microsoft 365, Copilot Studio), not through the gateway."""
+        return (self.source or "").startswith("platform:")
 
-class ToolServer(Model):
+
+class ToolServer(Row):
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=64)
     # The server's own MCP endpoint. A server only for developers may have none ("")
@@ -207,14 +348,13 @@ class ToolServer(Model):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "tool_servers"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_tool_servers_name"),
         ]
 
 
-class ModelProvider(Model):
+class ModelProvider(Row):
     """A model provider agents call through the gateway, at ``/llm/<name>``.
 
     Its API key never enters AgentGov: the gateway reads it from ``key_file``, a
@@ -241,14 +381,13 @@ class ModelProvider(Model):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "model_providers"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_model_providers_name"),
         ]
 
 
-class IdentityIssuer(Model):
+class IdentityIssuer(Row):
     """An identity provider whose tokens agents may authenticate with instead of a client
     secret: a Kubernetes cluster, a SPIFFE trust domain, or an OpenID Connect issuer such
     as Microsoft Entra ID, Okta, AWS or GitHub Actions.
@@ -289,7 +428,6 @@ class IdentityIssuer(Model):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "identity_issuers"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_identity_issuers_name"),
@@ -297,7 +435,7 @@ class IdentityIssuer(Model):
         ]
 
 
-class Destination(Model):
+class Destination(Row):
     """Where AgentGov hands its evidence and alerts to the security team: a SIEM, through
     OpenTelemetry logs, an HTTP input or Splunk's HTTP Event Collector, or a Teams or Slack
     channel. Its credential (a token, or the chat's webhook URL) is a file the control plane
@@ -333,14 +471,13 @@ class Destination(Model):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "destinations"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_destinations_name"),
         ]
 
 
-class ModelUsage(Model):
+class ModelUsage(Row):
     """Model calls through the gateway, per agent, UTC day, provider and model.
 
     ``agent_id`` is empty for callers the gateway could not identify (only possible
@@ -359,14 +496,13 @@ class ModelUsage(Model):
     pk = CompositePrimaryKey("agent_id", "day", "provider", "model")
 
     class Meta:
-        managed = False
         db_table = "model_usage"
         indexes = [
             Index(fields=["day"], name="ix_model_usage_day"),
         ]
 
 
-class Policy(Model):
+class Policy(Row):
     """An organisation Rego module, shipped to OPA alongside the built-in library."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -379,14 +515,13 @@ class Policy(Model):
     updated_at = UTCDateTimeField(auto_now=True)
 
     class Meta:
-        managed = False
         db_table = "policies"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_policies_name"),
         ]
 
 
-class FindingType(Model):
+class FindingType(Row):
     """How findings of one type are handled here (``agentgov.registry.finding_types``):
     raised or not, and how severe. Types nobody configured have no row."""
 
@@ -398,11 +533,10 @@ class FindingType(Model):
     changed_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "finding_types"
 
 
-class FeatureSetting(Model):
+class FeatureSetting(Row):
     """The mode chosen for one of AgentGov's features (``agentgov.registry.features``).
 
     Features nobody chose a mode for have no row and run in their default mode.
@@ -419,11 +553,10 @@ class FeatureSetting(Model):
     scopes = JSONField(default=list, db_default=[])
 
     class Meta:
-        managed = False
         db_table = "feature_settings"
 
 
-class ApiKey(Model):
+class ApiKey(Row):
     """Scoped keys for people and automation (approvers, auditors, CI pipelines)."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -440,14 +573,13 @@ class ApiKey(Model):
     expires_at = UTCDateTimeField(null=True)
 
     class Meta:
-        managed = False
         db_table = "api_keys"
         constraints = [
             UniqueConstraint(fields=["key_hash"], name="ix_api_keys_key_hash"),
         ]
 
 
-class AdminSession(Model):
+class AdminSession(Row):
     """An administrator signed in through single sign-on.
 
     The browser holds a random token in an HttpOnly cookie; only its hash is
@@ -470,7 +602,6 @@ class AdminSession(Model):
     expires_at = UTCDateTimeField()
 
     class Meta:
-        managed = False
         db_table = "admin_sessions"
         indexes = [
             Index(fields=["expires_at"], name="ix_admin_sessions_expires_at"),
@@ -481,7 +612,7 @@ class AdminSession(Model):
         ]
 
 
-class RoleGrant(Model):
+class RoleGrant(Row):
     """An AgentGov role given to a person in AgentGov rather than by the identity provider:
     for providers whose tokens carry no groups (Google's), and the first administrators.
     It applies when they sign in with this email address, which the provider vouches for.
@@ -497,7 +628,6 @@ class RoleGrant(Model):
     created_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "role_grants"
         indexes = [
             Index(fields=["email"], name="ix_role_grants_email"),
@@ -507,7 +637,7 @@ class RoleGrant(Model):
         ]
 
 
-class LoginState(Model):
+class LoginState(Row):
     """A sign-in in flight: state, nonce and PKCE verifier, used once and short-lived."""
 
     state = CharField(max_length=64, primary_key=True)
@@ -516,14 +646,13 @@ class LoginState(Model):
     expires_at = UTCDateTimeField()
 
     class Meta:
-        managed = False
         db_table = "login_states"
         indexes = [
             Index(fields=["expires_at"], name="ix_login_states_expires_at"),
         ]
 
 
-class CliLogin(Model):
+class CliLogin(Row):
     """A sign-in for the command line (``agentgov login``), used once and short-lived.
 
     The CLI listens on a loopback port and proves with PKCE that it started the
@@ -539,7 +668,6 @@ class CliLogin(Model):
     expires_at = UTCDateTimeField()
 
     class Meta:
-        managed = False
         db_table = "cli_logins"
         indexes = [
             Index(fields=["expires_at"], name="ix_cli_logins_expires_at"),
@@ -549,7 +677,7 @@ class CliLogin(Model):
         ]
 
 
-class MicrosoftGrant(Model):
+class MicrosoftGrant(Row):
     """A signed-in administrator's Microsoft sign-in, which AgentGov acts with in Microsoft
     365 and Power Platform (agentgov.identity.delegation): the refresh token, sealed with a
     key derived from the client secret, kept for as long as the AgentGov session lasts."""
@@ -561,14 +689,13 @@ class MicrosoftGrant(Model):
     updated_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "microsoft_grants"
         indexes = [
             Index(fields=["expires_at"], name="ix_microsoft_grants_expires_at"),
         ]
 
 
-class PlatformAgent(Model):
+class PlatformAgent(Row):
     """An agent as the platform that runs it reports it (Microsoft 365, Copilot Studio).
 
     These agents never call tools through AgentGov's gateway, so AgentGov
@@ -585,7 +712,6 @@ class PlatformAgent(Model):
     synced_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "platform_agents"
         indexes = [
             Index(fields=["agent_id"], name="ix_platform_agents_agent_id"),
@@ -593,7 +719,7 @@ class PlatformAgent(Model):
         ]
 
 
-class PlatformSync(Model):
+class PlatformSync(Row):
     """The outcome of the latest sync or import from each platform."""
 
     source = CharField(max_length=64, primary_key=True)
@@ -603,11 +729,10 @@ class PlatformSync(Model):
     counts = JSONField(default=dict)
 
     class Meta:
-        managed = False
         db_table = "platform_syncs"
 
 
-class ComponentReport(Model):
+class ComponentReport(Row):
     """What one instance of a component (a governance processor) last said it can reach:
     OPA, Presidio, Granite Guardian, a decision point of your own (agentgov.health)."""
 
@@ -624,11 +749,10 @@ class ComponentReport(Model):
     pk = CompositePrimaryKey("component", "instance")
 
     class Meta:
-        managed = False
         db_table = "component_reports"
 
 
-class Person(Model):
+class Person(Row):
     """Someone in Microsoft Entra ID whom a platform names as an agent's maker or owner, by
     object ID (registry.people): as the directory last said, or a list uploaded from it."""
 
@@ -649,7 +773,6 @@ class Person(Model):
     checked_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "people"
         indexes = [
             Index(fields=["email"], name="ix_people_email"),
@@ -657,7 +780,7 @@ class Person(Model):
         ]
 
 
-class IntegrationState(Model):
+class IntegrationState(Row):
     """Where an integration with another service got to, between runs (a cursor, a
     pending query, the permissions an app was granted)."""
 
@@ -666,11 +789,10 @@ class IntegrationState(Model):
     updated_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "integration_state"
 
 
-class AgentInstructions(Model):
+class AgentInstructions(Row):
     """What an agent is instructed to do (its system prompt), from one source, and
     what scanning found in it. Credentials in the text are redacted before storing."""
 
@@ -689,7 +811,6 @@ class AgentInstructions(Model):
     classifier = JSONField(default=dict)
 
     class Meta:
-        managed = False
         db_table = "agent_instructions"
         indexes = [
             Index(fields=["agent_id"], name="ix_agent_instructions_agent_id"),
@@ -697,7 +818,7 @@ class AgentInstructions(Model):
         ]
 
 
-class ApprovedConnector(Model):
+class ApprovedConnector(Row):
     """A Power Platform connector the organisation allows its agents to use."""
 
     connector_id = CharField(max_length=200, primary_key=True)
@@ -706,11 +827,10 @@ class ApprovedConnector(Model):
     created_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "approved_connectors"
 
 
-class ApprovalRequest(Model):
+class ApprovalRequest(Row):
     """Human-in-the-loop approval for one specific tool call."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -737,7 +857,6 @@ class ApprovalRequest(Model):
     deciders = CharField(max_length=16, default="approvers", db_default="approvers")
 
     class Meta:
-        managed = False
         db_table = "approval_requests"
         indexes = [
             Index(fields=["agent_id"], name="ix_approval_requests_agent_id"),
@@ -747,7 +866,7 @@ class ApprovalRequest(Model):
         ]
 
 
-class Finding(Model):
+class Finding(Row):
     """A posture or threat finding, open until resolved or dismissed."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -786,7 +905,6 @@ class Finding(Model):
     round = IntegerField(default=0, db_default=0)
 
     class Meta:
-        managed = False
         db_table = "findings"
         indexes = [
             Index(fields=["agent_id"], name="ix_findings_agent_id"),
@@ -798,7 +916,7 @@ class Finding(Model):
         ]
 
 
-class Team(Model):
+class Team(Row):
     """People and chat channels that can own agents, and that issues escalate to."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -820,14 +938,13 @@ class Team(Model):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "teams"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_teams_name"),
         ]
 
 
-class AccessPackage(Model):
+class AccessPackage(Row):
     """Grants an agent can hold for a while: requested, approved, and expiring
     (docs/access-packages.md)."""
 
@@ -852,14 +969,13 @@ class AccessPackage(Model):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "access_packages"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_access_packages_name"),
         ]
 
 
-class AccessAssignment(Model):
+class AccessAssignment(Row):
     """An access package for an agent: asked for, then held until it expires, is revoked
     or is renewed (each renewal is an assignment of its own)."""
 
@@ -882,7 +998,6 @@ class AccessAssignment(Model):
     updated_at = UTCDateTimeField(auto_now=True)
 
     class Meta:
-        managed = False
         db_table = "access_assignments"
         indexes = [
             Index(fields=["agent_id"], name="ix_access_assignments_agent_id"),
@@ -892,7 +1007,7 @@ class AccessAssignment(Model):
         ]
 
 
-class ManagementRule(Model):
+class ManagementRule(Row):
     """Conditions on agents, and what to do about the agents that meet them for long enough:
     raise an issue, give them an owner, block them, delete them or revoke their access
     packages, after telling their people (docs/management-rules.md)."""
@@ -920,14 +1035,13 @@ class ManagementRule(Model):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "management_rules"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_management_rules_name"),
         ]
 
 
-class RuleMatch(Model):
+class RuleMatch(Row):
     """An agent a management rule matches, from when it started to match: when its people
     were told, and what the rule did or would have done. Gone once the agent no longer
     matches."""
@@ -944,7 +1058,6 @@ class RuleMatch(Model):
     outcome = TextField(null=True)
 
     class Meta:
-        managed = False
         db_table = "rule_matches"
         indexes = [
             Index(fields=["agent_id"], name="ix_rule_matches_agent_id"),
@@ -955,7 +1068,7 @@ class RuleMatch(Model):
         ]
 
 
-class Notification(Model):
+class Notification(Row):
     """A message about an issue to someone's email address or a team's chat, which the
     control plane sends and retries (docs/issues.md)."""
 
@@ -975,7 +1088,6 @@ class Notification(Model):
     sent_at = UTCDateTimeField(null=True)
 
     class Meta:
-        managed = False
         db_table = "notifications"
         indexes = [
             Index(fields=["finding_id"], name="ix_notifications_finding_id"),
@@ -989,7 +1101,7 @@ class Notification(Model):
         ]
 
 
-class Ticket(Model):
+class Ticket(Row):
     """An issue's ticket in a service desk (docs/tickets.md): AgentGov opens it, keeps it in
     step with the issue, and reads back what happens to it there."""
 
@@ -1024,7 +1136,6 @@ class Ticket(Model):
     updated_at = UTCDateTimeField(auto_now=True)
 
     class Meta:
-        managed = False
         db_table = "tickets"
         indexes = [
             Index(fields=["destination_id"], name="ix_tickets_destination_id"),
@@ -1033,7 +1144,7 @@ class Ticket(Model):
         ]
 
 
-class RiskSignal(Model):
+class RiskSignal(Row):
     """Runtime evidence feeding an agent's risk score; decays after a window."""
 
     id = CharField(max_length=32, primary_key=True)
@@ -1043,14 +1154,13 @@ class RiskSignal(Model):
     ts = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "risk_signals"
         indexes = [
             Index(fields=["agent_id", "ts"], name="ix_risk_signals_agent_ts"),
         ]
 
 
-class AgentActivity(Model):
+class AgentActivity(Row):
     """Daily usage counters per agent, from gateway decisions and telemetry."""
 
     agent_id = CharField(max_length=32)
@@ -1063,11 +1173,10 @@ class AgentActivity(Model):
     pk = CompositePrimaryKey("agent_id", "day")
 
     class Meta:
-        managed = False
         db_table = "agent_activity"
 
 
-class LedgerEntry(Model):
+class LedgerEntry(Row):
     """Append-only, hash-chained evidence ledger.
 
     ``hash = sha256(prev_hash || canonical_json(entry))``, so modifying or
@@ -1094,7 +1203,6 @@ class LedgerEntry(Model):
     hash = CharField(max_length=64)
 
     class Meta:
-        managed = False
         db_table = "ledger"
         indexes = [
             Index(fields=["agent_id"], name="ix_ledger_agent_id"),
@@ -1108,7 +1216,7 @@ class LedgerEntry(Model):
         ]
 
 
-class LedgerHead(Model):
+class LedgerHead(Row):
     """Single row holding the tip of the hash chain.
 
     Appenders update this row first, which takes a write lock (row lock on
@@ -1120,11 +1228,10 @@ class LedgerHead(Model):
     last_hash = CharField(max_length=64)
 
     class Meta:
-        managed = False
         db_table = "ledger_head"
 
 
-class LedgerCheckpoint(Model):
+class LedgerCheckpoint(Row):
     """A point of the ledger's hash chain kept for good (docs/evidence.md): made every so
     often, time-stamped by a time-stamping authority when one is set (RFC 3161), and,
     once the entries up to it are archived and removed, where the chain goes on from."""
@@ -1157,11 +1264,10 @@ class LedgerCheckpoint(Model):
     pruned_at = UTCDateTimeField(null=True)
 
     class Meta:
-        managed = False
         db_table = "ledger_checkpoints"
 
 
-class McpSighting(Model):
+class McpSighting(Row):
     """An MCP server set up in one client on one developer's machine, as last reported
     by ``agentgov mcp scan --report``. Credentials never arrive here: environment
     variables and headers are reported by name only."""
@@ -1184,7 +1290,6 @@ class McpSighting(Model):
     last_seen_at = UTCDateTimeField()
 
     class Meta:
-        managed = False
         db_table = "mcp_sightings"
         indexes = [
             Index(fields=["identity"], name="ix_mcp_sightings_identity"),

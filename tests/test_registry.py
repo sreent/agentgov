@@ -3,10 +3,9 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
 
 from agentgov import ids
-from agentgov.models import ACTIVE, BLOCKED, DELETED, DISCOVERED, PENDING, LedgerEntry
+from agentgov.db.models import ACTIVE, BLOCKED, DELETED, DISCOVERED, PENDING, Finding, LedgerEntry
 from agentgov.registry import (
     agents,
     approvals,
@@ -39,31 +38,31 @@ def _agent(s, settings, name="bot", approve=True, **overrides):
 class TestValidation:
     @pytest.mark.parametrize("name", ["Bad_Name", "-x", "x-", "", "a" * 64, "has space"])
     def test_names_must_be_slugs(self, rt, settings, name) -> None:
-        with rt.db.session() as s, pytest.raises(ValidationError):
-            blueprints.create(s, {"name": name}, actor="test")
+        with rt.db.transaction() as tx, pytest.raises(ValidationError):
+            blueprints.create(tx, {"name": name}, actor="test")
 
     def test_permissions_shape_is_checked(self, rt) -> None:
-        with rt.db.session() as s, pytest.raises(ValidationError):
+        with rt.db.transaction() as tx, pytest.raises(ValidationError):
             blueprints.create(
-                s, {"name": "bp", "permissions": [{"server": "crm", "tool": "x"}]}, actor="t"
+                tx, {"name": "bp", "permissions": [{"server": "crm", "tool": "x"}]}, actor="t"
             )
 
     def test_risk_tier_is_checked(self, rt) -> None:
-        with rt.db.session() as s, pytest.raises(ValidationError):
-            blueprints.create(s, {"name": "bp", "risk_tier": "extreme"}, actor="t")
+        with rt.db.transaction() as tx, pytest.raises(ValidationError):
+            blueprints.create(tx, {"name": "bp", "risk_tier": "extreme"}, actor="t")
 
 
 class TestPublicClients:
     """Agents people sign in to on their own machines, such as developers' MCP clients."""
 
     def test_by_default_they_return_to_the_machine_itself(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings, client_type="public")
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings, client_type="public")
             view = agents.to_dict(agent)
             assert view["client_type"] == "public" and view["redirect_uris"] == []
             assert view["identity"]["method"] == "sign-in"
-            plain = agents.to_dict(_agent(s, settings, name="plain"))
+            plain = agents.to_dict(_agent(tx, settings, name="plain"))
             assert plain["client_type"] == "service"
             assert plain["identity"]["method"] == "client-secret"
 
@@ -78,10 +77,10 @@ class TestPublicClients:
         ],
     )
     def test_redirect_uris_are_checked(self, rt, settings, uri) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
             with pytest.raises(ValidationError, match="redirect_uris"):
-                _agent(s, settings, client_type="public", redirect_uris=[uri])
+                _agent(tx, settings, client_type="public", redirect_uris=[uri])
 
     def test_redirect_uris_they_take(self, rt, settings) -> None:
         uris = [
@@ -90,64 +89,64 @@ class TestPublicClients:
             "https://vscode.dev/redirect",
             "cursor://anysphere.cursor-retrieval/oauth/callback",
         ]
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings, client_type="public", redirect_uris=uris)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings, client_type="public", redirect_uris=uris)
             assert agent.redirect_uris == uris
 
     def test_only_public_clients_have_redirect_uris(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
             with pytest.raises(ValidationError, match="for public clients"):
-                _agent(s, settings, redirect_uris=["http://127.0.0.1/*"])
+                _agent(tx, settings, redirect_uris=["http://127.0.0.1/*"])
             with pytest.raises(ValidationError, match="client_type is one of"):
-                _agent(s, settings, name="other", client_type="confidential")
+                _agent(tx, settings, name="other", client_type="confidential")
 
     def test_they_act_for_people_only(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s, acts_for="itself")
+        with rt.db.transaction() as tx:
+            _blueprint(tx, acts_for="itself")
             with pytest.raises(ValidationError, match="act only for themselves"):
-                _agent(s, settings, client_type="public")
+                _agent(tx, settings, client_type="public")
 
     def test_they_have_no_workload_identity(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s, require_workload_identity=True)
+        with rt.db.transaction() as tx:
+            _blueprint(tx, require_workload_identity=True)
             with pytest.raises(ValidationError, match="requires a workload identity"):
-                _agent(s, settings, client_type="public")
+                _agent(tx, settings, client_type="public")
 
 
 class TestLifecycle:
     def test_registration_starts_pending(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings, approve=False)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings, approve=False)
             assert agent.status == PENDING
             assert agent.client_id == "agent-bot"
 
     def test_approval_requires_a_sponsor(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings, approve=False, sponsors=[])
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings, approve=False, sponsors=[])
             with pytest.raises(Conflict, match="sponsor"):
-                agents.transition(s, settings, agent, "approve", actor="test")
+                agents.transition(tx, settings, agent, "approve", actor="test")
 
     def test_blueprint_can_waive_sponsor_requirement(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s, require_sponsor=False)
-            agent = _agent(s, settings, sponsors=[])
+        with rt.db.transaction() as tx:
+            _blueprint(tx, require_sponsor=False)
+            agent = _agent(tx, settings, sponsors=[])
             assert agent.status == ACTIVE
 
     def test_approval_sets_attestation_expiry(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s, attestation_days=30)
-            agent = _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx, attestation_days=30)
+            agent = _agent(tx, settings)
             delta = agent.attestation_expires_at - ids.utcnow()
             assert timedelta(days=29) < delta <= timedelta(days=30)
 
     def test_full_lifecycle(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings)
             for action, expected in [
                 ("block", BLOCKED),
                 ("unblock", ACTIVE),
@@ -155,36 +154,32 @@ class TestLifecycle:
                 ("restore", PENDING),
                 ("approve", ACTIVE),
             ]:
-                agents.transition(s, settings, agent, action, actor="test")
+                agents.transition(tx, settings, agent, action, actor="test")
                 assert agent.status == expected
 
     def test_unblocking_puts_back_what_blocking_found(self, rt, settings) -> None:
         """Blocking then unblocking approves nothing: a pending agent waits again, an
         unmanaged one stays unmanaged (and a pending tool server waits again)."""
-        with rt.db.session() as s:
-            _blueprint(s)
-            pending = _agent(s, settings, name="waiting", approve=False)
-            active = _agent(s, settings, name="running")
-            found = discovery.observe(s, source="otel", name="shadow")
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            pending = _agent(tx, settings, name="waiting", approve=False)
+            active = _agent(tx, settings, name="running")
+            found = discovery.observe(tx, source="otel", name="shadow")
             for agent, before in ((pending, PENDING), (active, ACTIVE), (found, DISCOVERED)):
-                agents.transition(s, settings, agent, "block", actor="test")
+                agents.transition(tx, settings, agent, "block", actor="test")
                 assert agent.status == BLOCKED
-                agents.transition(s, settings, agent, "unblock", actor="test")
+                agents.transition(tx, settings, agent, "unblock", actor="test")
                 assert agent.status == before, agent.name
             waiting = pending.id
             ts = toolservers.create(
-                s, {"name": "byo", "url": "http://byo/mcp"}, actor="t", approve=False
+                tx, {"name": "byo", "url": "http://byo/mcp"}, actor="t", approve=False
             )
-            toolservers.set_status(s, ts, "block", actor="t")
-            toolservers.set_status(s, ts, "block", actor="t")  # again: still what it was before
-            toolservers.set_status(s, ts, "unblock", actor="t")
+            toolservers.set_status(tx, ts, "block", actor="t")
+            toolservers.set_status(tx, ts, "block", actor="t")  # again: still what it was before
+            toolservers.set_status(tx, ts, "unblock", actor="t")
             assert ts.status == "pending"
-        with rt.db.session() as s:
-            entry = s.scalars(
-                select(LedgerEntry).where(
-                    LedgerEntry.type == "agent.unblock", LedgerEntry.agent_id == waiting
-                )
-            ).one()
+        with rt.db.transaction() as tx:
+            entry = LedgerEntry.objects.get(type="agent.unblock", agent_id=waiting)
             assert entry.details == {"from": BLOCKED, "to": PENDING}
 
     @pytest.mark.parametrize(
@@ -197,60 +192,64 @@ class TestLifecycle:
         ],
     )
     def test_invalid_transitions(self, rt, settings, start, action) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings, approve=start == "active")
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings, approve=start == "active")
             with pytest.raises(InvalidTransition):
-                agents.transition(s, settings, agent, action, actor="test")
+                agents.transition(tx, settings, agent, action, actor="test")
 
     def test_purge_only_after_delete(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings)
             with pytest.raises(InvalidTransition):
-                agents.purge(s, agent, actor="test")
-            agents.transition(s, settings, agent, "delete", actor="test")
-            agents.purge(s, agent, actor="test")
-        with rt.db.session() as s, pytest.raises(NotFound):
-            agents.get(s, "bot")
+                agents.purge(tx, agent, actor="test")
+            agents.transition(tx, settings, agent, "delete", actor="test")
+            agents.purge(tx, agent, actor="test")
+        with rt.db.transaction() as tx, pytest.raises(NotFound):
+            agents.get(tx, "bot")
 
     def test_deleted_agents_are_purged_after_the_retention_period(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
             for name in ("old", "recent", "kept"):
-                agent = _agent(s, settings, name=name)
+                agent = _agent(tx, settings, name=name)
                 if name != "kept":
-                    agents.transition(s, settings, agent, "delete", actor="test")
-            agents.get(s, "old").deleted_at = ids.utcnow() - timedelta(days=31)
-        with rt.db.session() as s:
-            assert agents.purge_expired(s, settings) == ["old"]
-        with rt.db.session() as s:
+                    agents.transition(tx, settings, agent, "delete", actor="test")
+            old = agents.get(tx, "old")
+            old.deleted_at = ids.utcnow() - timedelta(days=31)
+            old.save()
+        with rt.db.transaction() as tx:
+            assert agents.purge_expired(tx, settings) == ["old"]
+        with rt.db.transaction() as tx:
             with pytest.raises(NotFound):
-                agents.get(s, "old")
-            assert agents.get(s, "recent").status == DELETED
-            assert agents.get(s, "kept").status == ACTIVE
-            entries = [e for e in s.scalars(select(LedgerEntry)) if e.type == "agent.purged"]
+                agents.get(tx, "old")
+            assert agents.get(tx, "recent").status == DELETED
+            assert agents.get(tx, "kept").status == ACTIVE
+            entries = list(LedgerEntry.objects.filter(type="agent.purged").order_by("seq"))
             assert [e.actor for e in entries] == ["system:retention"]
         # 0 keeps deleted agents.
-        with rt.db.session() as s:
-            agents.get(s, "recent").deleted_at = ids.utcnow() - timedelta(days=90)
+        with rt.db.transaction() as tx:
+            recent = agents.get(tx, "recent")
+            recent.deleted_at = ids.utcnow() - timedelta(days=90)
+            recent.save()
             keep = settings.with_overrides(soft_delete_retention_days=0)
-            assert agents.purge_expired(s, keep) == []
+            assert agents.purge_expired(tx, keep) == []
 
     def test_attestation_extends_expiry(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s, attestation_days=10)
-            agent = _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx, attestation_days=10)
+            agent = _agent(tx, settings)
             agent.attestation_expires_at = ids.utcnow() - timedelta(days=1)
-            agents.attest(s, agent, actor="alice")
+            agents.attest(tx, agent, actor="alice")
             assert agent.attestation_expires_at > ids.utcnow() + timedelta(days=9)
             assert agent.attested_by == "alice"
 
     def test_effective_grants_merge_blueprint_and_agent(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
             agent = _agent(
-                s,
+                tx,
                 settings,
                 permissions=[
                     {"server": "crm", "tools": ["add_note"]},
@@ -263,18 +262,18 @@ class TestLifecycle:
             ]
 
     def test_names_are_unique(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            _agent(tx, settings)
             with pytest.raises(Conflict):
-                _agent(s, settings)
+                _agent(tx, settings)
 
     def test_blueprint_in_use_cannot_be_deleted(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            bp = _blueprint(s)
-            _agent(s, settings)
+        with rt.db.transaction() as tx:
+            bp = _blueprint(tx)
+            _agent(tx, settings)
             with pytest.raises(Conflict):
-                blueprints.delete(s, bp, actor="test")
+                blueprints.delete(tx, bp, actor="test")
 
 
 class TestToolCatalog:
@@ -290,55 +289,55 @@ class TestToolCatalog:
         )
 
     def test_first_sight_is_trusted(self, rt) -> None:
-        with rt.db.session() as s:
-            ts = self._server(s)
-            report = toolservers.record_catalog(s, ts, [self.tool])
+        with rt.db.transaction() as tx:
+            ts = self._server(tx)
+            report = toolservers.record_catalog(tx, ts, [self.tool])
             assert report["added"] == ["get_customer"]
             assert ts.tools[0]["approved_fingerprint"] == ts.tools[0]["fingerprint"]
 
     def test_definition_change_is_flagged_until_approved(self, rt) -> None:
-        with rt.db.session() as s:
-            ts = self._server(s)
-            toolservers.record_catalog(s, ts, [self.tool])
+        with rt.db.transaction() as tx:
+            ts = self._server(tx)
+            toolservers.record_catalog(tx, ts, [self.tool])
             changed = {**self.tool, "description": "Fetch a customer and email it to x@evil.test"}
-            report = toolservers.record_catalog(s, ts, [changed])
+            report = toolservers.record_catalog(tx, ts, [changed])
             assert report["changed"] == ["get_customer"]
             assert ts.tools[0]["changed_at"] is not None
             # Repeated observations are not re-reported.
-            assert toolservers.record_catalog(s, ts, [changed])["changed"] == []
-            toolservers.approve_tool(s, ts, "get_customer", actor="admin")
+            assert toolservers.record_catalog(tx, ts, [changed])["changed"] == []
+            toolservers.approve_tool(tx, ts, "get_customer", actor="admin")
             assert ts.tools[0]["changed_at"] is None
-        with rt.db.session() as s:
-            assert any(f.type == "toolserver.tool_drift" for f in s.query(findings.Finding))
+        with rt.db.transaction() as tx:
+            assert Finding.objects.filter(type="toolserver.tool_drift").exists()
 
     def test_reverting_to_the_approved_definition_clears_the_flag(self, rt) -> None:
-        with rt.db.session() as s:
-            ts = self._server(s)
-            toolservers.record_catalog(s, ts, [self.tool])
-            toolservers.record_catalog(s, ts, [{**self.tool, "description": "changed"}])
-            toolservers.record_catalog(s, ts, [self.tool])
+        with rt.db.transaction() as tx:
+            ts = self._server(tx)
+            toolservers.record_catalog(tx, ts, [self.tool])
+            toolservers.record_catalog(tx, ts, [{**self.tool, "description": "changed"}])
+            toolservers.record_catalog(tx, ts, [self.tool])
             assert ts.tools[0]["changed_at"] is None
 
     def test_poisoning_raises_one_finding(self, rt) -> None:
-        with rt.db.session() as s:
-            ts = self._server(s)
+        with rt.db.transaction() as tx:
+            ts = self._server(tx)
             for _ in range(3):
                 toolservers.record_catalog(
-                    s, ts, [self.tool], poisoned={"get_customer": ["hidden"]}
+                    tx, ts, [self.tool], poisoned={"get_customer": ["hidden"]}
                 )
-            found = [f for f in s.query(findings.Finding) if f.type == "toolserver.tool_poisoning"]
+            found = list(Finding.objects.filter(type="toolserver.tool_poisoning"))
             assert len(found) == 1
             assert ts.tools[0]["poisoned"] is True
 
 
 class TestApprovals:
     def test_request_approve_consume(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings)
             args = {"customer_id": "c-1"}
             outcome, req = approvals.check_or_request(
-                s,
+                tx,
                 agent=agent,
                 action="tools/call",
                 resource="crm/delete",
@@ -348,7 +347,7 @@ class TestApprovals:
             )
             assert outcome == "created"
             again, same = approvals.check_or_request(
-                s,
+                tx,
                 agent=agent,
                 action="tools/call",
                 resource="crm/delete",
@@ -357,9 +356,9 @@ class TestApprovals:
                 ttl_seconds=60,
             )
             assert (again, same.id) == ("pending", req.id)
-            approvals.decide(s, req, approve=True, actor="bob")
+            approvals.decide(tx, req, approve=True, actor="bob")
             used, _ = approvals.check_or_request(
-                s,
+                tx,
                 agent=agent,
                 action="tools/call",
                 resource="crm/delete",
@@ -368,10 +367,11 @@ class TestApprovals:
                 ttl_seconds=60,
             )
             assert used == "approved"
+            req.refresh_from_db()
             assert req.status == "used"
             # Single use: the next identical call needs a new approval.
             nxt, _ = approvals.check_or_request(
-                s,
+                tx,
                 agent=agent,
                 action="tools/call",
                 resource="crm/delete",
@@ -382,11 +382,11 @@ class TestApprovals:
             assert nxt == "created"
 
     def test_approval_is_bound_to_arguments(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings)
             _, req = approvals.check_or_request(
-                s,
+                tx,
                 agent=agent,
                 action="tools/call",
                 resource="crm/delete",
@@ -394,9 +394,9 @@ class TestApprovals:
                 reasons=[],
                 ttl_seconds=60,
             )
-            approvals.decide(s, req, approve=True, actor="bob")
+            approvals.decide(tx, req, approve=True, actor="bob")
             outcome, _ = approvals.check_or_request(
-                s,
+                tx,
                 agent=agent,
                 action="tools/call",
                 resource="crm/delete",
@@ -407,11 +407,11 @@ class TestApprovals:
             assert outcome == "created"
 
     def test_denial_is_remembered_and_counts_as_risk(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings)
             _, req = approvals.check_or_request(
-                s,
+                tx,
                 agent=agent,
                 action="tools/call",
                 resource="crm/delete",
@@ -419,9 +419,9 @@ class TestApprovals:
                 reasons=[],
                 ttl_seconds=60,
             )
-            approvals.decide(s, req, approve=False, actor="bob")
+            approvals.decide(tx, req, approve=False, actor="bob")
             outcome, _ = approvals.check_or_request(
-                s,
+                tx,
                 agent=agent,
                 action="tools/call",
                 resource="crm/delete",
@@ -430,15 +430,15 @@ class TestApprovals:
                 ttl_seconds=60,
             )
             assert outcome == "denied"
-            result = risk.evaluate(s, agent, 24)
+            result = risk.evaluate(tx, agent, 24)
             assert any("denied" in f["factor"] for f in result.factors)
 
     def test_expired_requests_cannot_be_decided(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings)
             _, req = approvals.check_or_request(
-                s,
+                tx,
                 agent=agent,
                 action="tools/call",
                 resource="crm/delete",
@@ -447,22 +447,22 @@ class TestApprovals:
                 ttl_seconds=60,
             )
             req.expires_at = ids.utcnow() - timedelta(seconds=1)
+            req.save()
             with pytest.raises(InvalidTransition):
-                approvals.decide(s, req, approve=True, actor="bob")
+                approvals.decide(tx, req, approve=True, actor="bob")
             assert req.status == "expired"
 
 
 class TestRiskAndPosture:
     def test_signals_raise_risk_and_auto_block(self, rt, settings) -> None:
         strict = settings.with_overrides(auto_block_risk_score=60)
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, strict)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, strict)
             for _ in range(2):
-                risk.add_signal(s, agent.id, "secret_detected")
-                risk.add_signal(s, agent.id, "prompt_injection")
-            s.flush()
-            result = agents.refresh_risk(s, strict, agent)
+                risk.add_signal(tx, agent.id, "secret_detected")
+                risk.add_signal(tx, agent.id, "prompt_injection")
+            result = agents.refresh_risk(tx, strict, agent)
             assert result.score >= 60
             assert agent.status == BLOCKED
             assert "auto-blocked" in agent.status_reason
@@ -472,21 +472,20 @@ class TestRiskAndPosture:
     ) -> None:
         """A threat when what the agent did adds to its risk; otherwise about how it is set
         up. Either way it resolves when the risk is back below high."""
-        from agentgov.models import RiskSignal
+        from agentgov.db.models import RiskSignal
 
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings)
             for _ in range(2):
-                risk.add_signal(s, agent.id, "secret_detected")
-                risk.add_signal(s, agent.id, "prompt_injection")
-            s.flush()
-            assert agents.refresh_risk(s, settings, agent).level in ("high", "critical")
-            high = s.query(findings.Finding).filter_by(key=f"agent.high_risk:{agent.id}").one()
+                risk.add_signal(tx, agent.id, "secret_detected")
+                risk.add_signal(tx, agent.id, "prompt_injection")
+            assert agents.refresh_risk(tx, settings, agent).level in ("high", "critical")
+            high = Finding.objects.get(key=f"agent.high_risk:{agent.id}")
             assert (high.status, high.category) == ("open", findings.THREAT)
-            s.query(RiskSignal).filter_by(agent_id=agent.id).delete()
-            s.flush()
-            assert agents.refresh_risk(s, settings, agent).level not in ("high", "critical")
+            RiskSignal.objects.filter(agent_id=agent.id).delete()
+            assert agents.refresh_risk(tx, settings, agent).level not in ("high", "critical")
+            high.refresh_from_db()
             assert (high.status, high.resolved_by) == ("resolved", "system:risk")
 
     def test_levels(self) -> None:
@@ -502,47 +501,48 @@ class TestRiskAndPosture:
         ]
 
     def test_posture_findings_open_and_resolve(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings, owner=None, permissions=[{"server": "*", "tools": ["*"]}])
-        with rt.db.session() as s:
-            posture.scan(s, settings)
-            types = {f.type for f in s.query(findings.Finding).filter_by(status="open")}
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings, owner=None, permissions=[{"server": "*", "tools": ["*"]}])
+        with rt.db.transaction() as tx:
+            posture.scan(tx, settings)
+            types = set(Finding.objects.filter(status="open").values_list("type", flat=True))
             assert {"agent.no_owner", "agent.broad_permissions"} <= types
-        with rt.db.session() as s:
-            agent = agents.get(s, "bot")
-            agents.update(s, agent, {"owner": "team", "permissions": []}, actor="test")
-        with rt.db.session() as s:
-            posture.scan(s, settings)
-            open_types = {f.type for f in s.query(findings.Finding).filter_by(status="open")}
+        with rt.db.transaction() as tx:
+            agent = agents.get(tx, "bot")
+            agents.update(tx, agent, {"owner": "team", "permissions": []}, actor="test")
+        with rt.db.transaction() as tx:
+            posture.scan(tx, settings)
+            open_types = set(Finding.objects.filter(status="open").values_list("type", flat=True))
             assert "agent.no_owner" not in open_types
             assert "agent.broad_permissions" not in open_types
 
 
 class TestDiscovery:
     def test_unknown_agents_are_recorded_once(self, rt) -> None:
-        with rt.db.session() as s:
-            first = discovery.observe(s, source="otel", name="Notebook Agent")
-            second = discovery.observe(s, source="otel", name="Notebook Agent")
+        with rt.db.transaction() as tx:
+            first = discovery.observe(tx, source="otel", name="Notebook Agent")
+            second = discovery.observe(tx, source="otel", name="Notebook Agent")
             assert first.id == second.id
             assert first.status == DISCOVERED
             assert first.name == "notebook-agent"
-            assert any(f.type == "agent.unmanaged" for f in s.query(findings.Finding))
+            assert Finding.objects.filter(type="agent.unmanaged").exists()
 
     def test_registered_agents_are_matched_by_client_id(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _blueprint(s)
-            agent = _agent(s, settings)
-            seen = discovery.observe(s, source="gateway", client_id="agent-bot")
+        with rt.db.transaction() as tx:
+            _blueprint(tx)
+            agent = _agent(tx, settings)
+            seen = discovery.observe(tx, source="gateway", client_id="agent-bot")
             assert seen.id == agent.id
+            agent.refresh_from_db()
             assert agent.last_seen_at is not None
 
     def test_scanner_import(self, rt) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             result = discovery.import_scan(
-                s,
+                tx,
                 [{"name": "cron-gpt", "framework": "langchain", "location": "/srv/jobs"}],
                 source="agt-discovery",
             )
             assert result == {"created": 1, "matched": 0}
-            assert agents.get(s, "cron-gpt").framework == "langchain"
+            assert agents.get(tx, "cron-gpt").framework == "langchain"

@@ -24,13 +24,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import FEATURE_PRESETS, Settings
 from agentgov.db import mark_changed
-from agentgov.models import DELETED, Agent, FeatureSetting, IntegrationState
+from agentgov.db.models import DELETED, Agent, FeatureSetting, IntegrationState
 from agentgov.registry import scopes as scope_rules
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
@@ -974,23 +971,27 @@ def unmet(key: str, mode: str, settings: Settings) -> str | None:
     return None
 
 
-def _rows(session: Session) -> dict[str, FeatureSetting]:
-    return {row.key: row for row in session.scalars(select(FeatureSetting))}
+def _rows(tx: db.Transaction) -> dict[str, FeatureSetting]:
+    return {row.key: row for row in FeatureSetting.objects.all()}
 
 
-def modes(session: Session) -> dict[str, str]:
+def _row(key: str) -> FeatureSetting | None:
+    return FeatureSetting.objects.filter(pk=key).first()
+
+
+def modes(tx: db.Transaction) -> dict[str, str]:
     """The mode of every feature."""
-    rows = _rows(session)
+    rows = _rows(tx)
     return {f.key: rows[f.key].mode if f.key in rows else f.default for f in CATALOG}
 
 
-def mode(session: Session, key: str) -> str:
-    row = session.get(FeatureSetting, key)
+def mode(tx: db.Transaction, key: str) -> str:
+    row = _row(key)
     return row.mode if row is not None else feature(key).default
 
 
-def is_on(session: Session, key: str) -> bool:
-    return mode(session, key) != OFF
+def is_on(tx: db.Transaction, key: str) -> bool:
+    return mode(tx, key) != OFF
 
 
 def _weaker(f: Feature, before: str, after: str) -> bool:
@@ -998,7 +999,7 @@ def _weaker(f: Feature, before: str, after: str) -> bool:
 
 
 def _set(
-    session: Session,
+    tx: db.Transaction,
     f: Feature,
     new: str,
     *,
@@ -1006,20 +1007,21 @@ def _set(
     pinned: bool,
     preset: str | None = None,
 ) -> bool:
-    row = session.get(FeatureSetting, f.key)
+    row = _row(f.key)
     before = row.mode if row is not None else f.default
     if row is not None and row.mode == new and row.pinned == pinned:
         return False
+    adding = row is None
     if row is None:
         row = FeatureSetting(key=f.key)
-        session.add(row)
     row.mode, row.pinned, row.changed_by, row.changed_at = new, pinned, actor, ids.utcnow()
+    row.save(force_insert=adding)
     if before != new:
         details: dict[str, Any] = {"from": before, "to": new, "pinned": pinned}
         if preset:
             details["preset"] = preset
         ledger.append(
-            session,
+            tx,
             type="feature.changed",
             actor=actor,
             resource=f"feature/{f.key}",
@@ -1027,15 +1029,15 @@ def _set(
             reason=f"{f.title}: {before} to {new}" + (f" (preset {preset})" if preset else ""),
             details=details,
         )
-        mark_changed(session, "features", f"feature:{f.key}")
+        mark_changed(tx, "features", f"feature:{f.key}")
     return True
 
 
-def set_mode(session: Session, settings: Settings, key: str, new: Any, *, actor: str) -> bool:
+def set_mode(tx: db.Transaction, settings: Settings, key: str, new: Any, *, actor: str) -> bool:
     """An administrator's choice; returns whether anything changed."""
     f = feature(key)
     check_mode(f, new)
-    row = session.get(FeatureSetting, key)
+    row = _row(key)
     if row is not None and row.pinned:
         if row.mode == new:
             return False
@@ -1045,33 +1047,34 @@ def set_mode(session: Session, settings: Settings, key: str, new: Any, *, actor:
     reason = unmet(key, new, settings)
     if reason:
         raise ValidationError(reason)
-    return _set(session, f, new, actor=actor, pinned=False)
+    return _set(tx, f, new, actor=actor, pinned=False)
 
 
-def apply_pins(session: Session, settings: Settings) -> None:
+def apply_pins(tx: db.Transaction, settings: Settings) -> None:
     """Make the database match AGENTGOV_FEATURES (when the control plane starts)."""
     pins = parse_pins(settings.features)
     for key, new in pins.items():
         reason = unmet(key, new, settings)
         if reason:
             raise ValueError(f"AGENTGOV_FEATURES: {reason}")
-        _set(session, BY_KEY[key], new, actor=DEPLOYMENT, pinned=True)
-    for row in _rows(session).values():
+        _set(tx, BY_KEY[key], new, actor=DEPLOYMENT, pinned=True)
+    for row in _rows(tx).values():
         if row.pinned and row.key not in pins:
             # No longer pinned: it keeps its mode, and administrators may now change it.
             row.pinned, row.changed_by, row.changed_at = False, DEPLOYMENT, ids.utcnow()
+            row.save()
 
 
-def preview_preset(session: Session, settings: Settings, name: str) -> dict[str, Any]:
+def preview_preset(tx: db.Transaction, settings: Settings, name: str) -> dict[str, Any]:
     """What applying preset ``name`` would change, and what it leaves: features the
     deployment pins, and modes that can't be used yet."""
     try:
         preset = PRESETS[name]
     except KeyError:
         raise NotFound(f"no preset {name!r}; presets: {', '.join(PRESETS)}") from None
-    current = modes(session)
+    current = modes(tx)
     pins = parse_pins(settings.features)
-    pinned = set(pins) | {row.key for row in _rows(session).values() if row.pinned}
+    pinned = set(pins) | {row.key for row in _rows(tx).values() if row.pinned}
     changes, kept = [], []
     for key, new in preset.sets(current).items():
         if current[key] == new:
@@ -1086,7 +1089,7 @@ def preview_preset(session: Session, settings: Settings, name: str) -> dict[str,
             kept.append({**item, "reason": why})
         else:
             changes.append(item)
-    exceptions = {key: e for key, e in all_scopes(session).items() if key not in pinned}
+    exceptions = {key: e for key, e in all_scopes(tx).items() if key not in pinned}
     for key, entries in preset.sets_scopes(exceptions).items():
         for before, after in zip(exceptions[key], entries, strict=True):
             if before["mode"] != after["mode"]:
@@ -1108,40 +1111,41 @@ def preview_preset(session: Session, settings: Settings, name: str) -> dict[str,
     }
 
 
-def apply_preset(session: Session, settings: Settings, name: str, *, actor: str) -> dict[str, Any]:
+def apply_preset(
+    tx: db.Transaction, settings: Settings, name: str, *, actor: str
+) -> dict[str, Any]:
     """Set the modes preset ``name`` sets, but for those preview_preset says it keeps;
     each change is a feature.changed entry that names the preset."""
-    plan = preview_preset(session, settings, name)
+    plan = preview_preset(tx, settings, name)
     for change in plan["changes"]:
         if "scope" not in change:
-            _set(
-                session, BY_KEY[change["key"]], change["to"], actor=actor, pinned=False, preset=name
-            )
-    exceptions = all_scopes(session)
+            _set(tx, BY_KEY[change["key"]], change["to"], actor=actor, pinned=False, preset=name)
+    exceptions = all_scopes(tx)
     for key, entries in PRESETS[name].sets_scopes(exceptions).items():
         if any(c["key"] == key and "scope" in c for c in plan["changes"]):
-            _set_scopes(session, BY_KEY[key], entries, actor=actor, preset=name)
+            _set_scopes(tx, BY_KEY[key], entries, actor=actor, preset=name)
     return plan
 
 
-def deployment_preset(session: Session) -> str | None:
+def deployment_preset(tx: db.Transaction) -> str | None:
     """The AGENTGOV_FEATURE_PRESET last applied, if any."""
-    state = session.get(IntegrationState, PRESET_STATE)
+    state = IntegrationState.objects.filter(pk=PRESET_STATE).first()
     return (state.data or {}).get("applied") if state is not None else None
 
 
-def apply_deployment_preset(session: Session, settings: Settings) -> None:
+def apply_deployment_preset(tx: db.Transaction, settings: Settings) -> None:
     """AGENTGOV_FEATURE_PRESET, when the control plane starts with one it hasn't applied
     (before the pins, which then hold)."""
     name = settings.feature_preset
-    if not name or deployment_preset(session) == name:
+    if not name or deployment_preset(tx) == name:
         return
-    apply_preset(session, settings, name, actor=DEPLOYMENT)
-    state = session.get(IntegrationState, PRESET_STATE)
+    apply_preset(tx, settings, name, actor=DEPLOYMENT)
+    state = IntegrationState.objects.filter(pk=PRESET_STATE).first()
+    adding = state is None
     if state is None:
         state = IntegrationState(key=PRESET_STATE)
-        session.add(state)
     state.data, state.updated_at = {"applied": name}, ids.utcnow()
+    state.save(force_insert=adding)
 
 
 # ------------------------------------------------------------------- exceptions
@@ -1197,27 +1201,28 @@ def _scopes_weaken(f: Feature, mode: str, before: list[Any], after: list[Any]) -
 
 
 def _set_scopes(
-    session: Session,
+    tx: db.Transaction,
     f: Feature,
     new: list[dict[str, Any]],
     *,
     actor: str,
     preset: str | None = None,
 ) -> bool:
-    row = session.get(FeatureSetting, f.key)
+    row = _row(f.key)
     before = list(row.scopes or []) if row is not None else []
     if before == new:
         return False
+    adding = row is None
     if row is None:
         row = FeatureSetting(key=f.key, mode=f.default, pinned=False)
-        session.add(row)
     row.scopes, row.changed_by, row.changed_at = new, actor, ids.utcnow()
+    row.save(force_insert=adding)
     words = "; ".join(f"{e['mode']} for {scope_rules.describe(e['scope'])}" for e in new)
     details: dict[str, Any] = {"scopes_from": before, "scopes_to": new}
     if preset:
         details["preset"] = preset
     ledger.append(
-        session,
+        tx,
         type="feature.changed",
         actor=actor,
         resource=f"feature/{f.key}",
@@ -1226,15 +1231,15 @@ def _set_scopes(
         + (f" (preset {preset})" if preset else ""),
         details=details,
     )
-    mark_changed(session, "features", f"feature:{f.key}")
+    mark_changed(tx, "features", f"feature:{f.key}")
     return True
 
 
-def set_scopes(session: Session, settings: Settings, key: str, value: Any, *, actor: str) -> bool:
+def set_scopes(tx: db.Transaction, settings: Settings, key: str, value: Any, *, actor: str) -> bool:
     """An administrator's exceptions to a control; returns whether anything changed."""
     f = feature(key)
     new = check_scopes(f, value, settings)
-    row = session.get(FeatureSetting, key)
+    row = _row(key)
     if row is not None and row.pinned:
         raise Conflict(
             f"{key} is set by the deployment (AGENTGOV_FEATURES), for every agent: its "
@@ -1242,15 +1247,15 @@ def set_scopes(session: Session, settings: Settings, key: str, value: Any, *, ac
         )
     had = [e["scope"] for e in (row.scopes or [])] if row is not None else []
     for i, entry in enumerate(new):
-        scope_rules.check_names(session, entry["scope"], f"scopes[{i}].scope", had=had)
-    return _set_scopes(session, f, new, actor=actor)
+        scope_rules.check_names(tx, entry["scope"], f"scopes[{i}].scope", had=had)
+    return _set_scopes(tx, f, new, actor=actor)
 
 
-def all_scopes(session: Session) -> dict[str, list[dict[str, Any]]]:
+def all_scopes(tx: db.Transaction) -> dict[str, list[dict[str, Any]]]:
     """Each control's exceptions that apply: none while the deployment pins the control."""
     return {
         row.key: list(row.scopes)
-        for row in _rows(session).values()
+        for row in _rows(tx).values()
         if row.scopes and not row.pinned and row.key in SCOPABLE
     }
 
@@ -1277,10 +1282,10 @@ def exceptions_for(
     return out
 
 
-def mode_for(session: Session, agent: Agent, key: str) -> str:
+def mode_for(tx: db.Transaction, agent: Agent, key: str) -> str:
     """A feature's mode for one agent: its exception's, or the feature's."""
-    current = {key: mode(session, key)}
-    exceptions = {k: v for k, v in all_scopes(session).items() if k == key}
+    current = {key: mode(tx, key)}
+    exceptions = {k: v for k, v in all_scopes(tx).items() if k == key}
     return exceptions_for(agent, current, exceptions).get(key, {}).get("mode", current[key])
 
 
@@ -1298,8 +1303,8 @@ def strictest(
     return out
 
 
-def strictest_modes(session: Session) -> dict[str, str]:
-    return strictest(modes(session), all_scopes(session))
+def strictest_modes(tx: db.Transaction) -> dict[str, str]:
+    return strictest(modes(tx), all_scopes(tx))
 
 
 def _reach(entries: list[dict[str, Any]], agents: list[Agent]) -> list[int]:
@@ -1313,8 +1318,10 @@ def _reach(entries: list[dict[str, Any]], agents: list[Agent]) -> list[int]:
     return counts
 
 
-def describe(session: Session, settings: Settings, key: str | None = None) -> list[dict[str, Any]]:
-    rows = _rows(session)
+def describe(
+    tx: db.Transaction, settings: Settings, key: str | None = None
+) -> list[dict[str, Any]]:
+    rows = _rows(tx)
     agents: list[Agent] | None = None
     names: dict[str, set[str]] = {}
     out = []
@@ -1325,8 +1332,8 @@ def describe(session: Session, settings: Settings, key: str | None = None) -> li
         if entries and agents is None:
             # Read once: how many agents each exception applies to, and what it names that
             # there isn't.
-            agents = list(session.scalars(select(Agent).where(Agent.status != DELETED)).unique())
-            names = scope_rules.known(session)
+            agents = list(Agent.objects.exclude(status=DELETED))
+            names = scope_rules.known(tx)
         # A default that needs what isn't there, or a mode chosen before it went away: it
         # does nothing until it is there, and says so.
         missing = unmet(f.key, current, settings)
@@ -1371,11 +1378,11 @@ def describe(session: Session, settings: Settings, key: str | None = None) -> li
     return out
 
 
-def chosen(session: Session) -> dict[str, dict[str, Any]]:
+def chosen(tx: db.Transaction) -> dict[str, dict[str, Any]]:
     """Modes, and exceptions, administrators chose (for export: pins belong to the
     deployment)."""
     return {
         row.key: {"mode": row.mode, **({"scopes": list(row.scopes)} if row.scopes else {})}
-        for row in _rows(session).values()
+        for row in _rows(tx).values()
         if not row.pinned
     }

@@ -59,9 +59,9 @@ def signed(settings: Settings, tmp_path: Path) -> tuple[Runtime, Path]:
     key, cert = signing.generate(tmp_path / "keys")
     rt = Runtime(settings.with_overrides(bundle_signing_key_file=str(key)))
     rt.init_db()
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         agents.register(
-            s, rt.settings, {"name": "support-bot", "owner": AWKWARD}, actor="admin:test"
+            tx, rt.settings, {"name": "support-bot", "owner": AWKWARD}, actor="admin:test"
         )
     yield rt, cert
     rt.db.dispose()

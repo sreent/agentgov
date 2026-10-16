@@ -12,10 +12,9 @@ from typing import Any
 
 import httpcore
 import pytest
-from sqlalchemy import select
 
 from agentgov import cli, telemetry
-from agentgov.models import Finding, LedgerEntry
+from agentgov.db.models import Finding, LedgerEntry
 from agentgov.registry import agents, features, posture, reachability
 from agentgov.secops import ocsf
 from tests.conftest import ADMIN
@@ -39,14 +38,14 @@ def _agent(s, settings, name: str = "billing", **data: Any):
 
 
 def _mode(rt, mode: str) -> None:
-    with rt.db.session() as s:
-        features.set_mode(s, rt.settings, reachability.FEATURE, mode, actor="admin:t")
+    with rt.db.transaction() as tx:
+        features.set_mode(tx, rt.settings, reachability.FEATURE, mode, actor="admin:t")
 
 
 def _open(rt) -> dict[str, Finding]:
-    with rt.db.session() as s:
-        found = s.scalars(select(Finding).where(Finding.status == "open")).all()
-        return {f.type: f for f in found if f.type.startswith("agent.a2a_")}
+    with rt.db.transaction():
+        found = Finding.objects.filter(status="open", type__startswith="agent.a2a_")
+        return {f.type: f for f in found}
 
 
 class _Agent(httpcore.NetworkBackend):
@@ -255,91 +254,87 @@ class TestTheTest:
 
 class TestPosture:
     def test_only_the_test_mode_tests_and_only_published_agents(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            billing = _agent(s, settings).id
-            _agent(s, settings, "kb", a2a_url=None)
+        with rt.db.transaction() as tx:
+            billing = _agent(tx, settings).id
+            _agent(tx, settings, "kb", a2a_url=None)
             pending = agents.register(
-                s, settings, {"name": "draft", "a2a_url": "http://draft:1"}, actor="test"
+                tx, settings, {"name": "draft", "a2a_url": "http://draft:1"}, actor="test"
             )
             assert pending.status == "pending"
-        with rt.db.session() as s:
-            assert reachability.targets(s) is None  # watch, the default
+        with rt.db.transaction() as tx:
+            assert reachability.targets(tx) is None  # watch, the default
         _mode(rt, "test")
-        with rt.db.session() as s:
-            assert reachability.targets(s) == {billing: "http://billing:9600"}
-            features.set_mode(s, settings, "a2a-gateway", "off", actor="admin:t")
-        with rt.db.session() as s:
-            assert reachability.targets(s) is None
+        with rt.db.transaction() as tx:
+            assert reachability.targets(tx) == {billing: "http://billing:9600"}
+            features.set_mode(tx, settings, "a2a-gateway", "off", actor="admin:t")
+        with rt.db.transaction() as tx:
+            assert reachability.targets(tx) is None
 
     def test_owners_that_havent_said_what_stops_calls_are_asked(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _agent(s, settings)
-            posture.scan(s, settings)
+        with rt.db.transaction() as tx:
+            _agent(tx, settings)
+            posture.scan(tx, settings)
         found = _open(rt)[reachability.UNDECLARED]
         assert found.severity == "low" and found.agent_id
         assert found.title == "billing's owners haven't said what stops calls around the gateway"
-        with rt.db.session() as s:
-            agents.update(s, agents.get(s, "billing"), {"a2a_protection": "network"}, actor="t")
-            posture.scan(s, settings)
+        with rt.db.transaction() as tx:
+            agents.update(tx, agents.get(tx, "billing"), {"a2a_protection": "network"}, actor="t")
+            posture.scan(tx, settings)
         assert reachability.UNDECLARED not in _open(rt)
 
     def test_an_agent_that_takes_calls_around_the_gateway_is_an_issue(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            billing = _agent(s, settings).id
+        with rt.db.transaction() as tx:
+            billing = _agent(tx, settings).id
         accepted = {"state": "accepted", "detail": "it took a call", "url": "http://billing:9600"}
-        with rt.db.session() as s:
-            posture.scan(s, settings, tested={billing: accepted})
+        with rt.db.transaction() as tx:
+            posture.scan(tx, settings, tested={billing: accepted})
         found = _open(rt)[reachability.REACHABLE]
         assert found.severity == "medium"
         assert found.title == "billing takes calls that don't come through the gateway"
         assert found.details["test"] == accepted
-        with rt.db.session() as s:
-            assert agents.get(s, billing).a2a_probe == accepted
+        with rt.db.transaction() as tx:
+            assert agents.get(tx, billing).a2a_probe == accepted
             # Its owners say the network stops them: it didn't, which is worse.
-            agents.update(s, agents.get(s, billing), {"a2a_protection": "network"}, actor="t")
-            posture.scan(s, settings, tested={billing: accepted})
+            agents.update(tx, agents.get(tx, billing), {"a2a_protection": "network"}, actor="t")
+            posture.scan(tx, settings, tested={billing: accepted})
         found = _open(rt)[reachability.REACHABLE]
         assert found.severity == "high"
         assert "Its owners say the network lets only the gateway reach it" in found.description
         # Not tested this time: it stays, unverified.
-        with rt.db.session() as s:
-            posture.scan(s, settings)
+        with rt.db.transaction() as tx:
+            posture.scan(tx, settings)
         assert _open(rt)[reachability.REACHABLE].verified is False
         # Tested again, and refused: resolved.
         refused = {**accepted, "state": "refused", "detail": "it refused"}
-        with rt.db.session() as s:
-            posture.scan(s, settings, tested={billing: refused})
+        with rt.db.transaction() as tx:
+            posture.scan(tx, settings, tested={billing: refused})
         assert reachability.REACHABLE not in _open(rt)
         # The ledger has what each test found, when it changed.
-        with rt.db.session() as s:
-            tests = s.scalars(
-                select(LedgerEntry)
-                .where(LedgerEntry.type == "agent.a2a_tested")
-                .order_by(LedgerEntry.seq)
-            ).all()
+        with rt.db.transaction() as tx:
+            tests = LedgerEntry.objects.filter(type="agent.a2a_tested").order_by("seq")
             assert [(e.decision, e.reason, e.resource) for e in tests] == [
                 ("accepted", "it took a call", "billing"),
                 ("refused", "it refused", "billing"),
             ]
 
     def test_an_agent_that_refused_the_test_isnt_asked(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            billing = _agent(s, settings).id
+        with rt.db.transaction() as tx:
+            billing = _agent(tx, settings).id
             refused = {"state": "refused", "detail": "it refused", "url": "http://billing:9600"}
-            posture.scan(s, settings, tested={billing: refused})
+            posture.scan(tx, settings, tested={billing: refused})
         assert _open(rt) == {}
         # Watched, not tested, after that: the last test still says it refuses.
-        with rt.db.session() as s:
-            posture.scan(s, settings)
+        with rt.db.transaction() as tx:
+            posture.scan(tx, settings)
         assert _open(rt) == {}
 
     def test_off_nothing_is_looked_for_and_what_was_found_stays(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _agent(s, settings)
-            posture.scan(s, settings)
+        with rt.db.transaction() as tx:
+            _agent(tx, settings)
+            posture.scan(tx, settings)
         _mode(rt, "off")
-        with rt.db.session() as s:
-            posture.scan(s, settings)
+        with rt.db.transaction() as tx:
+            posture.scan(tx, settings)
         found = _open(rt)[reachability.UNDECLARED]
         assert found.verified is False
 
@@ -361,16 +356,16 @@ class TestPosture:
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Agent)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
-            with rt.db.session() as s:
-                _agent(s, settings, a2a_url=f"http://127.0.0.1:{server.server_address[1]}")
+            with rt.db.transaction() as tx:
+                _agent(tx, settings, a2a_url=f"http://127.0.0.1:{server.server_address[1]}")
             _mode(rt, "test")
             rt.run_posture_scan()
         finally:
             server.shutdown()
             server.server_close()
         assert refused == ["calls-around-gateway"]
-        with rt.db.session() as s:
-            assert agents.get(s, "billing").a2a_probe["state"] == "refused"
+        with rt.db.transaction() as tx:
+            assert agents.get(tx, "billing").a2a_probe["state"] == "refused"
         assert _open(rt) == {}
 
 
@@ -407,19 +402,17 @@ def _batch(service: str, *spans: dict[str, Any], agent_id: str | None = None) ->
 
 class TestTelemetry:
     def test_a_call_straight_to_an_agents_url_is_recorded(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            billing = _agent(s, settings)
-            frontdesk = _agent(s, settings, "frontdesk", a2a_url=None)
+        with rt.db.transaction() as tx:
+            billing = _agent(tx, settings)
+            frontdesk = _agent(tx, settings, "frontdesk", a2a_url=None)
             billing_id, frontdesk_id = billing.id, frontdesk.id
         straight = _client_span(server__address="billing", server__port=9600)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             # Twice in one trace (an HTTP span and its retry): one call.
-            stats = telemetry.ingest(s, _batch("frontdesk", straight, straight))
+            stats = telemetry.ingest(tx, _batch("frontdesk", straight, straight))
         assert stats["around_the_gateway"] == 1
-        with rt.db.session() as s:
-            [entry] = s.scalars(
-                select(LedgerEntry).where(LedgerEntry.type == "telemetry.a2a_around_gateway")
-            ).all()
+        with rt.db.transaction() as tx:
+            [entry] = LedgerEntry.objects.filter(type="telemetry.a2a_around_gateway")
             assert (entry.agent_id, entry.resource) == (frontdesk_id, "billing")
             assert entry.decision == "observed" and entry.trace_id == "a" * 32
             event = ocsf.event(entry)
@@ -435,11 +428,11 @@ class TestTelemetry:
         assert calls.remediation == "Call billing through the gateway, at /a2a/billing."
 
     def test_calls_by_a_service_that_isnt_an_agent(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _agent(tx, settings)
         span = _client_span(url__full="http://billing.agents.svc.cluster.local:9600/")
-        with rt.db.session() as s:
-            assert telemetry.ingest(s, _batch("invoice-job", span))["around_the_gateway"] == 1
+        with rt.db.transaction() as tx:
+            assert telemetry.ingest(tx, _batch("invoice-job", span))["around_the_gateway"] == 1
         found = _open(rt)
         assert found[reachability.CALLED_AROUND].title == (
             "invoice-job called billing around the gateway"
@@ -459,19 +452,19 @@ class TestTelemetry:
         ],
     )
     def test_calls_that_arent_around_the_gateway(self, rt, settings, service, span) -> None:
-        with rt.db.session() as s:
-            _agent(s, settings)
-        with rt.db.session() as s:
-            assert telemetry.ingest(s, _batch(service, span))["around_the_gateway"] == 0
+        with rt.db.transaction() as tx:
+            _agent(tx, settings)
+        with rt.db.transaction() as tx:
+            assert telemetry.ingest(tx, _batch(service, span))["around_the_gateway"] == 0
         assert reachability.CALLED_AROUND not in _open(rt)
 
     def test_nothing_is_looked_for_while_the_feature_is_off(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            _agent(s, settings)
+        with rt.db.transaction() as tx:
+            _agent(tx, settings)
         _mode(rt, "off")
         span = _client_span(server__address="billing", server__port=9600)
-        with rt.db.session() as s:
-            assert telemetry.ingest(s, _batch("frontdesk", span))["around_the_gateway"] == 0
+        with rt.db.transaction() as tx:
+            assert telemetry.ingest(tx, _batch("frontdesk", span))["around_the_gateway"] == 0
 
     def test_hosts_match_as_kubernetes_names_them(self) -> None:
         same = reachability._same_host

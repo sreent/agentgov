@@ -13,12 +13,10 @@ from typing import Any
 
 import httpx
 from django.http import HttpRequest, HttpResponse
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
+from agentgov.db.models import Agent, ToolServer
 from agentgov.identity import assertions, people
-from agentgov.models import Agent, ToolServer
 from agentgov.registry import features
 from agentgov.web.api import HTTPException, Router, json_response
 from agentgov.web.auth import runtime
@@ -31,8 +29,8 @@ _tokens_lock = threading.Lock()
 
 
 def _on(request: HttpRequest) -> None:
-    with runtime(request).db.session() as s:
-        if not features.is_on(s, FEATURE):
+    with runtime(request).db.transaction() as tx:
+        if not features.is_on(tx, FEATURE):
             raise HTTPException(404, "AgentGov doesn't give identity assertions here")
 
 
@@ -77,12 +75,10 @@ def _subject_tokens(rt: Any) -> assertions.SubjectTokens:
         return found
 
 
-def _server(s: Session, request: assertions.Request) -> ToolServer:
+def _server(tx: db.Transaction, request: assertions.Request) -> ToolServer:
     """The tool server the assertion is for: the one registered with that authorization
     server, or, of several, the one at the resource asked for."""
-    listed = list(
-        s.scalars(select(ToolServer).where(ToolServer.authorization_server == request.audience))
-    )
+    listed = list(ToolServer.objects.filter(authorization_server=request.audience))
     if request.resource:
         listed = [ts for ts in listed if ts.url == request.resource]
     if len(listed) == 1:
@@ -122,10 +118,12 @@ def _decide(rt: Any, opa_input: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _agent(s: Session, identity: dict[str, Any]) -> Agent | None:
-    found = s.get(Agent, identity["agent_id"]) if identity.get("agent_id") else None
+def _agent(tx: db.Transaction, identity: dict[str, Any]) -> Agent | None:
+    found = (
+        Agent.objects.filter(pk=identity["agent_id"]).first() if identity.get("agent_id") else None
+    )
     if found is None and identity.get("client_id"):
-        found = s.scalar(select(Agent).where(Agent.client_id == identity["client_id"]))
+        found = Agent.objects.filter(client_id=identity["client_id"]).first()
     return found
 
 
@@ -145,10 +143,10 @@ def _exchange(rt: Any, body: bytes, kind: str) -> dict[str, Any]:
     identity, person = assertions.caller(claims, request.subject_token_type)
     # What the registry says, then the policies (no transaction held while they decide),
     # then the record.
-    with rt.db.session() as s:
-        server = _server(s, request)
+    with rt.db.transaction() as tx:
+        server = _server(tx, request)
         target = {"name": server.name, "url": server.url, "client_id": server.oauth_client_id}
-        agent = _agent(s, identity)
+        agent = _agent(tx, identity)
         agent_id, agent_client = (agent.id, agent.client_id) if agent else (None, None)
     decision = _decide(
         rt,
@@ -200,11 +198,11 @@ def _exchange(rt: Any, body: bytes, kind: str) -> dict[str, Any]:
         reason = "monitored: " + "; ".join(monitored)
     else:
         reason = "; ".join(reasons) or None
-    with rt.db.session() as s:
-        agent = s.get(Agent, agent_id) if agent_id else None
+    with rt.db.transaction() as tx:
+        agent = Agent.objects.filter(pk=agent_id).first() if agent_id else None
         client = identity.get("client_id") or "unknown"
         ledger.append(
-            s,
+            tx,
             type="decision.assertion",
             actor=f"agent:{agent.name}" if agent else f"client:{client}",
             agent=agent,

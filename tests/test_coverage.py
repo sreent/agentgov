@@ -8,11 +8,10 @@ import zipfile
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids, ledger
-from agentgov.models import Agent, PlatformAgent, PlatformSync
+from agentgov.db.models import Agent, PlatformAgent, PlatformSync
 from tests.conftest import ADMIN, seed
 from tests.test_people import import_studio, studio
 
@@ -44,13 +43,13 @@ class TestCoverage:
         c = report(client)["coverage"]
         assert (c["not_seen_names"], c["platforms_read"]) == (["support-bot"], ["copilot-studio"])
         # Seen at work (its telemetry, say): its calls not checked.
-        with _rt(client).db.session() as s:
-            s.get(Agent, bot["id"]).last_seen_at = ids.utcnow()
+        with _rt(client).db.transaction() as tx:
+            Agent.objects.filter(pk=bot["id"]).update(last_seen_at=ids.utcnow())
         assert seen(client) == (2, 0, 1, 1, 0)
         # Its calls checked.
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             ledger.append(
-                s,
+                tx,
                 type="decision.tool.request",
                 actor=f"agent:{bot['name']}",
                 agent_id=bot["id"],
@@ -61,10 +60,9 @@ class TestCoverage:
     def test_a_platform_not_read_in_the_period(self, client) -> None:
         import_studio(client, studio("bot-sales", "Sales Helper"))
         long_ago = ids.utcnow() - timedelta(days=200)
-        with _rt(client).db.session() as s:
-            s.get(PlatformSync, "copilot-studio").synced_at = long_ago
-            for record in s.scalars(select(PlatformAgent)):
-                record.synced_at = long_ago
+        with _rt(client).db.transaction():
+            PlatformSync.objects.filter(pk="copilot-studio").update(synced_at=long_ago)
+            PlatformAgent.objects.update(synced_at=long_ago)
         r = report(client)
         assert r["coverage"]["platforms_not_read"] == ["copilot-studio"]
         assert seen(client) == (1, 0, 0, 0, 1)

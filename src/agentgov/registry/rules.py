@@ -30,13 +30,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete as sql_delete
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from django.db.models import Q
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.models import (
+from agentgov.db.models import (
     ACTIVE,
     BLOCKED,
     DELETED,
@@ -158,17 +156,15 @@ def effective(rule_mode: str, feature_mode: str) -> str:
 # ----------------------------------------------------------------------- rules
 
 
-def get(session: Session, ref: str) -> ManagementRule:
-    rule = session.scalar(
-        select(ManagementRule).where((ManagementRule.name == ref) | (ManagementRule.id == ref))
-    )
+def get(tx: db.Transaction, ref: str) -> ManagementRule:
+    rule = ManagementRule.objects.filter(Q(name=ref) | Q(id=ref)).first()
     if rule is None:
         raise NotFound(f"management rule {ref!r} not found")
     return rule
 
 
-def list_all(session: Session) -> list[ManagementRule]:
-    return list(session.scalars(select(ManagementRule).order_by(ManagementRule.name)))
+def list_all(tx: db.Transaction) -> list[ManagementRule]:
+    return list(ManagementRule.objects.order_by("name"))
 
 
 def _int(value: Any, field: str, low: int, high: int) -> int:
@@ -230,7 +226,7 @@ def _scope(value: Any) -> dict[str, Any]:
     return scopes.parse(value)
 
 
-def _params(session: Session, action: str, value: Any) -> dict[str, Any]:
+def _params(tx: db.Transaction, action: str, value: Any) -> dict[str, Any]:
     value = value or {}
     if not isinstance(value, dict):
         raise ValidationError("params is a mapping")
@@ -243,14 +239,14 @@ def _params(session: Session, action: str, value: Any) -> dict[str, Any]:
     if unknown or not isinstance(owner, str) or not owner.strip():
         raise ValidationError("assign_owner needs params.owner: a team, or a person's email")
     owner = owner.strip()
-    if not teams.is_email(owner) and teams.find(session, owner) is None:
+    if not teams.is_email(owner) and teams.find(tx, owner) is None:
         raise ValidationError(
             f"params.owner {owner!r} is neither a team (add it first) nor an email address"
         )
     return {"owner": owner}
 
 
-def _apply(session: Session, rule: ManagementRule, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Transaction, rule: ManagementRule, data: dict[str, Any]) -> list[str]:
     changed = []
     action = data.get("action", rule.action)
     for key in FIELDS:
@@ -265,11 +261,11 @@ def _apply(session: Session, rule: ManagementRule, data: dict[str, Any]) -> list
             value = _conditions(value)
         elif key == "scope":
             value = _scope(value)
-            scopes.check_names(session, value, had=[rule.scope or {}])
+            scopes.check_names(tx, value, had=[rule.scope or {}])
         elif key == "action":
             value = validation.one_of(value, ACTIONS, "action")
         elif key == "params":
-            value = _params(session, action, value if "params" in data else rule.params)
+            value = _params(tx, action, value if "params" in data else rule.params)
         elif key == "after_days":
             value = _int(value, "after_days", 0, MAX_AFTER_DAYS)
         elif key == "severity":
@@ -322,46 +318,46 @@ def _new(name: str) -> ManagementRule:
     )
 
 
-def draft(session: Session, data: dict[str, Any]) -> ManagementRule:
+def draft(tx: db.Transaction, data: dict[str, Any]) -> ManagementRule:
     """A rule that isn't saved: to preview it before creating it."""
     _known(data)
     rule = _new(str(data.get("name") or "draft"))
-    _apply(session, rule, data)
+    _apply(tx, rule, data)
     return rule
 
 
-def create(session: Session, data: dict[str, Any], *, actor: str) -> ManagementRule:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str) -> ManagementRule:
     _known(data)
     name = validation.slug(data.get("name"), "name")
-    if session.scalar(select(ManagementRule).where(ManagementRule.name == name)):
+    if ManagementRule.objects.filter(name=name).exists():
         raise Conflict(f"management rule {name!r} already exists")
     rule = _new(name)
-    _apply(session, rule, data)
-    session.add(rule)
-    session.flush()
+    _apply(tx, rule, data)
+    rule.save(force_insert=True)
     ledger.append(
-        session, type="rule.created", actor=actor, resource=f"rule/{name}", details=_details(rule)
+        tx, type="rule.created", actor=actor, resource=f"rule/{name}", details=_details(rule)
     )
     return rule
 
 
 def update(
-    session: Session,
+    tx: db.Transaction,
     rule: ManagementRule,
     data: dict[str, Any],
     *,
     actor: str,
     version: int | None = None,
 ) -> list[str]:
-    start_edit(session, rule, version, f"management rule {rule.name}")
+    start_edit(tx, rule, version, f"management rule {rule.name}")
     _known(data)
     if "name" in data and data["name"] != rule.name:
         raise ValidationError("a management rule's name can't change: the ledger names it")
-    changed = _apply(session, rule, data)
+    changed = _apply(tx, rule, data)
     if changed:
         edited(rule)
+        rule.save()
         ledger.append(
-            session,
+            tx,
             type="rule.updated",
             actor=actor,
             resource=f"rule/{rule.name}",
@@ -370,20 +366,19 @@ def update(
     return changed
 
 
-def delete(session: Session, rule: ManagementRule, *, actor: str) -> None:
+def delete(tx: db.Transaction, rule: ManagementRule, *, actor: str) -> None:
     """Delete a rule: its issues are resolved; what it did stays done."""
-    for finding in session.scalars(
-        select(Finding).where(
-            Finding.status == "open",
-            (Finding.key.like(f"{MATCHED}:{rule.id}:%")) | (Finding.key == f"{TOO_MANY}:{rule.id}"),
-        )
-    ):
-        findings.set_status(session, finding.id, "resolved", actor)
-    session.execute(sql_delete(RuleMatch).where(RuleMatch.rule_id == rule.id))
-    ledger.append(
-        session, type="rule.deleted", actor=actor, resource=f"rule/{rule.name}", severity="warning"
+    theirs = Finding.objects.filter(
+        Q(key__startswith=f"{MATCHED}:{rule.id}:") | Q(key=f"{TOO_MANY}:{rule.id}"),
+        status="open",
     )
-    session.delete(rule)
+    for finding_id in list(theirs.values_list("id", flat=True)):
+        findings.set_status(tx, finding_id, "resolved", actor)
+    RuleMatch.objects.filter(rule_id=rule.id).delete()
+    ledger.append(
+        tx, type="rule.deleted", actor=actor, resource=f"rule/{rule.name}", severity="warning"
+    )
+    rule.delete()
 
 
 def _details(rule: ManagementRule) -> dict[str, Any]:
@@ -401,14 +396,14 @@ def _details(rule: ManagementRule) -> dict[str, Any]:
     }
 
 
-def to_dict(session: Session, rule: ManagementRule) -> dict[str, Any]:
-    rows = list(session.scalars(select(RuleMatch).where(RuleMatch.rule_id == rule.id)))
+def to_dict(tx: db.Transaction, rule: ManagementRule) -> dict[str, Any]:
+    rows = list(RuleMatch.objects.filter(rule_id=rule.id))
     return {
         "id": rule.id,
         "name": rule.name,
         "version": rule.version,
         **_details(rule),
-        "effective_mode": effective(rule.mode, features.mode(session, FEATURE)),
+        "effective_mode": effective(rule.mode, features.mode(tx, FEATURE)),
         "matches": {
             "matching": len(rows),
             "acted": sum(1 for r in rows if r.acted_at is not None),
@@ -459,37 +454,28 @@ def _parse(value: Any) -> datetime | None:
         return None
 
 
-def _usage(session: Session, now: datetime) -> tuple[datetime, datetime] | None:
+def _usage(tx: db.Transaction, now: datetime) -> tuple[datetime, datetime] | None:
     """The stretch of time AgentGov read Microsoft 365 and Copilot Studio agents' usage for,
     from the Purview audit log, while it keeps reading it."""
-    if not features.is_on(session, "purview-audit"):
+    if not features.is_on(tx, "purview-audit"):
         return None
-    state = connections.load_state(session, "purview-audit")
+    state = connections.load_state(tx, "purview-audit")
     start, until = _parse(state.get("usage_from")), _parse(state.get("usage_until"))
     if start is None or until is None or now - until > USAGE_FRESH:
         return None
     return start, until
 
 
-def _context(session: Session, now: datetime, feature: str) -> _Context:
+def _context(tx: db.Transaction, now: datetime, feature: str) -> _Context:
     # In the posture scan's order (registry/posture), as the rules act on them.
-    agents = {
-        a.id: a
-        for a in session.scalars(
-            select(Agent).where(Agent.status != DELETED).order_by(Agent.id)
-        ).unique()
-    }
+    agents = {a.id: a for a in Agent.objects.exclude(status=DELETED).order_by("id")}
     open_findings: dict[str, list[Finding]] = defaultdict(list)
-    for finding in session.scalars(
-        select(Finding).where(Finding.status == "open", Finding.agent_id.is_not(None))
-    ):
+    for finding in Finding.objects.filter(status="open", agent_id__isnull=False):
         if finding.type not in FINDING_TYPES and finding.verified is not False:
             open_findings[str(finding.agent_id)].append(finding)
     holding = set(
-        session.scalars(
-            select(AccessAssignment.agent_id).where(
-                AccessAssignment.status.in_(access_packages.HELD)
-            )
+        AccessAssignment.objects.filter(status__in=access_packages.HELD).values_list(
+            "agent_id", flat=True
         )
     )
     return _Context(
@@ -498,8 +484,8 @@ def _context(session: Session, now: datetime, feature: str) -> _Context:
         agents,
         dict(open_findings),
         holding,
-        _usage(session, now),
-        features.modes(session),
+        _usage(tx, now),
+        features.modes(tx),
     )
 
 
@@ -680,8 +666,8 @@ def _key(rule: ManagementRule, agent_id: str) -> str:
     return f"{MATCHED}:{rule.id}:{agent_id}"
 
 
-def _finding(session: Session, key: str) -> Finding | None:
-    return session.scalar(select(Finding).where(Finding.key == key))
+def _finding(tx: db.Transaction, key: str) -> Finding | None:
+    return findings.by_key(tx, key)
 
 
 def _remedy(rule: ManagementRule, a: Assessment) -> str:
@@ -694,7 +680,7 @@ def _remedy(rule: ManagementRule, a: Assessment) -> str:
 
 
 def _raise(
-    session: Session,
+    tx: db.Transaction,
     rule: ManagementRule,
     agent: Agent,
     *,
@@ -704,7 +690,7 @@ def _raise(
     **details: Any,
 ) -> Finding:
     finding, _ = findings.raise_finding(
-        session,
+        tx,
         type=MATCHED,
         severity=rule.severity,
         subject=f"{rule.id}:{agent.id}",
@@ -718,7 +704,7 @@ def _raise(
 
 
 def _heads_up(
-    session: Session,
+    tx: db.Transaction,
     rule: ManagementRule,
     agent: Agent,
     row: RuleMatch,
@@ -732,7 +718,7 @@ def _heads_up(
     about = f"{agent.name} matches management rule {rule.name} since {row.since:%Y-%m-%d}: {why}."
     if rule.description:
         about += f" The rule: {rule.description.rstrip('.')}."
-    existing = _finding(session, _key(rule, agent.id))
+    existing = _finding(tx, _key(rule, agent.id))
     held = _exemption(existing, now)
     if cannot:
         title = f"Rule {rule.name} can't {_verb(rule)} {agent.name}"
@@ -747,7 +733,7 @@ def _heads_up(
             f"{due:%Y-%m-%d %H:%M} UTC."
         )
     return _raise(
-        session,
+        tx,
         rule,
         agent,
         title=title,
@@ -758,21 +744,22 @@ def _heads_up(
     )
 
 
-def _drop(session: Session, rule: ManagementRule, row: RuleMatch | None, now: datetime) -> None:
+def _drop(tx: db.Transaction, rule: ManagementRule, row: RuleMatch | None, now: datetime) -> None:
     """The agent no longer matches: its match goes. Its issue is resolved by the end of the
     round; one dismissed or accepted is resolved too, so that a later match starts afresh."""
     if row is None:
         return
-    finding = _finding(session, _key(rule, row.agent_id))
+    finding = _finding(tx, _key(rule, row.agent_id))
     if finding is not None and finding.status in ("dismissed", "accepted"):
         finding.status, finding.accepted_until = "resolved", None
         finding.resolved_at, finding.resolved_by = now, SYSTEM
-        findings.record(session, finding, "resolved", SYSTEM)
-    session.delete(row)
+        finding.save()
+        findings.record(tx, finding, "resolved", SYSTEM)
+    row.delete()
 
 
 def _act(
-    session: Session,
+    tx: db.Transaction,
     settings: Settings,
     rule: ManagementRule,
     agent: Agent,
@@ -786,18 +773,18 @@ def _act(
     remediation = ""
     if rule.action == ASSIGN_OWNER:
         owner = rule.params["owner"]
-        agents_svc.update(session, agent, {"owner": owner}, actor=actor)
+        agents_svc.update(tx, agent, {"owner": owner}, actor=actor)
         outcome = f"made {owner} its owner"
         remediation = "Give it the right owner if that isn't it."
     elif rule.action == BLOCK:
-        agents_svc.transition(session, settings, agent, "block", actor=actor, reason=reason)
+        agents_svc.transition(tx, settings, agent, "block", actor=actor, reason=reason)
         outcome = "blocked it"
         remediation = (
             "If it is still needed, an administrator unblocks it: the rule then leaves it be "
             "for as long as it still matches."
         )
     elif rule.action == DELETE:
-        agents_svc.transition(session, settings, agent, "delete", actor=actor, reason=reason)
+        agents_svc.transition(tx, settings, agent, "delete", actor=actor, reason=reason)
         outcome = "deleted it"
         days = settings.soft_delete_retention_days
         remediation = (
@@ -807,26 +794,24 @@ def _act(
             else "If it is still needed, an administrator restores it."
         )
     elif rule.action == REVOKE:
-        held = session.scalars(
-            select(AccessAssignment).where(
-                AccessAssignment.agent_id == agent.id,
-                AccessAssignment.status.in_(access_packages.HELD),
-            )
-        ).all()
+        held = list(
+            AccessAssignment.objects.filter(agent_id=agent.id, status__in=access_packages.HELD)
+        )
         for assignment in held:
-            access_packages.revoke(session, assignment, actor=actor, reason=reason)
+            access_packages.revoke(tx, assignment, actor=actor, reason=reason)
         outcome = f"revoked {len(held)} access package(s)"
         remediation = "Ask for the packages again if it still needs them."
     else:
         outcome = "raised an issue"
     row.acted_at, row.outcome = now, outcome
+    row.save()
     about = f"{agent.name} matches management rule {rule.name} since {row.since:%Y-%m-%d}: {why}."
     if rule.description:
         about += f" The rule: {rule.description.rstrip('.')}."
     if rule.action == ISSUE:
         title = f"{agent.name} matches rule {rule.name}: {a.reasons[0] if a.reasons else why}"
         finding = _raise(
-            session,
+            tx,
             rule,
             agent,
             title=title,
@@ -836,7 +821,7 @@ def _act(
         )
         return
     finding = _raise(
-        session,
+        tx,
         rule,
         agent,
         title=f"Rule {rule.name} {_verb(rule, past=True)} {agent.name} on {now:%Y-%m-%d}",
@@ -846,21 +831,23 @@ def _act(
         outcome=outcome,
     )
     findings.record(
-        session, finding, "acted", actor, severity="warning", action=rule.action, outcome=outcome
+        tx, finding, "acted", actor, severity="warning", action=rule.action, outcome=outcome
     )
     # News for the agent's people: it goes to them again, from the start of its chain.
     if finding.status == "open":
         findings.restart_chain(finding)
+        finding.save()
 
 
 def _would(
-    session: Session, rule: ManagementRule, agent: Agent, row: RuleMatch, a: Assessment
+    tx: db.Transaction, rule: ManagementRule, agent: Agent, row: RuleMatch, a: Assessment
 ) -> None:
     """A monitored rule's turn to act: what it would have done, in the ledger, once."""
     row.monitored_at = row.monitored_at or ids.utcnow()
     row.outcome = f"would {_verb(rule)} it"
+    row.save()
     ledger.append(
-        session,
+        tx,
         type="rule.would_act",
         actor=_actor(rule),
         severity="info",
@@ -872,7 +859,7 @@ def _would(
 
 
 def _hold_back(
-    session: Session,
+    tx: db.Transaction,
     rule: ManagementRule,
     due: list[tuple[Agent, RuleMatch, Assessment]],
     mode: str,
@@ -889,7 +876,7 @@ def _hold_back(
         f"{rule.max_actions}"
     )
     finding, new = findings.raise_finding(
-        session,
+        tx,
         type=TOO_MANY,
         severity="high" if mode == features.ENFORCE else "medium",
         subject=rule.id,
@@ -906,10 +893,11 @@ def _hold_back(
     held = f"held back: {count} agents due at once, more than {rule.max_actions}"
     for agent, row, a in due:
         row.outcome = held
+        row.save()
         if mode == features.ENFORCE:
             # Its people were told a date: say why nothing happened on it.
             _raise(
-                session,
+                tx,
                 rule,
                 agent,
                 title=f"Rule {rule.name} would {verb} {agent.name}, but is held back",
@@ -921,7 +909,7 @@ def _hold_back(
             )
     if new:
         ledger.append(
-            session,
+            tx,
             type="rule.held_back",
             actor=_actor(rule),
             severity="warning",
@@ -932,7 +920,7 @@ def _hold_back(
 
 
 def _round(
-    session: Session,
+    tx: db.Transaction,
     settings: Settings,
     rule: ManagementRule,
     ctx: _Context,
@@ -941,20 +929,17 @@ def _round(
     """One rule's round: which agents match, whom to tell, and what to do."""
     mode = effective(rule.mode, ctx.feature)
     counts = {"matching": 0, "due": 0, "acted": 0, "would_act": 0, "held_back": 0}
-    rows = {
-        r.agent_id: r
-        for r in session.scalars(select(RuleMatch).where(RuleMatch.rule_id == rule.id))
-    }
+    rows = {r.agent_id: r for r in RuleMatch.objects.filter(rule_id=rule.id)}
     if mode == features.OFF:
         for row in rows.values():
-            _drop(session, rule, row, ctx.now)
+            _drop(tx, rule, row, ctx.now)
         return counts
     due: list[tuple[Agent, RuleMatch, Assessment]] = []
     for agent_id in sorted(set(ctx.agents) | set(rows)):
-        agent = ctx.agents.get(agent_id) or session.get(Agent, agent_id)
+        agent = ctx.agents.get(agent_id) or Agent.objects.filter(pk=agent_id).first()
         row = rows.get(agent_id)
         if agent is None:  # purged
-            _drop(session, rule, row, ctx.now)
+            _drop(tx, rule, row, ctx.now)
             continue
         key = _key(rule, agent.id)
         if row is not None and row.acted_at is not None and LEAVES.get(rule.action) == agent.status:
@@ -962,18 +947,18 @@ def _round(
             present.add(key)
             continue
         if not _applies(rule, agent, row, ctx):
-            _drop(session, rule, row, ctx.now)
+            _drop(tx, rule, row, ctx.now)
             continue
         a = assess(rule, agent, ctx)
         if not a.matched:
-            _drop(session, rule, row, ctx.now)
+            _drop(tx, rule, row, ctx.now)
             continue
         counts["matching"] += 1
         if row is None:
             row = RuleMatch(
                 id=ids.new_id(ids.RULE_MATCH), rule_id=rule.id, agent_id=agent.id, since=ctx.now
             )
-            session.add(row)
+            row.save(force_insert=True)
         if row.acted_at is not None:
             # It did what it does; whatever people did since, it leaves the agent be.
             if mode == features.ENFORCE:
@@ -983,13 +968,15 @@ def _round(
         if rule.action != ISSUE and mode == features.ENFORCE:
             row.warned_at = row.warned_at or ctx.now
             due_at = _due_at(rule, row, mode, ctx.now)
-            finding = _heads_up(session, rule, agent, row, a, due_at, cannot, ctx.now)
+            finding = _heads_up(tx, rule, agent, row, a, due_at, cannot, ctx.now)
             present.add(key)
             held = _exemption(finding, ctx.now)
             if cannot or held:
                 # The notice starts again once nothing holds the rule back.
                 row.warned_at, row.outcome = None, cannot or held
+                row.save()
                 continue
+            row.save()
         else:
             # Monitored, a rule tells nobody: nor does a rule that only raises issues
             # until it is time to.
@@ -997,61 +984,65 @@ def _round(
             due_at = _due_at(rule, row, mode, ctx.now)
             if cannot:
                 row.outcome = cannot
+                row.save()
                 continue
+            row.save()
         if ctx.now < due_at or (mode == features.MONITOR and row.monitored_at is not None):
             continue
         due.append((agent, row, a))
     counts["due"] = len(due)
     if len(due) > rule.max_actions:
-        _hold_back(session, rule, due, mode, present)
+        _hold_back(tx, rule, due, mode, present)
         counts["held_back"] = len(due)
         return counts
     for agent, row, a in due:
         if mode == features.MONITOR:
-            _would(session, rule, agent, row, a)
+            _would(tx, rule, agent, row, a)
             counts["would_act"] += 1
             continue
         try:
-            with session.begin_nested():
-                _act(session, settings, rule, agent, row, a, ctx.now)
+            with tx.savepoint():
+                _act(tx, settings, rule, agent, row, a, ctx.now)
         except RegistryError as exc:
+            # As it was before (what it did is rolled back), but for why it failed.
+            agent.refresh_from_db()
+            row.refresh_from_db()
             row.outcome = f"failed: {exc}"
+            row.save()
             continue
         present.add(_key(rule, agent.id))
         counts["acted"] += 1
     return counts
 
 
-def _clear(session: Session, now: datetime) -> dict[str, Any]:
+def _clear(tx: db.Transaction, now: datetime) -> dict[str, Any]:
     """Rules are off: no rule matches anything, and their issues are resolved."""
-    for rule in list_all(session):
-        for row in session.scalars(select(RuleMatch).where(RuleMatch.rule_id == rule.id)):
-            _drop(session, rule, row, now)
-    resolved = findings.resolve_absent(
-        session, types=FINDING_TYPES, present_keys=set(), actor=SYSTEM
-    )
+    for rule in list_all(tx):
+        for row in list(RuleMatch.objects.filter(rule_id=rule.id)):
+            _drop(tx, rule, row, now)
+    resolved = findings.resolve_absent(tx, types=FINDING_TYPES, present_keys=set(), actor=SYSTEM)
     return {"off": True, "resolved": resolved}
 
 
-def evaluate(session: Session, settings: Settings, now: datetime | None = None) -> dict[str, Any]:
+def evaluate(tx: db.Transaction, settings: Settings, now: datetime | None = None) -> dict[str, Any]:
     """A round of every rule; returns what each did. Nothing runs while posture checks are
     off: rules are about what they find."""
     now = now or ids.utcnow()
-    feature = features.mode(session, FEATURE)
+    feature = features.mode(tx, FEATURE)
     if feature == features.OFF:
-        return _clear(session, now)
-    if not features.is_on(session, POSTURE):
+        return _clear(tx, now)
+    if not features.is_on(tx, POSTURE):
         return {"skipped": "posture checks are off: rules run after each posture scan"}
-    ctx = _context(session, now, feature)
+    ctx = _context(tx, now, feature)
     present: set[str] = set()
     out: dict[str, Any] = {}
     known = set()
-    for rule in list_all(session):
+    for rule in list_all(tx):
         known.add(rule.id)
-        out[rule.name] = _round(session, settings, rule, ctx, present)
+        out[rule.name] = _round(tx, settings, rule, ctx, present)
     # Matches of rules that are gone (deleting a rule removes its own).
-    session.execute(sql_delete(RuleMatch).where(RuleMatch.rule_id.not_in(known)))
-    findings.resolve_absent(session, types=FINDING_TYPES, present_keys=present, actor=SYSTEM)
+    RuleMatch.objects.exclude(rule_id__in=known).delete()
+    findings.resolve_absent(tx, types=FINDING_TYPES, present_keys=present, actor=SYSTEM)
     return out
 
 
@@ -1093,26 +1084,21 @@ def _state(
     )
 
 
-def preview(session: Session, rule: ManagementRule, now: datetime | None = None) -> dict[str, Any]:
+def preview(
+    tx: db.Transaction, rule: ManagementRule, now: datetime | None = None
+) -> dict[str, Any]:
     """Which agents the rule matches now, since when, and what it will do to each: for a
     saved rule, or one that isn't saved yet. Changes nothing."""
     now = now or ids.utcnow()
-    feature = features.mode(session, FEATURE)
+    feature = features.mode(tx, FEATURE)
     mode = effective(rule.mode, feature)
-    ctx = _context(session, now, feature)
-    saved = rule.id is not None and session.get(ManagementRule, rule.id) is rule
-    rows = (
-        {
-            r.agent_id: r
-            for r in session.scalars(select(RuleMatch).where(RuleMatch.rule_id == rule.id))
-        }
-        if saved
-        else {}
-    )
+    ctx = _context(tx, now, feature)
+    saved = not rule._state.adding
+    rows = {r.agent_id: r for r in RuleMatch.objects.filter(rule_id=rule.id)} if saved else {}
     entries: list[dict[str, Any]] = []
     unknown: list[dict[str, Any]] = []
     for agent_id in sorted(set(ctx.agents) | set(rows)):
-        agent = ctx.agents.get(agent_id) or session.get(Agent, agent_id)
+        agent = ctx.agents.get(agent_id) or Agent.objects.filter(pk=agent_id).first()
         if agent is None:
             continue
         row = rows.get(agent_id)
@@ -1131,7 +1117,7 @@ def preview(session: Session, rule: ManagementRule, now: datetime | None = None)
             reasons = a.reasons
         else:
             reasons = [row.outcome or ""]
-        finding = _finding(session, _key(rule, agent.id)) if saved else None
+        finding = _finding(tx, _key(rule, agent.id)) if saved else None
         state, detail, due = _state(rule, agent, row, mode, finding, now, ctx.modes)
         entries.append(
             {
@@ -1154,7 +1140,7 @@ def preview(session: Session, rule: ManagementRule, now: datetime | None = None)
     running, why = True, ""
     if feature == features.OFF:
         running, why = False, f"the {FEATURE} feature is off"
-    elif not features.is_on(session, POSTURE):
+    elif not features.is_on(tx, POSTURE):
         running, why = False, "posture checks are off: rules run after each posture scan"
     elif mode == features.OFF:
         running, why = False, "the rule is off"
@@ -1174,21 +1160,19 @@ def preview(session: Session, rule: ManagementRule, now: datetime | None = None)
     }
 
 
-def for_agent(session: Session, agent: Agent) -> list[dict[str, Any]]:
+def for_agent(tx: db.Transaction, agent: Agent) -> list[dict[str, Any]]:
     """The rules that match the agent, and what each will do or did."""
-    feature = features.mode(session, FEATURE)
-    modes = features.modes(session)
+    feature = features.mode(tx, FEATURE)
+    modes = features.modes(tx)
     out = []
     now = ids.utcnow()
-    for row, rule in session.execute(
-        select(RuleMatch, ManagementRule)
-        .join(ManagementRule, ManagementRule.id == RuleMatch.rule_id)
-        .where(RuleMatch.agent_id == agent.id)
-        .order_by(ManagementRule.name)
-    ):
+    rows = list(RuleMatch.objects.filter(agent_id=agent.id))
+    named = ManagementRule.objects.in_bulk({r.rule_id for r in rows})
+    matched = [(row, named[row.rule_id]) for row in rows if row.rule_id in named]
+    for row, rule in sorted(matched, key=lambda pair: pair[1].name):
         mode = effective(rule.mode, feature)
         state, detail, due = _state(
-            rule, agent, row, mode, _finding(session, _key(rule, agent.id)), now, modes
+            rule, agent, row, mode, _finding(tx, _key(rule, agent.id)), now, modes
         )
         out.append(
             {

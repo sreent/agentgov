@@ -24,12 +24,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
-
-from agentgov import ids
+from agentgov import db, ids
 from agentgov.config import Settings
-from agentgov.models import SEVERITIES, Agent, Destination, Finding, Ticket
+from agentgov.db.models import SEVERITIES, Agent, Destination, Finding, Ticket
 from agentgov.registry import desks, finding_types, findings, issues
 
 SYSTEM = "system:tickets"
@@ -44,19 +41,13 @@ MAX_ATTEMPTS = 13
 READ_EVERY = timedelta(minutes=5)
 
 
-def active_desks(session: Session) -> list[Destination]:
-    return list(
-        session.scalars(
-            select(Destination)
-            .where(Destination.kind.in_(desks.DESKS), Destination.status == "active")
-            .order_by(Destination.name)
-        )
-    )
+def active_desks(tx: db.Transaction) -> list[Destination]:
+    return list(Destination.objects.filter(kind__in=desks.DESKS, status="active").order_by("name"))
 
 
-def team_of(session: Session, finding: Finding, directory: issues.Directory) -> str | None:
+def team_of(tx: db.Transaction, finding: Finding, directory: issues.Directory) -> str | None:
     """The issue's team: the first team in its chain (its owner, a sponsor, or its team)."""
-    for _level, people in issues.chain(session, finding, directory):
+    for _level, people in issues.chain(tx, finding, directory):
         for person in people:
             if person.kind == "team":
                 return person.name
@@ -89,25 +80,23 @@ def _new(desk: Destination, finding: Finding, team: str | None, status: str) -> 
     )
 
 
-def plan(session: Session, settings: Settings) -> int:
+def plan(tx: db.Transaction, settings: Settings) -> int:
     """Tickets to open: for the open issues each desk takes that have none for their round
     (an open ticket of an earlier round follows the issue instead)."""
-    chosen = active_desks(session)
+    chosen = active_desks(tx)
     if not chosen:
         return 0
-    routed = session.scalars(
-        select(Finding).where(Finding.status == "open", Finding.level.is_not(None))
-    ).all()
+    routed = list(Finding.objects.filter(status="open", level__isnull=False))
     if not routed:
         return 0
-    off = finding_types.off_types(session)
+    off = finding_types.off_types(tx)
     had: set[tuple[str, str, int]] = set()
     live: set[tuple[str, str]] = set()
-    for t in session.scalars(select(Ticket).where(Ticket.finding_id.in_([f.id for f in routed]))):
+    for t in Ticket.objects.filter(finding_id__in=[f.id for f in routed]):
         had.add((t.finding_id, t.destination_id, t.round))
         if t.status in (PENDING, OPEN):
             live.add((t.finding_id, t.destination_id))
-    directory = issues.Directory(session)
+    directory = issues.Directory(tx)
     count = 0
     for finding in routed:
         if finding.type in off:
@@ -118,45 +107,41 @@ def plan(session: Session, settings: Settings) -> int:
             if (finding.id, desk.id, finding.round or 0) in had or (finding.id, desk.id) in live:
                 continue
             if not looked:
-                team, looked = team_of(session, finding, directory), True
+                team, looked = team_of(tx, finding, directory), True
             if takes(settings, desk, finding, team):
-                session.add(_new(desk, finding, team, PENDING))
+                _new(desk, finding, team, PENDING).save(force_insert=True)
                 count += 1
     return count
 
 
-def skip_open(session: Session, desk: Destination) -> int:
+def skip_open(tx: db.Transaction, desk: Destination) -> int:
     """A desk just added: the issues already open get no ticket there (until they are
     raised again), so that it isn't flooded with what was there before it."""
     count = 0
-    for finding in session.scalars(
-        select(Finding).where(Finding.status == "open", Finding.level.is_not(None))
-    ):
-        session.add(_new(desk, finding, None, SKIPPED))
+    for finding in list(Finding.objects.filter(status="open", level__isnull=False)):
+        _new(desk, finding, None, SKIPPED).save(force_insert=True)
         count += 1
     return count
 
 
-def retry_failed(session: Session, desk: Destination) -> int:
+def retry_failed(tx: db.Transaction, desk: Destination) -> int:
     """The desk's settings changed: what it refused is tried again now."""
     now = ids.utcnow()
     count = 0
-    for t in session.scalars(
-        select(Ticket).where(
-            Ticket.destination_id == desk.id, Ticket.status.in_((PENDING, OPEN, FAILED))
-        )
-    ):
+    live = Ticket.objects.filter(destination_id=desk.id, status__in=(PENDING, OPEN, FAILED))
+    for t in list(live):
         if t.status == FAILED:
             t.status, t.attempts = PENDING, 0
         if t.status == PENDING or t.last_error:
             t.next_attempt_at, t.last_error = now, None
             count += 1
+        t.save()
     return count
 
 
-def forget(session: Session, desk: Destination) -> None:
+def forget(tx: db.Transaction, desk: Destination) -> None:
     """The desk is deleted: AgentGov stops keeping its tickets in step (they stay there)."""
-    session.execute(delete(Ticket).where(Ticket.destination_id == desk.id))
+    Ticket.objects.filter(destination_id=desk.id).delete()
 
 
 # ------------------------------------------------------------------ what to send
@@ -184,10 +169,10 @@ def marker(ticket: Ticket) -> str:
     return f"agentgov-{ticket.id}"
 
 
-def _about(session: Session, finding: Finding, team: str | None) -> list[str]:
+def _about(tx: db.Transaction, finding: Finding, team: str | None) -> list[str]:
     from agentgov.registry.platforms import SOURCES
 
-    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
+    agent = Agent.objects.filter(pk=finding.agent_id).first() if finding.agent_id else None
     facts = []
     if agent is not None:
         source = (agent.source or "").removeprefix("platform:")
@@ -205,9 +190,9 @@ def _about(session: Session, finding: Finding, team: str | None) -> list[str]:
 
 
 def new_ticket(
-    session: Session, settings: Settings, desk: Destination, ticket: Ticket, finding: Finding
+    tx: db.Transaction, settings: Settings, desk: Destination, ticket: Ticket, finding: Finding
 ) -> NewTicket:
-    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
+    agent = Agent.objects.filter(pk=finding.agent_id).first() if finding.agent_id else None
     severity = finding.severity
     summary = f"[AgentGov] {severity.capitalize()}: {finding.title}"
     if agent is not None and agent.name not in finding.title:
@@ -218,7 +203,7 @@ def new_ticket(
     if finding.remediation:
         lines += [f"What to do: {finding.remediation}", ""]
     lines += [
-        " · ".join(_about(session, finding, ticket.team)),
+        " · ".join(_about(tx, finding, ticket.team)),
         f"Severity: {severity} · Kind: {finding.type} · First seen: "
         f"{ids.isoformat(finding.first_seen)}",
     ]
@@ -369,7 +354,7 @@ def _who(desk: Destination, ticket: Ticket, seen: Seen) -> str:
 
 
 def seen(
-    session: Session,
+    tx: db.Transaction,
     settings: Settings,
     desk: Destination,
     ticket: Ticket,
@@ -379,6 +364,20 @@ def seen(
 ) -> list[str]:
     """Record what the desk says of a ticket, and what it means for the issue; returns what
     happened, in words."""
+    happened = _seen(tx, desk, ticket, finding, what, now)
+    ticket.save()
+    finding.save()
+    return happened
+
+
+def _seen(
+    tx: db.Transaction,
+    desk: Destination,
+    ticket: Ticket,
+    finding: Finding,
+    what: Seen,
+    now: datetime,
+) -> list[str]:
     happened = []
     ticket.state, ticket.phase, ticket.assignee = what.state[:64], what.phase, what.assignee
     ticket.synced_at = now
@@ -391,7 +390,7 @@ def seen(
         finding.acknowledged_by = _who(desk, ticket, what)[:200]
         finding.escalate_at = None
         findings.record(
-            session,
+            tx,
             finding,
             "acknowledged",
             actor(desk, ticket),
@@ -407,7 +406,7 @@ def seen(
     if ticket.done_seen_at is None:
         ticket.done_seen_at = now
         findings.record(
-            session,
+            tx,
             finding,
             "ticket_done",
             actor(desk, ticket),
@@ -426,7 +425,7 @@ def seen(
             finding.resolved_by = _who(desk, ticket, what)[:200]
             finding.escalate_at = None
             findings.record(
-                session,
+                tx,
                 finding,
                 "resolved",
                 actor(desk, ticket),
@@ -442,13 +441,13 @@ def seen(
         ticket.status = CLOSED
         again = _new(desk, finding, ticket.team, PENDING)
         again.replaces = ticket.key
-        session.add(again)
+        again.save(force_insert=True)
         happened.append("replaced")
     return happened
 
 
 def opened(
-    session: Session,
+    tx: db.Transaction,
     desk: Destination,
     ticket: Ticket,
     finding: Finding | None,
@@ -466,10 +465,11 @@ def opened(
     ticket.next_attempt_at = ids.utcnow()
     ticket.told = state
     ticket.round = state.get("round", ticket.round)
+    ticket.save()
     if finding is None:
         return
     findings.record(
-        session,
+        tx,
         finding,
         "ticket_opened",
         SYSTEM,
@@ -482,7 +482,7 @@ def opened(
 
 
 def failed(
-    session: Session, desk: Destination, ticket: Ticket, finding: Finding | None, error: str
+    tx: db.Transaction, desk: Destination, ticket: Ticket, finding: Finding | None, error: str
 ) -> None:
     """It couldn't go: tried again later, until it is given up on."""
     from agentgov.secops.delivery import backoff
@@ -491,9 +491,10 @@ def failed(
     ticket.last_error = error[:1000]
     if ticket.status == PENDING and ticket.attempts >= MAX_ATTEMPTS:
         ticket.status = FAILED
+        ticket.save()
         if finding is not None:
             findings.record(
-                session,
+                tx,
                 finding,
                 "ticket_failed",
                 SYSTEM,
@@ -503,20 +504,24 @@ def failed(
             )
         return
     ticket.next_attempt_at = ids.utcnow() + backoff(ticket.attempts)
+    ticket.save()
 
 
-def told(session: Session, desk: Destination, ticket: Ticket, finding: Finding, done: Work) -> None:
+def told(
+    tx: db.Transaction, desk: Destination, ticket: Ticket, finding: Finding, done: Work
+) -> None:
     """The desk has what changed (as ``done`` told it: what changed since goes next)."""
     ticket.told = done.state
     ticket.round = done.state.get("round", ticket.round)
     ticket.attempts, ticket.last_error = 0, None
     if done.let_go:
         ticket.status = CLOSED
+        ticket.save()
         return
     if done.ended:
         ticket.status = CLOSED
         findings.record(
-            session,
+            tx,
             finding,
             "ticket_closed",
             SYSTEM,
@@ -525,6 +530,7 @@ def told(session: Session, desk: Destination, ticket: Ticket, finding: Finding, 
             desk=desk.name,
             resolved=ticket.phase != DONE and desks.resolves(desk.tickets or {}),
         )
+    ticket.save()
 
 
 # ------------------------------------------------------------------ what people see
@@ -554,34 +560,31 @@ def to_dict(t: Ticket, desk: Destination | None) -> dict[str, Any]:
     }
 
 
-def for_finding(session: Session, finding: Finding) -> list[dict[str, Any]]:
-    rows = session.scalars(
-        select(Ticket)
-        .where(Ticket.finding_id == finding.id, Ticket.status != SKIPPED)
-        .order_by(Ticket.created_at)
-    ).all()
-    named = {d.id: d for d in session.scalars(select(Destination))}
+def for_finding(tx: db.Transaction, finding: Finding) -> list[dict[str, Any]]:
+    rows = list(
+        Ticket.objects.filter(finding_id=finding.id).exclude(status=SKIPPED).order_by("created_at")
+    )
+    named = {d.id: d for d in Destination.objects.all()}
     return [to_dict(t, named.get(t.destination_id)) for t in rows]
 
 
 def listing(
-    session: Session, *, desk: str | None = None, status: str | None = None, limit: int = 500
+    tx: db.Transaction, *, desk: str | None = None, status: str | None = None, limit: int = 500
 ) -> list[dict[str, Any]]:
-    named = {d.id: d for d in session.scalars(select(Destination))}
-    query = select(Ticket).where(Ticket.status != SKIPPED).order_by(Ticket.created_at.desc())
+    named = {d.id: d for d in Destination.objects.all()}
+    rows = Ticket.objects.exclude(status=SKIPPED).order_by("-created_at")
     if desk:
-        ids_ = [i for i, d in named.items() if d.name == desk or i == desk]
-        query = query.where(Ticket.destination_id.in_(ids_))
+        rows = rows.filter(destination_id__in=[i for i, d in named.items() if desk in (d.name, i)])
     if status:
-        query = query.where(Ticket.status == status)
-    return [to_dict(t, named.get(t.destination_id)) for t in session.scalars(query.limit(limit))]
+        rows = rows.filter(status=status)
+    return [to_dict(t, named.get(t.destination_id)) for t in rows[:limit]]
 
 
-def counts(session: Session) -> dict[str, dict[str, int]]:
+def counts(tx: db.Transaction) -> dict[str, dict[str, int]]:
     """By desk: its tickets AgentGov keeps in step, those waiting to open, those it gave up
     opening, and those whose last try failed."""
     out: dict[str, dict[str, int]] = {}
-    for t in session.scalars(select(Ticket).where(Ticket.status.in_((PENDING, OPEN, FAILED)))):
+    for t in Ticket.objects.filter(status__in=(PENDING, OPEN, FAILED)):
         row = out.setdefault(t.destination_id, {"open": 0, "pending": 0, "failed": 0, "erring": 0})
         row[t.status] += 1
         if t.last_error:

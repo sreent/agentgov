@@ -18,13 +18,10 @@ import posixpath
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.models import BLOCKED, MODEL_PROVIDER_KINDS, Agent, ModelProvider
+from agentgov.db.models import BLOCKED, MODEL_PROVIDER_KINDS, Agent, ModelProvider
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
@@ -34,17 +31,18 @@ KEY_DIR = "/model-keys"
 FIELDS = ("kind", "description", "base_url", "key_file", "trust_level", "prices", "labels")
 
 
-def get(session: Session, ref: str) -> ModelProvider:
-    provider = session.get(ModelProvider, ref) or session.scalar(
-        select(ModelProvider).where(ModelProvider.name == ref)
+def get(tx: db.Transaction, ref: str) -> ModelProvider:
+    provider = (
+        ModelProvider.objects.filter(pk=ref).first()
+        or ModelProvider.objects.filter(name=ref).first()
     )
     if provider is None:
         raise NotFound(f"model provider {ref!r} not found")
     return provider
 
 
-def list_all(session: Session) -> list[ModelProvider]:
-    return list(session.scalars(select(ModelProvider).order_by(ModelProvider.name)))
+def list_all(tx: db.Transaction) -> list[ModelProvider]:
+    return list(ModelProvider.objects.order_by("name"))
 
 
 def key_file(provider: ModelProvider) -> str:
@@ -144,10 +142,10 @@ def _apply(
 
 
 def create(
-    session: Session, data: dict[str, Any], *, actor: str, settings: Settings | None = None
+    tx: db.Transaction, data: dict[str, Any], *, actor: str, settings: Settings | None = None
 ) -> ModelProvider:
     name = validation.slug(data.get("name"), "name")
-    if session.scalar(select(ModelProvider).where(ModelProvider.name == name)):
+    if ModelProvider.objects.filter(name=name).exists():
         raise Conflict(f"model provider {name!r} already exists")
     if "kind" not in data:
         raise ValidationError(f"kind is required: one of {', '.join(MODEL_PROVIDER_KINDS)}")
@@ -161,21 +159,20 @@ def create(
         created_by=actor,
     )
     _apply(provider, data, settings)
-    session.add(provider)
-    session.flush()
+    provider.save(force_insert=True)
     ledger.append(
-        session,
+        tx,
         type="model_provider.registered",
         actor=actor,
         resource=f"model-provider/{name}",
         details={"kind": provider.kind, "trust_level": provider.trust_level},
     )
-    mark_changed(session, "toolservers")  # the gateway's routes and OPA's data
+    mark_changed(tx, "toolservers")  # the gateway's routes and OPA's data
     return provider
 
 
 def update(
-    session: Session,
+    tx: db.Transaction,
     provider: ModelProvider,
     data: dict[str, Any],
     *,
@@ -183,54 +180,56 @@ def update(
     version: int | None = None,
     settings: Settings | None = None,
 ) -> list[str]:
-    start_edit(session, provider, version, f"model provider {provider.name}")
+    start_edit(tx, provider, version, f"model provider {provider.name}")
     changed = _apply(provider, data, settings)
     if changed:
         edited(provider)
+        provider.save()
         ledger.append(
-            session,
+            tx,
             type="model_provider.updated",
             actor=actor,
             resource=f"model-provider/{provider.name}",
             details={**{k: getattr(provider, k) for k in changed}, "changes": changes(provider)},
         )
-        mark_changed(session, "toolservers")
+        mark_changed(tx, "toolservers")
     return changed
 
 
 def set_status(
-    session: Session, provider: ModelProvider, action: str, *, actor: str
+    tx: db.Transaction, provider: ModelProvider, action: str, *, actor: str
 ) -> ModelProvider:
     if action not in ("block", "unblock"):
         raise ValidationError(f"unknown action {action!r}")
-    lock(session, provider)
+    lock(tx, provider)
     if action == "unblock" and provider.status != BLOCKED:
         raise InvalidTransition("model provider is not blocked")
     if action == "block" and provider.status == BLOCKED:
         raise InvalidTransition("model provider is already blocked")
     previous = provider.status
     provider.status = BLOCKED if action == "block" else APPROVED
+    provider.save()
     ledger.append(
-        session,
+        tx,
         type=f"model_provider.{action}",
         actor=actor,
         resource=f"model-provider/{provider.name}",
         severity="warning" if action == "block" else "info",
         details={"from": previous, "to": provider.status},
     )
-    mark_changed(session, "toolservers")
+    mark_changed(tx, "toolservers")
     return provider
 
 
-def delete(session: Session, provider: ModelProvider, *, actor: str) -> None:
+def delete(tx: db.Transaction, provider: ModelProvider, *, actor: str) -> None:
     ledger.append(
-        session,
+        tx,
         type="model_provider.deleted",
         actor=actor,
         resource=f"model-provider/{provider.name}",
     )
-    session.delete(provider)
-    mark_changed(session, "toolservers")
+    provider.delete()
+    mark_changed(tx, "toolservers")
 
 
 def to_dict(provider: ModelProvider) -> dict[str, Any]:

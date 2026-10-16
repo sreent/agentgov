@@ -19,9 +19,9 @@ from tests.conftest import requires_opa
 
 
 def _seed(rt, settings) -> None:
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         blueprints.create(
-            s,
+            tx,
             {
                 "name": "support",
                 "labels": {"pii-access": "true"},
@@ -30,13 +30,13 @@ def _seed(rt, settings) -> None:
             actor="t",
         )
         toolservers.create(
-            s,
+            tx,
             {"name": "crm", "url": "http://crm/mcp", "trust_level": "verified"},
             actor="t",
             approve=True,
         )
         agents.register(
-            s,
+            tx,
             settings,
             {"name": "bot", "blueprint": "support", "sponsors": ["a"]},
             actor="t",
@@ -76,15 +76,15 @@ def test_etag_is_stable_and_tracks_changes(rt, settings) -> None:
     first = rt.bundles.current()
     rt.bundles.notify()
     assert rt.bundles.current().etag == first.etag  # rebuilt, same content
-    with rt.db.session() as s:
-        agents.transition(s, settings, agents.get(s, "bot"), "block", actor="t")
+    with rt.db.transaction() as tx:
+        agents.transition(tx, settings, agents.get(tx, "bot"), "block", actor="t")
     assert rt.bundles.current().etag != first.etag  # commit hook marked it stale
 
 
 def test_deleted_agents_are_not_published(rt, settings) -> None:
     _seed(rt, settings)
-    with rt.db.session() as s:
-        agents.transition(s, settings, agents.get(s, "bot"), "delete", actor="t")
+    with rt.db.transaction() as tx:
+        agents.transition(tx, settings, agents.get(tx, "bot"), "delete", actor="t")
     data = json.loads(_files(rt.bundles.current().body)["registry/data.json"])
     assert data["agents"] == {}
 
@@ -101,8 +101,8 @@ def test_long_poll_wakes_on_change(rt, settings) -> None:
         await asyncio.sleep(0.2)
 
         def block() -> None:
-            with rt.db.session() as s:
-                agents.transition(s, settings, agents.get(s, "bot"), "block", actor="t")
+            with rt.db.transaction() as tx:
+                agents.transition(tx, settings, agents.get(tx, "bot"), "block", actor="t")
 
         await asyncio.to_thread(block)
         result = await waiter
@@ -242,15 +242,15 @@ def test_opa_logs_only_agents_own_decisions(
 def test_who_agents_act_for_reaches_policy(rt, settings, tmp_path: Path) -> None:
     """Blueprints' acts_for and people_groups, and the person in organisation policies."""
     _seed(rt, settings)
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         blueprints.update(
-            s,
-            blueprints.get(s, "support"),
+            tx,
+            blueprints.get(tx, "support"),
             {"acts_for": "people", "people_groups": ["support"]},
             actor="t",
         )
         policies.create(
-            s,
+            tx,
             {
                 "name": "no-deletes-for-contractors",
                 "rego": "package agentgov.custom.no_deletes_for_contractors\n\n"
@@ -292,8 +292,8 @@ def test_custom_policy_is_validated_and_shipped(rt, settings) -> None:
         'deny contains "no deletes" if {\n  input.phase == "request"\n'
         '  startswith(input.resource.name, "delete_")\n}\n'
     )
-    with rt.db.session() as s:
-        policies.create(s, {"name": "weekend", "rego": source}, actor="t")
+    with rt.db.transaction() as tx:
+        policies.create(tx, {"name": "weekend", "rego": source}, actor="t")
     assert "agentgov/custom/weekend.rego" in _files(rt.bundles.current().body)
 
 
@@ -319,14 +319,14 @@ def test_custom_policy_is_validated_and_shipped(rt, settings) -> None:
 )
 def test_broken_custom_policies_are_rejected(rt, settings, source, message) -> None:
     _seed(rt, settings)
-    with rt.db.session() as s, pytest.raises(ValidationError, match=message):
-        policies.create(s, {"name": "bad", "rego": source}, actor="t")
+    with rt.db.transaction() as tx, pytest.raises(ValidationError, match=message):
+        policies.create(tx, {"name": "bad", "rego": source}, actor="t")
 
 
 def test_policies_need_the_opa_binary(rt, monkeypatch) -> None:
     monkeypatch.setattr(rego, "opa_binary", lambda: None)
-    with rt.db.session() as s, pytest.raises(ValidationError, match="opa binary"):
-        policies.create(s, {"name": "x", "rego": "package agentgov.custom.x\n"}, actor="t")
+    with rt.db.transaction() as tx, pytest.raises(ValidationError, match="opa binary"):
+        policies.create(tx, {"name": "x", "rego": "package agentgov.custom.x\n"}, actor="t")
 
 
 @requires_opa

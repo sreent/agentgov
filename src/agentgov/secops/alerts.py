@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentgov.models import LedgerEntry
+from agentgov.db.models import LedgerEntry
 from agentgov.registry.destinations import BLOCKS, SEVERITIES
 from agentgov.secops.formats import Alert
 

@@ -13,11 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
-from agentgov.models import PlatformAgent
+from agentgov import db, ids, ledger
+from agentgov.db.models import PlatformAgent
 from agentgov.platforms import connections
 from agentgov.registry import platforms
 
@@ -56,8 +53,8 @@ def allowed_in(policy: dict[str, Any] | None) -> list[str] | None:
     return sorted(c for c in found if c)
 
 
-def approved(session: Session) -> list[str]:
-    return sorted(c.connector_id for c in platforms.approved_connectors(session))
+def approved(tx: db.Transaction) -> list[str]:
+    return sorted(c.connector_id for c in platforms.approved_connectors(tx))
 
 
 def policy_body(connectors: list[str], existing: dict[str, Any] | None) -> dict[str, Any]:
@@ -85,12 +82,10 @@ def policy_body(connectors: list[str], existing: dict[str, Any] | None) -> dict[
     }
 
 
-def studio_environments(session: Session) -> dict[str, int]:
+def studio_environments(tx: db.Transaction) -> dict[str, int]:
     """Environments with Copilot Studio agents, and how many agents each holds."""
     counts: dict[str, int] = {}
-    for record in session.scalars(
-        select(PlatformAgent).where(PlatformAgent.source == "copilot-studio")
-    ):
+    for record in PlatformAgent.objects.filter(source="copilot-studio"):
         environment = (record.data or {}).get("environment_id")
         if environment:
             counts[str(environment)] = counts.get(str(environment), 0) + 1
@@ -98,7 +93,7 @@ def studio_environments(session: Session) -> dict[str, int]:
 
 
 def preview(
-    session: Session,
+    tx: db.Transaction,
     policies: list[dict[str, Any]],
     targets: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -107,7 +102,7 @@ def preview(
     ``targets`` are environment groups and environments, each with the IDs of the
     policies applied to it (``assigned``).
     """
-    allowlist = approved(session)
+    allowlist = approved(tx)
     mine = ours(policies)
     mine_id = str(mine["id"]) if mine is not None else None
     names = {str(p.get("id")): p.get("name") for p in policies}
@@ -127,9 +122,7 @@ def preview(
         )
     # Agents that use connectors outside the allowlist lose them wherever it applies.
     losing = []
-    for record in session.scalars(
-        select(PlatformAgent).where(PlatformAgent.source == "copilot-studio")
-    ):
+    for record in PlatformAgent.objects.filter(source="copilot-studio"):
         data = record.data or {}
         used = sorted({c["connector_id"] for c in data.get("connectors") or []})
         lost = [c for c in used if c not in allowlist]
@@ -156,7 +149,7 @@ def preview(
 
 
 def record_push(
-    session: Session,
+    tx: db.Transaction,
     *,
     policy_id: str,
     connectors: list[str],
@@ -164,7 +157,7 @@ def record_push(
     actor: str,
 ) -> None:
     connections.save_state(
-        session,
+        tx,
         STATE_KEY,
         {
             "policy_id": policy_id,
@@ -175,7 +168,7 @@ def record_push(
         },
     )
     ledger.append(
-        session,
+        tx,
         type="connector_policy.pushed",
         actor=actor,
         severity="warning",
@@ -183,16 +176,16 @@ def record_push(
         details={"policy": POLICY_NAME, "connectors": connectors, "targets": targets},
     )
     platforms.set_sync(
-        session,
+        tx,
         STATE_KEY,
         ok=True,
         counts={"connectors": len(connectors), "targets": len(targets)},
     )
 
 
-def pushed(session: Session) -> dict[str, Any]:
+def pushed(tx: db.Transaction) -> dict[str, Any]:
     """The last push, and whether the allowlist has changed since."""
-    state = connections.load_state(session, STATE_KEY)
+    state = connections.load_state(tx, STATE_KEY)
     if not state:
         return {}
-    return {**state, "out_of_date": state.get("connectors") != approved(session)}
+    return {**state, "out_of_date": state.get("connectors") != approved(tx)}

@@ -32,13 +32,11 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from sqlalchemy import delete
-from sqlalchemy.orm import Session
 
-from agentgov import ids
+from agentgov import db, ids
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.models import MicrosoftGrant
+from agentgov.db.models import MicrosoftGrant
 
 POWER_PLATFORM = "power-platform"
 GRAPH = "graph"
@@ -92,41 +90,39 @@ class Delegations:
 
     # -- grants ----------------------------------------------------------------------
     def remember(self, session_id: str, refresh_token: str, expires_at: datetime) -> None:
-        with self.db.session() as s:
+        with self.db.transaction():
             now = ids.utcnow()
-            s.execute(delete(MicrosoftGrant).where(MicrosoftGrant.expires_at <= now))
-            row = s.get(MicrosoftGrant, session_id)
+            MicrosoftGrant.objects.filter(expires_at__lte=now).delete()
+            row = MicrosoftGrant.objects.filter(pk=session_id).first()
             if row is None:
                 row = MicrosoftGrant(session_id=session_id)
-                s.add(row)
             row.sealed = self._seal(session_id, refresh_token)
             row.expires_at, row.updated_at = expires_at, now
+            row.save()
         self._forget_access(session_id)
 
     def move(self, key: str, session_id: str, expires_at: datetime) -> None:
         """Give the sign-in held under ``key`` (a CLI sign-in in flight) to a session."""
-        with self.db.session() as s:
-            row = s.get(MicrosoftGrant, key, with_for_update=True)
+        with self.db.transaction():
+            row = MicrosoftGrant.objects.select_for_update().filter(pk=key).first()
             if row is None:
                 return
             token = self._open(key, row.sealed)
-            s.delete(row)
+            row.delete()
             if token is not None:
-                s.add(
-                    MicrosoftGrant(
-                        session_id=session_id,
-                        sealed=self._seal(session_id, token),
-                        expires_at=expires_at,
-                        updated_at=ids.utcnow(),
-                    )
+                MicrosoftGrant.objects.create(
+                    session_id=session_id,
+                    sealed=self._seal(session_id, token),
+                    expires_at=expires_at,
+                    updated_at=ids.utcnow(),
                 )
         self._forget_access(key)
 
     def forget(self, *session_ids: str) -> None:
         if not session_ids:
             return
-        with self.db.session() as s:
-            s.execute(delete(MicrosoftGrant).where(MicrosoftGrant.session_id.in_(session_ids)))
+        with self.db.transaction():
+            MicrosoftGrant.objects.filter(session_id__in=session_ids).delete()
         self._forget_access(*session_ids)
 
     def _forget_access(self, *session_ids: str) -> None:
@@ -134,20 +130,24 @@ class Delegations:
             for key in [k for k in self._access if k[0] in session_ids]:
                 del self._access[key]
 
-    def has(self, session_id: str | None, *, session: Session | None = None) -> bool:
-        """Whether AgentGov can act as this session's administrator (in ``session``, a
+    def has(self, session_id: str | None, *, tx: db.Transaction | None = None) -> bool:
+        """Whether AgentGov can act as this session's administrator (in ``tx``, a
         transaction the caller has open, if given)."""
         if not session_id:
             return False
-        with nullcontext(session) if session is not None else self.db.session() as s:
-            row = s.get(MicrosoftGrant, session_id)
-            return row is not None and row.expires_at > ids.utcnow()
+        with nullcontext() if tx is not None else self.db.transaction():
+            expires = (
+                MicrosoftGrant.objects.filter(pk=session_id)
+                .values_list("expires_at", flat=True)
+                .first()
+            )
+            return expires is not None and expires > ids.utcnow()
 
     def access_token(self, session_id: str | None, api: str) -> str:
         """An access token for ``api`` (``power-platform`` or ``graph``) as this admin."""
-        with self.db.session() as s:
+        with self.db.transaction():
             # Locked while it is refreshed: two replicas don't spend the same refresh token.
-            row = s.get(MicrosoftGrant, session_id or "", with_for_update=True)
+            row = MicrosoftGrant.objects.select_for_update().filter(pk=session_id or "").first()
             if row is None or row.expires_at <= ids.utcnow():
                 raise DelegationError(NO_SIGN_IN)
             key = (row.session_id, api)
@@ -166,6 +166,7 @@ class Delegations:
             if body.get("refresh_token"):
                 row.sealed = self._seal(row.session_id, body["refresh_token"])
                 row.updated_at = ids.utcnow()
+                row.save()
             lifetime = max(int(body.get("expires_in", 3600)) - 120, 60)
             with self._lock:
                 self._access[key] = (body["access_token"], time.monotonic() + lifetime)

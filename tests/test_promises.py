@@ -26,12 +26,10 @@ import jwt
 import pytest
 import yaml
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import delete, select, update
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.gateway import render, to_yaml
-from agentgov.models import (
+from agentgov.db.models import (
     Agent,
     IdentityIssuer,
     LedgerCheckpoint,
@@ -39,6 +37,7 @@ from agentgov.models import (
     LedgerHead,
     ModelProvider,
 )
+from agentgov.gateway import render, to_yaml
 from agentgov.registry import agents
 from tests.conftest import requires_opa
 from tests.test_gateway import IMAGE, _docker_ready
@@ -321,8 +320,8 @@ def test_a_blocked_agent_is_refused_within_seconds(rt, settings, tmp_path: Path)
         started = loop.time()
 
         def block() -> None:
-            with rt.db.session() as s:
-                agents.transition(s, settings, agents.get(s, "bot"), "block", actor="secops")
+            with rt.db.transaction() as tx:
+                agents.transition(tx, settings, agents.get(tx, "bot"), "block", actor="secops")
 
         await asyncio.to_thread(block)
         assert await waiting is not None
@@ -351,30 +350,30 @@ def test_usage_comes_from_the_gateway_alone() -> None:
     assert not any("4319" in str(p) for p in compose["services"]["otel-collector"]["ports"])
 
 
-def _edited(s: Any) -> None:
-    s.execute(update(LedgerEntry).where(LedgerEntry.seq == 3).values(reason="edited later"))
+def _edited(tx: Any) -> None:
+    LedgerEntry.objects.filter(seq=3).update(reason="edited later")
 
 
-def _removed(s: Any) -> None:
-    s.execute(delete(LedgerEntry).where(LedgerEntry.seq == 3))
+def _removed(tx: Any) -> None:
+    LedgerEntry.objects.filter(seq=3).delete()
 
 
-def _removed_behind_a_made_up_archive(s: Any) -> None:
+def _removed_behind_a_made_up_archive(tx: Any) -> None:
     # As archiving leaves the chain's start, without archiving.
-    s.get(LedgerCheckpoint, 5).pruned_at = ids.utcnow()
-    s.execute(delete(LedgerEntry).where(LedgerEntry.seq <= 5))
+    LedgerCheckpoint.objects.filter(seq=5).update(pruned_at=ids.utcnow())
+    LedgerEntry.objects.filter(seq__lte=5).delete()
 
 
-def _cut_back_past_a_checkpoint(s: Any) -> None:
-    kept = s.get(LedgerEntry, 7)
-    s.execute(delete(LedgerEntry).where(LedgerEntry.seq > 7))
-    s.execute(update(LedgerHead).where(LedgerHead.id == 1).values(last_seq=7, last_hash=kept.hash))
+def _cut_back_past_a_checkpoint(tx: Any) -> None:
+    kept = LedgerEntry.objects.get(seq=7)
+    LedgerEntry.objects.filter(seq__gt=7).delete()
+    LedgerHead.objects.filter(id=1).update(last_seq=7, last_hash=kept.hash)
 
 
-def _rewritten_with_its_hashes_worked_out_again(s: Any) -> None:
+def _rewritten_with_its_hashes_worked_out_again(tx: Any) -> None:
     from tests.test_ledger import _rewrite
 
-    _rewrite(s, 2, "a denial, now an allow")
+    _rewrite(tx, 2, "a denial, now an allow")
 
 
 @pytest.mark.parametrize(
@@ -397,17 +396,17 @@ def test_a_change_to_the_ledgers_history_is_found(rt, change: Any) -> None:
     from tests.test_ledger import _append
 
     _append(rt, 5)
-    with rt.db.session() as s:
-        ledger.checkpoint(s)
+    with rt.db.transaction() as tx:
+        ledger.checkpoint(tx)
     _append(rt, 5)
-    with rt.db.session() as s:
-        ledger.checkpoint(s)
+    with rt.db.transaction() as tx:
+        ledger.checkpoint(tx)
     _append(rt, 2)
-    with rt.db.session() as s:
-        assert ledger.verify(s)["valid"] is True
-        change(s)
-    with rt.db.session() as s:
-        assert ledger.verify(s)["valid"] is False
+    with rt.db.transaction() as tx:
+        assert ledger.verify(tx)["valid"] is True
+        change(tx)
+    with rt.db.transaction() as tx:
+        assert ledger.verify(tx)["valid"] is False
 
 
 def test_a_row_slipped_in_past_the_ledgers_head_is_found(rt) -> None:
@@ -417,7 +416,7 @@ def test_a_row_slipped_in_past_the_ledgers_head_is_found(rt) -> None:
 
     _append(rt, 3)
     seq = past_the_head(rt)
-    with rt.db.session() as s:
-        assert ledger.verify(s)["valid"] is False
-        listed = s.scalars(select(LedgerEntry.seq).where(ledger.in_chain())).all()
+    with rt.db.transaction() as tx:
+        assert ledger.verify(tx)["valid"] is False
+        listed = list(ledger.chain().values_list("seq", flat=True))
     assert seq not in listed

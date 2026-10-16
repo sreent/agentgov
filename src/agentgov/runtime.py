@@ -23,12 +23,12 @@ from agentgov import (
 from agentgov.config import Settings
 from agentgov.coordination import Coordinator
 from agentgov.db import Database
+from agentgov.db.models import Agent, LedgerCheckpoint
 from agentgov.gateway import GatewayConfigWriter
 from agentgov.identity import issuer_keys
 from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
-from agentgov.models import Agent, LedgerCheckpoint
 from agentgov.notify import Notifier
 from agentgov.opa.bundle import BundleServer
 from agentgov.opa.signing import Signer
@@ -299,16 +299,16 @@ class Runtime:
     # -- lifecycle -----------------------------------------------------------
     def init_db(self) -> None:
         if self.settings.database_auto_migrate:
-            migrations.upgrade(self.db.engine)
+            migrations.upgrade(self.db)
         else:
-            migrations.check(self.db.engine)
+            migrations.check(self.db)
         # Replicas starting together: one at a time.
         with self.coordination.job("startup"):
-            with self.db.session() as session:
-                ledger.ensure_head(session)
-            with self.db.session() as session:
-                features.apply_deployment_preset(session, self.settings)
-                features.apply_pins(session, self.settings)
+            with self.db.transaction() as tx:
+                ledger.ensure_head(tx)
+            with self.db.transaction() as tx:
+                features.apply_deployment_preset(tx, self.settings)
+                features.apply_pins(tx, self.settings)
         # A database restored from an older backup shows before anything is written to it.
         self.check_witness()
 
@@ -324,8 +324,8 @@ class Runtime:
                 exclusive=lambda: self.coordination.job("identity"),
             )
         if self._classifier_worker is not None:
-            with self.db.session() as session:
-                instructions.queue_unclassified(session)
+            with self.db.transaction() as tx:
+                instructions.queue_unclassified(tx)
         # Every scheduled job, so that none is built and left idle.
         for worker in self._workers():
             worker.start()
@@ -399,9 +399,9 @@ class Runtime:
         for a run already going, on this replica or another, before JobBusy (None: as long
         as it takes, as the scheduled runs do)."""
         with self.coordination.job("posture-scan", wait=wait):
-            with self.db.session() as session:
-                scanning = features.is_on(session, "posture-checks")
-                urls = reachability.targets(session) if scanning else None
+            with self.db.transaction() as tx:
+                scanning = features.is_on(tx, "posture-checks")
+                urls = reachability.targets(tx) if scanning else None
             # Calls around the gateway, when the feature says "test": over the network, so
             # outside any transaction (None: not tested this time). Agents on this machine
             # are called only where people reach the control plane on it alone.
@@ -410,8 +410,8 @@ class Runtime:
                 if urls is not None
                 else None
             )
-            with self.db.session() as session:
-                scanned = posture.scan(session, self.settings, tested=tested) if scanning else None
+            with self.db.transaction() as tx:
+                scanned = posture.scan(tx, self.settings, tested=tested) if scanning else None
             ruled = self.run_rules(wait=wait)
         return None if scanned is None else {**scanned, "rules": ruled}
 
@@ -444,14 +444,14 @@ class Runtime:
     def recheck(self, finding_id: str, *, actor: str) -> dict[str, Any]:
         """Check an open finding again now, as far as AgentGov can, because someone says
         they fixed it: whether it is gone, how it was checked, and what else to know."""
-        with self.db.session() as session:
-            finding = findings.get(session, finding_id)
+        with self.db.transaction() as tx:
+            finding = findings.get(tx, finding_id)
             if finding.status != "open":
                 raise InvalidTransition(
                     f"finding is {finding.status}: only open findings are checked again"
                 )
             agent_id = finding.agent_id
-            agent = session.get(Agent, agent_id) if agent_id else None
+            agent = Agent.objects.filter(pk=agent_id).first() if agent_id else None
             source = (agent.source or "").removeprefix("platform:") if agent else None
             source = source if agent is not None and agent.on_platform else None
             how, note = self._how_checked(finding.type, source)
@@ -471,19 +471,17 @@ class Runtime:
             if "error" in outcome:
                 raise PlatformError(outcome["error"])
         else:
-            with self.db.session() as session:
-                agent = session.get(Agent, agent_id)
+            with self.db.transaction() as tx:
+                agent = Agent.objects.filter(pk=agent_id).first()
                 if how == "risk":
-                    agents_svc.refresh_risk(session, self.settings, agent)
+                    agents_svc.refresh_risk(tx, self.settings, agent)
                 else:
-                    instructions.rescan(
-                        session, agent, actor=actor, classify=self.guardian is not None
-                    )
-        with self.db.session() as session:
-            finding = findings.get(session, finding_id)
+                    instructions.rescan(tx, agent, actor=actor, classify=self.guardian is not None)
+        with self.db.transaction() as tx:
+            finding = findings.get(tx, finding_id)
             fixed = finding.status != "open"
             findings.record(
-                session, finding, "fix_claimed", actor, severity="info", checked=how, fixed=fixed
+                tx, finding, "fix_claimed", actor, severity="info", checked=how, fixed=fixed
             )
             return {
                 "fixed": fixed,
@@ -494,8 +492,8 @@ class Runtime:
 
     def run_rules(self, *, wait: float | None = None) -> dict[str, Any]:
         """A round of the management rules (docs/management-rules.md)."""
-        with self.coordination.job("rules", wait=wait), self.db.session() as session:
-            return rules.evaluate(session, self.settings)
+        with self.coordination.job("rules", wait=wait), self.db.transaction() as tx:
+            return rules.evaluate(tx, self.settings)
 
     def run_retention(self, *, wait: float | None = None) -> dict[str, Any]:
         """Purge deleted agents past their retention, keep a ledger checkpoint when one is
@@ -503,17 +501,17 @@ class Runtime:
         operational records (docs/evidence.md)."""
         with self.coordination.job("retention", wait=wait):
             out: dict[str, Any] = {"purged": self.purge_deleted_agents()}
-            with self.db.session() as session:
-                point = retention.checkpoint_if_due(session, self.settings)
+            with self.db.transaction() as tx:
+                point = retention.checkpoint_if_due(tx, self.settings)
                 out["checkpoint"] = point.seq if point is not None else None
             out["timestamped"] = self.stamp_checkpoints()
             out["logged"] = self.log_checkpoints()
-            with self.db.session() as session:
-                out["archived"] = retention.archive(session, self.settings)
+            with self.db.transaction() as tx:
+                out["archived"] = retention.archive(tx, self.settings)
             checked = self.check_witness()
             out["witness"] = checked.state if checked is not None else None
-            with self.db.session() as session:
-                out["pruned"] = retention.prune_records(session, self.settings)
+            with self.db.transaction() as tx:
+                out["pruned"] = retention.prune_records(tx, self.settings)
             return out
 
     def check_witness(self) -> witness.Status | None:
@@ -524,15 +522,15 @@ class Runtime:
         if path is None:
             return None
         with self.coordination.job("witness"):
-            with self.db.session() as session:
-                status = witness.compare(session, path)
+            with self.db.transaction() as tx:
+                status = witness.compare(tx, path)
                 if status.rewound:
                     if status.restored_at is None:
                         # Noticed now: where the database's ledger ended stays the start of
                         # the gap, whatever is written after.
                         status.restored_at = status.head_seq
                     findings.raise_finding(
-                        session,
+                        tx,
                         type=witness.FINDING,
                         severity="critical",
                         subject="ledger",
@@ -563,12 +561,12 @@ class Runtime:
         if path is None:
             raise Conflict("no file keeps the ledger's head (AGENTGOV_LEDGER_WITNESS_FILE)")
         with self.coordination.job("witness"):
-            with self.db.session() as session:
-                status = witness.compare(session, path)
+            with self.db.transaction() as tx:
+                status = witness.compare(tx, path)
                 if not status.rewound:
                     raise Conflict("the ledger has every entry AgentGov wrote: nothing to accept")
                 ledger.append(
-                    session,
+                    tx,
                     type="ledger.rewound",
                     actor=actor,
                     severity="critical",
@@ -586,27 +584,27 @@ class Runtime:
                         ),
                     },
                 )
-            with self.db.session() as session:
-                findings.resolve_key(session, f"{witness.FINDING}:ledger", actor=actor)
-                seq, hash_ = witness.head(session)
-                ts = witness.written(session, seq)
+            with self.db.transaction() as tx:
+                findings.resolve_key(tx, f"{witness.FINDING}:ledger", actor=actor)
+                seq, hash_ = witness.head(tx)
+                ts = witness.written(tx, seq)
             witness.write(path, seq, hash_, ts)
-            with self.db.session() as session:
-                return witness.compare(session, path)
+            with self.db.transaction() as tx:
+                return witness.compare(tx, path)
 
     def make_checkpoint(self, *, wait: float | None = None) -> dict[str, Any] | None:
         """A checkpoint at the chain's head now (None for an empty ledger), time-stamped
         when an authority is set."""
         with self.coordination.job("retention", wait=wait):
-            with self.db.session() as session:
-                point = ledger.checkpoint(session)
+            with self.db.transaction() as tx:
+                point = ledger.checkpoint(tx)
                 if point is None:
                     return None
                 seq = point.seq
             self.stamp_checkpoints()
             self.log_checkpoints()
-            with self.db.session() as session:
-                return ledger.checkpoint_dict(session.get(LedgerCheckpoint, seq))
+            with self.db.transaction() as tx:
+                return ledger.checkpoint_dict(LedgerCheckpoint.objects.get(pk=seq))
 
     def stamp_checkpoints(self) -> int:
         """Have the time-stamping authority sign the checkpoints it hasn't yet; returns how
@@ -618,12 +616,12 @@ class Runtime:
             return 0
         trust = timestamping.trust(self.settings.ledger_tsa_ca_file)
         with self.coordination.job("retention"):
-            with self.db.session() as session:
-                todo = retention.unstamped(session)
+            with self.db.transaction() as tx:
+                todo = retention.unstamped(tx)
                 if trust.error:
                     for seq, _ in todo:
                         error = f"AGENTGOV_LEDGER_TSA_CA_FILE: {trust.error}"
-                        retention.save_stamp(session, seq, url, error=error)
+                        retention.save_stamp(tx, seq, url, error=error)
                     return 0
             done = 0
             for seq, hash_ in todo:  # the network calls happen outside any transaction
@@ -632,11 +630,11 @@ class Runtime:
                         url, ledger.statement(seq, hash_), http=self._tsa_http, roots=trust.roots
                     )
                 except timestamping.TimestampError as exc:
-                    with self.db.session() as session:
-                        retention.save_stamp(session, seq, url, error=str(exc))
+                    with self.db.transaction() as tx:
+                        retention.save_stamp(tx, seq, url, error=str(exc))
                     continue
-                with self.db.session() as session:
-                    retention.save_stamp(session, seq, url, stamp=got)
+                with self.db.transaction() as tx:
+                    retention.save_stamp(tx, seq, url, stamp=got)
                 done += 1
             return done
 
@@ -648,8 +646,8 @@ class Runtime:
         if not url:
             return 0
         with self.coordination.job("retention"):
-            with self.db.session() as session:
-                todo = retention.unlogged(session)
+            with self.db.transaction() as tx:
+                todo = retention.unlogged(tx)
             if not todo:
                 return 0
             try:
@@ -662,9 +660,9 @@ class Runtime:
                     else None
                 )
             except transparency.TransparencyError as exc:
-                with self.db.session() as session:
+                with self.db.transaction() as tx:
                     for seq, _ in todo:
-                        retention.save_log_entry(session, seq, url, error=str(exc))
+                        retention.save_log_entry(tx, seq, url, error=str(exc))
                 return 0
             origin = self.settings.ledger_rekor_origin or transparency.origin_of(url)
             done = 0
@@ -673,8 +671,8 @@ class Runtime:
                 try:
                     entry = transparency.add(url, statement, key, http=self._tlog_http)
                 except transparency.TransparencyError as exc:
-                    with self.db.session() as session:
-                        retention.save_log_entry(session, seq, url, error=str(exc))
+                    with self.db.transaction() as tx:
+                        retention.save_log_entry(tx, seq, url, error=str(exc))
                     continue
                 checked, error = None, None
                 if log_key is not None:
@@ -690,17 +688,17 @@ class Runtime:
                     except transparency.TransparencyError as exc:
                         # The log has the entry: kept, with why its proof doesn't hold.
                         checked, error = False, f"the log's proof doesn't check out: {exc}"
-                with self.db.session() as session:
+                with self.db.transaction() as tx:
                     retention.save_log_entry(
-                        session, seq, url, entry=entry, checked=checked, error=error
+                        tx, seq, url, entry=entry, checked=checked, error=error
                     )
                 done += 1
             return done
 
     def purge_deleted_agents(self) -> list[str]:
         """Purge the agents deleted longer ago than AGENTGOV_SOFT_DELETE_RETENTION_DAYS."""
-        with self.db.session() as session:
-            purged = agents_svc.purge_expired(session, self.settings)
+        with self.db.transaction() as tx:
+            purged = agents_svc.purge_expired(tx, self.settings)
         if purged:
             log.info("purged %d agent(s) deleted over the retention period", len(purged))
         return purged
@@ -711,14 +709,14 @@ class Runtime:
         whose time ran out, resolve threats that haven't happened for a while, and send
         what is due, the day's digests included."""
         with self.coordination.job("issues"):
-            with self.db.session() as session:
-                access = access_packages.check(session, self.settings)
-            with self.db.session() as session:
-                reopened = issues.reopen_accepted(session)
-                stale = findings.close_stale_threats(session, self.settings.threat_finding_days)
-                if not features.is_on(session, "issues"):
+            with self.db.transaction() as tx:
+                access = access_packages.check(tx, self.settings)
+            with self.db.transaction() as tx:
+                reopened = issues.reopen_accepted(tx)
+                stale = findings.close_stale_threats(tx, self.settings.threat_finding_days)
+                if not features.is_on(tx, "issues"):
                     return {"reopened": reopened, "stale_threats": stale, **access}
-                routed = issues.route(session, self.settings)
+                routed = issues.route(tx, self.settings)
             return {
                 "reopened": reopened,
                 "stale_threats": stale,
@@ -737,11 +735,11 @@ class Runtime:
     def refresh_issuer_keys(self, names: list[str] | None = None) -> dict[str, list[str]]:
         """Fetch the signing keys of the identity issuers the gateway trusts (all, or those
         ``names``), outside any transaction, and keep them (agentgov.identity.issuer_keys)."""
-        with self.db.session() as session:
-            wanted = issuer_keys.targets(session, names)
+        with self.db.transaction() as tx:
+            wanted = issuer_keys.targets(tx, names)
         found = issuer_keys.fetch_all(wanted, self.issuer_http)
-        with self.db.session() as session:
-            return issuer_keys.store(session, found)
+        with self.db.transaction() as tx:
+            return issuer_keys.store(tx, found)
 
     def _scheduled_issuer_keys(self) -> None:
         with self.coordination.job("issuer-keys"):
@@ -750,19 +748,19 @@ class Runtime:
     def refresh_developer_mcp(self) -> int:
         """Re-check the MCP servers developers reported against the approved tool servers;
         returns how many findings resolved."""
-        with self.coordination.job("developer-mcp"), self.db.session() as session:
-            if not features.is_on(session, "mcp-discovery"):
+        with self.coordination.job("developer-mcp"), self.db.transaction() as tx:
+            if not features.is_on(tx, "mcp-discovery"):
                 return 0
-            return mcp_sightings.refresh(session, self.settings)
+            return mcp_sightings.refresh(tx, self.settings)
 
     def check_unchecked_instructions(self) -> int:
         """Check instructions that arrived while instruction checks were off."""
-        with self.coordination.job("instruction-checks"), self.db.session() as session:
-            if not features.is_on(session, "instruction-checks"):
+        with self.coordination.job("instruction-checks"), self.db.transaction() as tx:
+            if not features.is_on(tx, "instruction-checks"):
                 return 0
-            checked = instructions.check_unchecked(session, classify=self.guardian is not None)
+            checked = instructions.check_unchecked(tx, classify=self.guardian is not None)
             for agent in checked:
-                agents_svc.refresh_risk(session, self.settings, agent)
+                agents_svc.refresh_risk(tx, self.settings, agent)
             return len(checked)
 
     def sync_microsoft_365(self, *, actor: str | None = None) -> dict[str, int]:
@@ -774,15 +772,15 @@ class Runtime:
             try:
                 packages = self.m365.agents()  # before the transaction: paging can be slow
             except PlatformError as exc:
-                with self.db.session() as session:
+                with self.db.transaction() as tx:
                     platforms.set_sync(
-                        session, "microsoft-365", ok=False, counts={}, message=str(exc), actor=actor
+                        tx, "microsoft-365", ok=False, counts={}, message=str(exc), actor=actor
                     )
                 raise
             # Declarative agents' instructions are in their package details: read those
             # of packages that changed since they were last read, a batch per sync.
-            with self.db.session() as session:
-                checked = platforms.instructions_checked(session)
+            with self.db.transaction() as tx:
+                checked = platforms.instructions_checked(tx)
             found: dict[str, str | None] = {}
             for pkg in packages:
                 package_id = pkg.get("id")
@@ -798,16 +796,16 @@ class Runtime:
                     found[package_id] = declarative_instructions(self.m365.package(package_id))
                 except PlatformError as exc:
                     log.warning("could not read package %s: %s", package_id, exc)
-            with self.db.session() as session, platforms.first_sync(session, "microsoft-365"):
+            with self.db.transaction() as tx, platforms.first_sync(tx, "microsoft-365"):
                 counts = platforms.record_microsoft_365(
-                    session,
+                    tx,
                     packages,
                     include_types=include,
                     actor=actor,
                     agent_instructions=found,
                     classify=self.guardian is not None,
                 )
-                platforms.refresh_risk(session, self.settings)
+                platforms.refresh_risk(tx, self.settings)
                 return counts
 
     # -- AgentGov's app connections to Microsoft -------------------------------------
@@ -831,8 +829,8 @@ class Runtime:
 
     def _sync_microsoft(self, keys: list[str] | None, *, actor: str | None) -> dict[str, Any]:
         assert self.m365 is not None
-        with self.db.session() as session:
-            turned_on = {k for k in connections.APP_CONNECTIONS if features.is_on(session, k)}
+        with self.db.transaction() as tx:
+            turned_on = {k for k in connections.APP_CONNECTIONS if features.is_on(tx, k)}
         results: dict[str, Any] = {k: {"off": True} for k in keys or () if k not in turned_on}
         wanted = [k for k in keys or connections.APP_CONNECTIONS if k in turned_on]
         if not wanted:
@@ -847,14 +845,12 @@ class Runtime:
                 # Someone asked: pick up permissions granted since the token was issued.
                 roles = self.m365.granted(refresh=True)
         except PlatformError as exc:
-            with self.db.session() as session:
+            with self.db.transaction() as tx:
                 for key in wanted:
-                    platforms.set_sync(
-                        session, key, ok=False, counts={}, message=str(exc), actor=actor
-                    )
+                    platforms.set_sync(tx, key, ok=False, counts={}, message=str(exc), actor=actor)
             raise
-        with self.db.session() as session:
-            connections.remember_grants(session, roles)
+        with self.db.transaction() as tx:
+            connections.remember_grants(tx, roles)
         runs = {
             "microsoft-365": self.sync_microsoft_365,
             "entra-agent-id": self.sync_agent_identities,
@@ -897,24 +893,24 @@ class Runtime:
             try:
                 inventory = connector.inventory()  # before the transaction: it can be slow
             except PlatformError as exc:
-                with self.db.session() as session:
-                    platforms.sync_failed(session, source, str(exc), actor=actor)
+                with self.db.transaction() as tx:
+                    platforms.sync_failed(tx, source, str(exc), actor=actor)
                 raise
-            with self.db.session() as session, platforms.first_sync(session, source):
+            with self.db.transaction() as tx, platforms.first_sync(tx, source):
                 counts = platforms.record_inventory(
-                    session,
+                    tx,
                     source,
                     inventory,
                     actor=actor,
                     classify=self.guardian is not None,
                     clean=clean,
                 )
-                platforms.refresh_risk(session, self.settings)
+                platforms.refresh_risk(tx, self.settings)
                 return counts
 
     def _scheduled_platform_sync(self) -> None:
-        with self.db.session() as session:
-            turned_on = [source for source in self.platforms if features.is_on(session, source)]
+        with self.db.transaction() as tx:
+            turned_on = [source for source in self.platforms if features.is_on(tx, source)]
         for source in turned_on:
             try:
                 self.sync_platform(source)
@@ -922,8 +918,8 @@ class Runtime:
                 log.warning("sync of %s failed: %s", source, exc)
 
     def _failed(self, key: str, exc: PlatformError, actor: str | None) -> None:
-        with self.db.session() as session:
-            platforms.set_sync(session, key, ok=False, counts={}, message=str(exc), actor=actor)
+        with self.db.transaction() as tx:
+            platforms.set_sync(tx, key, ok=False, counts={}, message=str(exc), actor=actor)
 
     def sync_agent_identities(self, *, actor: str | None = None) -> dict[str, int]:
         """Read the tenant's Entra agent identities and link them to agents."""
@@ -933,9 +929,9 @@ class Runtime:
         except PlatformError as exc:
             self._failed("entra-agent-id", exc, actor)
             raise
-        with self.db.session() as session, platforms.first_sync(session, "entra-agent-id"):
-            counts = platforms.record_agent_identities(session, identities, actor=actor)
-            platforms.refresh_risk(session, self.settings)
+        with self.db.transaction() as tx, platforms.first_sync(tx, "entra-agent-id"):
+            counts = platforms.record_agent_identities(tx, identities, actor=actor)
+            platforms.refresh_risk(tx, self.settings)
             return counts
 
     def sync_people(
@@ -949,9 +945,9 @@ class Runtime:
         app, or as the signed-in administrator whose access ``token`` is given. One lookup
         at a time, on one replica."""
         with self.coordination.job("people-lookup", wait=JOB_WAIT_SECONDS if actor else None):
-            with self.db.session() as session:
-                wanted = people.wanted(session, limit=limit)
-                emails = people.wanted_emails(session, limit=limit)
+            with self.db.transaction() as tx:
+                wanted = people.wanted(tx, limit=limit)
+                emails = people.wanted_emails(tx, limit=limit)
             found: list[dict[str, Any]] = []
             missing: list[str] = []
             missing_emails: list[str] = []
@@ -975,11 +971,11 @@ class Runtime:
             except PlatformError as exc:
                 self._failed("entra-users", exc, actor)
                 raise
-            with self.db.session() as session:
+            with self.db.transaction() as tx:
                 counts = people.record_lookup(
-                    session, found, missing, missing_emails=missing_emails, actor=actor
+                    tx, found, missing, missing_emails=missing_emails, actor=actor
                 )
-                platforms.set_sync(session, "entra-users", ok=True, counts=counts, actor=actor)
+                platforms.set_sync(tx, "entra-users", ok=True, counts=counts, actor=actor)
                 return counts
 
     def sync_audit(self, *, actor: str | None = None) -> dict[str, Any]:
@@ -996,40 +992,40 @@ class Runtime:
         except PlatformError as exc:
             self._failed("purview-audit", exc, actor)
             raise
-        with self.db.session() as session:
-            platforms.set_sync(session, "purview-audit", ok=True, counts=counts, actor=actor)
+        with self.db.transaction() as tx:
+            platforms.set_sync(tx, "purview-audit", ok=True, counts=counts, actor=actor)
         return counts
 
     def _audit_step(self, kind: str, search: dict[str, Any], counts: dict[str, Any]) -> None:
         assert self.m365 is not None
-        with self.db.session() as session:
-            state = connections.load_state(session, "purview-audit")
+        with self.db.transaction() as tx:
+            state = connections.load_state(tx, "purview-audit")
         pending = state.get(kind)
         if pending:
             status = self.m365.audit_query_status(pending["id"])
             started = datetime.fromisoformat(pending["started"])
             if status == "succeeded":
                 records = self.m365.audit_records(pending["id"])
-                with self.db.session() as session:
+                with self.db.transaction() as tx:
                     if kind == "usage":
-                        got = microsoft_signals.record_usage(session, self.settings, records)
+                        got = microsoft_signals.record_usage(tx, self.settings, records)
                         counts["interactions"] += got["interactions"]
                     else:
-                        got = microsoft_signals.record_maker_events(session, records)
+                        got = microsoft_signals.record_maker_events(tx, records)
                         counts["maker_events"] += got["events"]
-                    state = connections.load_state(session, "purview-audit")
+                    state = connections.load_state(tx, "purview-audit")
                     state[kind], state[f"{kind}_until"] = None, pending["end"]
                     # From when AgentGov knows what happened (management rules about
                     # inactive agents count no further back).
                     state.setdefault(f"{kind}_from", pending["start"])
-                    connections.save_state(session, "purview-audit", state)
+                    connections.save_state(tx, "purview-audit", state)
             elif status in ("failed", "cancelled") or ids.utcnow() - started > AUDIT_GIVE_UP:
                 # Search the same window again: from where the failed search started, which
                 # for the first search isn't a day before now any more.
-                with self.db.session() as session:
-                    state = connections.load_state(session, "purview-audit")
+                with self.db.transaction() as tx:
+                    state = connections.load_state(tx, "purview-audit")
                     state[kind], state[f"{kind}_until"] = None, pending["start"]
-                    connections.save_state(session, "purview-audit", state)
+                    connections.save_state(tx, "purview-audit", state)
             else:
                 counts["searching"] += 1
                 return
@@ -1044,22 +1040,22 @@ class Runtime:
         query_id = self.m365.start_audit_query(
             f"AgentGov {kind} {start_at}", start_at, end_at, **search
         )
-        with self.db.session() as session:
-            state = connections.load_state(session, "purview-audit")
+        with self.db.transaction() as tx:
+            state = connections.load_state(tx, "purview-audit")
             state[kind] = {
                 "id": query_id,
                 "start": start_at,
                 "end": end_at,
                 "started": now.isoformat(),
             }
-            connections.save_state(session, "purview-audit", state)
+            connections.save_state(tx, "purview-audit", state)
         counts["searching"] += 1
 
     def sync_defender(self, *, actor: str | None = None) -> dict[str, int]:
         """Read Defender's alerts about agents since the last run, as findings."""
         assert self.m365 is not None
-        with self.db.session() as session:
-            state = connections.load_state(session, "defender")
+        with self.db.transaction() as tx:
+            state = connections.load_state(tx, "defender")
         since = state.get("since") or _graph_time(ids.utcnow() - DEFENDER_FIRST_WINDOW)
         try:
             alerts = self.m365.alerts_since(since)
@@ -1067,10 +1063,10 @@ class Runtime:
             self._failed("defender", exc, actor)
             raise
         latest = max([str(a.get("lastUpdateDateTime") or "") for a in alerts] + [since])
-        with self.db.session() as session:
-            counts = microsoft_signals.record_alerts(session, self.settings, alerts)
-            connections.save_state(session, "defender", {"since": latest})
-            platforms.set_sync(session, "defender", ok=True, counts=counts, actor=actor)
+        with self.db.transaction() as tx:
+            counts = microsoft_signals.record_alerts(tx, self.settings, alerts)
+            connections.save_state(tx, "defender", {"since": latest})
+            platforms.set_sync(tx, "defender", ok=True, counts=counts, actor=actor)
             return counts
 
     def sync_entra_access_packages(self, *, actor: str | None = None) -> dict[str, int]:
@@ -1086,11 +1082,9 @@ class Runtime:
         except PlatformError as exc:
             self._failed("entra-access-packages", exc, actor)
             raise
-        with self.db.session() as session:
-            counts = entra_access.record(session, packages, assignments)
-            platforms.set_sync(
-                session, "entra-access-packages", ok=True, counts=counts, actor=actor
-            )
+        with self.db.transaction() as tx:
+            counts = entra_access.record(tx, packages, assignments)
+            platforms.set_sync(tx, "entra-access-packages", ok=True, counts=counts, actor=actor)
             return counts
 
     def classify_pending_instructions(self, limit: int = 100) -> int:
@@ -1102,13 +1096,13 @@ class Runtime:
 
     def _classify_pending(self, limit: int) -> int:
         assert self.guardian is not None
-        with self.db.session() as session:
-            if not features.is_on(session, "instruction-checks"):
+        with self.db.transaction() as tx:
+            if not features.is_on(tx, "instruction-checks"):
                 return 0
         done = 0
         while done < limit:
-            with self.db.session() as session:
-                batch = instructions.pending(session, limit=5)
+            with self.db.transaction() as tx:
+                batch = instructions.pending(tx, limit=5)
             if not batch:
                 break
             for row_id, text, digest in batch:
@@ -1122,11 +1116,11 @@ class Runtime:
                 except GuardianError as exc:
                     result, error = {"model": self.guardian.model, "verdicts": {}}, str(exc)
                     log.warning("instruction classifier failed: %s", exc)
-                with self.db.session() as session:
+                with self.db.transaction() as tx:
                     agent = instructions.record_classification(
-                        session, row_id, digest, result, error=error
+                        tx, row_id, digest, result, error=error
                     )
                     if agent is not None:
-                        agents_svc.refresh_risk(session, self.settings, agent)
+                        agents_svc.refresh_risk(tx, self.settings, agent)
                 done += 1
         return done

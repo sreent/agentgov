@@ -98,12 +98,11 @@ from urllib.parse import urlsplit
 
 import httpx
 import yaml
-from sqlalchemy import select
 
 from agentgov.config import Settings
 from agentgov.db import Database
+from agentgov.db.models import PENDING, Agent, IdentityIssuer, ModelProvider, ToolServer
 from agentgov.identity import chains
-from agentgov.models import PENDING, Agent, IdentityIssuer, ModelProvider, ToolServer
 from agentgov.registry import features, identity_issuers, model_providers
 from agentgov.registry.agents import a2a_published
 
@@ -758,22 +757,18 @@ class GatewayConfigWriter:
         self._lock = threading.Lock()
 
     def render_config(self) -> dict[str, Any]:
-        with self.db.session() as session:
-            servers = list(session.scalars(select(ToolServer).order_by(ToolServer.name)))
-            agents = list(
-                session.scalars(
-                    select(Agent).where(Agent.a2a_url.is_not(None)).order_by(Agent.name)
-                ).unique()
-            )
+        with self.db.transaction() as tx:
+            servers = list(ToolServer.objects.order_by("name"))
+            agents = list(Agent.objects.filter(a2a_url__isnull=False).order_by("name"))
             # Ready for the strictest mode any agent has: the gateway can't tell agents
             # apart, the processor and OPA do (docs/features.md#exceptions).
             return render(
                 servers,
                 self.settings,
-                features.strictest_modes(session),
-                model_providers.list_all(session),
+                features.strictest_modes(tx),
+                model_providers.list_all(tx),
                 agents,
-                identity_issuers.at_the_gateway(session),
+                identity_issuers.at_the_gateway(tx),
             )
 
     def render_current(self) -> str:

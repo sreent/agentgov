@@ -12,12 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
 from agentgov.config import Settings
-from agentgov.models import Finding
+from agentgov.db.models import Finding
 from agentgov.registry import features, rules
 from tests.conftest import ADMIN, requires_opa
 from tests.test_platforms import bot, connector
@@ -95,8 +94,8 @@ def agent(client: TestClient, name: str) -> dict[str, Any]:
 
 def run_rules(client: TestClient, now: Any) -> None:
     rt = client.app.state.rt  # type: ignore[attr-defined]
-    with rt.db.session() as s:
-        rules.evaluate(s, rt.settings, now)
+    with rt.db.transaction() as tx:
+        rules.evaluate(tx, rt.settings, now)
 
 
 class TestTheControl:
@@ -190,10 +189,8 @@ class TestRules:
             run_rules(client, now + timedelta(days=8))
             assert agent(client, "sales-helper")["status"] == "discovered"
             rt = client.app.state.rt  # type: ignore[attr-defined]
-            with rt.db.session() as s:
-                [issue] = s.scalars(
-                    select(Finding).where(Finding.type == rules.MATCHED, Finding.status == "open")
-                ).all()
+            with rt.db.transaction():
+                [issue] = Finding.objects.filter(type=rules.MATCHED, status="open")
                 assert "quarantine it there" in issue.description
                 assert "enforce Copilot Studio threat detection" in issue.description
         finally:
