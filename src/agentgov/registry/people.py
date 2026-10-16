@@ -31,8 +31,8 @@ from sqlalchemy.orm import Session
 
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.db.models import IntegrationState, Person
-from agentgov.models import DELETED, DISCOVERED, Agent, PlatformAgent
+from agentgov.db.models import IntegrationState, Person, PlatformAgent
+from agentgov.models import DELETED, DISCOVERED, Agent
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import platforms, teams
 from agentgov.registry.errors import NotFound, RegistryError, ValidationError
@@ -84,13 +84,8 @@ def named(record: PlatformAgent) -> list[dict[str, str]]:
 
 def _records(tx: db.Where) -> list[PlatformAgent]:
     """The platform records of agents in the registry (not deleted)."""
-    return list(
-        db.orm(tx).scalars(
-            select(PlatformAgent)
-            .join(Agent, Agent.id == PlatformAgent.agent_id)
-            .where(Agent.status != DELETED)
-        )
-    )
+    deleted = set(db.orm(tx).scalars(select(Agent.id).where(Agent.status == DELETED)))
+    return [r for r in PlatformAgent.objects.all() if r.agent_id not in deleted]
 
 
 def owners_and_sponsors(tx: db.Where) -> set[str]:
@@ -349,7 +344,7 @@ def for_records(tx: db.Where, records: list[PlatformAgent]) -> dict[str, list[di
 
 def for_agent(tx: db.Where, agent_id: str) -> list[dict[str, Any]]:
     """The people the agent's platforms name, with what AgentGov knows about each."""
-    found = db.orm(tx).scalars(select(PlatformAgent).where(PlatformAgent.agent_id == agent_id))
+    found = PlatformAgent.objects.filter(agent_id=agent_id)
     return for_records(tx, list(found)).get(agent_id, [])
 
 

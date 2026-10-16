@@ -103,7 +103,10 @@ The data layer:
   the people in the directory, where an organisation starts, and what integrations keep
   between runs (`agentgov.registry.features`, `scopes`, `policies`, `teams`, `people`,
   `start`, and the state that connections, threat detection, posture scans and the OPA
-  bundle keep). Blueprints move with agents, which name them. Each read gives
+  bundle keep); what platforms report of their agents and how each sync went, the connector
+  allowlist, access packages and their assignments, and management rules and the agents they
+  match (`agentgov.registry.platforms`, `connector_policy`, `access_packages`, `rules`).
+  Blueprints move with agents, which name them. Each read gives
   another object, where SQLAlchemy's session gave the same one: a row is locked and read
   afresh before it is changed (`agentgov.db.lock`, on SQLite too), and what was changed
   before is saved first. A part of a transaction that rolls back on its own (one of many

@@ -10,7 +10,8 @@ from ninja import Body
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal
 from agentgov.api.versions import if_match
-from agentgov.models import AccessAssignment, Agent
+from agentgov.db.models import AccessAssignment
+from agentgov.models import Agent
 from agentgov.registry import access_packages, agents
 from agentgov.registry.errors import NotFound, ValidationError
 from agentgov.secops import handoff

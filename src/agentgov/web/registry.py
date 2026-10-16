@@ -8,14 +8,14 @@ from typing import Any
 
 from django.http import HttpRequest
 from ninja import Body
-from sqlalchemy import select
 
 from agentgov import gateway, ledger
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal
 from agentgov.api.versions import if_match
+from agentgov.db.models import PlatformAgent
 from agentgov.identity.keycloak import KeycloakError
-from agentgov.models import ACTIVE, PlatformAgent
+from agentgov.models import ACTIVE
 from agentgov.registry import (
     agents,
     apikeys,
@@ -85,15 +85,9 @@ def list_agents(
         if reached is not None:
             listed = [a for a in listed if a.id in reached]
         # Who made each agent found on a platform, as its platform says.
+        on_platforms = [a.id for a in listed if a.on_platform]
         makers = people.for_records(
-            s,
-            list(
-                s.scalars(
-                    select(PlatformAgent).where(
-                        PlatformAgent.agent_id.in_([a.id for a in listed if a.on_platform])
-                    )
-                )
-            ),
+            s, list(PlatformAgent.objects.filter(agent_id__in=on_platforms))
         )
         rows = [
             {

@@ -11,8 +11,8 @@ from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
-from agentgov.db.models import Finding
-from agentgov.models import AccessAssignment, LedgerEntry
+from agentgov.db.models import AccessAssignment, Finding
+from agentgov.models import LedgerEntry
 from agentgov.registry import access_packages, features, findings
 from tests.conftest import ADMIN, requires_opa, seed
 from tests.test_opa import _decide
@@ -201,7 +201,7 @@ class TestLifecycle:
             access_packages.check(s, rt.settings, now + timedelta(days=29, hours=12))
             assert findings.get(s, reminder.id).severity == "high"
             assert access_packages.check(s, rt.settings, now + timedelta(days=31))["expired"] == 1
-            row = s.get(AccessAssignment, assignment_id)
+            row = AccessAssignment.objects.get(pk=assignment_id)
             assert row.status == "expired"
             assert findings.get(s, reminder.id).status == "resolved"
             expired = Finding.objects.get(type="access.expired")
@@ -216,8 +216,9 @@ class TestLifecycle:
         renewal = _ask(client, _key(client, "registrar"), days=7).json()
         approver = _key(client, "approver", "ann")
         client.post(f"/v1/access-assignments/{renewal['id']}/approve", headers=approver)
-        with rt.db.session() as s:
-            old, new = s.get(AccessAssignment, first), s.get(AccessAssignment, renewal["id"])
+        with rt.db.transaction():
+            old = AccessAssignment.objects.get(pk=first)
+            new = AccessAssignment.objects.get(pk=renewal["id"])
             assert (old.status, new.status) == ("renewed", "active")
             assert new.expires_at == old.expires_at  # 7 days from now would be sooner
         assert len(_held(client, agent["id"])) == 1
@@ -251,7 +252,7 @@ class TestLifecycle:
         client.post("/v1/agents/support-bot/restore", json={}, headers=ADMIN)
         with rt.db.session() as s:
             assert access_packages.check(s, rt.settings, later)["expired"] == 1
-            assert s.get(AccessAssignment, assignment_id).status == "expired"
+            assert AccessAssignment.objects.get(pk=assignment_id).status == "expired"
         # Purged, they go with it, and the package can be deleted.
         client.post("/v1/agents/support-bot/delete", json={}, headers=ADMIN)
         assert client.delete("/v1/agents/support-bot", headers=ADMIN).status_code in (200, 204)
@@ -343,8 +344,10 @@ def test_opa_applies_expiry_as_the_feature_says(rt, settings, tmp_path: Path) ->
         "detections": {"categories": []},
     }
     assert _decide(rt, tmp_path, call)["effect"] == "allow"
-    with rt.db.session() as s:
-        s.get(AccessAssignment, assignment_id).expires_at = ids.utcnow() - timedelta(minutes=1)
+    with rt.db.transaction():
+        AccessAssignment.objects.filter(pk=assignment_id).update(
+            expires_at=ids.utcnow() - timedelta(minutes=1)
+        )
     rt.bundles.notify()
     monitored = _decide(rt, tmp_path, call)
     assert monitored["effect"] == "allow" and monitored["monitored"] == [

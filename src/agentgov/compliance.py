@@ -31,22 +31,27 @@ from sqlalchemy.orm import Session
 
 from agentgov import __version__, ids, ledger, transparency, witness
 from agentgov.config import LEDGER_MIN_DAYS, Settings
-from agentgov.db.models import Destination, Finding, IntegrationState, Team
+from agentgov.db.models import (
+    AccessAssignment,
+    Destination,
+    Finding,
+    IntegrationState,
+    ManagementRule,
+    PlatformAgent,
+    PlatformSync,
+    Team,
+)
 from agentgov.models import (
     ACTIVE,
     BLOCKED,
     DELETED,
     DISCOVERED,
     PENDING,
-    AccessAssignment,
     Agent,
     Blueprint,
     LedgerCheckpoint,
     LedgerEntry,
-    ManagementRule,
     ModelProvider,
-    PlatformAgent,
-    PlatformSync,
     ToolServer,
 )
 from agentgov.registry import classification, features, posture
@@ -233,14 +238,8 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     destinations = list(Destination.objects.filter(status="active"))
     f.destinations = len(destinations)
     f.failing_destinations = sum(1 for d in destinations if d.failures >= 3)
-    f.rules_enforced = session.scalar(
-        select(func.count()).select_from(ManagementRule).where(ManagementRule.mode == "enforce")
-    )
-    f.packages_active = session.scalar(
-        select(func.count())
-        .select_from(AccessAssignment)
-        .where(AccessAssignment.status == "active")
-    )
+    f.rules_enforced = ManagementRule.objects.filter(mode="enforce").count()
+    f.packages_active = AccessAssignment.objects.filter(status="active").count()
     f.checked = set(
         session.scalars(
             select(LedgerEntry.agent_id)
@@ -254,11 +253,9 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
         )
     )
     f.platform_seen = set(
-        session.scalars(
-            select(PlatformAgent.agent_id).where(PlatformAgent.synced_at >= since).distinct()
-        )
+        PlatformAgent.objects.filter(synced_at__gte=since).values_list("agent_id", flat=True)
     )
-    for sync in session.scalars(select(PlatformSync).order_by(PlatformSync.source)):
+    for sync in PlatformSync.objects.order_by("source"):
         read = sync.ok and sync.synced_at >= since
         (f.platforms_read if read else f.platforms_not_read).append(sync.source)
     scanned = IntegrationState.objects.filter(pk=posture.SCANNED).first()

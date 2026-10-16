@@ -8,11 +8,11 @@ import zipfile
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids, ledger
-from agentgov.models import Agent, PlatformAgent, PlatformSync
+from agentgov.db.models import PlatformAgent, PlatformSync
+from agentgov.models import Agent
 from tests.conftest import ADMIN, seed
 from tests.test_people import import_studio, studio
 
@@ -61,10 +61,9 @@ class TestCoverage:
     def test_a_platform_not_read_in_the_period(self, client) -> None:
         import_studio(client, studio("bot-sales", "Sales Helper"))
         long_ago = ids.utcnow() - timedelta(days=200)
-        with _rt(client).db.session() as s:
-            s.get(PlatformSync, "copilot-studio").synced_at = long_ago
-            for record in s.scalars(select(PlatformAgent)):
-                record.synced_at = long_ago
+        with _rt(client).db.transaction():
+            PlatformSync.objects.filter(pk="copilot-studio").update(synced_at=long_ago)
+            PlatformAgent.objects.update(synced_at=long_ago)
         r = report(client)
         assert r["coverage"]["platforms_not_read"] == ["copilot-studio"]
         assert seen(client) == (1, 0, 0, 0, 1)

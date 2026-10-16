@@ -8,7 +8,7 @@ from typing import Any
 from starlette.testclient import TestClient
 
 from agentgov import cli
-from agentgov.db.models import FeatureSetting, Finding
+from agentgov.db.models import FeatureSetting, Finding, PlatformAgent
 from agentgov.platforms import databricks, foundry
 from agentgov.platforms.base import Found, Inventory
 from agentgov.registry import platforms
@@ -150,9 +150,10 @@ class TestCopilotStudio:
         import_inventory(m365, [bot("bot-exp", "Expenses (Copilot Studio)", entra_id="entra-exp")])
         expenses = agent_named(m365, "expense-helper")
         rt = m365.app.state.rt  # type: ignore[attr-defined]
-        with rt.db.session() as s:
-            record = s.get(platforms.PlatformAgent, "microsoft-365:T_expenses")
+        with rt.db.transaction():
+            record = PlatformAgent.objects.get(pk="microsoft-365:T_expenses")
             record.data = {**record.data, "blocked": True}
+            record.save()
         done = block(m365, "expense-helper")
         assert done["still_runs_in"] == "Copilot Studio"
         found = issue(m365, expenses["id"])

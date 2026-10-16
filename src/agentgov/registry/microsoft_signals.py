@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.models import DELETED, Agent, PlatformAgent
+from agentgov.db.models import PlatformAgent
+from agentgov.models import DELETED, Agent
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings, risk
 
@@ -51,11 +52,8 @@ DEFENDER_SEVERITY = {
 def agent_index(session: Session) -> dict[str, str]:
     """Registry agent ids by every identifier the platform sources reported (lowercase)."""
     index: dict[str, str] = {}
-    for record in session.scalars(
-        select(PlatformAgent)
-        .join(Agent, Agent.id == PlatformAgent.agent_id)
-        .where(Agent.status != DELETED)
-    ):
+    deleted = set(session.scalars(select(Agent.id).where(Agent.status == DELETED)))
+    for record in PlatformAgent.objects.exclude(agent_id__in=deleted):
         data = record.data or {}
         names = [record.external_id] + [
             data.get(k) for k in ("entra_agent_id", "entra_app_id", "app_id", "schema_name")
@@ -189,7 +187,7 @@ def _remember_usage(
     session: Session, agent_id: str, entry: dict[str, Any], last_used: datetime
 ) -> None:
     """Keep who used the agent lately, and where, on its platform records."""
-    for record in session.scalars(select(PlatformAgent).where(PlatformAgent.agent_id == agent_id)):
+    for record in PlatformAgent.objects.filter(agent_id=agent_id):
         data = dict(record.data or {})
         previous = data.get("usage") or {}
         users = list(entry["users"])
@@ -206,6 +204,7 @@ def _remember_usage(
             "hosts": dict(hosts.most_common(10)),
         }
         record.data = data
+        record.save()
 
 
 def record_maker_events(session: Session, records: list[dict[str, Any]]) -> dict[str, int]:

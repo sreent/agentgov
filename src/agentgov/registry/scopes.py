@@ -13,8 +13,8 @@ from typing import Any
 from sqlalchemy import select
 
 from agentgov import db
-from agentgov.db.models import FeatureSetting, Team
-from agentgov.models import Agent, Blueprint, ManagementRule
+from agentgov.db.models import FeatureSetting, ManagementRule, Team
+from agentgov.models import Agent, Blueprint
 from agentgov.registry import validation
 from agentgov.registry.errors import ValidationError
 
@@ -114,7 +114,7 @@ def naming(tx: db.Where, key: str, name: str) -> list[str]:
     ]
     found += [
         f"management rule {rule.name}"
-        for rule in db.orm(tx).scalars(select(ManagementRule).order_by(ManagementRule.name))
+        for rule in ManagementRule.objects.order_by("name")
         if name in ((rule.scope or {}).get(key) or [])
         or (key == "teams" and (rule.params or {}).get("owner") == name)
     ]

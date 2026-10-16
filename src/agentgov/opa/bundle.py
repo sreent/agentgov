@@ -30,12 +30,11 @@ from sqlalchemy.orm import Session
 
 from agentgov import db, ids
 from agentgov.db import Database
-from agentgov.db.models import IntegrationState, Policy
+from agentgov.db.models import ApprovedConnector, IntegrationState, Policy
 from agentgov.models import (
     DELETED,
     DISCOVERED,
     Agent,
-    ApprovedConnector,
     Blueprint,
     ToolServer,
 )
@@ -191,7 +190,7 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
         for bp in session.scalars(select(Blueprint))
     }
     # The connector allowlist for Copilot Studio agents (enforced through threat detection).
-    approved = {c.connector_id: True for c in session.scalars(select(ApprovedConnector))}
+    approved = dict.fromkeys(ApprovedConnector.objects.values_list("connector_id", flat=True), True)
     providers = {
         p.name: {
             "name": p.name,

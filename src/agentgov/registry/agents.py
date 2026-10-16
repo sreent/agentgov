@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
+from agentgov.db.models import AccessAssignment
 from agentgov.models import (
     ACTIVE,
     AGENT_STATUSES,
@@ -19,7 +20,6 @@ from agentgov.models import (
     DELETED,
     DISCOVERED,
     PENDING,
-    AccessAssignment,
     Agent,
     AgentInstructions,
 )
@@ -519,7 +519,7 @@ def purge(session: Session, agent: Agent, *, actor: str) -> None:
     # Its instructions and access packages go too: the ledger keeps their history (and the
     # instructions' hashes, not their text).
     session.execute(delete(AgentInstructions).where(AgentInstructions.agent_id == agent.id))
-    session.execute(delete(AccessAssignment).where(AccessAssignment.agent_id == agent.id))
+    AccessAssignment.objects.filter(agent_id=agent.id).delete()
     session.delete(agent)
     mark_changed(session, "agents")
 

@@ -26,12 +26,10 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, timestamping
 from agentgov.config import FAILURE_SETTINGS, Settings
-from agentgov.db.models import Destination
+from agentgov.db.models import ApprovedConnector, Destination, PlatformSync
 from agentgov.models import (
-    ApprovedConnector,
     ComponentReport,
     IdentityIssuer,
-    PlatformSync,
 )
 from agentgov.registry import features, teams
 from agentgov.registry.errors import ValidationError
@@ -247,7 +245,7 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
     rows = {
         source: {
             "configured": source in connected,
-            "last_sync": session.get(PlatformSync, source),
+            "last_sync": PlatformSync.objects.filter(pk=source).first(),
         }
         for source in platforms.INVENTORY_SOURCES
     }
@@ -264,7 +262,7 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
         people_channels=Destination.objects.filter(
             kind__in=(*destinations.CHAT, *destinations.DESK)
         ).count(),
-        approved_connectors=len(list(session.scalars(select(ApprovedConnector.connector_id)))),
+        approved_connectors=ApprovedConnector.objects.count(),
         default_team=teams.default(session) is not None,
         gateway_issuers=[
             {"name": i.name, "keys": len(i.gateway_keys or []), "error": i.keys_error}

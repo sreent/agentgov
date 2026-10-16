@@ -11,8 +11,8 @@ from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
-from agentgov.db.models import Finding
-from agentgov.models import AccessAssignment, Agent, LedgerEntry, RuleMatch
+from agentgov.db.models import AccessAssignment, Finding, RuleMatch
+from agentgov.models import Agent, LedgerEntry
 from agentgov.platforms import connections
 from agentgov.registry import access_packages, features, findings, issues, rules
 from agentgov.registry.errors import Conflict, ValidationError
@@ -199,8 +199,8 @@ class TestEnforce:
         _seen(client, "support-bot", days_ago=0)
         _run(client, ids.utcnow() + timedelta(days=1))
         assert _issues(client)[0].status == "resolved"
-        with _rt(client).db.session() as s:
-            assert s.scalar(select(RuleMatch.id)) is None
+        with _rt(client).db.transaction():
+            assert not RuleMatch.objects.exists()
 
     def test_an_agent_that_stops_matching_is_left_alone(self, client, agent) -> None:
         _rule(client)
@@ -226,7 +226,7 @@ class TestEnforce:
         assert _status(client) == "active"
         assert "risk is accepted until" in _issues(client)[0].title
         with rt.db.session() as s:
-            assert s.scalar(select(RuleMatch.warned_at)) is None
+            assert RuleMatch.objects.get().warned_at is None
             issues.reopen_accepted(s, now + timedelta(days=31))
         _run(client, now + timedelta(days=31))
         assert _status(client) == "active"  # told again: a full week's notice
@@ -412,7 +412,7 @@ class TestEnforce:
         _run(client, now)
         _run(client, now + timedelta(days=2))
         with _rt(client).db.session() as s:
-            assert s.scalar(select(AccessAssignment.status)) == "revoked"
+            assert AccessAssignment.objects.get().status == "revoked"
             assert access_packages.held(s) == {}
         (revoked,) = _ledger(client, "access.revoked")
         assert revoked.actor == "system:rule:idle-access"
@@ -504,8 +504,8 @@ class TestEnforce:
         _feature(client, rules.FEATURE, "off")
         assert _run(client, ids.utcnow())["off"] is True
         assert _issues(client)[0].status == "resolved"
-        with _rt(client).db.session() as s:
-            assert s.scalar(select(RuleMatch.id)) is None
+        with _rt(client).db.transaction():
+            assert not RuleMatch.objects.exists()
 
     def test_nothing_runs_without_posture_checks(self, client, agent) -> None:
         _rule(client)
@@ -521,7 +521,7 @@ class TestEnforce:
         _run(client, ids.utcnow())
         with _rt(client).db.session() as s:
             rules.delete(s, rules.get(s, name), actor="admin:test")
-            assert s.scalar(select(RuleMatch.id)) is None
+            assert not RuleMatch.objects.exists()
         assert _issues(client)[0].status == "resolved"
         assert _ledger(client, "rule.deleted")
 
