@@ -400,8 +400,8 @@ def test_the_identity_sync_holds_no_agent_while_keycloak_answers(rt, settings) -
     import httpx
     from sqlalchemy import text
 
+    from agentgov.db.models import Agent
     from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
-    from agentgov.models import Agent
     from agentgov.registry import blueprints
     from tests.test_keycloak import FakeKeycloak
 
@@ -435,9 +435,10 @@ def test_the_identity_sync_holds_no_agent_while_keycloak_answers(rt, settings) -
         # and another transaction updates it, as the posture scan does, without waiting.
         with rt.db.session() as s:
             s.execute(text("SET LOCAL lock_timeout = '2s'"))
-            agent = s.get(Agent, first)
-            assert agent is not None and agent.identity_synced_at is not None
+            agent = Agent.objects.get(pk=first)
+            assert agent.identity_synced_at is not None
             agent.risk_score = 7
+            agent.save()
     finally:
         go.set()
         sync.join(10)

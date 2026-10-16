@@ -108,8 +108,14 @@ The data layer:
   match (`agentgov.registry.platforms`, `connector_policy`, `access_packages`, `rules`);
   approval requests, risk signals, agents' daily activity and model usage, and their
   instructions (`agentgov.registry.approvals`, `risk`, `model_usage`, `instructions`, and
-  `discovery`'s counters, which add up in the database rather than in memory).
-  Blueprints move with agents, which name them. Each read gives
+  `discovery`'s counters, which add up in the database rather than in memory); and agents
+  and blueprints, with everything that reads or changes them: their lifecycle, discovery,
+  decisions and telemetry, platforms' inventories, posture scans, rules, the identity
+  provider's clients, the gateway's configuration and the OPA bundle
+  (`agentgov.registry.agents`, `blueprints`, `discovery`, `decisions`, `agentgov.telemetry`,
+  `agentgov.identity.keycloak`, `agentgov.gateway`, `agentgov.opa.bundle`, and the rest of
+  the registry). An agent is read with its blueprint, as SQLAlchemy's relationship read it
+  (`Agent.objects`). Each read gives
   another object, where SQLAlchemy's session gave the same one: a row is locked and read
   afresh before it is changed (`agentgov.db.lock`, on SQLite too), and what was changed
   before is saved first. A part of a transaction that rolls back on its own (one of many

@@ -10,8 +10,7 @@ from ninja import Body
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal
 from agentgov.api.versions import if_match
-from agentgov.db.models import AccessAssignment
-from agentgov.models import Agent
+from agentgov.db.models import AccessAssignment, Agent
 from agentgov.registry import access_packages, agents
 from agentgov.registry.errors import NotFound, ValidationError
 from agentgov.secops import handoff
@@ -173,7 +172,7 @@ def get_assignment(request: HttpRequest, assignment_id: str) -> dict[str, Any]:
 
 
 def _agent(session: Any, row: AccessAssignment) -> Agent:
-    agent = session.get(Agent, row.agent_id)
+    agent = Agent.objects.filter(pk=row.agent_id).first()
     if agent is None:
         raise NotFound(f"agent {row.agent_id} not found")
     return agent

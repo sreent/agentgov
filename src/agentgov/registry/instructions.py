@@ -23,8 +23,7 @@ from typing import Any
 
 from agentgov import db, ids, ledger
 from agentgov.db import mark_changed
-from agentgov.db.models import AgentInstructions, Finding
-from agentgov.models import Agent
+from agentgov.db.models import Agent, AgentInstructions, Finding
 from agentgov.processor import detectors
 from agentgov.registry import features, finding_types, findings
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -173,7 +172,7 @@ def check_unchecked(tx: db.Where, *, classify: bool) -> list[Agent]:
         row.save()
     checked = []
     for agent_id in sorted({row.agent_id for row in rows}):
-        agent = db.orm(tx).get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         if agent is not None:
             evaluate(tx, agent)
             checked.append(agent)
@@ -213,7 +212,7 @@ def record_classification(
     row.classifier_state = "error" if error else "done"
     row.classifier = {**result, "error": error, "scanned_at": ids.isoformat(ids.utcnow())}
     row.save()
-    agent = db.orm(tx).get(Agent, row.agent_id)
+    agent = Agent.objects.filter(pk=row.agent_id).first()
     if agent is None:
         return None
     flagged = [i["rule"] for i in guardian.issues(result.get("verdicts") or {})]

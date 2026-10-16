@@ -33,6 +33,8 @@ from agentgov import __version__, ids, ledger, transparency, witness
 from agentgov.config import LEDGER_MIN_DAYS, Settings
 from agentgov.db.models import (
     AccessAssignment,
+    Agent,
+    Blueprint,
     Destination,
     Finding,
     IntegrationState,
@@ -47,8 +49,6 @@ from agentgov.models import (
     DELETED,
     DISCOVERED,
     PENDING,
-    Agent,
-    Blueprint,
     LedgerCheckpoint,
     LedgerEntry,
     ModelProvider,
@@ -184,7 +184,7 @@ class Facts:
 def facts(session: Session, settings: Settings, days: int, now: datetime | None = None) -> Facts:
     now = now or ids.utcnow()
     since = now - timedelta(days=days)
-    agents = list(session.scalars(select(Agent).where(Agent.status != DELETED)).unique())
+    agents = list(Agent.objects.exclude(status=DELETED))
     f = Facts(now, since, settings, features.modes(session), agents)
     f.exceptions = features.all_scopes(session)
     for type_, decision, n in session.execute(
@@ -228,7 +228,7 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     f.acknowledged = Finding.objects.filter(acknowledged_at__gte=since).count()
     teams = list(Team.objects.all())
     f.teams, f.default_team = len(teams), any(t.is_default for t in teams)
-    f.blueprints = session.scalar(select(func.count()).select_from(Blueprint))
+    f.blueprints = Blueprint.objects.count()
     servers = list(session.scalars(select(ToolServer)))
     f.servers = Counter(s.status for s in servers)
     f.unverified_servers = sum(

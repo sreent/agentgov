@@ -11,8 +11,8 @@ from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
-from agentgov.db.models import AccessAssignment, Finding, RuleMatch
-from agentgov.models import Agent, LedgerEntry
+from agentgov.db.models import AccessAssignment, Agent, Finding, RuleMatch
+from agentgov.models import LedgerEntry
 from agentgov.platforms import connections
 from agentgov.registry import access_packages, features, findings, issues, rules
 from agentgov.registry.errors import Conflict, ValidationError
@@ -40,9 +40,8 @@ def agent(client: TestClient) -> dict[str, Any]:
 
 
 def _seen(client: TestClient, name: str, *, days_ago: float) -> None:
-    with _rt(client).db.session() as s:
-        agent = s.scalar(select(Agent).where(Agent.name == name))
-        agent.last_seen_at = ids.utcnow() - timedelta(days=days_ago)
+    with _rt(client).db.transaction():
+        Agent.objects.filter(name=name).update(last_seen_at=ids.utcnow() - timedelta(days=days_ago))
 
 
 def _rule(client: TestClient, mode: str = "enforce", **spec: Any) -> str:
@@ -63,8 +62,8 @@ def _run(client: TestClient, at: datetime) -> dict[str, Any]:
 
 
 def _status(client: TestClient, name: str = "support-bot") -> str:
-    with _rt(client).db.session() as s:
-        return s.scalar(select(Agent.status).where(Agent.name == name))
+    with _rt(client).db.transaction():
+        return Agent.objects.filter(name=name).values_list("status", flat=True).first()
 
 
 def _issues(client: TestClient, type_: str = rules.MATCHED) -> list[Finding]:
@@ -282,22 +281,16 @@ class TestEnforce:
     def test_agents_on_other_platforms(self, client, agent) -> None:
         rt = _rt(client)
         now = ids.utcnow()
-        with rt.db.session() as s:
-            s.add(
-                Agent(
-                    id=ids.new_id(ids.AGENT),
-                    name="m365-helper",
-                    status="active",
-                    source="platform:microsoft-365",
-                    platform="Microsoft 365",
-                    owner="cx",
-                    sponsors=["alice@example.com"],
-                    labels={},
-                    models=[],
-                    permissions=[],
-                    external_ids={},
-                    created_at=now - timedelta(days=90),
-                )
+        with rt.db.transaction():
+            Agent.objects.create(
+                id=ids.new_id(ids.AGENT),
+                name="m365-helper",
+                status="active",
+                source="platform:microsoft-365",
+                platform="Microsoft 365",
+                owner="cx",
+                sponsors=["alice@example.com"],
+                created_at=now - timedelta(days=90),
             )
         name = _rule(client)
         with rt.db.session() as s:
@@ -383,8 +376,8 @@ class TestEnforce:
         (issue,) = _issues(client)
         assert issue.title.startswith("Rule ownerless will make cx-platform the owner of ")
         _run(client, now + timedelta(days=4))
-        with _rt(client).db.session() as s:
-            assert s.scalar(select(Agent.owner).where(Agent.name == "support-bot")) == "cx-platform"
+        with _rt(client).db.transaction():
+            assert Agent.objects.get(name="support-bot").owner == "cx-platform"
         (updated,) = _ledger(client, "agent.updated")[-1:]
         assert updated.actor == "system:rule:ownerless"
         # It has an owner now: the rule is done with it.

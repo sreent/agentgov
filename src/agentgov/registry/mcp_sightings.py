@@ -278,7 +278,7 @@ def refresh(tx: db.Where, settings: Settings, identities: set[str] | None = None
                 "approved servers run."
             )
         findings.raise_finding(
-            db.orm(tx),
+            tx,
             type=type_,
             severity=severity,
             subject=g["identity"][:200],
@@ -300,4 +300,4 @@ def refresh(tx: db.Where, settings: Settings, identities: set[str] | None = None
         scoped = {f"{t}:{i[:200]}" for t in types for i in identities}
         open_ = Finding.objects.filter(status="open", type__in=types)
         present |= {key for key in open_.values_list("key", flat=True) if key not in scoped}
-    return findings.resolve_absent(db.orm(tx), types=types, present_keys=present, actor=ACTOR)
+    return findings.resolve_absent(tx, types=types, present_keys=present, actor=ACTOR)

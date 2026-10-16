@@ -22,7 +22,9 @@ from django.db.models import (
     ForeignKey,
     Index,
     IntegerField,
+    Manager,
     Model,
+    QuerySet,
     TextField,
     UniqueConstraint,
 )
@@ -138,7 +140,17 @@ class Blueprint(Row):
         ]
 
 
+class _WithBlueprint(Manager):
+    """Agents, read with their blueprints (as SQLAlchemy's relationship read them): most
+    of what is worked out about an agent is its blueprint's too."""
+
+    def get_queryset(self) -> QuerySet[Any]:
+        return super().get_queryset().select_related("blueprint")
+
+
 class Agent(Row):
+    objects = _WithBlueprint()
+
     id = CharField(max_length=32, primary_key=True)
     name = CharField(max_length=200)
     description = TextField(default="")
@@ -231,6 +243,11 @@ class Agent(Row):
             ),
             UniqueConstraint(fields=["client_id"], name="agents_client_id_key"),
         ]
+
+    @property
+    def on_platform(self) -> bool:
+        """Run by another platform (Microsoft 365, Copilot Studio), not through the gateway."""
+        return (self.source or "").startswith("platform:")
 
 
 class ToolServer(Row):

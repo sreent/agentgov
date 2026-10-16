@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 
 from agentgov import cli
 from agentgov.config import Settings
-from agentgov.db.models import Finding
-from agentgov.models import Agent, LedgerEntry
+from agentgov.db.models import Agent, Finding
+from agentgov.models import LedgerEntry
 from agentgov.opa import bundle
 from agentgov.registry import agents, blueprints, identity_issuers, manifests, posture
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError

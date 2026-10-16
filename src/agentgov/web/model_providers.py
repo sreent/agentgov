@@ -6,12 +6,11 @@ from typing import Any
 
 from django.http import HttpRequest
 from ninja import Body
-from sqlalchemy import select
 
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES
 from agentgov.api.versions import if_match
-from agentgov.models import Agent
+from agentgov.db.models import Agent
 from agentgov.registry import model_providers, model_usage
 from agentgov.registry.errors import NotFound
 from agentgov.registry.validation import known_fields
@@ -107,10 +106,10 @@ def get_usage(
             rows = [r for r in rows if r.agent_id in reached]
             used = {k: v for k, v in used.items() if k in reached}
         ids = {r.agent_id for r in rows}
-        names = {a.id: a.name for a in s.scalars(select(Agent).where(Agent.id.in_(ids))).unique()}
+        names = dict(Agent.objects.filter(id__in=ids).values_list("id", "name"))
         budgets = []
         wanted = set(used) | ({agent_id} if agent_id else set())
-        for a in s.scalars(select(Agent).where(Agent.id.in_(wanted))).unique():
+        for a in Agent.objects.filter(id__in=wanted):
             budget = model_providers.effective_budget(a)
             budgets.append(
                 {

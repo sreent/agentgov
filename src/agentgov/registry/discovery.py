@@ -13,14 +13,12 @@ import re
 from datetime import datetime
 from typing import Any
 
-from django.db.models import F
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from django.db.models import F, Q
 
 from agentgov import db, ids, ledger
 from agentgov.db import mark_changed
-from agentgov.db.models import AgentActivity
-from agentgov.models import DISCOVERED, Agent, IdentityIssuer
+from agentgov.db.models import Agent, AgentActivity, IdentityIssuer
+from agentgov.models import DISCOVERED
 from agentgov.registry import findings, risk
 
 
@@ -30,52 +28,47 @@ def slugify(value: str) -> str:
     return slug or "agent"
 
 
-def unique_name(session: Session, base: str) -> str:
+def unique_name(tx: db.Where, base: str) -> str:
     """``base``, or ``base-2``, ``base-3``... if an agent already has that name."""
     name, n = base, 1
-    while session.scalar(select(Agent.id).where(Agent.name == name)):
+    while Agent.objects.filter(name=name).exists():
         n += 1
         name = f"{base}-{n}"
     return name
 
 
-def _workload(session: Session, issuer: str | None, subject: str | None) -> tuple[str, str] | None:
+def _workload(tx: db.Where, issuer: str | None, subject: str | None) -> tuple[str, str] | None:
     """The workload identity (issuer name, subject) a token of an issuer the gateway trusts
     names, or None."""
     if not issuer or not subject:
         return None
-    found = session.scalar(
-        select(IdentityIssuer).where(
-            IdentityIssuer.issuer == issuer, IdentityIssuer.gateway.is_(True)
-        )
-    )
+    found = IdentityIssuer.objects.filter(issuer=issuer, gateway=True).first()
     return (found.name, str(subject)[:512]) if found is not None else None
 
 
 def find(
-    session: Session,
+    tx: db.Where,
     *,
     agent_id: str | None = None,
     client_id: str | None = None,
     name: str | None = None,
 ) -> Agent | None:
     if agent_id:
-        agent = session.get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         if agent is not None:
             return agent
-    clauses = []
+    clauses = Q()
     if client_id:
-        clauses.append(Agent.client_id == client_id)
+        clauses |= Q(client_id=client_id)
     if name:
-        clauses.append(Agent.name == name)
-        clauses.append(Agent.name == slugify(name))
+        clauses |= Q(name=name) | Q(name=slugify(name))
     if not clauses:
         return None
-    return session.scalars(select(Agent).where(or_(*clauses))).first()
+    return Agent.objects.filter(clauses).first()
 
 
 def observe(
-    session: Session,
+    tx: db.Where,
     *,
     source: str,
     agent_id: str | None = None,
@@ -94,23 +87,21 @@ def observe(
     identity issuer the gateway trusts, which names the agent by its workload identity; a
     discovered agent takes it on, so that adopting it is all it needs
     (docs/agent-identity.md#straight-to-the-gateway)."""
-    workload = _workload(session, issuer, subject)
+    workload = _workload(tx, issuer, subject)
     agent = None
     if workload is not None:
-        agent = session.scalar(
-            select(Agent).where(
-                Agent.workload_issuer == workload[0], Agent.workload_subject == workload[1]
-            )
-        )
+        agent = Agent.objects.filter(
+            workload_issuer=workload[0], workload_subject=workload[1]
+        ).first()
     if agent is None and workload is None:
-        agent = find(session, agent_id=agent_id, client_id=client_id, name=name)
+        agent = find(tx, agent_id=agent_id, client_id=client_id, name=name)
     if agent is None:
         label = name or client_id or agent_id
         if not label or not discover:
             return None
         agent = Agent(
             id=ids.new_id(ids.AGENT),
-            name=unique_name(session, slugify(label)),
+            name=unique_name(tx, slugify(label)),
             description=f"Discovered via {source}; not registered.",
             status=DISCOVERED,
             source=f"discovered:{source}",
@@ -128,10 +119,9 @@ def observe(
             workload_subject=workload[1] if workload else None,
             created_by=f"system:{source}",
         )
-        session.add(agent)
-        session.flush()
+        agent.save(force_insert=True)
         ledger.append(
-            session,
+            tx,
             type="agent.discovered",
             actor=f"system:{source}",
             agent=agent,
@@ -139,7 +129,7 @@ def observe(
             details={"observed_as": label, **(details or {})},
         )
         findings.raise_finding(
-            session,
+            tx,
             type="agent.unmanaged",
             severity="high",
             subject=agent.id,
@@ -151,16 +141,24 @@ def observe(
             "block it.",
             details=details or {},
         )
-        risk.add_signal(session, agent.id, "unregistered_activity", source)
-        mark_changed(session, "agents")
+        risk.add_signal(tx, agent.id, "unregistered_activity", source)
+        mark_changed(tx, "agents")
     elif agent.status == DISCOVERED:
-        risk.add_signal(session, agent.id, "unregistered_activity", source)
+        risk.add_signal(tx, agent.id, "unregistered_activity", source)
     agent.last_seen_at = seen_at or ids.utcnow()
     if framework and not agent.framework:
         agent.framework = framework
     if model and model not in (agent.models or []):
         agent.models = [*(agent.models or []), model][-20:]
+    agent.save()
     return agent
+
+
+def seen(agent_id: str, when: datetime) -> None:
+    """Record that the agent was seen at ``when``, unless it was seen later already."""
+    Agent.objects.filter(
+        Q(last_seen_at__isnull=True) | Q(last_seen_at__lt=when), pk=agent_id
+    ).update(last_seen_at=when, updated_at=ids.utcnow())
 
 
 def record_activity(
@@ -189,7 +187,7 @@ def record_activity(
 
 
 def import_scan(
-    session: Session, items: list[dict[str, Any]], *, source: str, discover: bool = True
+    tx: db.Where, items: list[dict[str, Any]], *, source: str, discover: bool = True
 ) -> dict[str, int]:
     """Import scanner results: ``[{"name": ..., "framework": ..., "location": ...}]``. One
     that names an agent there is matched; one that doesn't is recorded as unmanaged while
@@ -200,14 +198,14 @@ def import_scan(
         name = item.get("name") or item.get("agent_name")
         if not isinstance(name, str) or not name:
             continue
-        existing = find(session, name=name)
+        existing = find(tx, name=name)
         if existing is not None:
             matched += 1
             if existing.status != DISCOVERED:
                 continue
         details = {k: v for k, v in item.items() if k in ("location", "path", "host", "evidence")}
         seen = observe(
-            session,
+            tx,
             source=source,
             name=name,
             framework=item.get("framework"),

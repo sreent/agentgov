@@ -10,11 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
-
 from agentgov import db
-from agentgov.db.models import FeatureSetting, ManagementRule, Team
-from agentgov.models import Agent, Blueprint
+from agentgov.db.models import Agent, Blueprint, FeatureSetting, ManagementRule, Team
 from agentgov.registry import validation
 from agentgov.registry.errors import ValidationError
 
@@ -63,7 +60,7 @@ def known(tx: db.Where) -> dict[str, set[str]]:
     """The names a scope may use: the teams and blueprints there are, and the platforms."""
     return {
         "teams": set(Team.objects.values_list("name", flat=True)),
-        "blueprints": set(db.orm(tx).scalars(select(Blueprint.name))),
+        "blueprints": set(Blueprint.objects.values_list("name", flat=True)),
         "platforms": set(PLATFORMS),
     }
 

@@ -23,12 +23,13 @@ from agentgov import (
 from agentgov.config import Settings
 from agentgov.coordination import Coordinator
 from agentgov.db import Database
+from agentgov.db.models import Agent
 from agentgov.gateway import GatewayConfigWriter
 from agentgov.identity import issuer_keys
 from agentgov.identity.delegation import Delegations
 from agentgov.identity.keycloak import IdentityReconciler, KeycloakAdmin
 from agentgov.identity.sso import OIDCClient
-from agentgov.models import Agent, LedgerCheckpoint
+from agentgov.models import LedgerCheckpoint
 from agentgov.notify import Notifier
 from agentgov.opa.bundle import BundleServer
 from agentgov.opa.signing import Signer
@@ -451,7 +452,7 @@ class Runtime:
                     f"finding is {finding.status}: only open findings are checked again"
                 )
             agent_id = finding.agent_id
-            agent = session.get(Agent, agent_id) if agent_id else None
+            agent = Agent.objects.filter(pk=agent_id).first() if agent_id else None
             source = (agent.source or "").removeprefix("platform:") if agent else None
             source = source if agent is not None and agent.on_platform else None
             how, note = self._how_checked(finding.type, source)
@@ -472,7 +473,7 @@ class Runtime:
                 raise PlatformError(outcome["error"])
         else:
             with self.db.session() as session:
-                agent = session.get(Agent, agent_id)
+                agent = Agent.objects.filter(pk=agent_id).first()
                 if how == "risk":
                     agents_svc.refresh_risk(session, self.settings, agent)
                 else:

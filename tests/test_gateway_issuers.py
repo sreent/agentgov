@@ -14,15 +14,14 @@ from typing import Any
 import httpx
 import pytest
 import yaml
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.db.models import ModelUsage
+from agentgov.db.models import Agent, ModelUsage
 from agentgov.gateway import render, to_yaml
 from agentgov.identity import issuer_keys
-from agentgov.models import DISCOVERED, Agent, IdentityIssuer
+from agentgov.models import DISCOVERED, IdentityIssuer
 from agentgov.opa import bundle
 from agentgov.processor.a2a_answers import _identity as answer_identity
 from agentgov.processor.control_plane import DecisionRecorder
@@ -653,7 +652,7 @@ class TestDiscoveryAndUsage:
             again = discovery.observe(
                 s, source="gateway", name="sa:seen", issuer=CLUSTER_URL, subject="sa:seen"
             )
-            assert again is found
+            assert again.id == found.id
             # A token of an issuer the gateway doesn't trust names no workload.
             other = discovery.observe(
                 s, source="gateway", name="elsewhere", issuer=ENTRA_URL, subject="x"
@@ -669,8 +668,8 @@ class TestDiscoveryAndUsage:
         )
         assert observed.status_code == 200, observed.text
         rt = app_client.app.state.rt
-        with rt.db.session() as s:
-            agent = s.scalars(select(Agent).where(Agent.workload_subject == SA)).one()
+        with rt.db.transaction():
+            agent = Agent.objects.get(workload_subject=SA)
             assert agent.status == DISCOVERED
             assert agent.workload_issuer == "cluster"
 

@@ -19,14 +19,8 @@ from sqlalchemy import func, select
 from agentgov import ids, ledger, witness
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal
-from agentgov.db.models import AgentActivity, ApprovalRequest, Finding
-from agentgov.models import (
-    DELETED,
-    DISCOVERED,
-    Agent,
-    LedgerEntry,
-    ToolServer,
-)
+from agentgov.db.models import Agent, AgentActivity, ApprovalRequest, Finding, ToolServer
+from agentgov.models import DELETED, DISCOVERED, LedgerEntry
 from agentgov.opa import WHAT_IF
 from agentgov.opa.bundle import opa_status
 from agentgov.platforms.base import PlatformError
@@ -108,7 +102,7 @@ def get_approval(request: HttpRequest, approval_id: str) -> dict[str, Any]:
     with runtime(request).db.session() as s:
         req = approvals.get(s, approval_id)
         # Everyone who reads AgentGov (where its agent is), and the person it was sent to.
-        roles = reach.roles_at(s, principal, s.get(Agent, req.agent_id))
+        roles = reach.roles_at(s, principal, Agent.objects.filter(pk=req.agent_id).first())
         if not roles & set(READ_ROLES) and not approvals.may_decide(req, roles, principal.subject):
             raise HTTPException(403, f"role {principal.role!r} may not do this")
         return reach.mark([approvals.to_dict(req)], s, principal, "agent_id")[0]
@@ -124,7 +118,7 @@ def decide_approval(
     with runtime(request).db.session() as s:
         req = approvals.get(s, approval_id)
         # Their roles where its agent is: an approver for its team decides it.
-        here = reach.here(s, principal, s.get(Agent, req.agent_id))
+        here = reach.here(s, principal, Agent.objects.filter(pk=req.agent_id).first())
         secops = handoff.at_least(s, handoff.DECIDE)
         if not approvals.may_decide(req, here.roles, principal.subject, secops=secops):
             if req.deciders != approvals.PERSON:
@@ -215,7 +209,7 @@ def _triages(session: Any, principal: Principal) -> bool:
 
 def _where(session: Any, principal: Principal, finding: Any) -> Principal:
     """``principal`` as it is where the finding's agent is (reach.here)."""
-    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
+    agent = Agent.objects.filter(pk=finding.agent_id).first() if finding.agent_id else None
     return reach.here(session, principal, agent)
 
 
@@ -241,7 +235,7 @@ def my_issues(request: HttpRequest, status: str | None = "open") -> list[dict[st
     with runtime(request).db.session() as s:
         rows = issues.for_person(s, principal.person, status=status)
         ids = {f.agent_id for f in rows if f.agent_id}
-        names = {a.id: a.name for a in s.scalars(select(Agent).where(Agent.id.in_(ids))).unique()}
+        names = dict(Agent.objects.filter(id__in=ids).values_list("id", "name"))
         return [{**findings.to_dict(f), "agent_name": names.get(f.agent_id)} for f in rows]
 
 
@@ -255,7 +249,7 @@ def get_finding(request: HttpRequest, finding_id: str) -> dict[str, Any]:
         mine = issues.may_act(s, finding, principal.person)
         if not _where(s, principal, finding).roles & set(READ_ROLES) and not mine:
             raise HTTPException(403, f"role {principal.role!r} may not do this")
-        agent = s.get(Agent, finding.agent_id) if finding.agent_id else None
+        agent = Agent.objects.filter(pk=finding.agent_id).first() if finding.agent_id else None
         row = {
             **findings.to_dict(finding),
             "agent_name": agent.name if agent else None,
@@ -602,13 +596,13 @@ def overview(request: HttpRequest) -> dict[str, Any]:
     # SQLite, where every transaction takes the write lock up front.
     bundle_revision = rt.bundles.current().revision
     with rt.db.session() as s:
-        all_agents = s.scalars(select(Agent).where(Agent.status != DELETED)).unique().all()
+        all_agents = list(Agent.objects.exclude(status=DELETED))
         by_status = Counter(a.status for a in all_agents)
         risky = sorted(
             (a for a in all_agents if a.risk_level in ("high", "critical")),
             key=lambda a: -a.risk_score,
         )
-        servers = s.scalars(select(ToolServer)).all()
+        servers = list(ToolServer.objects.all())
         open_findings = list(
             Finding.objects.filter(status="open")
             .values("severity")
@@ -719,7 +713,7 @@ def agent_map(request: HttpRequest) -> dict[str, Any]:
     with runtime(request).db.session() as s:
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
-        servers = s.scalars(select(ToolServer).where(ToolServer.gateway.is_(True))).all()
+        servers = list(ToolServer.objects.filter(gateway=True))
         for ts in servers:
             nodes[f"server:{ts.name}"] = {
                 "id": f"server:{ts.name}",
@@ -755,7 +749,7 @@ def agent_map(request: HttpRequest) -> dict[str, Any]:
         for agent_id, target, decision, count in a2a_rows:
             if agent_id and target:
                 a2a_usage[(agent_id, target)][decision or "none"] += count
-        listed = list(s.scalars(select(Agent).where(Agent.status != DELETED)).unique())
+        listed = list(Agent.objects.exclude(status=DELETED))
         by_name = {a.name: a for a in listed}
         for a in listed:
             nodes[f"agent:{a.id}"] = {

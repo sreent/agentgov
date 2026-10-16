@@ -222,7 +222,9 @@ class TestLifecycle:
                 agent = _agent(s, settings, name=name)
                 if name != "kept":
                     agents.transition(s, settings, agent, "delete", actor="test")
-            agents.get(s, "old").deleted_at = ids.utcnow() - timedelta(days=31)
+            old = agents.get(s, "old")
+            old.deleted_at = ids.utcnow() - timedelta(days=31)
+            old.save()
         with rt.db.session() as s:
             assert agents.purge_expired(s, settings) == ["old"]
         with rt.db.session() as s:
@@ -234,7 +236,9 @@ class TestLifecycle:
             assert [e.actor for e in entries] == ["system:retention"]
         # 0 keeps deleted agents.
         with rt.db.session() as s:
-            agents.get(s, "recent").deleted_at = ids.utcnow() - timedelta(days=90)
+            recent = agents.get(s, "recent")
+            recent.deleted_at = ids.utcnow() - timedelta(days=90)
+            recent.save()
             keep = settings.with_overrides(soft_delete_retention_days=0)
             assert agents.purge_expired(s, keep) == []
 
@@ -538,6 +542,7 @@ class TestDiscovery:
             agent = _agent(s, settings)
             seen = discovery.observe(s, source="gateway", client_id="agent-bot")
             assert seen.id == agent.id
+            agent.refresh_from_db()
             assert agent.last_seen_at is not None
 
     def test_scanner_import(self, rt) -> None:

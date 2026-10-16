@@ -30,9 +30,9 @@ from sqlalchemy import delete, select, update
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
+from agentgov.db.models import Agent
 from agentgov.gateway import render, to_yaml
 from agentgov.models import (
-    Agent,
     IdentityIssuer,
     LedgerCheckpoint,
     LedgerEntry,

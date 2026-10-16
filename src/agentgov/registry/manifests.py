@@ -41,11 +41,11 @@ from contextlib import contextmanager
 from typing import Any
 
 import yaml
-from sqlalchemy.orm import Session
 
+from agentgov import db
 from agentgov.config import Settings
-from agentgov.db.models import AgentInstructions, FindingType
-from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent
+from agentgov.db.models import Agent, AgentInstructions, FindingType
+from agentgov.models import ACTIVE, BLOCKED, PENDING
 from agentgov.registry import (
     access_packages,
     agents,
@@ -114,7 +114,7 @@ def _spec(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def apply(
-    session: Session, settings: Settings, docs: list[dict[str, Any]], *, actor: str
+    tx: db.Where, settings: Settings, docs: list[dict[str, Any]], *, actor: str
 ) -> list[dict[str, str]]:
     results = []
     # Features' exceptions, set last: they may name teams and blueprints applied here.
@@ -136,13 +136,13 @@ def apply(
                 "Policy": _policy,
                 "ManagementRule": _rule,
                 "Agent": _agent,
-            }[kind](session, settings, spec, actor)
+            }[kind](tx, settings, spec, actor)
         results.append({"kind": kind, "name": name, "action": action})
         if kind == "Feature" and "scopes" in spec:
             later.append((results[-1], spec))
     for result, spec in later:
         with _about("Feature", spec["name"]):
-            if _feature_scopes(session, settings, spec, actor):
+            if _feature_scopes(tx, settings, spec, actor):
                 result["action"] = "configured"
     return results
 
@@ -160,7 +160,7 @@ def _about(kind: str, name: str) -> Iterator[None]:
         raise type(exc)(f"{what}: {exc}") from None
 
 
-def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _feature(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     """A feature's mode. Its exceptions are set after the other documents
     (``_feature_scopes``), once the teams and blueprints they name are there."""
     if set(spec) - {"name", "mode", "scopes", "labels"}:
@@ -170,20 +170,20 @@ def _feature(session: Session, settings: Settings, spec: dict[str, Any], actor: 
     changed = False
     try:
         if "mode" in spec:
-            changed = features.set_mode(session, settings, spec["name"], spec["mode"], actor=actor)
+            changed = features.set_mode(tx, settings, spec["name"], spec["mode"], actor=actor)
     except NotFound as exc:
         raise ValidationError(str(exc)) from None
     return "configured" if changed else "unchanged"
 
 
-def _feature_scopes(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> bool:
+def _feature_scopes(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> bool:
     try:
-        return features.set_scopes(session, settings, spec["name"], spec["scopes"], actor=actor)
+        return features.set_scopes(tx, settings, spec["name"], spec["scopes"], actor=actor)
     except NotFound as exc:
         raise ValidationError(str(exc)) from None
 
 
-def _finding_type(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _finding_type(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     if set(spec) - {"name", "mode", "severity", "labels"}:
         raise ValidationError(f"finding type {spec['name']}: spec takes only mode and severity")
     if "mode" not in spec and "severity" not in spec:
@@ -191,139 +191,137 @@ def _finding_type(session: Session, settings: Settings, spec: dict[str, Any], ac
     row = FindingType.objects.filter(pk=spec["name"]).first()
     before = (row.mode, row.severity) if row is not None else None
     after = finding_types.configure(
-        session, spec["name"], {k: spec[k] for k in ("mode", "severity") if k in spec}, actor=actor
+        tx, spec["name"], {k: spec[k] for k in ("mode", "severity") if k in spec}, actor=actor
     )
     return "unchanged" if before == (after["mode"], after["severity"]) else "configured"
 
 
-def _destination(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _destination(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", destinations.ACTIVE)
     if desired not in (destinations.ACTIVE, destinations.PAUSED):
         raise ValidationError(f"destination {spec['name']}: status must be active or paused")
     try:
-        destination = destinations.get(session, spec["name"])
+        destination = destinations.get(tx, spec["name"])
     except NotFound:
-        destinations.create(session, {**spec, "status": desired}, actor=actor, settings=settings)
+        destinations.create(tx, {**spec, "status": desired}, actor=actor, settings=settings)
         return "created"
     spec.pop("backfill", None)  # where a new destination starts in the ledger
     if "tickets" in spec and isinstance(spec["tickets"], dict):
         # The manifest says all of a desk's ticket settings: what it leaves out goes.
         spec["tickets"] = {**{k: None for k in destination.tickets or {}}, **spec["tickets"]}
-    changed = destinations.update(session, destination, spec, actor=actor, settings=settings)
+    changed = destinations.update(tx, destination, spec, actor=actor, settings=settings)
     action = "configured" if changed else "unchanged"
     if destination.status != desired:
         verb = "pause" if desired == destinations.PAUSED else "resume"
-        destinations.set_status(session, destination, verb, actor=actor)
+        destinations.set_status(tx, destination, verb, actor=actor)
         action = "configured"
     return action
 
 
-def _team(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _team(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     spec.pop("labels", None)
-    team = teams.find(session, spec["name"])
+    team = teams.find(tx, spec["name"])
     if team is None:
-        teams.create(session, spec, actor=actor)
+        teams.create(tx, spec, actor=actor)
         return "created"
-    return "configured" if teams.update_team(session, team, spec, actor=actor) else "unchanged"
+    return "configured" if teams.update_team(tx, team, spec, actor=actor) else "unchanged"
 
 
-def _identity_issuer(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _identity_issuer(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", identity_issuers.APPROVED)
     if desired not in (identity_issuers.APPROVED, BLOCKED):
         raise ValidationError(f"identity issuer {spec['name']}: status must be approved or blocked")
     try:
-        issuer = identity_issuers.get(session, spec["name"])
-        changed = identity_issuers.update(session, issuer, spec, actor=actor)
+        issuer = identity_issuers.get(tx, spec["name"])
+        changed = identity_issuers.update(tx, issuer, spec, actor=actor)
         action = "configured" if changed else "unchanged"
     except NotFound:
-        issuer = identity_issuers.create(session, spec, actor=actor)
+        issuer = identity_issuers.create(tx, spec, actor=actor)
         action = "created"
     if issuer.status != desired:
         verb = "block" if desired == BLOCKED else "unblock"
-        identity_issuers.set_status(session, issuer, verb, actor=actor)
+        identity_issuers.set_status(tx, issuer, verb, actor=actor)
         action = "configured" if action == "unchanged" else action
     return action
 
 
-def _blueprint(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _blueprint(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     try:
-        bp = blueprints.get(session, spec["name"])
+        bp = blueprints.get(tx, spec["name"])
     except NotFound:
-        blueprints.create(session, spec, actor=actor)
+        blueprints.create(tx, spec, actor=actor)
         return "created"
-    return "configured" if blueprints.update(session, bp, spec, actor=actor) else "unchanged"
+    return "configured" if blueprints.update(tx, bp, spec, actor=actor) else "unchanged"
 
 
-def _toolserver(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _toolserver(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", None)
     try:
-        ts = toolservers.get(session, spec["name"])
-        action = "configured" if toolservers.update(session, ts, spec, actor=actor) else "unchanged"
+        ts = toolservers.get(tx, spec["name"])
+        action = "configured" if toolservers.update(tx, ts, spec, actor=actor) else "unchanged"
     except NotFound:
-        ts = toolservers.create(session, spec, actor=actor, approve=desired != PENDING)
+        ts = toolservers.create(tx, spec, actor=actor, approve=desired != PENDING)
         action = "created"
     if desired == BLOCKED and ts.status != BLOCKED:
-        toolservers.set_status(session, ts, "block", actor=actor)
+        toolservers.set_status(tx, ts, "block", actor=actor)
         action = "configured"
     elif desired == "approved" and ts.status != "approved":
         if ts.status == BLOCKED:
             # Unblocked, it is as it was when it was blocked: pending, it is approved next.
-            toolservers.set_status(session, ts, "unblock", actor=actor)
+            toolservers.set_status(tx, ts, "unblock", actor=actor)
         if ts.status == PENDING:
-            toolservers.set_status(session, ts, "approve", actor=actor)
+            toolservers.set_status(tx, ts, "approve", actor=actor)
         action = "configured"
     return action
 
 
-def _model_provider(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _model_provider(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", model_providers.APPROVED)
     if desired not in (model_providers.APPROVED, BLOCKED):
         raise ValidationError(f"model provider {spec['name']}: status must be approved or blocked")
     try:
-        provider = model_providers.get(session, spec["name"])
-        changed = model_providers.update(session, provider, spec, actor=actor, settings=settings)
+        provider = model_providers.get(tx, spec["name"])
+        changed = model_providers.update(tx, provider, spec, actor=actor, settings=settings)
         action = "configured" if changed else "unchanged"
     except NotFound:
-        provider = model_providers.create(session, spec, actor=actor, settings=settings)
+        provider = model_providers.create(tx, spec, actor=actor, settings=settings)
         action = "created"
     if provider.status != desired:
         verb = "block" if desired == BLOCKED else "unblock"
-        model_providers.set_status(session, provider, verb, actor=actor)
+        model_providers.set_status(tx, provider, verb, actor=actor)
         action = "configured" if action == "unchanged" else action
     return action
 
 
-def _access_package(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _access_package(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     try:
-        package = access_packages.get(session, spec["name"])
+        package = access_packages.get(tx, spec["name"])
     except NotFound:
-        access_packages.create(session, spec, actor=actor)
+        access_packages.create(tx, spec, actor=actor)
         return "created"
-    changed = access_packages.update(session, package, spec, actor=actor)
+    changed = access_packages.update(tx, package, spec, actor=actor)
     return "configured" if changed else "unchanged"
 
 
-def _rule(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _rule(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     try:
-        rule = rules.get(session, spec["name"])
+        rule = rules.get(tx, spec["name"])
     except NotFound:
-        rules.create(session, spec, actor=actor)
+        rules.create(tx, spec, actor=actor)
         return "created"
-    return "configured" if rules.update(session, rule, spec, actor=actor) else "unchanged"
+    return "configured" if rules.update(tx, rule, spec, actor=actor) else "unchanged"
 
 
-def _policy(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _policy(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     try:
-        policy = policies.get(session, spec["name"])
+        policy = policies.get(tx, spec["name"])
     except NotFound:
-        policies.create(session, spec, actor=actor)
+        policies.create(tx, spec, actor=actor)
         return "created"
-    return "configured" if policies.update(session, policy, spec, actor=actor) else "unchanged"
+    return "configured" if policies.update(tx, policy, spec, actor=actor) else "unchanged"
 
 
-def _instructions(
-    session: Session, settings: Settings, agent: Agent, text: Any, actor: str
-) -> bool:
+def _instructions(tx: db.Where, settings: Settings, agent: Agent, text: Any, actor: str) -> bool:
     """Apply ``spec.instructions``; returns whether they changed."""
     if text is None:
         return False
@@ -333,7 +331,7 @@ def _instructions(
         .first()
     )
     row = instructions.report(
-        session,
+        tx,
         agent,
         source="registered",
         text=text,
@@ -343,7 +341,7 @@ def _instructions(
     return row.sha256 != digest
 
 
-def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _agent(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", ACTIVE)
     text = spec.pop("instructions", None)
     # Its classification, when the manifest gives one (none: it is left as it is).
@@ -353,37 +351,37 @@ def _agent(session: Session, settings: Settings, spec: dict[str, Any], actor: st
     if classified is not None:
         classification.normalize(classified)  # before anything is changed
     try:
-        agent = agents.get(session, spec["name"])
+        agent = agents.get(tx, spec["name"])
     except NotFound:
-        agent = agents.register(session, settings, spec, actor=actor, approve=desired == ACTIVE)
-        _instructions(session, settings, agent, text, actor)
+        agent = agents.register(tx, settings, spec, actor=actor, approve=desired == ACTIVE)
+        _instructions(tx, settings, agent, text, actor)
         if classified is not None:
-            classification.classify(session, agent, classified, actor=actor)
+            classification.classify(tx, agent, classified, actor=actor)
         if desired == BLOCKED:
-            agents.transition(session, settings, agent, "block", actor=actor, reason="manifest")
+            agents.transition(tx, settings, agent, "block", actor=actor, reason="manifest")
         return "created"
-    action = "configured" if agents.update(session, agent, spec, actor=actor) else "unchanged"
-    if _instructions(session, settings, agent, text, actor):
+    action = "configured" if agents.update(tx, agent, spec, actor=actor) else "unchanged"
+    if _instructions(tx, settings, agent, text, actor):
         action = "configured"
-    if classified is not None and classification.classify(session, agent, classified, actor=actor):
+    if classified is not None and classification.classify(tx, agent, classified, actor=actor):
         action = "configured"
     if desired == ACTIVE and agent.status in (PENDING, BLOCKED):
         if agent.status == BLOCKED:
             # Unblocked, it is as it was when it was blocked: pending, it is approved next.
-            agents.transition(session, settings, agent, "unblock", actor=actor, reason="manifest")
+            agents.transition(tx, settings, agent, "unblock", actor=actor, reason="manifest")
         if agent.status == PENDING:
-            agents.transition(session, settings, agent, "approve", actor=actor, reason="manifest")
+            agents.transition(tx, settings, agent, "approve", actor=actor, reason="manifest")
         action = "configured"
     elif desired == BLOCKED and agent.status in (PENDING, ACTIVE):
-        agents.transition(session, settings, agent, "block", actor=actor, reason="manifest")
+        agents.transition(tx, settings, agent, "block", actor=actor, reason="manifest")
         action = "configured"
     return action
 
 
-def export(session: Session) -> list[dict[str, Any]]:
+def export(tx: db.Where) -> list[dict[str, Any]]:
     # Features administrators chose; the deployment's pins belong to the deployment.
     docs: list[dict[str, Any]] = [
-        _doc("Feature", key, spec) for key, spec in features.chosen(session).items()
+        _doc("Feature", key, spec) for key, spec in features.chosen(tx).items()
     ]
     # How types of findings are handled here.
     docs += [
@@ -392,10 +390,10 @@ def export(session: Session) -> list[dict[str, Any]]:
             row.type,
             {"mode": row.mode, **({"severity": row.severity} if row.severity else {})},
         )
-        for row in finding_types.chosen(session)
+        for row in finding_types.chosen(tx)
     ]
     # Where events and alerts go; their credentials are files, never exported.
-    for destination in destinations.list_all(session):
+    for destination in destinations.list_all(tx):
         spec = {"kind": destination.kind}
         defaults = {
             "description": "",
@@ -412,17 +410,17 @@ def export(session: Session) -> list[dict[str, Any]]:
                 spec[key] = value
         spec["status"] = destination.status
         docs.append(_doc("Destination", destination.name, spec))
-    for team in teams.list_all(session):
+    for team in teams.list_all(tx):
         d = teams.to_dict(team)
         spec = {k: d[k] for k in teams.FIELDS if d[k] not in ("", [], False)}
         docs.append(_doc("Team", team.name, spec))
-    for issuer in identity_issuers.list_all(session):
+    for issuer in identity_issuers.list_all(tx):
         # Whether the gateway takes its tokens, as set (its dict says how that goes too).
         d = {**identity_issuers.to_dict(issuer), "gateway": bool(issuer.gateway)}
         spec = {k: d[k] for k in identity_issuers.FIELDS if d[k] not in (None, "", {}, False)}
         spec["status"] = issuer.status
         docs.append(_doc("IdentityIssuer", issuer.name, spec))
-    for bp in blueprints.list_all(session):
+    for bp in blueprints.list_all(tx):
         d = blueprints.to_dict(bp)
         docs.append(_doc("Blueprint", bp.name, {k: d[k] for k in blueprints.FIELDS}))
     # How a server is used is written out only where it differs from the default: on the
@@ -435,26 +433,26 @@ def export(session: Session) -> list[dict[str, Any]]:
         "authorization_server": None,
         "oauth_client_id": None,
     }
-    for ts in toolservers.list_all(session):
+    for ts in toolservers.list_all(tx):
         d = toolservers.to_dict(ts)
         spec = {k: d[k] for k in toolservers.FIELDS if k not in unless or d[k] != unless[k]}
         if not d["url"]:
             spec.pop("url")
         spec["status"] = ts.status
         docs.append(_doc("ToolServer", ts.name, spec))
-    for provider in model_providers.list_all(session):
+    for provider in model_providers.list_all(tx):
         d = model_providers.to_dict(provider)
         spec = {k: d[k] for k in model_providers.FIELDS if d[k] not in (None, "", {}, [])}
         if not provider.key_file:
             spec.pop("key_file", None)  # the default path follows the name
         spec["status"] = provider.status
         docs.append(_doc("ModelProvider", provider.name, spec))
-    for package in access_packages.list_all(session):
-        d = access_packages.to_dict(session, package)
+    for package in access_packages.list_all(tx):
+        d = access_packages.to_dict(tx, package)
         spec = {k: d[k] for k in access_packages.FIELDS if d[k] not in ("", [], {}, None)}
         spec["approval"] = d["approval"]
         docs.append(_doc("AccessPackage", package.name, spec))
-    for policy in policies.list_all(session):
+    for policy in policies.list_all(tx):
         docs.append(
             _doc(
                 "Policy",
@@ -462,15 +460,15 @@ def export(session: Session) -> list[dict[str, Any]]:
                 {"description": policy.description, "enabled": policy.enabled, "rego": policy.rego},
             )
         )
-    for rule in rules.list_all(session):
-        d = rules.to_dict(session, rule)
+    for rule in rules.list_all(tx):
+        d = rules.to_dict(tx, rule)
         spec = {
             k: d[k]
             for k in rules.FIELDS
             if k in ("conditions", "action") or d[k] != rules.DEFAULTS.get(k)
         }
         docs.append(_doc("ManagementRule", rule.name, spec))
-    for agent in agents.list_agents(session):
+    for agent in agents.list_agents(tx):
         if agent.status not in (ACTIVE, PENDING, BLOCKED):
             continue
         d = agents.to_dict(agent)

@@ -21,13 +21,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from django.db.models import F, Sum
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from agentgov import db, ids, ledger
 from agentgov.db import mark_changed
-from agentgov.db.models import ModelUsage
-from agentgov.models import Agent, IdentityIssuer
+from agentgov.db.models import Agent, IdentityIssuer, ModelUsage
 from agentgov.registry import discovery, model_providers
 from agentgov.telemetry import attrs_of
 
@@ -102,7 +99,7 @@ def _int(value: Any) -> int:
 
 
 def _metered(
-    session: Session,
+    tx: db.Where,
     agent_id: Any,
     client_id: Any,
     issuer: Any,
@@ -110,30 +107,30 @@ def _metered(
 ) -> Agent | None:
     """The agent a model call was made by, as the gateway's access log names it."""
     if agent_id or client_id:
-        return discovery.find(session, agent_id=agent_id, client_id=client_id)
+        return discovery.find(tx, agent_id=agent_id, client_id=client_id)
     if not (issuer and subject):
         return None
-    return session.scalar(
-        select(Agent)
-        .join(IdentityIssuer, IdentityIssuer.name == Agent.workload_issuer)
-        .where(IdentityIssuer.issuer == str(issuer), Agent.workload_subject == str(subject))
-    )
+    names = IdentityIssuer.objects.filter(issuer=str(issuer)).values_list("name", flat=True)
+    return Agent.objects.filter(
+        workload_issuer__in=list(names), workload_subject=str(subject)
+    ).first()
 
 
 # A row's counts, which each model call adds to.
 COUNTS = ("calls", "refused", "input_tokens", "output_tokens", "cost_usd")
 
 
-def ingest_logs(session: Session, payload: dict[str, Any]) -> dict[str, int]:
+def ingest_logs(tx: db.Where, payload: dict[str, Any]) -> dict[str, int]:
     """Meter the model calls in agentgateway's access logs (OTLP logs)."""
     stats = {"records": 0, "model_calls": 0, "unidentified": 0}
-    providers = {p.name: p for p in model_providers.list_all(session)}
+    providers = {p.name: p for p in model_providers.list_all(tx)}
     agents: dict[tuple[str | None, ...], Agent | None] = {}
     spent: dict[tuple[str, str], int] = {}  # tokens per (agent, day) in this batch
     # What this batch adds to each row (agent, day, provider, model), and to each agent's
     # activity on a day.
     added: dict[tuple[str, str, str, str], dict[str, float]] = {}
     activity: dict[tuple[str, str], dict[str, Any]] = {}
+    last_seen: dict[str, datetime] = {}
     for attrs, record in iter_log_records(payload):
         stats["records"] += 1
         route = str(attrs.get("route") or "").rsplit("/", 1)[-1]
@@ -155,7 +152,7 @@ def ingest_logs(session: Session, payload: dict[str, Any]) -> dict[str, int]:
             attrs.get("agentgov.subject"),
         )
         if identity not in agents:
-            agents[identity] = _metered(session, *identity)
+            agents[identity] = _metered(tx, *identity)
         agent = agents[identity]
         if agent is None:
             stats["unidentified"] += 1
@@ -170,7 +167,7 @@ def ingest_logs(session: Session, payload: dict[str, Any]) -> dict[str, int]:
         if price:
             row["cost_usd"] += (tokens_in * price["input"] + tokens_out * price["output"]) / 1e6
         if agent is not None:
-            agent.last_seen_at = max(agent.last_seen_at or when, when)
+            last_seen[agent.id] = max(last_seen.get(agent.id, when), when)
             seen = activity.setdefault(
                 (agent.id, day),
                 {"when": when, "model_calls": 0, "input_tokens": 0, "output_tokens": 0},
@@ -182,8 +179,10 @@ def ingest_logs(session: Session, payload: dict[str, Any]) -> dict[str, int]:
     for (agent_id, day, provider, model), counts in added.items():
         _add(agent_id, day, provider, model, counts)
     for (agent_id, _), counts in activity.items():
-        discovery.record_activity(session, agent_id, **counts)
-    _budgets_reached(session, spent)
+        discovery.record_activity(tx, agent_id, **counts)
+    for agent_id, when in last_seen.items():
+        discovery.seen(agent_id, when)
+    _budgets_reached(tx, spent)
     return stats
 
 
@@ -197,20 +196,20 @@ def _add(agent_id: str, day: str, provider: str, model: str, counts: dict[str, f
         ModelUsage.objects.create(**key, **counts)
 
 
-def _budgets_reached(session: Session, spent: dict[tuple[str, str], int]) -> None:
+def _budgets_reached(tx: db.Where, spent: dict[tuple[str, str], int]) -> None:
     """Record the agents whose usage today reached their budget in this batch, and have OPA
     refuse their further calls."""
     day = today()
-    used = tokens_used(session, day) if any(d == day for _, d in spent) else {}
+    used = tokens_used(tx, day) if any(d == day for _, d in spent) else {}
     for (agent_id, spent_day), tokens in spent.items():
-        agent = session.get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         budget = model_providers.effective_budget(agent) if agent else None
         if spent_day != day or budget is None:
             continue
         after = used.get(agent_id, 0)
         if after - tokens < budget <= after:
             ledger.append(
-                session,
+                tx,
                 type="model.budget_reached",
                 actor="system:usage",
                 agent=agent,
@@ -218,7 +217,7 @@ def _budgets_reached(session: Session, spent: dict[tuple[str, str], int]) -> Non
                 reason=f"{after} of {budget} tokens used today",
                 details={"budget": budget, "used": after, "day": day},
             )
-            mark_changed(session, "agents")
+            mark_changed(tx, "agents")
 
 
 SPEND_BY = ("owner", "sponsor")
@@ -231,8 +230,7 @@ def spend(tx: db.Where, rows: list[ModelUsage]) -> dict[str, list[dict[str, Any]
     or sponsors counts under ``None``. Calls from unidentified callers aren't included.
     """
     ids_ = {r.agent_id for r in rows if r.agent_id}
-    found = db.orm(tx).scalars(select(Agent).where(Agent.id.in_(ids_))).unique() if ids_ else []
-    agents = {a.id: a for a in found}
+    agents = Agent.objects.in_bulk(ids_) if ids_ else {}
     groups: dict[str, dict[str | None, dict[str, Any]]] = {by: {} for by in SPEND_BY}
     for row in rows:
         agent = agents.get(row.agent_id)

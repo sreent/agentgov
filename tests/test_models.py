@@ -9,8 +9,8 @@ import pytest
 from sqlalchemy import select
 
 from agentgov import cli, ids
-from agentgov.db.models import Finding, ModelUsage
-from agentgov.models import Agent, LedgerEntry
+from agentgov.db.models import Agent, Finding, ModelUsage
+from agentgov.models import LedgerEntry
 from agentgov.opa import bundle as opa_bundle
 from agentgov.registry import agents, blueprints, decisions, manifests, model_providers, model_usage
 from agentgov.registry.errors import Conflict, InvalidTransition, ValidationError
@@ -200,7 +200,7 @@ class TestProviders:
 class TestModelAccess:
     def test_blueprint_and_agent_grants_merge(self, rt, bot) -> None:
         with rt.db.session() as s:
-            agent = s.get(Agent, bot)
+            agent = Agent.objects.get(pk=bot)
             agents.update(
                 s,
                 agent,
@@ -229,7 +229,7 @@ class TestModelAccess:
             {"daily_token_budget": "lots"},
         ):
             with rt.db.session() as s, pytest.raises(ValidationError):
-                agents.update(s, s.get(Agent, bot), data, actor="a")
+                agents.update(s, Agent.objects.get(pk=bot), data, actor="a")
 
     def test_opa_gets_providers_grants_and_budgets(self, rt, bot) -> None:
         with rt.db.session() as s:
@@ -262,7 +262,7 @@ class TestMetering:
             )
             assert unidentified.calls == 1
             assert model_usage.tokens_used(s) == {bot: 120}
-            assert s.get(Agent, bot).last_seen_at is not None
+            assert Agent.objects.get(pk=bot).last_seen_at is not None
 
     def test_reaching_the_budget_is_recorded_and_reaches_opa(self, rt, bot) -> None:
         with rt.db.session() as s:

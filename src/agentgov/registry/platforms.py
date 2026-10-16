@@ -32,13 +32,12 @@ from collections.abc import Iterator
 from typing import Any
 
 from django.db.models import Count
-from sqlalchemy import select
 
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import mark_changed
-from agentgov.db.models import ApprovedConnector, Finding, PlatformAgent, PlatformSync
-from agentgov.models import BLOCKED, DELETED, DISCOVERED, Agent
+from agentgov.db.models import Agent, ApprovedConnector, Finding, PlatformAgent, PlatformSync
+from agentgov.models import BLOCKED, DELETED, DISCOVERED
 from agentgov.platforms.base import Inventory
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, features, findings
@@ -128,18 +127,17 @@ def upsert(
 ) -> tuple[Agent, bool]:
     """Record one agent as the platform reports it; returns ``(agent, created)``."""
     key = f"{source}:{external_id}"
-    session = db.orm(tx)
     record = PlatformAgent.objects.filter(pk=key).first()
-    agent = session.get(Agent, record.agent_id) if record is not None else None
+    agent = Agent.objects.filter(pk=record.agent_id).first() if record is not None else None
     entra_id = external_ids.get("entra_agent_id")
     if agent is None and entra_id and entra_id in entra_index:
         # A Copilot Studio agent published to Microsoft 365 is in both sources.
-        agent = session.get(Agent, entra_index[entra_id])
+        agent = Agent.objects.filter(pk=entra_index[entra_id]).first()
     created = agent is None
     if agent is None:
         agent = Agent(
             id=ids.new_id(ids.AGENT),
-            name=discovery.unique_name(session, discovery.slugify(name)),
+            name=discovery.unique_name(tx, discovery.slugify(name)),
             description=description or "",
             status=DISCOVERED,
             source=f"platform:{source}",
@@ -151,10 +149,9 @@ def upsert(
             external_ids=external_ids,
             created_by=f"system:{source}",
         )
-        session.add(agent)
-        session.flush()
+        agent.save(force_insert=True)
         ledger.append(
-            session,
+            tx,
             type="agent.discovered",
             actor=f"system:{source}",
             agent=agent,
@@ -162,13 +159,14 @@ def upsert(
         )
         # Not a finding of its own: one per platform says how many are left to review
         # (review_summary), so that an import of 300 agents raises one issue, not 300.
-        mark_changed(session, "agents")
+        mark_changed(tx, "agents")
     else:
         agent.external_ids = {**(agent.external_ids or {}), **external_ids}
         if not agent.platform or agent.platform == ENTRA_PLATFORM:
             agent.platform = platform
         if description and not agent.description:
             agent.description = description
+        agent.save()
     if entra_id:
         entra_index[entra_id] = agent.id
     adding = record is None
@@ -273,7 +271,7 @@ def record_microsoft_365(
         if text:
             with contextlib.suppress(ValidationError):  # too long to keep
                 instructions_svc.report(
-                    db.orm(tx),
+                    tx,
                     agent,
                     source="microsoft-365",
                     text=text,
@@ -557,7 +555,7 @@ def remove_approval(tx: db.Where, connector_id: str, *, actor: str) -> None:
 
 def _records(tx: db.Where, source: str) -> list[PlatformAgent]:
     """The source's agents that are still in the registry (not deleted)."""
-    deleted = set(db.orm(tx).scalars(select(Agent.id).where(Agent.status == DELETED)))
+    deleted = set(Agent.objects.filter(status=DELETED).values_list("id", flat=True))
     found = PlatformAgent.objects.filter(source=source).order_by("name")
     return [r for r in found if r.agent_id not in deleted]
 
@@ -744,7 +742,7 @@ def record_inventory(
         if item.instructions and item.instructions.strip():
             with contextlib.suppress(ValidationError):  # too long to keep
                 instructions_svc.report(
-                    db.orm(tx),
+                    tx,
                     agent,
                     source=source,
                     text=item.instructions,
@@ -821,15 +819,11 @@ def refresh_risk(tx: db.Where, settings: Settings) -> None:
     scan, how many of them are left to review, and which of those blocked in AgentGov their
     platform still runs."""
     for agent in (
-        db.orm(tx)
-        .scalars(
-            select(Agent)
-            .where(Agent.source.like("platform:%"), Agent.status != DELETED)
-            .order_by(Agent.id)  # in the posture scan's order (registry/posture)
-        )
-        .unique()
+        Agent.objects.filter(source__startswith="platform:")
+        .exclude(status=DELETED)
+        .order_by("id")  # in the posture scan's order (registry/posture)
     ):
-        agents_svc.refresh_risk(db.orm(tx), settings, agent)
+        agents_svc.refresh_risk(tx, settings, agent)
     review_summary(tx)
     check_stops(tx, settings)
 
@@ -847,11 +841,7 @@ def review_summary(tx: db.Where) -> None:
     platform_agents = []
     # Gone from their platforms: there is nothing left to adopt.
     gone = gone_agents(tx)
-    for agent in (
-        db.orm(tx)
-        .scalars(select(Agent).where(Agent.source.like("platform:%"), Agent.status != DELETED))
-        .unique()
-    ):
+    for agent in Agent.objects.filter(source__startswith="platform:").exclude(status=DELETED):
         platform_agents.append(agent.id)
         source = (agent.source or "").removeprefix("platform:")
         if agent.status == DISCOVERED and source in SOURCES and agent.id not in gone:
@@ -1106,14 +1096,13 @@ def check_stop(
 def check_stops(tx: db.Where, settings: Settings) -> None:
     """:func:`check_stop` for the agents blocked in AgentGov that platforms report, and for
     those with the issue open."""
-    session = db.orm(tx)
     reported = set(PlatformAgent.objects.values_list("agent_id", flat=True))
-    agent_ids = reported & set(session.scalars(select(Agent.id).where(Agent.status == BLOCKED)))
+    agent_ids = reported & set(Agent.objects.filter(status=BLOCKED).values_list("id", flat=True))
     agent_ids |= set(
         Finding.objects.filter(type=STILL_RUNNING, status="open").values_list("agent_id", flat=True)
     )
     for agent_id in sorted(a for a in agent_ids if a):
-        agent = session.get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         if agent is not None:
             check_stop(tx, settings, agent)
 
@@ -1162,7 +1151,7 @@ def overview(
     """Each source, how many agents it reports and how its last sync went. ``connected``:
     the INVENTORY_SOURCES whose connector is configured."""
     connected = connected or set()
-    deleted = list(db.orm(tx).scalars(select(Agent.id).where(Agent.status == DELETED)))
+    deleted = list(Agent.objects.filter(status=DELETED).values_list("id", flat=True))
     agents = dict(
         PlatformAgent.objects.exclude(agent_id__in=deleted)
         .values("source")

@@ -40,11 +40,10 @@ from urllib.parse import urlsplit
 
 import httpcore
 import httpx
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
-from agentgov import __version__, ids, ledger
-from agentgov.models import DELETED, Agent
+from agentgov import __version__, db, ids, ledger
+from agentgov.db.models import Agent
+from agentgov.models import DELETED
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import features
 
@@ -297,12 +296,12 @@ def call(
     return _result(INCONCLUSIVE, f"it answered HTTP {status}", url, status)
 
 
-def targets(session: Session) -> dict[str, str] | None:
+def targets(tx: db.Where) -> dict[str, str] | None:
     """The agents to test, by ID: their A2A URLs (None unless the feature says "test")."""
-    modes = features.modes(session)
+    modes = features.modes(tx)
     if modes.get(FEATURE) != TEST or not on(modes):
         return None
-    found = session.scalars(select(Agent).where(Agent.status != DELETED)).unique()
+    found = Agent.objects.exclude(status=DELETED)
     return {a.id: a.a2a_url for a in found if a.a2a_url and checked(a, modes)}
 
 
@@ -322,16 +321,17 @@ def call_all(urls: dict[str, str], **options: Any) -> dict[str, Any]:
 Flag = Callable[..., None]
 
 
-def scan(session: Session, agent: Agent, flag: Flag, *, tested: dict[str, Any] | None) -> None:
+def scan(tx: db.Where, agent: Agent, flag: Flag, *, tested: dict[str, Any] | None) -> None:
     """Record the agent's test, if this scan tested it, and raise what it shows (and what
     its owners haven't said) for posture.scan."""
     if tested is not None:
         before = (agent.a2a_probe or {}).get("state")
         agent.a2a_probe = tested
+        agent.save()
         if tested["state"] != before:
             # What it found, in the ledger when it changes: evidence of what was tested.
             ledger.append(
-                session,
+                tx,
                 type="agent.a2a_tested",
                 actor="system:posture-scan",
                 agent=agent,
@@ -414,11 +414,11 @@ def _same_host(a: str, b: str) -> bool:
     return "." not in rest or ".svc" in f".{rest}"
 
 
-def endpoints(session: Session, modes: dict[str, str]) -> list[tuple[str, int | None, Agent]]:
+def endpoints(tx: db.Where, modes: dict[str, str]) -> list[tuple[str, int | None, Agent]]:
     """Where the agents whose calls around the gateway are looked for serve A2A."""
     if not on(modes):
         return []
-    found = session.scalars(select(Agent).where(Agent.status != DELETED)).unique()
+    found = Agent.objects.exclude(status=DELETED)
     out = []
     for agent in found:
         where = _endpoint_of(agent.a2a_url) if agent.a2a_url else None

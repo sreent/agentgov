@@ -21,13 +21,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from django.db.models import Q
-from sqlalchemy import select
 
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.db.models import AccessAssignment, AccessPackage
-from agentgov.models import DELETED, Agent, Blueprint
+from agentgov.db.models import AccessAssignment, AccessPackage, Agent, Blueprint
+from agentgov.models import DELETED
 from agentgov.registry import features, findings, issues, validation
 from agentgov.registry.errors import (
     Conflict,
@@ -107,7 +106,7 @@ def _apply(tx: db.Where, package: AccessPackage, data: dict[str, Any]) -> list[s
             value = validation.agent_access(value)
         elif key == "blueprints":
             value = list(dict.fromkeys(validation.string_list(value, "blueprints")))
-            known = set(db.orm(tx).scalars(select(Blueprint.name).where(Blueprint.name.in_(value))))
+            known = set(Blueprint.objects.filter(name__in=value).values_list("name", flat=True))
             missing = [b for b in value if b not in known]
             if missing:
                 raise ValidationError(f"blueprint(s) {', '.join(missing)} not found")
@@ -321,7 +320,7 @@ def _record(
     **extra: Any,
 ) -> None:
     package = AccessPackage.objects.filter(pk=row.package_id).first()
-    agent = db.orm(tx).get(Agent, row.agent_id)
+    agent = Agent.objects.filter(pk=row.agent_id).first()
     assert package is not None and agent is not None
     ledger.append(
         tx,
@@ -440,7 +439,7 @@ def decide(
         raise Forbidden("someone other than who asked for it decides a request")
     note = str(note).strip()[:2000] if note else None
     if approve:
-        _not_deleted(db.orm(tx).get(Agent, row.agent_id))
+        _not_deleted(Agent.objects.filter(pk=row.agent_id).first())
         _grant(tx, row, actor=actor, note=note)
     else:
         row.status = DENIED
@@ -523,7 +522,7 @@ def check(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict
     counts = {"expired": 0, "expiring": 0, "reviews": 0}
     packages = AccessPackage.objects.in_bulk()
     for row in list(AccessAssignment.objects.filter(status=ACTIVE)):
-        package, agent = packages.get(row.package_id), db.orm(tx).get(Agent, row.agent_id)
+        package, agent = packages.get(row.package_id), Agent.objects.filter(pk=row.agent_id).first()
         # A deleted agent's packages wait for it to be restored (or purged).
         if package is None or agent is None or agent.status == DELETED or row.expires_at is None:
             continue
@@ -632,7 +631,7 @@ def _with_packages(rows: Any) -> list[tuple[AccessAssignment, AccessPackage]]:
 
 def assignment_dict(tx: db.Where, row: AccessAssignment) -> dict[str, Any]:
     package = AccessPackage.objects.filter(pk=row.package_id).first()
-    agent = db.orm(tx).get(Agent, row.agent_id)
+    agent = Agent.objects.filter(pk=row.agent_id).first()
     expired = row.status == EXPIRED or (
         row.status == ACTIVE and row.expires_at is not None and row.expires_at <= ids.utcnow()
     )

@@ -35,9 +35,7 @@ def _validate(tx: db.Where, name: str, source: str, enabled: bool) -> None:
         for path, src in opa_bundle.custom_modules(tx).items()
         if path != f"agentgov/custom/{name}.rego"
     }
-    rego.check_custom_policy(
-        name, source, others=others, registry=opa_bundle.registry_snapshot(db.orm(tx))
-    )
+    rego.check_custom_policy(name, source, others=others, registry=opa_bundle.registry_snapshot(tx))
 
 
 def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> Policy:

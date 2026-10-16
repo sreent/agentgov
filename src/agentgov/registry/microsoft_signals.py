@@ -19,13 +19,10 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.db.models import PlatformAgent
-from agentgov.models import DELETED, Agent
+from agentgov.db.models import Agent, PlatformAgent
+from agentgov.models import DELETED
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings, risk
 
@@ -49,10 +46,10 @@ DEFENDER_SEVERITY = {
 }
 
 
-def agent_index(session: Session) -> dict[str, str]:
+def agent_index(tx: db.Where) -> dict[str, str]:
     """Registry agent ids by every identifier the platform sources reported (lowercase)."""
     index: dict[str, str] = {}
-    deleted = set(session.scalars(select(Agent.id).where(Agent.status == DELETED)))
+    deleted = set(Agent.objects.filter(status=DELETED).values_list("id", flat=True))
     for record in PlatformAgent.objects.exclude(agent_id__in=deleted):
         data = record.data or {}
         names = [record.external_id] + [
@@ -104,9 +101,9 @@ def _flagged(items: Any, flag: str) -> int:
 # ------------------------------------------------------------------- Purview
 
 
-def record_usage(session: Session, settings: Settings, records: list[dict[str, Any]]) -> dict:
+def record_usage(tx: db.Where, settings: Settings, records: list[dict[str, Any]]) -> dict:
     """Agents' use, from ``CopilotInteraction`` audit records."""
-    index = agent_index(session)
+    index = agent_index(tx)
     usage: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"days": Counter(), "users": [], "hosts": Counter(), "jailbreaks": 0, "xpia": 0}
     )
@@ -132,22 +129,23 @@ def record_usage(session: Session, settings: Settings, records: list[dict[str, A
         entry["xpia"] += _flagged(data.get("AccessedResources"), "XPIADetected")
         last_used[agent_id] = max(last_used.get(agent_id, when), when)
     for agent_id, entry in usage.items():
-        agent = session.get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         if agent is None:
             continue
         when = last_used[agent_id]
         agent.last_seen_at = max(agent.last_seen_at or when, when)
+        agent.save()
         for day, count in entry["days"].items():
             # Each interaction is a model call by the agent on someone's behalf.
             discovery.record_activity(
-                session, agent_id, when=datetime(day.year, day.month, day.day), model_calls=count
+                tx, agent_id, when=datetime(day.year, day.month, day.day), model_calls=count
             )
-        _remember_usage(session, agent_id, entry, when)
+        _remember_usage(tx, agent_id, entry, when)
         if entry["jailbreaks"]:
             for _ in range(min(entry["jailbreaks"], 10)):
-                risk.add_signal(session, agent_id, "jailbreak_attempt", "Microsoft Purview")
+                risk.add_signal(tx, agent_id, "jailbreak_attempt", "Microsoft Purview")
             findings.raise_finding(
-                session,
+                tx,
                 type="agent.jailbreak_attempts",
                 severity="medium",
                 subject=agent_id,
@@ -162,9 +160,9 @@ def record_usage(session: Session, settings: Settings, records: list[dict[str, A
             )
         if entry["xpia"]:
             for _ in range(min(entry["xpia"], 10)):
-                risk.add_signal(session, agent_id, "prompt_injection", "Microsoft Purview")
+                risk.add_signal(tx, agent_id, "prompt_injection", "Microsoft Purview")
             findings.raise_finding(
-                session,
+                tx,
                 type="agent.cross_prompt_injection",
                 severity="high",
                 subject=agent_id,
@@ -178,13 +176,13 @@ def record_usage(session: Session, settings: Settings, records: list[dict[str, A
                 "may be targeting your agents.",
                 details={"attempts": entry["xpia"]},
             )
-        agents_svc.refresh_risk(session, settings, agent)
+        agents_svc.refresh_risk(tx, settings, agent)
     interactions = sum(sum(e["days"].values()) for e in usage.values())
     return {"interactions": interactions, "agents": len(usage), "unmatched": unmatched}
 
 
 def _remember_usage(
-    session: Session, agent_id: str, entry: dict[str, Any], last_used: datetime
+    tx: db.Where, agent_id: str, entry: dict[str, Any], last_used: datetime
 ) -> None:
     """Keep who used the agent lately, and where, on its platform records."""
     for record in PlatformAgent.objects.filter(agent_id=agent_id):
@@ -207,9 +205,9 @@ def _remember_usage(
         record.save()
 
 
-def record_maker_events(session: Session, records: list[dict[str, Any]]) -> dict[str, int]:
+def record_maker_events(tx: db.Where, records: list[dict[str, Any]]) -> dict[str, int]:
     """Copilot Studio agents created, published, shared or deleted, into the ledger."""
-    index = agent_index(session)
+    index = agent_index(tx)
     counts = {"events": 0, "skipped": 0}
     for record in sorted(records, key=lambda r: str(r.get("createdDateTime") or "")):
         data = _audit_data(record)
@@ -220,10 +218,10 @@ def record_maker_events(session: Session, records: list[dict[str, Any]]) -> dict
             continue
         bot_id = data.get("BotId") or record.get("objectId")
         agent_id = match_agent(index, bot_id, data.get("BotSchemaName"))
-        agent = session.get(Agent, agent_id) if agent_id else None
+        agent = Agent.objects.filter(pk=agent_id).first() if agent_id else None
         who = record.get("userPrincipalName") or record.get("userId") or "unknown"
         ledger.append(
-            session,
+            tx,
             type=type_,
             actor=f"maker:{who}",
             agent=agent,
@@ -262,9 +260,9 @@ def is_about_agents(alert: dict[str, Any]) -> bool:
     )
 
 
-def record_alerts(session: Session, settings: Settings, alerts: list[dict[str, Any]]) -> dict:
+def record_alerts(tx: db.Where, settings: Settings, alerts: list[dict[str, Any]]) -> dict:
     """Defender alerts about agents, as findings (resolved when Defender resolves them)."""
-    index = agent_index(session)
+    index = agent_index(tx)
     counts = {"alerts": 0, "matched": 0, "resolved": 0}
     touched: set[str] = set()
     for alert in alerts:
@@ -280,14 +278,14 @@ def record_alerts(session: Session, settings: Settings, alerts: list[dict[str, A
                 break
         key = f"defender.alert:{alert_id}"
         if alert.get("status") == "resolved":
-            findings.resolve_key(session, key, actor=ACTOR)
+            findings.resolve_key(tx, key, actor=ACTOR)
             counts["resolved"] += 1
             if agent_id:
                 touched.add(agent_id)
             continue
         named = ", ".join(sorted({str(e.get("agentName")) for e in evidence if e.get("agentName")}))
         findings.raise_finding(
-            session,
+            tx,
             type="defender.alert",
             severity=DEFENDER_SEVERITY.get(str(alert.get("severity")), "medium"),
             subject=str(alert_id),
@@ -317,7 +315,7 @@ def record_alerts(session: Session, settings: Settings, alerts: list[dict[str, A
             counts["matched"] += 1
             touched.add(agent_id)
     for agent_id in touched:
-        agent = session.get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         if agent is not None:
-            agents_svc.refresh_risk(session, settings, agent)
+            agents_svc.refresh_risk(tx, settings, agent)
     return counts

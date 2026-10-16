@@ -8,12 +8,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from sqlalchemy.orm import Session
-
 from agentgov import db, ids
 from agentgov.config import Settings
-from agentgov.db.models import Finding
-from agentgov.models import Agent
+from agentgov.db.models import Agent, Finding
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import blueprints, classification, issues, platforms, teams, validation
 from agentgov.registry import findings as findings_svc
@@ -55,7 +52,7 @@ def _as_asked(
     }
 
 
-def edit(session: Session, fields: Any) -> dict[str, Any]:
+def edit(tx: db.Where, fields: Any) -> dict[str, Any]:
     """An edit to many agents, checked once for all of them."""
     if not isinstance(fields, dict) or not fields:
         raise ValidationError(f"say what to change (fields): {', '.join(EDITS)}")
@@ -77,9 +74,9 @@ def edit(session: Session, fields: Any) -> dict[str, Any]:
             raise ValidationError(f"{key} must be a string")
         change[key] = (change[key] or "").strip() or None
     if "team" in change:
-        change["team"] = teams.reference(session, change["team"])
+        change["team"] = teams.reference(tx, change["team"])
     if change.get("blueprint"):
-        change["blueprint"] = blueprints.get(session, change["blueprint"]).name
+        change["blueprint"] = blueprints.get(tx, change["blueprint"]).name
     if "risk_tier" in change:
         change["risk_tier"] = validation.risk_tier(change["risk_tier"])
     return change
@@ -101,7 +98,7 @@ def _for(agent: Agent, change: dict[str, Any]) -> dict[str, Any]:
 
 
 def agents(
-    session: Session,
+    tx: db.Where,
     settings: Settings,
     refs: Any,
     action: str,
@@ -124,7 +121,7 @@ def agents(
     if action not in AGENT_ACTIONS:
         raise ValidationError(f"action is {', '.join(AGENT_ACTIONS)}")
     if action == "update":
-        change = edit(session, fields)
+        change = edit(tx, fields)
     elif action == "classify":
         # One classification for them all, checked once.
         if not fields:
@@ -140,7 +137,7 @@ def agents(
     found: dict[str, tuple[int, Agent]] = {}
     for i, ref in enumerate(names):
         try:
-            agent = agents_svc.get(session, ref)
+            agent = agents_svc.get(tx, ref)
         except NotFound:
             agent = None
         if agent is None or (reached is not None and agent.id not in reached):
@@ -150,23 +147,21 @@ def agents(
     # In the same order every time: two of these at once lock their agents in that order.
     for i, agent in sorted(found.values(), key=lambda x: x[1].id):
         try:
-            with session.begin_nested():
+            with db.transaction_of(tx).savepoint():
                 if check is not None:
                     check(agent)
                 if action == "update":
                     changed = agents_svc.update(
-                        session, agent, _for(agent, change), actor=actor, reason=reason
+                        tx, agent, _for(agent, change), actor=actor, reason=reason
                     )
                     if set(changed) & agents_svc.RISKY_FIELDS:
-                        agents_svc.refresh_risk(session, settings, agent)
+                        agents_svc.refresh_risk(tx, settings, agent)
                 elif action == "classify":
-                    classification.classify(session, agent, given, actor=actor)
+                    classification.classify(tx, agent, given, actor=actor)
                 else:
-                    agents_svc.transition(
-                        session, settings, agent, action, actor=actor, reason=reason
-                    )
+                    agents_svc.transition(tx, settings, agent, action, actor=actor, reason=reason)
                     if action in ("approve", "restore"):
-                        agents_svc.refresh_risk(session, settings, agent)
+                        agents_svc.refresh_risk(tx, settings, agent)
                 if keep is not None:
                     keep(agent)
         except RegistryError as exc:
@@ -178,12 +173,12 @@ def agents(
         )
     if any(d["platform"] for _, d in done):
         # Those waiting to be reviewed on their platforms: blocked or deleted, they aren't.
-        platforms.review_summary(session)
+        platforms.review_summary(tx)
     return _as_asked(done, left)
 
 
 def findings(
-    session: Session,
+    tx: db.Where,
     refs: Any,
     action: str,
     *,
@@ -218,7 +213,7 @@ def findings(
     found: dict[str, tuple[int, Finding]] = {}
     for i, ref in enumerate(names):
         try:
-            finding = findings_svc.get(session, ref)
+            finding = findings_svc.get(tx, ref)
         except NotFound:
             left.append((i, {"finding": ref, "title": "", "why": "there is no such finding"}))
             continue
@@ -230,14 +225,14 @@ def findings(
             )
             continue
         try:
-            with db.transaction_of(session).savepoint():
+            with db.transaction_of(tx).savepoint():
                 if action == "acknowledge":
-                    issues.acknowledge(session, finding, actor=actor)
+                    issues.acknowledge(tx, finding, actor=actor)
                 elif action == "dismiss":
-                    issues.dismiss(session, finding, reason=reason, actor=actor, until=when, by=by)
+                    issues.dismiss(tx, finding, reason=reason, actor=actor, until=when, by=by)
                 elif action == "accept":
                     issues.accept(
-                        session,
+                        tx,
                         finding,
                         reason=reason,
                         until=ids.isoformat(when),
@@ -246,7 +241,7 @@ def findings(
                     )
                 else:
                     status = "resolved" if action == "resolve" else "open"
-                    finding = findings_svc.set_status(session, finding.id, status, actor)
+                    finding = findings_svc.set_status(tx, finding.id, status, actor)
         except RegistryError as exc:
             left.append((i, {"finding": finding.id, "title": finding.title, "why": str(exc)}))
             continue

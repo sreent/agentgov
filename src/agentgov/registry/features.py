@@ -24,13 +24,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
-
 from agentgov import db, ids, ledger
 from agentgov.config import FEATURE_PRESETS, Settings
 from agentgov.db import mark_changed
-from agentgov.db.models import FeatureSetting, IntegrationState
-from agentgov.models import DELETED, Agent
+from agentgov.db.models import Agent, FeatureSetting, IntegrationState
+from agentgov.models import DELETED
 from agentgov.registry import scopes as scope_rules
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
@@ -1331,7 +1329,7 @@ def describe(tx: db.Where, settings: Settings, key: str | None = None) -> list[d
         if entries and agents is None:
             # Read once: how many agents each exception applies to, and what it names that
             # there isn't.
-            agents = list(db.orm(tx).scalars(select(Agent).where(Agent.status != DELETED)).unique())
+            agents = list(Agent.objects.exclude(status=DELETED))
             names = scope_rules.known(tx)
         # A default that needs what isn't there, or a mode chosen before it went away: it
         # does nothing until it is there, and says so.

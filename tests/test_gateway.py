@@ -13,6 +13,7 @@ import yaml
 from starlette.testclient import TestClient
 
 from agentgov.config import Settings
+from agentgov.db.models import Agent
 from agentgov.gateway import (
     identity_headers,
     render,
@@ -20,7 +21,7 @@ from agentgov.gateway import (
     with_available_keys,
     write_if_changed,
 )
-from agentgov.models import Agent, ModelProvider, ToolServer
+from agentgov.models import ModelProvider, ToolServer
 
 IMAGE = "ghcr.io/agentgateway/agentgateway:v1.6.0"
 # A throwaway RSA public key, so validation does not need a running Keycloak.

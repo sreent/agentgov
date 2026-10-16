@@ -25,19 +25,19 @@ from pathlib import Path
 from typing import Any
 
 from django.db import IntegrityError
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from django.db.models import Q
 
 from agentgov import db, ids
 from agentgov.db import Database
-from agentgov.db.models import ApprovedConnector, IntegrationState, Policy
-from agentgov.models import (
-    DELETED,
-    DISCOVERED,
+from agentgov.db.models import (
     Agent,
+    ApprovedConnector,
     Blueprint,
+    IntegrationState,
+    Policy,
     ToolServer,
 )
+from agentgov.models import DELETED, DISCOVERED
 from agentgov.opa import WHAT_IF
 from agentgov.opa.signing import SIGNATURES, Signer
 from agentgov.registry import (
@@ -103,7 +103,7 @@ def custom_package(name: str) -> str:
     return "agentgov.custom." + name.replace("-", "_")
 
 
-def registry_snapshot(session: Session) -> dict[str, Any]:
+def registry_snapshot(tx: db.Where) -> dict[str, Any]:
     agents: dict[str, Any] = {}
     clients: dict[str, str] = {}
     names: dict[str, str] = {}
@@ -111,14 +111,14 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
     # whose workload identity it names, by the issuer as tokens name it and the subject
     # (docs/agent-identity.md#straight-to-the-gateway). A blocked issuer's agents, and
     # agents not adopted yet, are callers AgentGov can't tell.
-    takers = {i.name: i.issuer for i in identity_issuers.at_the_gateway(session)}
+    takers = {i.name: i.issuer for i in identity_issuers.at_the_gateway(tx)}
     workloads: dict[str, dict[str, str]] = {}
-    used = model_usage.tokens_used(session)
-    held = access_packages.held(session)
-    current = features.modes(session)
-    exceptions = features.all_scopes(session)
+    used = model_usage.tokens_used(tx)
+    held = access_packages.held(tx)
+    current = features.modes(tx)
+    exceptions = features.all_scopes(tx)
     scoped = False
-    for agent in session.scalars(select(Agent).where(Agent.status != DELETED)).unique():
+    for agent in Agent.objects.exclude(status=DELETED):
         bp = agent.blueprint
         budget = model_providers.effective_budget(agent)
         # The controls whose mode differs for this agent (docs/features.md#exceptions).
@@ -163,8 +163,8 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
     servers: dict[str, Any] = {}
     # Servers only for developers never reach the gateway, so OPA never decides on them;
     # it does on those agents get identity assertions for (agentgov.idjag).
-    reached = or_(ToolServer.gateway.is_(True), ToolServer.authorization_server.is_not(None))
-    for ts in session.scalars(select(ToolServer).where(reached)):
+    reached = Q(gateway=True) | Q(authorization_server__isnull=False)
+    for ts in ToolServer.objects.filter(reached):
         servers[ts.name] = {
             "name": ts.name,
             "status": ts.status,
@@ -187,7 +187,7 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
             "permissions": bp.permissions or [],
             "labels": bp.labels or {},
         }
-        for bp in session.scalars(select(Blueprint))
+        for bp in Blueprint.objects.all()
     }
     # The connector allowlist for Copilot Studio agents (enforced through threat detection).
     approved = dict.fromkeys(ApprovedConnector.objects.values_list("connector_id", flat=True), True)
@@ -199,7 +199,7 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
             "trust_level": p.trust_level,
             "labels": p.labels or {},
         }
-        for p in model_providers.list_all(session)
+        for p in model_providers.list_all(tx)
     }
     return {
         "agents": agents,
@@ -231,10 +231,10 @@ class Bundle:
     revision: str
 
 
-def build(session: Session, signer: Signer | None = None) -> Bundle:
+def build(tx: db.Where, signer: Signer | None = None) -> Bundle:
     """The bundle as the registry has it now; signed (.signatures.json) with ``signer``."""
-    files = {**library_files(), "system/log.rego": SYSTEM_LOG_REGO, **custom_modules(session)}
-    data = registry_snapshot(session)
+    files = {**library_files(), "system/log.rego": SYSTEM_LOG_REGO, **custom_modules(tx)}
+    data = registry_snapshot(tx)
     data_json = json.dumps(data, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(data_json.encode())
     for path in sorted(files):
@@ -311,8 +311,8 @@ class BundleServer:
         if cached is not None and cached[0] == key and time.monotonic() - cached[2] < self.max_age:
             return cached[1]
         built_at = time.monotonic()
-        with self._db.session() as session:
-            bundle = build(session, self._signer)
+        with self._db.transaction() as tx:
+            bundle = build(tx, self._signer)
         with self._lock:
             self._cached = (key, bundle, built_at)
         return bundle

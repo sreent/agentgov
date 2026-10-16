@@ -13,11 +13,10 @@ import re
 from typing import Any
 
 from django.db.models import Q
-from sqlalchemy import select
 
 from agentgov import db, ids, ledger
-from agentgov.db.models import Destination, Team
-from agentgov.models import DELETED, Agent, Blueprint
+from agentgov.db.models import Agent, Blueprint, Destination, Team
+from agentgov.models import DELETED
 from agentgov.registry import scopes, validation
 from agentgov.registry.destinations import CHAT
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -96,11 +95,7 @@ def agents_in(tx: db.Where, names: Any) -> set[str]:
         return set()
     fallback = default(tx)
     existing = all_names(tx)
-    rows = db.orm(tx).execute(
-        select(Agent.id, Agent.team, Blueprint.team).outerjoin(
-            Blueprint, Agent.blueprint_id == Blueprint.id
-        )
-    )
+    rows = Agent.objects.values_list("id", "team", "blueprint__team")
     return {
         agent_id
         for agent_id, own, blueprints in rows
@@ -239,13 +234,10 @@ def users(tx: db.Where, name: str, *, reached: set[str] | None = None) -> list[s
     for some teams only, which reads only those, and no exceptions or rules."""
     found = scopes.naming(tx, "teams", name) if reached is None else []
     found += [
-        f"blueprint {b}"
-        for b in db.orm(tx).scalars(select(Blueprint.name).where(Blueprint.team == name))
+        f"blueprint {b}" for b in Blueprint.objects.filter(team=name).values_list("name", flat=True)
     ]
-    rows = db.orm(tx).execute(
-        select(Agent.id, Agent.name, Agent.team, Agent.owner, Agent.sponsors).where(
-            Agent.status != DELETED
-        )
+    rows = Agent.objects.exclude(status=DELETED).values_list(
+        "id", "name", "team", "owner", "sponsors"
     )
     found += [
         f"agent {agent}"

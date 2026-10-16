@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.db.models import Count
 from django.http import HttpRequest
 from ninja import Body
-from sqlalchemy import func, select
 
 from agentgov.api.auth import READ_ROLES
 from agentgov.api.versions import if_match
-from agentgov.models import Agent
+from agentgov.db.models import Agent
 from agentgov.registry import features, identity_issuers
 from agentgov.registry.errors import Conflict, NotFound
 from agentgov.secops import handoff
@@ -52,11 +52,11 @@ def _keys_now(rt: Any, name: str, trusted: bool) -> dict[str, Any]:
 def list_issuers(request: HttpRequest) -> list[dict[str, Any]]:
     with runtime(request).db.session() as s:
         counts = dict(
-            s.execute(
-                select(Agent.workload_issuer, func.count())
-                .where(Agent.workload_issuer.is_not(None))
-                .group_by(Agent.workload_issuer)
-            ).all()
+            Agent.objects.filter(workload_issuer__isnull=False)
+            .values("workload_issuer")
+            .annotate(n=Count("id"))
+            .order_by()
+            .values_list("workload_issuer", "n")
         )
         on = features.is_on(s, OWN_IDENTITIES)
         return [

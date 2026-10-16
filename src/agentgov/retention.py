@@ -244,7 +244,7 @@ def archive(tx: db.Where, settings: Settings, now: datetime | None = None) -> di
     point.archived_from, point.pruned_at = floor + 1, now
     point.save()
     LedgerEntry.objects.filter(seq__gt=floor, seq__lte=last).delete()
-    findings.resolve_key(db.orm(tx), f"{ARCHIVE_FAILED}:ledger", actor=SYSTEM)
+    findings.resolve_key(tx, f"{ARCHIVE_FAILED}:ledger", actor=SYSTEM)
     ledger.append(
         tx,
         type="ledger.archived",
@@ -281,7 +281,7 @@ def _same_entries(one: Path, other: Path) -> bool:
 
 def _archive_failed(tx: db.Where, error: str) -> None:
     findings.raise_finding(
-        db.orm(tx),
+        tx,
         type=ARCHIVE_FAILED,
         severity="high",
         subject="ledger",

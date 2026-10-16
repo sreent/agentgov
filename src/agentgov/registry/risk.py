@@ -15,8 +15,8 @@ from typing import Any
 from django.db.models import Count
 
 from agentgov import db, ids
-from agentgov.db.models import Finding, RiskSignal
-from agentgov.models import DISCOVERED, Agent
+from agentgov.db.models import Agent, Finding, RiskSignal
+from agentgov.models import DISCOVERED
 from agentgov.registry import validation
 
 TIER_POINTS = {"minimal": 0, "low": 5, "medium": 10, "high": 25, "critical": 40}

@@ -351,7 +351,7 @@ def record_catalog(
 
     for name in report["changed"]:
         findings.raise_finding(
-            db.orm(tx),
+            tx,
             type="toolserver.tool_drift",
             severity="high",
             subject=f"{ts.name}/{name}",
@@ -364,7 +364,7 @@ def record_catalog(
         )
     for name in report["poisoned"]:
         findings.raise_finding(
-            db.orm(tx),
+            tx,
             type="toolserver.tool_poisoning",
             severity="critical",
             subject=f"{ts.name}/{name}",

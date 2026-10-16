@@ -134,7 +134,7 @@ def revoke(tx: db.Where, key_id: str, *, actor: str) -> ApiKey:
             details={"name": key.name, "role": key.role},
         )
         # Revoked, it no longer needs replacing: what said it expires is over.
-        findings.resolve_key(db.orm(tx), f"{EXPIRING}:{key.id}", actor=actor)
+        findings.resolve_key(tx, f"{EXPIRING}:{key.id}", actor=actor)
     return key
 
 

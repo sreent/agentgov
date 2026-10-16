@@ -26,13 +26,11 @@ from typing import Any
 
 from django.db.models import Q
 from django.db.models.functions import Lower
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.db.models import IntegrationState, Person, PlatformAgent
-from agentgov.models import DELETED, DISCOVERED, Agent
+from agentgov.db.models import Agent, IntegrationState, Person, PlatformAgent
+from agentgov.models import DELETED, DISCOVERED
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import platforms, teams
 from agentgov.registry.errors import NotFound, RegistryError, ValidationError
@@ -84,7 +82,7 @@ def named(record: PlatformAgent) -> list[dict[str, str]]:
 
 def _records(tx: db.Where) -> list[PlatformAgent]:
     """The platform records of agents in the registry (not deleted)."""
-    deleted = set(db.orm(tx).scalars(select(Agent.id).where(Agent.status == DELETED)))
+    deleted = set(Agent.objects.filter(status=DELETED).values_list("id", flat=True))
     return [r for r in PlatformAgent.objects.all() if r.agent_id not in deleted]
 
 
@@ -93,9 +91,7 @@ def owners_and_sponsors(tx: db.Where) -> set[str]:
     address (lower case): not teams, nor user names it can't look up."""
     team_names = {t.lower() for t in teams.all_names(tx)}
     names: set[str] = set()
-    for owner, sponsors in db.orm(tx).execute(
-        select(Agent.owner, Agent.sponsors).where(Agent.status != DELETED)
-    ):
+    for owner, sponsors in Agent.objects.exclude(status=DELETED).values_list("owner", "sponsors"):
         for name in [owner, *(sponsors or [])]:
             key = str(name or "").strip().lower()
             if "@" in key and key not in team_names:
@@ -419,7 +415,7 @@ def summary(tx: db.Where) -> dict[str, int]:
 
 
 def adopt(
-    session: Session,
+    tx: db.Where,
     settings: Settings,
     refs: list[str],
     *,
@@ -443,7 +439,7 @@ def adopt(
     left: list[dict[str, str]] = []
     for ref in dict.fromkeys(refs):
         try:
-            agent = agents_svc.get(session, ref)
+            agent = agents_svc.get(tx, ref)
         except NotFound:
             agent = None
         if agent is None or (reached is not None and agent.id not in reached):
@@ -457,7 +453,7 @@ def adopt(
                 }
             )
             continue
-        maker = suggested(for_agent(session, agent.id)) if makers else None
+        maker = suggested(for_agent(tx, agent.id)) if makers else None
         its_owner = maker or owner
         its_sponsors = [maker] if maker else (sponsors or [])
         if not its_owner:
@@ -466,12 +462,12 @@ def adopt(
             )
             continue
         try:
-            with session.begin_nested():
+            with db.transaction_of(tx).savepoint():
                 agents_svc.update(
-                    session, agent, {"owner": its_owner, "sponsors": its_sponsors}, actor=actor
+                    tx, agent, {"owner": its_owner, "sponsors": its_sponsors}, actor=actor
                 )
-                agents_svc.transition(session, settings, agent, "adopt", actor=actor, reason=reason)
-                agents_svc.refresh_risk(session, settings, agent)
+                agents_svc.transition(tx, settings, agent, "adopt", actor=actor, reason=reason)
+                agents_svc.refresh_risk(tx, settings, agent)
         except RegistryError as exc:
             left.append({"agent": agent.name, "why": str(exc)})
             continue
@@ -479,5 +475,5 @@ def adopt(
             {"agent": agent.name, "id": agent.id, "owner": its_owner, "sponsors": its_sponsors}
         )
     if adopted:
-        platforms.review_summary(session)
+        platforms.review_summary(tx)
     return {"adopted": adopted, "left": left}

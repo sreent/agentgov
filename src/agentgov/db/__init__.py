@@ -144,11 +144,15 @@ def lock(where: Where, instance: Any) -> None:
     later one sees the earlier one's outcome. No lock on SQLite, where each write
     transaction holds the whole database. ``instance`` is one of Django's models, read
     afresh there too, since each read gives another object (SQLAlchemy's session gives the
-    same one); or, from the modules still on SQLAlchemy, one of its."""
+    same one), and what was changed on it before is saved first (as SQLAlchemy's session
+    wrote it before it read); or, from the modules still on SQLAlchemy, one of its."""
     sqlite = transaction_of(where).database.sqlite
     if isinstance(instance, DjangoModel):
         if instance._state.adding:
             return  # not in the database yet
+        changed = getattr(instance, "changed", None)
+        if changed is not None and changed():
+            instance.save()
         if not sqlite:
             rows = type(instance).objects.select_for_update().filter(pk=instance.pk)
             list(rows.values_list("pk", flat=True))

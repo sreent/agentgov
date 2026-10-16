@@ -16,11 +16,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
-from agentgov.models import DELETED, Agent
+from agentgov import db, ids, ledger
+from agentgov.db.models import Agent
+from agentgov.models import DELETED
 from agentgov.platforms import connections
 from agentgov.registry import features, findings
 from agentgov.registry.errors import InvalidTransition, NotFound, ValidationError
@@ -65,10 +63,10 @@ def agent_policies(package: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(policies, key=lambda p: AGENT_SCOPES.index(p["allowedTargetScope"]))
 
 
-def _identities(session: Session) -> dict[str, Agent]:
+def _identities(tx: db.Where) -> dict[str, Agent]:
     """Agents by their Entra identity's object ID (lower case)."""
     out = {}
-    for agent in session.scalars(select(Agent).where(Agent.status != DELETED)).unique():
+    for agent in Agent.objects.exclude(status=DELETED):
         entra = (agent.external_ids or {}).get("entra_agent_id")
         if entra:
             out[str(entra).lower()] = agent
@@ -76,7 +74,7 @@ def _identities(session: Session) -> dict[str, Agent]:
 
 
 def record(
-    session: Session,
+    tx: db.Where,
     packages: list[dict[str, Any]],
     assignments: dict[str, list[dict[str, Any]]],
     now: datetime | None = None,
@@ -84,7 +82,7 @@ def record(
     """Remember the packages agents can hold and what each agent's identity holds, and
     raise or resolve their issues; returns the counts."""
     now = now or ids.utcnow()
-    agents = _identities(session)
+    agents = _identities(tx)
     kept = [
         {
             "id": p.get("id"),
@@ -126,7 +124,7 @@ def record(
             )
             if state == "deliveryFailed":
                 finding, _ = findings.raise_finding(
-                    session,
+                    tx,
                     type=FAILED,
                     severity="medium",
                     subject=str(row.get("id")),
@@ -142,7 +140,7 @@ def record(
                 left = end - now
                 days = max(1, int(left.total_seconds() // 86400))
                 finding, _ = findings.raise_finding(
-                    session,
+                    tx,
                     type=EXPIRING,
                     severity="high"
                     if left <= timedelta(days=1)
@@ -162,11 +160,9 @@ def record(
                 present.add(finding.key)
                 counts["expiring"] += 1
     # Gone from two syncs in a row: extended, removed or delivered after all.
-    findings.resolve_absent(
-        session, types=FINDING_TYPES, present_keys=present, actor=SYSTEM, clean=2
-    )
+    findings.resolve_absent(tx, types=FINDING_TYPES, present_keys=present, actor=SYSTEM, clean=2)
     connections.save_state(
-        session, FEATURE, {"packages": kept, "held": held, "synced_at": ids.isoformat(now)}
+        tx, FEATURE, {"packages": kept, "held": held, "synced_at": ids.isoformat(now)}
     )
     return counts
 
@@ -174,16 +170,16 @@ def record(
 # ------------------------------------------------------------------------- views
 
 
-def view(session: Session) -> dict[str, Any]:
+def view(tx: db.Where) -> dict[str, Any]:
     """The packages agents can hold, and what each agent's identity holds."""
-    state = connections.load_state(session, FEATURE)
+    state = connections.load_state(tx, FEATURE)
     held = state.get("held", {})
     names = {}
     for agent_id in held:
-        agent = session.get(Agent, agent_id)
+        agent = Agent.objects.filter(pk=agent_id).first()
         names[agent_id] = agent.name if agent else agent_id
     return {
-        "mode": features.mode(session, FEATURE),
+        "mode": features.mode(tx, FEATURE),
         "packages": state.get("packages", []),
         "held": held,
         "agents": names,
@@ -191,8 +187,8 @@ def view(session: Session) -> dict[str, Any]:
     }
 
 
-def for_agent(session: Session, agent: Agent) -> dict[str, Any]:
-    state = view(session)
+def for_agent(tx: db.Where, agent: Agent) -> dict[str, Any]:
+    state = view(tx)
     entra = (agent.external_ids or {}).get("entra_agent_id")
     return {
         "mode": state["mode"],
@@ -207,10 +203,10 @@ def for_agent(session: Session, agent: Agent) -> dict[str, Any]:
 # ------------------------------------------------------------------------ manage
 
 
-def target(session: Session, agent: Agent, package_id: str) -> tuple[str, str, str]:
+def target(tx: db.Where, agent: Agent, package_id: str) -> tuple[str, str, str]:
     """What an adminAdd for this agent needs: its Entra identity, the package and its
     policy for agents. Refused unless the feature manages packages."""
-    if features.mode(session, FEATURE) != features.MANAGE:
+    if features.mode(tx, FEATURE) != features.MANAGE:
         raise InvalidTransition(
             "Entra access packages are read, not managed: an administrator sets the "
             f"{FEATURE} feature to manage first"
@@ -219,7 +215,7 @@ def target(session: Session, agent: Agent, package_id: str) -> tuple[str, str, s
     if not entra:
         raise ValidationError(f"{agent.name} has no Microsoft Entra agent identity")
     package = next(
-        (p for p in view(session)["packages"] if p["id"] == package_id or p["name"] == package_id),
+        (p for p in view(tx)["packages"] if p["id"] == package_id or p["name"] == package_id),
         None,
     )
     if package is None:
@@ -231,25 +227,25 @@ def target(session: Session, agent: Agent, package_id: str) -> tuple[str, str, s
     return str(entra), package["id"], package["policies"][0]["id"]
 
 
-def holding(session: Session, agent: Agent, assignment_id: str) -> dict[str, Any]:
+def holding(tx: db.Where, agent: Agent, assignment_id: str) -> dict[str, Any]:
     """One of the agent's Entra assignments, for an adminRemove."""
-    if features.mode(session, FEATURE) != features.MANAGE:
+    if features.mode(tx, FEATURE) != features.MANAGE:
         raise InvalidTransition(
             "Entra access packages are read, not managed: an administrator sets the "
             f"{FEATURE} feature to manage first"
         )
-    for row in view(session)["held"].get(agent.id, []):
+    for row in view(tx)["held"].get(agent.id, []):
         if row["id"] == assignment_id:
             return row
     raise NotFound(f"{agent.name} holds no Entra assignment {assignment_id!r}")
 
 
 def requested(
-    session: Session, agent: Agent, *, change: str, package: str, actor: str, **details: Any
+    tx: db.Where, agent: Agent, *, change: str, package: str, actor: str, **details: Any
 ) -> None:
     """An Entra request AgentGov's app made, in the ledger."""
     ledger.append(
-        session,
+        tx,
         type=f"entra.access_{change}",
         actor=actor,
         severity="warning" if change == "removal_requested" else "info",

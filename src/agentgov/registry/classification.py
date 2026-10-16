@@ -9,10 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
-from agentgov.models import Agent
+from agentgov import db, ids, ledger
+from agentgov.db.models import Agent
 from agentgov.registry.errors import ValidationError
 
 CATEGORIES = {
@@ -68,7 +66,7 @@ def _plain(value: dict[str, Any] | None) -> dict[str, str] | None:
     return {k: value.get(k, "") for k in FIELDS} if value else None
 
 
-def classify(session: Session, agent: Agent, value: Any, *, actor: str) -> bool:
+def classify(tx: db.Where, agent: Agent, value: Any, *, actor: str) -> bool:
     """Classify ``agent`` (None: no longer classified); returns whether that changed it.
     The ledger keeps what it was and what it is (agent.classified)."""
     new = normalize(value)
@@ -78,8 +76,9 @@ def classify(session: Session, agent: Agent, value: Any, *, actor: str) -> bool:
     agent.classification = (
         {**new, "by": actor, "at": ids.isoformat(ids.utcnow())} if new is not None else None
     )
+    agent.save()
     ledger.append(
-        session,
+        tx,
         type="agent.classified",
         actor=actor,
         agent=agent,

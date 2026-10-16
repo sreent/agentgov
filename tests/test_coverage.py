@@ -11,8 +11,7 @@ from typing import Any
 from starlette.testclient import TestClient
 
 from agentgov import ids, ledger
-from agentgov.db.models import PlatformAgent, PlatformSync
-from agentgov.models import Agent
+from agentgov.db.models import Agent, PlatformAgent, PlatformSync
 from tests.conftest import ADMIN, seed
 from tests.test_people import import_studio, studio
 
@@ -45,7 +44,7 @@ class TestCoverage:
         assert (c["not_seen_names"], c["platforms_read"]) == (["support-bot"], ["copilot-studio"])
         # Seen at work (its telemetry, say): its calls not checked.
         with _rt(client).db.session() as s:
-            s.get(Agent, bot["id"]).last_seen_at = ids.utcnow()
+            Agent.objects.filter(pk=bot["id"]).update(last_seen_at=ids.utcnow())
         assert seen(client) == (2, 0, 1, 1, 0)
         # Its calls checked.
         with _rt(client).db.session() as s:

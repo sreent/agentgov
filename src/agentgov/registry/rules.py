@@ -31,11 +31,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from django.db.models import Q
-from sqlalchemy import select
 
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.db.models import AccessAssignment, Finding, ManagementRule, RuleMatch
+from agentgov.db.models import AccessAssignment, Agent, Finding, ManagementRule, RuleMatch
 from agentgov.models import (
     ACTIVE,
     BLOCKED,
@@ -44,7 +43,6 @@ from agentgov.models import (
     PENDING,
     RISK_LEVELS,
     SEVERITIES,
-    Agent,
 )
 from agentgov.platforms import connections
 from agentgov.registry import access_packages, features, findings, scopes, teams, validation
@@ -466,12 +464,7 @@ def _usage(tx: db.Where, now: datetime) -> tuple[datetime, datetime] | None:
 
 def _context(tx: db.Where, now: datetime, feature: str) -> _Context:
     # In the posture scan's order (registry/posture), as the rules act on them.
-    agents = {
-        a.id: a
-        for a in db.orm(tx)
-        .scalars(select(Agent).where(Agent.status != DELETED).order_by(Agent.id))
-        .unique()
-    }
+    agents = {a.id: a for a in Agent.objects.exclude(status=DELETED).order_by("id")}
     open_findings: dict[str, list[Finding]] = defaultdict(list)
     for finding in Finding.objects.filter(status="open", agent_id__isnull=False):
         if finding.type not in FINDING_TYPES and finding.verified is not False:
@@ -937,7 +930,7 @@ def _round(
         return counts
     due: list[tuple[Agent, RuleMatch, Assessment]] = []
     for agent_id in sorted(set(ctx.agents) | set(rows)):
-        agent = ctx.agents.get(agent_id) or db.orm(tx).get(Agent, agent_id)
+        agent = ctx.agents.get(agent_id) or Agent.objects.filter(pk=agent_id).first()
         row = rows.get(agent_id)
         if agent is None:  # purged
             _drop(tx, rule, row, ctx.now)
@@ -1002,10 +995,11 @@ def _round(
             counts["would_act"] += 1
             continue
         try:
-            with db.orm(tx).begin_nested():
+            with db.transaction_of(tx).savepoint():
                 _act(tx, settings, rule, agent, row, a, ctx.now)
         except RegistryError as exc:
             # As it was before (what it did is rolled back), but for why it failed.
+            agent.refresh_from_db()
             row.refresh_from_db()
             row.outcome = f"failed: {exc}"
             row.save()
@@ -1096,7 +1090,7 @@ def preview(tx: db.Where, rule: ManagementRule, now: datetime | None = None) -> 
     entries: list[dict[str, Any]] = []
     unknown: list[dict[str, Any]] = []
     for agent_id in sorted(set(ctx.agents) | set(rows)):
-        agent = ctx.agents.get(agent_id) or db.orm(tx).get(Agent, agent_id)
+        agent = ctx.agents.get(agent_id) or Agent.objects.filter(pk=agent_id).first()
         if agent is None:
             continue
         row = rows.get(agent_id)

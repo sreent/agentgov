@@ -27,10 +27,9 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy.orm import Session
-
-from agentgov import ledger
-from agentgov.models import ACTIVE, Agent
+from agentgov import db, ledger
+from agentgov.db.models import Agent
+from agentgov.models import ACTIVE
 from agentgov.registry import (
     access_packages,
     discovery,
@@ -152,7 +151,7 @@ def granted(grants: list[dict[str, Any]], server: str, tool: str) -> bool:
     )
 
 
-def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False) -> dict[str, Any]:
+def ingest(tx: db.Where, payload: dict[str, Any], *, classify: bool = False) -> dict[str, Any]:
     stats = {
         "spans": 0,
         "genai_spans": 0,
@@ -164,10 +163,10 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
     }
     seen_agents: set[str] = set()
     reported: dict[str, str] = {}
-    modes = features.modes(session)
-    exceptions = features.all_scopes(session)
+    modes = features.modes(tx)
+    exceptions = features.all_scopes(tx)
     # Where agents serve A2A, to see calls that went straight there.
-    served = reachability.endpoints(session, modes)
+    served = reachability.endpoints(tx, modes)
     around: set[tuple[str | None, str, str]] = set()
     for resource, scope, span in iter_spans(payload):
         stats["spans"] += 1
@@ -176,7 +175,7 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
         if service in IGNORED_SERVICES:
             continue
         target = reachability.called(attrs, span, served) if served else None
-        if target is not None and _around_the_gateway(session, resource, span, target, around):
+        if target is not None and _around_the_gateway(tx, resource, span, target, around):
             stats["around_the_gateway"] += 1
         op = attrs.get("gen_ai.operation.name") or (span.get("name") or "").split(" ", 1)[0]
         if op not in GENAI_OPERATIONS:
@@ -184,11 +183,11 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
         stats["genai_spans"] += 1
         agent_id = attrs.get("gen_ai.agent.id") or resource.get("gen_ai.agent.id")
         name = attrs.get("gen_ai.agent.name") or resource.get("gen_ai.agent.name") or service
-        before = discovery.find(session, agent_id=agent_id, name=name)
+        before = discovery.find(tx, agent_id=agent_id, name=name)
         when = _ts(span)
         model = attrs.get("gen_ai.request.model") if op in MODEL_OPERATIONS else None
         agent = discovery.observe(
-            session,
+            tx,
             source="otel",
             agent_id=agent_id,
             name=name,
@@ -208,7 +207,7 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
             reported[agent.id] = system
             try:
                 instructions.report(
-                    session,
+                    tx,
                     agent,
                     source="telemetry",
                     text=system,
@@ -221,19 +220,17 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
         if op == "execute_tool":
             tool = attrs.get("gen_ai.tool.name") or "unknown"
             server = attrs.get("agentgov.server") or "local"
-            discovery.record_activity(session, agent.id, when=when, tool_calls=1)
+            discovery.record_activity(tx, agent.id, when=when, tool_calls=1)
             own = features.exceptions_for(agent, modes, exceptions).get("least-privilege")
             if (
                 (own["mode"] if own else modes["least-privilege"]) != features.OFF
                 and agent.status == ACTIVE
                 and not granted(agents_svc.effective_grants(agent), server, tool)
-                and not granted(
-                    access_packages.current(session, agent.id)["permissions"], server, tool
-                )
+                and not granted(access_packages.current(tx, agent.id)["permissions"], server, tool)
             ):
                 stats["ungranted"] += 1
                 ledger.append(
-                    session,
+                    tx,
                     type="telemetry.ungranted_tool_use",
                     actor="system:otel",
                     agent=agent,
@@ -245,7 +242,7 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
                     trace_id=_hex_id(span.get("traceId")),
                 )
                 findings.raise_finding(
-                    session,
+                    tx,
                     type="agent.ungranted_tool_use",
                     severity="high",
                     subject=f"{agent.id}:{server}/{tool}",
@@ -259,7 +256,7 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
                 )
         elif op in MODEL_OPERATIONS:
             discovery.record_activity(
-                session,
+                tx,
                 agent.id,
                 when=when,
                 model_calls=1,
@@ -271,7 +268,7 @@ def ingest(session: Session, payload: dict[str, Any], *, classify: bool = False)
 
 
 def _around_the_gateway(
-    session: Session,
+    tx: db.Where,
     resource: dict[str, Any],
     span: dict[str, Any],
     target: Agent,
@@ -284,7 +281,7 @@ def _around_the_gateway(
     # The agent that reported the span (not gen_ai.agent.name on the span: on a call to
     # another agent, that names the agent called).
     caller = discovery.find(
-        session,
+        tx,
         agent_id=resource.get("gen_ai.agent.id"),
         name=resource.get("gen_ai.agent.name") or service,
     )
@@ -297,7 +294,7 @@ def _around_the_gateway(
     seen.add((trace_id, key, target.id))
     name = reachability.caller_name(service, caller)
     ledger.append(
-        session,
+        tx,
         type="telemetry.a2a_around_gateway",
         actor="system:otel",
         agent=caller,
@@ -315,7 +312,7 @@ def _around_the_gateway(
         "not through the gateway: none of AgentGov's controls applied to the call."
     )
     findings.raise_finding(
-        session,
+        tx,
         type=reachability.CALLED_AROUND,
         severity="medium",
         subject=f"{target.id}:{key}",
@@ -330,7 +327,7 @@ def _around_the_gateway(
     )
     if caller is not None:
         findings.raise_finding(
-            session,
+            tx,
             type=reachability.CALLS_AROUND,
             severity="medium",
             subject=f"{caller.id}:{target.id}",

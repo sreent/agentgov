@@ -11,12 +11,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
-
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.db.models import FeatureSetting, IntegrationState
-from agentgov.models import DELETED, DISCOVERED, Agent
+from agentgov.db.models import Agent, FeatureSetting, IntegrationState
+from agentgov.models import DELETED, DISCOVERED
 from agentgov.registry import features, teams
 from agentgov.registry.errors import ValidationError
 
@@ -126,7 +124,7 @@ def checklist(tx: db.Where) -> dict[str, Any]:
     done or not, worked out from the registry."""
     data = _row().data or {}
     places = [p for p in data.get("places") or [] if p in PLACES]
-    agents = list(db.orm(tx).scalars(select(Agent).where(Agent.status != DELETED)).unique())
+    agents = list(Agent.objects.exclude(status=DELETED))
     to_review = sum(1 for a in agents if a.status == DISCOVERED and a.on_platform)
     unowned = sum(1 for a in agents if not a.owner and (a.status != DISCOVERED or a.on_platform))
     team = teams.default(tx)

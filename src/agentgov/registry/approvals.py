@@ -19,9 +19,8 @@ from typing import Any
 
 from agentgov import db, ids, ledger
 from agentgov.db import lock
-from agentgov.db.models import ApprovalRequest
+from agentgov.db.models import Agent, ApprovalRequest
 from agentgov.identity import people
-from agentgov.models import Agent
 from agentgov.registry import features, risk
 from agentgov.registry.errors import InvalidTransition, NotFound
 
