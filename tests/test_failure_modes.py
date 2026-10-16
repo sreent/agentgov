@@ -14,9 +14,10 @@ from starlette.testclient import TestClient
 from agentgov import cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.db.models import FeatureSetting
 from agentgov.gateway import render
 from agentgov.identity import chains
-from agentgov.models import FeatureSetting, LedgerEntry
+from agentgov.models import LedgerEntry
 from agentgov.opa.client import OpaError
 from agentgov.processor.control_plane import DecisionRecorder
 from agentgov.processor.model_guard import PASS, ModelGuard
@@ -519,8 +520,8 @@ class TestStartingPoints:
             create_app(settings.with_overrides(feature_preset="inventory"), background=False)
         ) as client:
             assert feature(client, "least-privilege")["mode"] == "off"
-            with client.app.state.rt.db.session() as s:
-                row = s.get(FeatureSetting, "mcp-gateway")
+            with client.app.state.rt.db.transaction():
+                row = FeatureSetting.objects.get(pk="mcp-gateway")
                 assert row.mode == "off" and row.changed_by == "deployment" and not row.pinned
 
     def test_the_cli(self, client, monkeypatch) -> None:

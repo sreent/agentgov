@@ -24,20 +24,19 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from django.db import IntegrityError
 from sqlalchemy import or_, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from agentgov import ids
+from agentgov import db, ids
 from agentgov.db import Database
+from agentgov.db.models import IntegrationState, Policy
 from agentgov.models import (
     DELETED,
     DISCOVERED,
     Agent,
     ApprovedConnector,
     Blueprint,
-    IntegrationState,
-    Policy,
     ToolServer,
 )
 from agentgov.opa import WHAT_IF
@@ -219,12 +218,10 @@ def registry_snapshot(session: Session) -> dict[str, Any]:
     }
 
 
-def custom_modules(session: Session) -> dict[str, str]:
+def custom_modules(tx: db.Where) -> dict[str, str]:
     return {
         f"agentgov/custom/{p.name}.rego": p.rego
-        for p in session.scalars(
-            select(Policy).where(Policy.enabled.is_(True)).order_by(Policy.name)
-        )
+        for p in Policy.objects.filter(enabled=True).order_by("name")
     }
 
 
@@ -349,22 +346,20 @@ class BundleServer:
                     # Nothing heard of: look again all the same (see MAX_AGE_SECONDS).
 
 
-def record_status(session: Session, status: dict[str, Any]) -> None:
+def record_status(tx: db.Where, status: dict[str, Any]) -> None:
     """Keep an OPA instance's status report: when it reported, and the bundle it runs."""
     labels = status.get("labels") or {}
     instance = str(labels.get("id") or "opa")[:100]
     bundle = (status.get("bundles") or {}).get("agentgov") or {}
-    row = session.get(IntegrationState, OPA_STATUS, with_for_update=True)
+    rows = IntegrationState.objects.select_for_update().filter(pk=OPA_STATUS)
+    row = rows.first()
     if row is None:
         try:
-            with session.begin_nested():
-                session.add(IntegrationState(key=OPA_STATUS, data={}))
+            with db.transaction_of(tx).savepoint():
+                IntegrationState.objects.create(key=OPA_STATUS, data={})
         except IntegrityError:
             pass  # another replica added it meanwhile
-        row = session.get(
-            IntegrationState, OPA_STATUS, with_for_update=True, populate_existing=True
-        )
-        assert row is not None
+        row = rows.get()
     now = ids.utcnow()
     instances = {
         key: value
@@ -378,11 +373,12 @@ def record_status(session: Session, status: dict[str, Any]) -> None:
     }
     row.data = {"instances": instances}
     row.updated_at = now
+    row.save()
 
 
-def opa_status(session: Session) -> dict[str, Any]:
+def opa_status(tx: db.Where) -> dict[str, Any]:
     """The OPA instances heard from in the last day: when each reported and its bundle."""
-    row = session.get(IntegrationState, OPA_STATUS)
+    row = IntegrationState.objects.filter(pk=OPA_STATUS).first()
     instances = ((row.data or {}).get("instances") or {}) if row is not None else {}
     listed = sorted(
         ({"id": key, **value} for key, value in instances.items()),

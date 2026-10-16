@@ -12,12 +12,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session
+from django.db.models import Q
+from sqlalchemy import select
 
-from agentgov import ids, ledger
-from agentgov.db.models import Destination
-from agentgov.models import DELETED, Agent, Blueprint, Team
+from agentgov import db, ids, ledger
+from agentgov.db.models import Destination, Team
+from agentgov.models import DELETED, Agent, Blueprint
 from agentgov.registry import scopes, validation
 from agentgov.registry.destinations import CHAT
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -32,30 +32,35 @@ def is_email(value: str) -> bool:
     return bool(_EMAIL.match(value))
 
 
-def get(session: Session, ref: str) -> Team:
-    team = session.scalar(select(Team).where((Team.name == ref) | (Team.id == ref)))
+def get(tx: db.Where, ref: str) -> Team:
+    team = Team.objects.filter(Q(name=ref) | Q(id=ref)).first()
     if team is None:
         raise NotFound(f"team {ref!r} not found")
     return team
 
 
-def find(session: Session, name: str | None) -> Team | None:
+def find(tx: db.Where, name: str | None) -> Team | None:
     """The team of this name, if there is one."""
     if not name:
         return None
-    return session.scalar(select(Team).where(Team.name == name))
+    return Team.objects.filter(name=name).first()
 
 
-def default(session: Session) -> Team | None:
-    return session.scalar(select(Team).where(Team.is_default.is_(True)))
+def default(tx: db.Where) -> Team | None:
+    return Team.objects.filter(is_default=True).first()
 
 
-def reference(session: Session, value: Any) -> str | None:
+def all_names(tx: db.Where) -> set[str]:
+    """The teams' names."""
+    return set(Team.objects.values_list("name", flat=True))
+
+
+def reference(tx: db.Where, value: Any) -> str | None:
     """A blueprint's or an agent's team: the name of a team there is, or none."""
     if value in (None, ""):
         return None
     name = str(value)
-    if find(session, name) is None:
+    if find(tx, name) is None:
         raise ValidationError(f"team {name!r} not found: add it first")
     return name
 
@@ -71,28 +76,27 @@ def _with(
     return fallback
 
 
-def team_of(session: Session, agent: Agent) -> str | None:
+def team_of(tx: db.Where, agent: Agent) -> str | None:
     """The team ``agent`` is with, as its issues reach a team: its own, else its
     blueprint's, else the default team."""
     blueprint = agent.blueprint
-    fallback = default(session)
-    names = set(session.scalars(select(Team.name)))
+    fallback = default(tx)
     return _with(
         agent.team,
         blueprint.team if blueprint else None,
-        names,
+        all_names(tx),
         fallback.name if fallback else None,
     )
 
 
-def agents_in(session: Session, names: Any) -> set[str]:
+def agents_in(tx: db.Where, names: Any) -> set[str]:
     """The agents, by ID, that are with the teams ``names`` (any case): see team_of."""
     wanted = {str(name).lower() for name in names if name}
     if not wanted:
         return set()
-    fallback = default(session)
-    existing = set(session.scalars(select(Team.name)))
-    rows = session.execute(
+    fallback = default(tx)
+    existing = all_names(tx)
+    rows = db.orm(tx).execute(
         select(Agent.id, Agent.team, Blueprint.team).outerjoin(
             Blueprint, Agent.blueprint_id == Blueprint.id
         )
@@ -105,8 +109,8 @@ def agents_in(session: Session, names: Any) -> set[str]:
     }
 
 
-def list_all(session: Session) -> list[Team]:
-    return list(session.scalars(select(Team).order_by(Team.name)))
+def list_all(tx: db.Where) -> list[Team]:
+    return list(Team.objects.order_by("name"))
 
 
 def _members(value: Any) -> list[str]:
@@ -123,7 +127,7 @@ def _emails(value: Any) -> list[str]:
     return list(dict.fromkeys(emails))
 
 
-def _destinations(session: Session, value: Any) -> list[str]:
+def _destinations(tx: db.Where, value: Any) -> list[str]:
     names = list(dict.fromkeys(validation.string_list(value, "destinations")))
     for name in names:
         destination = Destination.objects.filter(name=name).first()
@@ -137,7 +141,7 @@ def _destinations(session: Session, value: Any) -> list[str]:
     return names
 
 
-def _apply(session: Session, team: Team, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Where, team: Team, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in FIELDS:
         if key not in data:
@@ -148,7 +152,7 @@ def _apply(session: Session, team: Team, data: dict[str, Any]) -> list[str]:
         elif key == "emails":
             value = _emails(value)
         elif key == "destinations":
-            value = _destinations(session, value)
+            value = _destinations(tx, value)
         elif key == "description":
             value = str(value or "")
         elif key == "default":
@@ -156,8 +160,8 @@ def _apply(session: Session, team: Team, data: dict[str, Any]) -> list[str]:
                 raise ValidationError("default is true or false")
             if value and not team.is_default:
                 # One default team: the one marked last.
-                session.execute(
-                    update(Team).where(Team.is_default.is_(True)).values(is_default=False)
+                Team.objects.filter(is_default=True).update(
+                    is_default=False, updated_at=ids.utcnow()
                 )
             if team.is_default != value:
                 team.is_default = value
@@ -177,10 +181,10 @@ def _known(data: dict[str, Any], also: tuple[str, ...]) -> None:
         )
 
 
-def create(session: Session, data: dict[str, Any], *, actor: str) -> Team:
+def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> Team:
     _known(data, ("name",))
     name = validation.slug(data.get("name"), "name")
-    if find(session, name):
+    if find(tx, name):
         raise Conflict(f"team {name!r} already exists")
     team = Team(
         id=ids.new_id(ids.TEAM),
@@ -191,11 +195,10 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Team:
         destinations=[],
         is_default=False,
     )
-    _apply(session, team, data)
-    session.add(team)
-    session.flush()
+    _apply(tx, team, data)
+    team.save(force_insert=True)
     ledger.append(
-        session,
+        tx,
         type="team.created",
         actor=actor,
         resource=f"team/{name}",
@@ -205,22 +208,23 @@ def create(session: Session, data: dict[str, Any], *, actor: str) -> Team:
 
 
 def update_team(
-    session: Session,
+    tx: db.Where,
     team: Team,
     data: dict[str, Any],
     *,
     actor: str,
     version: int | None = None,
 ) -> list[str]:
-    start_edit(session, team, version, f"team {team.name}")
+    start_edit(tx, team, version, f"team {team.name}")
     _known(data, ("name",))
     if "name" in data and data["name"] != team.name:
         raise ValidationError("a team's name can't change: agents and blueprints name it")
-    changed = _apply(session, team, data)
+    changed = _apply(tx, team, data)
     if changed:
         edited(team)
+        team.save()
         ledger.append(
-            session,
+            tx,
             type="team.updated",
             actor=actor,
             resource=f"team/{team.name}",
@@ -229,16 +233,16 @@ def update_team(
     return changed
 
 
-def users(session: Session, name: str, *, reached: set[str] | None = None) -> list[str]:
+def users(tx: db.Where, name: str, *, reached: set[str] | None = None) -> list[str]:
     """The blueprints and agents that name a team (as their team, owner or sponsor), and
     the controls' exceptions and management rules. ``reached``: the agents (by ID) of a role
     for some teams only, which reads only those, and no exceptions or rules."""
-    found = scopes.naming(session, "teams", name) if reached is None else []
+    found = scopes.naming(tx, "teams", name) if reached is None else []
     found += [
         f"blueprint {b}"
-        for b in session.scalars(select(Blueprint.name).where(Blueprint.team == name))
+        for b in db.orm(tx).scalars(select(Blueprint.name).where(Blueprint.team == name))
     ]
-    rows = session.execute(
+    rows = db.orm(tx).execute(
         select(Agent.id, Agent.name, Agent.team, Agent.owner, Agent.sponsors).where(
             Agent.status != DELETED
         )
@@ -252,8 +256,8 @@ def users(session: Session, name: str, *, reached: set[str] | None = None) -> li
     return sorted(found)
 
 
-def delete(session: Session, team: Team, *, actor: str) -> None:
-    named_by = users(session, team.name)
+def delete(tx: db.Where, team: Team, *, actor: str) -> None:
+    named_by = users(tx, team.name)
     if named_by:
         more = f" and {len(named_by) - 5} more" if len(named_by) > 5 else ""
         raise Conflict(
@@ -261,13 +265,13 @@ def delete(session: Session, team: Team, *, actor: str) -> None:
             "person there first"
         )
     ledger.append(
-        session,
+        tx,
         type="team.deleted",
         actor=actor,
         resource=f"team/{team.name}",
         severity="warning",
     )
-    session.delete(team)
+    team.delete()
 
 
 def _details(team: Team) -> dict[str, Any]:

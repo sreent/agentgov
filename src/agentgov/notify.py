@@ -22,7 +22,7 @@ from email.message import EmailMessage
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
-from agentgov import db, ids
+from agentgov import ids
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.db.models import Agent, Destination, Finding, Notification
@@ -117,7 +117,7 @@ class Notifier:
     def run(self) -> dict[str, int]:
         """Send the notifications that are due; returns how many went and how many failed."""
         with self.db.transaction() as tx:
-            if not features.is_on(db.orm(tx), "issues"):
+            if not features.is_on(tx, "issues"):
                 return {}
             now = ids.utcnow()
             due = list(
@@ -225,7 +225,7 @@ class Notifier:
         if day is None:
             return {}
         with self.db.transaction() as tx:
-            if not features.is_on(db.orm(tx), "issues"):
+            if not features.is_on(tx, "issues"):
                 return {}
             state = digest.start(tx, day, now)
             todo = {

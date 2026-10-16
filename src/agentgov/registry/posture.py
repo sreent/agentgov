@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids
 from agentgov.config import Settings
-from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, IntegrationState, ToolServer
+from agentgov.db.models import IntegrationState
+from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING, Agent, ToolServer
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import (
     apikeys,
@@ -298,9 +299,10 @@ def scan(
     resolved = findings.resolve_absent(session, types=checked, present_keys=present)
     # When it last ran, for the compliance reports: a check set up but never run shows
     # nothing working (agentgov.compliance).
-    row = session.get(IntegrationState, SCANNED) or IntegrationState(key=SCANNED, data={})
+    row = IntegrationState.objects.filter(pk=SCANNED).first()
+    row = row or IntegrationState(key=SCANNED, data={})
     row.data, row.updated_at = {"at": ids.isoformat(now), "agents": len(agents)}, now
-    session.add(row)
+    row.save(force_insert=row._state.adding)
     return {
         "checked_agents": len(agents),
         "open_posture_findings": len(present),

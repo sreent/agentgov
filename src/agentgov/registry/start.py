@@ -12,12 +12,12 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.models import DELETED, DISCOVERED, Agent, FeatureSetting, IntegrationState, Team
-from agentgov.registry import features
+from agentgov.db.models import FeatureSetting, IntegrationState
+from agentgov.models import DELETED, DISCOVERED, Agent
+from agentgov.registry import features, teams
 from agentgov.registry.errors import ValidationError
 
 STATE = "start"
@@ -67,11 +67,12 @@ READERS = tuple(
 )
 
 
-def _row(session: Session) -> IntegrationState | None:
-    return session.get(IntegrationState, STATE)
+def _row() -> IntegrationState:
+    """Where the organisation said it starts from (a new row if it said nothing yet)."""
+    return IntegrationState.objects.filter(pk=STATE).first() or IntegrationState(key=STATE, data={})
 
 
-def answer(session: Session, settings: Settings, value: Any, *, actor: str) -> dict[str, Any]:
+def answer(tx: db.Where, settings: Settings, value: Any, *, actor: str) -> dict[str, Any]:
     """Where the organisation's agents are (``{"places": [...]}``): what reads them on,
     what reads other places off (but what the deployment pins), and the starting point."""
     if not isinstance(value, dict) or set(value) - {"places"}:
@@ -85,54 +86,50 @@ def answer(session: Session, settings: Settings, value: Any, *, actor: str) -> d
     chosen = [p for p in PLACES if p in places]
     gateway = GATEWAY in chosen
     preset = "monitor" if gateway else "inventory"
-    features.apply_preset(session, settings, preset, actor=actor)
+    features.apply_preset(tx, settings, preset, actor=actor)
     wanted = {key for p in chosen for key in PLACES[p][1]}
     if MICROSOFT & set(chosen):
         wanted |= set(MICROSOFT_EXTRAS)
     changed = []
     for key in READERS:
-        row = session.get(FeatureSetting, key)
+        row = FeatureSetting.objects.filter(pk=key).first()
         if row is not None and row.pinned:
             continue  # the deployment decides
         mode = features.ON if key in wanted else features.OFF
-        if features.set_mode(session, settings, key, mode, actor=actor):
+        if features.set_mode(tx, settings, key, mode, actor=actor):
             changed.append(f"{key}={mode}")
-    row = _row(session)
-    if row is None:
-        row = IntegrationState(key=STATE, data={})
-        session.add(row)
+    row = _row()
     now = ids.utcnow()
     row.data = {**(row.data or {}), "places": chosen, "by": actor, "at": ids.isoformat(now)}
     row.updated_at = now
+    row.save(force_insert=row._state.adding)
     ledger.append(
-        session,
+        tx,
         type="start.answered",
         actor=actor,
         details={"places": chosen, "starting_point": preset, "features": changed},
     )
-    return checklist(session)
+    return checklist(tx)
 
 
-def hide(session: Session, hidden: bool, *, actor: str) -> dict[str, Any]:
+def hide(tx: db.Where, hidden: bool, *, actor: str) -> dict[str, Any]:
     """Hide the checklist (or show it again)."""
-    row = _row(session)
-    if row is None:
-        row = IntegrationState(key=STATE, data={})
-        session.add(row)
+    row = _row()
     row.data = {**(row.data or {}), "hidden": bool(hidden)}
     row.updated_at = ids.utcnow()
-    return checklist(session)
+    row.save(force_insert=row._state.adding)
+    return checklist(tx)
 
 
-def checklist(session: Session) -> dict[str, Any]:
+def checklist(tx: db.Where) -> dict[str, Any]:
     """Where the organisation is: what it said it has, and each step to a first useful day,
     done or not, worked out from the registry."""
-    data = (row.data or {}) if (row := _row(session)) is not None else {}
+    data = _row().data or {}
     places = [p for p in data.get("places") or [] if p in PLACES]
-    agents = list(session.scalars(select(Agent).where(Agent.status != DELETED)).unique())
+    agents = list(db.orm(tx).scalars(select(Agent).where(Agent.status != DELETED)).unique())
     to_review = sum(1 for a in agents if a.status == DISCOVERED and a.on_platform)
     unowned = sum(1 for a in agents if not a.owner and (a.status != DISCOVERED or a.on_platform))
-    team = session.scalar(select(Team).where(Team.is_default.is_(True)))
+    team = teams.default(tx)
     steps = [
         {
             "key": "places",

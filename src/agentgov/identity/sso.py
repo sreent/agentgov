@@ -588,7 +588,7 @@ def people_may_sign_in(tx: db.Where) -> bool:
     """Whether people without an AgentGov role may sign in, to see what was sent to them."""
     from agentgov.registry import features
 
-    return any(features.is_on(db.orm(tx), name) for name in PERSON_FEATURES)
+    return any(features.is_on(tx, name) for name in PERSON_FEATURES)
 
 
 def purge_expired(tx: db.Where) -> None:

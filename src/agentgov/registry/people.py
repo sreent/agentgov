@@ -24,22 +24,17 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from django.db.models import Q
+from django.db.models.functions import Lower
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.models import (
-    DELETED,
-    DISCOVERED,
-    Agent,
-    IntegrationState,
-    Person,
-    PlatformAgent,
-    Team,
-)
+from agentgov.db.models import IntegrationState, Person
+from agentgov.models import DELETED, DISCOVERED, Agent, PlatformAgent
 from agentgov.registry import agents as agents_svc
-from agentgov.registry import platforms
+from agentgov.registry import platforms, teams
 from agentgov.registry.errors import NotFound, RegistryError, ValidationError
 
 GUID = re.compile(r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$")
@@ -87,10 +82,10 @@ def named(record: PlatformAgent) -> list[dict[str, str]]:
     return out
 
 
-def _records(session: Session) -> list[PlatformAgent]:
+def _records(tx: db.Where) -> list[PlatformAgent]:
     """The platform records of agents in the registry (not deleted)."""
     return list(
-        session.scalars(
+        db.orm(tx).scalars(
             select(PlatformAgent)
             .join(Agent, Agent.id == PlatformAgent.agent_id)
             .where(Agent.status != DELETED)
@@ -98,17 +93,17 @@ def _records(session: Session) -> list[PlatformAgent]:
     )
 
 
-def owners_and_sponsors(session: Session) -> set[str]:
+def owners_and_sponsors(tx: db.Where) -> set[str]:
     """The people AgentGov names as owners and sponsors of agents in the registry, by email
     address (lower case): not teams, nor user names it can't look up."""
-    teams = {t.lower() for t in session.scalars(select(Team.name))}
+    team_names = {t.lower() for t in teams.all_names(tx)}
     names: set[str] = set()
-    for owner, sponsors in session.execute(
+    for owner, sponsors in db.orm(tx).execute(
         select(Agent.owner, Agent.sponsors).where(Agent.status != DELETED)
     ):
         for name in [owner, *(sponsors or [])]:
             key = str(name or "").strip().lower()
-            if "@" in key and key not in teams:
+            if "@" in key and key not in team_names:
                 names.add(key)
     return names
 
@@ -117,7 +112,7 @@ def _names(person: Person) -> set[str]:
     return {n.lower() for n in (person.email, person.upn) if n}
 
 
-def aliases(session: Session, name: str | None) -> set[str]:
+def aliases(tx: db.Where, name: str | None) -> set[str]:
     """The names a person goes by, lower case: the one given, and, where the directory knows
     them by it, their email address and user principal name too. Owners are named by their
     email address; a person may sign in by their user principal name."""
@@ -126,23 +121,20 @@ def aliases(session: Session, name: str | None) -> set[str]:
         return set()
     found = {key}
     if "@" in key:
-        for person in session.scalars(
-            select(Person).where(
-                (func.lower(Person.email) == key) | (func.lower(Person.upn) == key)
-            )
-        ):
+        people = Person.objects.alias(email_=Lower("email"), upn_=Lower("upn"))
+        for person in people.filter(Q(email_=key) | Q(upn_=key)):
             found |= _names(person)
     return found
 
 
-def wanted(session: Session, now: datetime | None = None, *, limit: int = MAX_LOOKUP) -> list[str]:
+def wanted(tx: db.Where, now: datetime | None = None, *, limit: int = MAX_LOOKUP) -> list[str]:
     """The Entra object IDs to look up: those platforms name that AgentGov hasn't looked up,
     then those of the people platforms or AgentGov name that it looked up over a week ago,
     the longest ago first."""
     now = now or ids.utcnow()
-    named_ids = {n["entra_id"] for r in _records(session) for n in named(r) if "entra_id" in n}
-    known = {p.id: p for p in session.scalars(select(Person))}
-    names = owners_and_sponsors(session)
+    named_ids = {n["entra_id"] for r in _records(tx) for n in named(r) if "entra_id" in n}
+    known = Person.objects.in_bulk()
+    names = owners_and_sponsors(tx)
     ours = {p.id for p in known.values() if _names(p) & names}
     unknown = sorted(i for i in named_ids if i not in known)
     stale = sorted(
@@ -152,30 +144,30 @@ def wanted(session: Session, now: datetime | None = None, *, limit: int = MAX_LO
     return (unknown + [p.id for p in stale])[:limit]
 
 
-def _misses(session: Session) -> dict[str, str]:
-    row = session.get(IntegrationState, MISSES)
+def _misses(tx: db.Where) -> dict[str, str]:
+    row = IntegrationState.objects.filter(pk=MISSES).first()
     return dict((row.data or {}).get("emails") or {}) if row is not None else {}
 
 
 def wanted_emails(
-    session: Session, now: datetime | None = None, *, limit: int = MAX_LOOKUP
+    tx: db.Where, now: datetime | None = None, *, limit: int = MAX_LOOKUP
 ) -> list[str]:
     """The owners and sponsors AgentGov names by email address that it doesn't know yet,
     but those the directory had no user for in the past week."""
     now = now or ids.utcnow()
-    names = owners_and_sponsors(session)
+    names = owners_and_sponsors(tx)
     if not names:
         return []
     known: set[str] = set()
-    for person in session.scalars(select(Person)):
+    for person in Person.objects.all():
         known |= _names(person)
-    misses = _misses(session)
+    misses = _misses(tx)
     recent = {e for e, at in misses.items() if datetime.fromisoformat(at) > now - RECHECK}
     return sorted(names - known - recent)[:limit]
 
 
 def record_lookup(
-    session: Session,
+    tx: db.Where,
     found: list[dict[str, Any]],
     missing: list[str],
     *,
@@ -187,30 +179,31 @@ def record_lookup(
     for, to ask again a week on."""
     now = ids.utcnow()
     counts = {"found": 0, "not_found": 0, "left": 0}
+    oids = {str(user.get("id") or "").lower() for user in found} | {o.lower() for o in missing}
+    people = Person.objects.in_bulk([oid for oid in oids if oid])
     for user in found:
         oid = str(user.get("id") or "").lower()
         if not GUID.match(oid):
             continue
-        person = session.get(Person, oid) or Person(id=oid, source=GRAPH)
+        person = people.setdefault(oid, Person(id=oid, source=GRAPH))
         person.name = user.get("displayName") or person.name
         person.email = user.get("mail") or user.get("userPrincipalName") or person.email
         person.upn = user.get("userPrincipalName") or person.upn
         if "accountEnabled" in user:
             person.enabled = user["accountEnabled"]
         person.found, person.gone_at, person.source, person.checked_at = True, None, GRAPH, now
-        session.add(person)
         counts["found"] += 1
-    for oid in missing:
-        person = session.get(Person, oid.lower())
+    for oid in (o.lower() for o in missing):
+        person = people.get(oid)
         if person is None:
-            person = Person(id=oid.lower(), found=False, source=GRAPH)
+            person = people[oid] = Person(id=oid, found=False, source=GRAPH)
             counts["not_found"] += 1
         elif person.found:
             # The directory had them, and has no more: they left.
             person.found, person.gone_at = False, now
             counts["left"] += 1
             ledger.append(
-                session,
+                tx,
                 type="person.left",
                 actor=actor or "system:entra-users",
                 severity="warning",
@@ -218,17 +211,19 @@ def record_lookup(
                 details={"name": person.name, "email": person.email},
             )
         person.source, person.checked_at = GRAPH, now
-        session.add(person)
+    for person in people.values():
+        person.save(force_insert=person._state.adding)
     if missing_emails is not None:
-        misses = _misses(session)
+        misses = _misses(tx)
         known: set[str] = set()
         for user in found:
             known |= {str(user.get(k) or "").lower() for k in ("mail", "userPrincipalName")}
         misses = {e: at for e, at in misses.items() if e not in known}
         misses.update(dict.fromkeys(missing_emails, ids.isoformat(now)))
-        row = session.get(IntegrationState, MISSES) or IntegrationState(key=MISSES, data={})
+        row = IntegrationState.objects.filter(pk=MISSES).first()
+        row = row or IntegrationState(key=MISSES, data={})
         row.data, row.updated_at = {"emails": misses}, now
-        session.add(row)
+        row.save(force_insert=row._state.adding)
         counts["not_found"] += len(missing_emails)
     return counts
 
@@ -257,7 +252,7 @@ def _column(row: dict[str, Any], key: str) -> Any:
     return None
 
 
-def import_list(session: Session, payload: Any, *, actor: str) -> dict[str, int]:
+def import_list(tx: db.Where, payload: Any, *, actor: str) -> dict[str, int]:
     """Keep the people in a list of users uploaded from the directory. A user the list
     leaves out isn't taken to have left: it may be filtered."""
     rows = _rows(payload)
@@ -265,12 +260,16 @@ def import_list(session: Session, payload: Any, *, actor: str) -> dict[str, int]
         raise ValidationError(f"a list of {MAX_LIST} users at most")
     now = ids.utcnow()
     counts = {"people": 0, "skipped": 0}
+    listed = []
     for row in rows:
         oid = str(_column(row, "id") or "").strip().lower()
         if not GUID.match(oid):
             counts["skipped"] += 1  # no object ID: nothing to match a platform's to
             continue
-        person = session.get(Person, oid) or Person(id=oid, source=UPLOAD)
+        listed.append((oid, row))
+    people = Person.objects.in_bulk([oid for oid, _ in listed])
+    for oid, row in listed:
+        person = people.setdefault(oid, Person(id=oid, source=UPLOAD))
         person.name = _column(row, "name") or person.name
         person.email = _column(row, "mail") or _column(row, "upn") or person.email
         person.upn = _column(row, "upn") or person.upn
@@ -281,7 +280,6 @@ def import_list(session: Session, payload: Any, *, actor: str) -> dict[str, int]
         elif blocked in TRUE | FALSE:
             person.enabled = blocked in FALSE
         person.found, person.gone_at, person.source, person.checked_at = True, None, UPLOAD, now
-        session.add(person)
         counts["people"] += 1
     if not counts["people"]:
         raise ValidationError(
@@ -289,8 +287,10 @@ def import_list(session: Session, payload: Any, *, actor: str) -> dict[str, int]
             "users file (objectId, userPrincipalName, displayName, mail), or one with id and "
             "mail columns"
         )
+    for person in people.values():
+        person.save(force_insert=person._state.adding)
     ledger.append(
-        session,
+        tx,
         type="people.imported",
         actor=actor,
         resource="platform/entra-users",
@@ -317,7 +317,7 @@ def _describe(entry: dict[str, str], person: Person | None) -> dict[str, Any]:
     return out
 
 
-def for_records(session: Session, records: list[PlatformAgent]) -> dict[str, list[dict[str, Any]]]:
+def for_records(tx: db.Where, records: list[PlatformAgent]) -> dict[str, list[dict[str, Any]]]:
     """For each agent, the people its platforms name, with what AgentGov knows about each:
     its owner on the platform first. One entry per person, with their roles."""
     entries: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
@@ -338,11 +338,7 @@ def for_records(session: Session, records: list[PlatformAgent]) -> dict[str, lis
     wanted_ids = {
         e["entra_id"] for people in entries.values() for e in people.values() if "entra_id" in e
     }
-    known = (
-        {p.id: p for p in session.scalars(select(Person).where(Person.id.in_(wanted_ids)))}
-        if wanted_ids
-        else {}
-    )
+    known = Person.objects.in_bulk(wanted_ids) if wanted_ids else {}
     out: dict[str, list[dict[str, Any]]] = {}
     for agent_id, people in entries.items():
         described = [_describe(e, known.get(e.get("entra_id", ""))) for e in people.values()]
@@ -351,10 +347,10 @@ def for_records(session: Session, records: list[PlatformAgent]) -> dict[str, lis
     return out
 
 
-def for_agent(session: Session, agent_id: str) -> list[dict[str, Any]]:
+def for_agent(tx: db.Where, agent_id: str) -> list[dict[str, Any]]:
     """The people the agent's platforms name, with what AgentGov knows about each."""
-    records = list(session.scalars(select(PlatformAgent).where(PlatformAgent.agent_id == agent_id)))
-    return for_records(session, records).get(agent_id, [])
+    found = db.orm(tx).scalars(select(PlatformAgent).where(PlatformAgent.agent_id == agent_id))
+    return for_records(tx, list(found)).get(agent_id, [])
 
 
 def _usable(person: dict[str, Any]) -> bool:
@@ -381,25 +377,23 @@ def shown(makers: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next((m for m in makers if _usable(m)), makers[0] if makers else None)
 
 
-def gone(session: Session) -> dict[str, Person]:
+def gone(tx: db.Where) -> dict[str, Person]:
     """The people who have left, as far as AgentGov goes, by email address and user
     principal name (lower case): the directory no longer has them, or their account is
     disabled."""
     out: dict[str, Person] = {}
-    for person in session.scalars(
-        select(Person).where((Person.gone_at.is_not(None)) | (Person.enabled.is_(False)))
-    ):
+    for person in Person.objects.filter(Q(gone_at__isnull=False) | Q(enabled=False)):
         for name in _names(person):
             out[name] = person
     return out
 
 
 def who_left(
-    session: Session, agent: Agent, left: dict[str, Person] | None = None
+    tx: db.Where, agent: Agent, left: dict[str, Person] | None = None
 ) -> list[dict[str, Any]]:
     """The agent's owner and sponsors who have left, and how: "left" (not in the directory
     any more) or "disabled" (their account)."""
-    left = gone(session) if left is None else left
+    left = gone(tx) if left is None else left
     out = []
     for role, names in (("owner", [agent.owner]), ("sponsor", list(agent.sponsors or []))):
         for name in names:
@@ -416,10 +410,10 @@ def who_left(
     return out
 
 
-def summary(session: Session) -> dict[str, int]:
+def summary(tx: db.Where) -> dict[str, int]:
     """How many people platforms name, how many AgentGov knows, and how many have left."""
-    named_ids = {n["entra_id"] for r in _records(session) for n in named(r) if "entra_id" in n}
-    known = {p.id: p for p in session.scalars(select(Person))}
+    named_ids = {n["entra_id"] for r in _records(tx) for n in named(r) if "entra_id" in n}
+    known = Person.objects.in_bulk()
     return {
         "named": len(named_ids),
         "known": sum(1 for i in named_ids if i in known and known[i].found),

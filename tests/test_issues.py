@@ -536,17 +536,15 @@ class TestWhoSeesWhat:
     def test_people_by_any_name_they_go_by(self, client, agent) -> None:
         # Sponsors are named by email address; a sponsor may sign in by their user principal
         # name, which the directory knows them by too.
-        from agentgov.models import Person
+        from agentgov.db.models import Person
 
         fid = _raise(client, agent["id"])
-        with _rt(client).db.session() as s:
-            s.add(
-                Person(
-                    id="oid-alice",
-                    email="Alice@example.com",
-                    upn="alice.smith@contoso.onmicrosoft.com",
-                    source="upload",
-                )
+        with _rt(client).db.transaction():
+            Person.objects.create(
+                id="oid-alice",
+                email="Alice@example.com",
+                upn="alice.smith@contoso.onmicrosoft.com",
+                source="upload",
             )
         with _rt(client).db.session() as s:
             finding = findings.get(s, fid)

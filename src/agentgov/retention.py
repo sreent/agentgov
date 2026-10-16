@@ -167,7 +167,7 @@ def save_log_entry(
 
 def _cursor_floor(tx: db.Where) -> int | None:
     """The furthest entry every active destination has been sent, while they are sent to."""
-    if features.mode(db.orm(tx), "security-operations") == features.OFF:
+    if features.mode(tx, "security-operations") == features.OFF:
         return None
     cursors = Destination.objects.filter(status="active").values_list("cursor", flat=True)
     return min(cursors, default=None)

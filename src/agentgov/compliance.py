@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 
 from agentgov import __version__, ids, ledger, transparency, witness
 from agentgov.config import LEDGER_MIN_DAYS, Settings
-from agentgov.db.models import Destination, Finding
+from agentgov.db.models import Destination, Finding, IntegrationState, Team
 from agentgov.models import (
     ACTIVE,
     BLOCKED,
@@ -41,14 +41,12 @@ from agentgov.models import (
     AccessAssignment,
     Agent,
     Blueprint,
-    IntegrationState,
     LedgerCheckpoint,
     LedgerEntry,
     ManagementRule,
     ModelProvider,
     PlatformAgent,
     PlatformSync,
-    Team,
     ToolServer,
 )
 from agentgov.registry import classification, features, posture
@@ -223,7 +221,7 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     f.findings_raised = Finding.objects.filter(first_seen__gte=since).count()
     f.findings_resolved = Finding.objects.filter(resolved_at__gte=since).count()
     f.acknowledged = Finding.objects.filter(acknowledged_at__gte=since).count()
-    teams = list(session.scalars(select(Team)))
+    teams = list(Team.objects.all())
     f.teams, f.default_team = len(teams), any(t.is_default for t in teams)
     f.blueprints = session.scalar(select(func.count()).select_from(Blueprint))
     servers = list(session.scalars(select(ToolServer)))
@@ -263,7 +261,7 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     for sync in session.scalars(select(PlatformSync).order_by(PlatformSync.source)):
         read = sync.ok and sync.synced_at >= since
         (f.platforms_read if read else f.platforms_not_read).append(sync.source)
-    scanned = session.get(IntegrationState, posture.SCANNED)
+    scanned = IntegrationState.objects.filter(pk=posture.SCANNED).first()
     at = (scanned.data or {}).get("at") if scanned is not None else None
     f.posture_scanned_at = datetime.fromisoformat(at) if at else None
     f.delivered = sum(

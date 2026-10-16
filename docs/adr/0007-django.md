@@ -99,7 +99,11 @@ The data layer:
   issues they are and their kinds, their messages and daily digests, their tickets in service
   desks, destinations, and what goes to the security team (`agentgov.registry.findings`,
   `finding_types`, `issues`, `digest`, `tickets`, `destinations`, `agentgov.notify`,
-  `agentgov.ticketing`, `agentgov.secops`). Each read gives
+  `agentgov.ticketing`, `agentgov.secops`); features and their exceptions, policies, teams,
+  the people in the directory, where an organisation starts, and what integrations keep
+  between runs (`agentgov.registry.features`, `scopes`, `policies`, `teams`, `people`,
+  `start`, and the state that connections, threat detection, posture scans and the OPA
+  bundle keep). Blueprints move with agents, which name them. Each read gives
   another object, where SQLAlchemy's session gave the same one: a row is locked and read
   afresh before it is changed (`agentgov.db.lock`, on SQLite too), and what was changed
   before is saved first. A part of a transaction that rolls back on its own (one of many

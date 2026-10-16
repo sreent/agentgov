@@ -33,8 +33,9 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import Database
+from agentgov.db.models import IntegrationState
 from agentgov.identity.entra_calls import EntraCallers
-from agentgov.models import Agent, IntegrationState
+from agentgov.models import Agent
 from agentgov.processor.detectors import scan_local
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, features, findings, microsoft_signals, risk
@@ -380,19 +381,20 @@ def record(session: Session, settings: Settings, verdict: Verdict, *, correlatio
 
 
 def _count(session: Session, *, blocked: bool, would_block: bool) -> None:
-    state = session.get(IntegrationState, STATE_KEY) or IntegrationState(key=STATE_KEY, data={})
+    state = IntegrationState.objects.filter(pk=STATE_KEY).first()
+    state = state or IntegrationState(key=STATE_KEY, data={})
     data = dict(state.data or {})
     data["calls"] = int(data.get("calls", 0)) + 1
     data["blocked"] = int(data.get("blocked", 0)) + (1 if blocked else 0)
     data["would_block"] = int(data.get("would_block", 0)) + (1 if would_block else 0)
     data["last_call_at"] = ids.isoformat(ids.utcnow())
     state.data, state.updated_at = data, ids.utcnow()
-    session.add(state)
+    state.save(force_insert=state._state.adding)
 
 
 def summary(session: Session, mode: str) -> dict[str, Any]:
     """How threat detection is doing, for the Platforms page."""
-    state = session.get(IntegrationState, STATE_KEY)
+    state = IntegrationState.objects.filter(pk=STATE_KEY).first()
     data = dict(state.data or {}) if state is not None else {}
     return {
         "mode": mode,

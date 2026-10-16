@@ -14,8 +14,8 @@ from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov.config import Settings
-from agentgov.db.models import Finding
-from agentgov.models import IntegrationState, LedgerEntry
+from agentgov.db.models import Finding, IntegrationState
+from agentgov.models import LedgerEntry
 from agentgov.notify import Notifier
 from agentgov.registry import destinations, digest, features, findings, issues, teams
 from agentgov.secops.delivery import Delivery
@@ -187,5 +187,5 @@ class TestTheDigest:
             features.set_mode(s, rt.settings, "issues", "off", actor="admin:test")
         assert _notifier(client, settings, smtp=lambda: _SMTP(outbox)).digest(MONDAY) == {}
         assert outbox == []
-        with rt.db.session() as s:
-            assert s.get(IntegrationState, digest.STATE) is None
+        with rt.db.transaction():
+            assert not IntegrationState.objects.filter(pk=digest.STATE).exists()

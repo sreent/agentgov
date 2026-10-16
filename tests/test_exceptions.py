@@ -156,16 +156,14 @@ class TestNames:
         assert [e["scope"] for e in again.json()["scopes"]] == [e["scope"] for e in scopes]
 
     def test_a_name_from_before_doesnt_stop_editing_the_others(self, client) -> None:
-        from agentgov.models import FeatureSetting
+        from agentgov.db.models import FeatureSetting
 
-        with client.app.state.rt.db.session() as s:
-            s.add(
-                FeatureSetting(
-                    key="least-privilege",
-                    mode="enforce",
-                    changed_by="admin:test",
-                    scopes=[{"mode": "monitor", "scope": {"teams": ["gone"]}}],
-                )
+        with client.app.state.rt.db.transaction():
+            FeatureSetting.objects.create(
+                key="least-privilege",
+                mode="enforce",
+                changed_by="admin:test",
+                scopes=[{"mode": "monitor", "scope": {"teams": ["gone"]}}],
             )
         listed = client.get("/v1/features/least-privilege", headers=ADMIN).json()["scopes"]
         assert listed[0]["missing"] == ["team gone"] and listed[0]["agents"] == 0

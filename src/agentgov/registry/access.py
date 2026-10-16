@@ -166,7 +166,7 @@ def team_role(tx: db.Where, role: Any, team: Any, allowed: tuple[str, ...]) -> s
         raise ValidationError(
             f"the {role} role is for every team: one team takes {', '.join(TEAM_ROLES)}"
         )
-    name = teams.reference(db.orm(tx), team)
+    name = teams.reference(tx, team)
     return for_team(role, str(name))
 
 

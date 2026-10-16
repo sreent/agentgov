@@ -35,7 +35,7 @@ MAY = {
 
 
 def level(tx: db.Where) -> str:
-    return features.mode(db.orm(tx), FEATURE)
+    return features.mode(tx, FEATURE)
 
 
 def at_least(tx: db.Where, needed: str) -> bool:

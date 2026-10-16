@@ -285,7 +285,7 @@ def at_the_gateway(tx: db.Where) -> list[IdentityIssuer]:
     (docs/agent-identity.md#straight-to-the-gateway): trusted there and approved, with the
     keys AgentGov fetched from them; none while agents' own identities are off, as in
     Keycloak."""
-    if not features.is_on(db.orm(tx), "workload-identity"):
+    if not features.is_on(tx, "workload-identity"):
         return []
     return [i for i in IdentityIssuer.objects.filter(gateway=True).order_by("name") if _taking(i)]
 

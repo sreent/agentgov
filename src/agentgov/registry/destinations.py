@@ -477,7 +477,7 @@ def replay(tx: db.Where, destination: Destination, after: Any, *, actor: str) ->
 
 def delete(tx: db.Where, destination: Destination, *, actor: str) -> None:
     posting = sorted(
-        t.name for t in teams.list_all(db.orm(tx)) if destination.name in (t.destinations or [])
+        t.name for t in teams.list_all(tx) if destination.name in (t.destinations or [])
     )
     if posting:
         raise Conflict(

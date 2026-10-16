@@ -8,8 +8,7 @@ from typing import Any
 from starlette.testclient import TestClient
 
 from agentgov import cli
-from agentgov.db.models import Finding
-from agentgov.models import FeatureSetting
+from agentgov.db.models import FeatureSetting, Finding
 from agentgov.platforms import databricks, foundry
 from agentgov.platforms.base import Found, Inventory
 from agentgov.registry import platforms
@@ -136,11 +135,9 @@ class TestCopilotStudio:
 
     def test_with_threat_detection_enforced_it_makes_no_tool_calls(self, client) -> None:
         import_inventory(client)
-        with client.app.state.rt.db.session() as s:
-            s.add(
-                FeatureSetting(
-                    key=platforms.THREAT_DETECTION, mode="enforce", changed_by="admin:test"
-                )
+        with client.app.state.rt.db.transaction():
+            FeatureSetting.objects.create(
+                key=platforms.THREAT_DETECTION, mode="enforce", changed_by="admin:test"
             )
         sales = agent_named(client, "sales-helper")
         block(client, "sales-helper")

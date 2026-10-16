@@ -21,7 +21,7 @@ from typing import Any
 
 from django.db.models import F, Q
 
-from agentgov import db, ids, ledger
+from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import Database
 from agentgov.db.models import Destination, Finding, Ticket
@@ -55,7 +55,7 @@ class Ticketing:
     def run(self, now: datetime | None = None) -> dict[str, int]:
         """Open, read back and update the desks' tickets; returns how many of each."""
         with self.db.transaction() as tx:
-            if not features.is_on(db.orm(tx), "issues"):
+            if not features.is_on(tx, "issues"):
                 return {}
             planned = tickets.plan(tx, self.settings)
         now = now or ids.utcnow()  # after planning: what it planned is due now

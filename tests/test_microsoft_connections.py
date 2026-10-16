@@ -10,13 +10,14 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from starlette.testclient import TestClient
 
 from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.models import AgentActivity, IntegrationState
+from agentgov.db.models import IntegrationState
+from agentgov.models import AgentActivity
 from agentgov.registry import platforms
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
@@ -401,8 +402,8 @@ class TestPurviewAudit:
         # How far back AgentGov knows agents' use: management rules count no further.
         graph.query_status = "succeeded"
         sync(ms, "purview-audit")
-        with ms.app.state.rt.db.session() as s:
-            state = s.get(IntegrationState, "purview-audit").data
+        with ms.app.state.rt.db.transaction():
+            state = IntegrationState.objects.get(pk="purview-audit").data
         assert state["usage_from"] == usage["filterStartDateTime"]
         assert state["usage_until"] == graph.queries["q-3"]["filterEndDateTime"]
 
@@ -448,16 +449,13 @@ class TestPurviewAudit:
     def test_a_search_that_never_finishes_is_given_up(self, ms, graph) -> None:
         sync(ms, "purview-audit")
         rt = ms.app.state.rt
-        with rt.db.session() as s:
-            state = s.get(IntegrationState, "purview-audit")
+        with rt.db.transaction():
+            state = IntegrationState.objects.get(pk="purview-audit")
             stale = dict(state.data)
             for kind in ("usage", "makers"):
                 stale[kind] = {**stale[kind], "started": "2026-01-01T00:00:00+00:00"}
-            s.execute(
-                update(IntegrationState)
-                .where(IntegrationState.key == "purview-audit")
-                .values(data=stale, updated_at=ids.utcnow())
-            )
+            state.data, state.updated_at = stale, ids.utcnow()
+            state.save()
         sync(ms, "purview-audit")
         assert len(graph.queries) == 4
 

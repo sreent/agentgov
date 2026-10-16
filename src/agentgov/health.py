@@ -32,9 +32,8 @@ from agentgov.models import (
     ComponentReport,
     IdentityIssuer,
     PlatformSync,
-    Team,
 )
-from agentgov.registry import features
+from agentgov.registry import features, teams
 from agentgov.registry.errors import ValidationError
 
 PROCESSOR = "processor"
@@ -266,7 +265,7 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
             kind__in=(*destinations.CHAT, *destinations.DESK)
         ).count(),
         approved_connectors=len(list(session.scalars(select(ApprovedConnector.connector_id)))),
-        default_team=session.scalar(select(Team.name).where(Team.is_default.is_(True))) is not None,
+        default_team=teams.default(session) is not None,
         gateway_issuers=[
             {"name": i.name, "keys": len(i.gateway_keys or []), "error": i.keys_error}
             for i in session.scalars(

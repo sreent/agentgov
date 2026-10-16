@@ -66,10 +66,10 @@ class Directory:
     """The teams, read once for a round of routing or a list of issues."""
 
     def __init__(self, tx: db.Where) -> None:
-        self.teams = {t.name: t for t in teams.list_all(db.orm(tx))}
+        self.teams = {t.name: t for t in teams.list_all(tx)}
         self.default = next((t for t in self.teams.values() if t.is_default), None)
         # People who left: an issue goes past them (docs/issues.md#people-who-leave).
-        self.left = set(directory_people.gone(db.orm(tx)))
+        self.left = set(directory_people.gone(tx))
 
     def recipient(self, name: str | None) -> Recipient | None:
         """Who a name stands for: a team of that name, or else a person."""
@@ -555,7 +555,7 @@ def accept(
 def for_person(tx: db.Where, name: str | None, *, status: str | None = None) -> list[Finding]:
     """The issues that reached this person (by any name they go by: their email address,
     user principal name or user name), or one of the teams they are in."""
-    names = directory_people.aliases(db.orm(tx), name)
+    names = directory_people.aliases(tx, name)
     if not names:
         return []
     found = Finding.objects.filter(level__isnull=False).order_by("-last_seen")
@@ -568,7 +568,7 @@ def for_person(tx: db.Where, name: str | None, *, status: str | None = None) -> 
 def may_act(tx: db.Where, finding: Finding, name: str | None) -> bool:
     """Whether the issue reached the person, by any name they go by (their email address,
     or the user principal name they sign in with)."""
-    return bool(directory_people.aliases(db.orm(tx), name) & involved(tx, finding))
+    return bool(directory_people.aliases(tx, name) & involved(tx, finding))
 
 
 def describe(tx: db.Where, finding: Finding) -> list[dict[str, Any]]:
