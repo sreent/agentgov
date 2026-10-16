@@ -40,14 +40,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from sqlalchemy import text
-
-from agentgov.db import (
-    CLIENT_KEEPALIVES,
-    SERVER_KEEPALIVES,
-    Database,
-    Transaction,
-)
+from agentgov.db import Database, Transaction
 from agentgov.registry.errors import Conflict
 
 log = logging.getLogger(__name__)
@@ -105,7 +98,7 @@ class Coordinator:
         self.db = db
         self.name = replica_name()
         # Several replicas need PostgreSQL; on SQLite this process is the only one.
-        self.shared = db.engine.dialect.name == "postgresql"
+        self.shared = not db.sqlite
         self.on_remote = on_remote or (lambda topics: None)
         self.on_leader = on_leader or (lambda leading: None)
         self.retry_seconds = retry_seconds
@@ -184,17 +177,9 @@ class Coordinator:
 
     # -- the coordination connection ---------------------------------------------------
     def _connect(self) -> Any:
-        """A connection of its own (outside the pool), in autocommit, with keepalives."""
-        engine = self.db.engine
-        cargs, cparams = engine.dialect.create_connect_args(engine.url)
-        for key, value in CLIENT_KEEPALIVES.items():
-            cparams.setdefault(key, value)
-        cparams["application_name"] = f"{APPLICATION}/{self.name}"[:63]
-        cparams["autocommit"] = True
-        connection = engine.dialect.connect(*cargs, **cparams)
-        for statement in SERVER_KEEPALIVES:
-            connection.execute(statement)
-        return connection
+        """A connection of its own (outside the pool), in autocommit, with keepalives, named
+        after this replica: how the replicas see each other (``replicas``)."""
+        return self.db.connect(f"{APPLICATION}/{self.name}")
 
     def _run(self) -> None:
         backoff, first = 1.0, True
@@ -313,15 +298,16 @@ class Coordinator:
         if not self.shared:
             yield
             return
-        params = {"space": LOCK_SPACE, "key": lock_key(name)}
-        connection = self.db.engine.connect()
+        params = (LOCK_SPACE, lock_key(name))
+        # A connection of its own, which holds the lock while the job runs: closing it lets
+        # the lock go, whatever happened to the job.
+        connection = self.db.connect()
         try:
             while True:
                 # The server process that holds the lock, to tell later that it still does.
                 got, pid = connection.execute(
-                    text("SELECT pg_try_advisory_lock(:space, :key), pg_backend_pid()"), params
-                ).one()
-                connection.commit()
+                    "SELECT pg_try_advisory_lock(%s, %s), pg_backend_pid()", params
+                ).fetchone()
                 if got:
                     break
                 if self._stop.is_set() or (deadline is not None and time.monotonic() >= deadline):
@@ -333,15 +319,13 @@ class Coordinator:
                 yield
             finally:
                 lockers.pop(name, None)
-                try:
-                    connection.execute(text("SELECT pg_advisory_unlock(:space, :key)"), params)
-                    connection.commit()
-                except Exception:
-                    # Closing the connection lets the lock go, rather than keeping it in
-                    # the pool.
-                    connection.invalidate()
+                # At once, rather than once the server sees the connection close. One that
+                # went has let the lock go already.
+                with contextlib.suppress(Exception):
+                    connection.execute("SELECT pg_advisory_unlock(%s, %s)", params)
         finally:
-            connection.close()
+            with contextlib.suppress(Exception):
+                connection.close()
 
     # -- the replicas ------------------------------------------------------------------
     def replicas(self, tx: Transaction) -> list[dict[str, Any]]:
