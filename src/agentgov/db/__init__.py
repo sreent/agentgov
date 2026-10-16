@@ -6,8 +6,10 @@ entries written last, and its changes announced once it commits, never before. N
 a savepoint. Django's ORM uses the database whose transaction is open (``Router``); the
 modules' functions take the transaction they run in.
 
-SQLAlchemy's engine is kept for what runs outside the transactions: Alembic's migrations
-(agentgov.migrations), and the coordinator's connections (agentgov.coordination).
+What needs a PostgreSQL session of its own, outside the pool and the transactions (the
+replicas' coordinator: LISTEN, and advisory locks held while a job runs), opens a connection
+of its own (``Database.connect``). SQLAlchemy's engine is kept for Alembic's migrations alone
+(agentgov.migrations), until they go.
 """
 
 from __future__ import annotations
@@ -257,8 +259,7 @@ class Database:
         self.sqlite = here.get_backend_name() == "sqlite"
         self._local = threading.local()
 
-        # SQLAlchemy's own connections, for what runs outside the transactions: Alembic's
-        # migrations, and the coordinator's (agentgov.coordination).
+        # SQLAlchemy's own connections, for Alembic's migrations (agentgov.migrations).
         kwargs: dict[str, Any] = {}
         if self.sqlite:
             kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
@@ -307,6 +308,29 @@ class Database:
             open_.pop()
             self._local.transaction = None
             self._release()
+
+    def connect(self, application_name: str | None = None) -> Any:
+        """A connection to PostgreSQL of its own, outside the pool and the transactions, for
+        what holds the session itself (agentgov.coordination: LISTEN, and advisory locks
+        that last until it closes). It is in autocommit, with TCP keepalives both ways, and
+        made as Django makes its connections to the database; its caller closes it."""
+        if self.sqlite:
+            raise RuntimeError("a connection of its own is for PostgreSQL")
+        import psycopg
+
+        params = connections.create_connection(self.alias).get_connection_params()
+        if application_name:
+            params["application_name"] = application_name[:63]
+        connection = psycopg.connect(**params, autocommit=True)
+        try:
+            # As statements rather than startup options, which poolers such as PgBouncer
+            # refuse.
+            for statement in SERVER_KEEPALIVES:
+                connection.execute(statement)
+        except BaseException:
+            connection.close()
+            raise
+        return connection
 
     def _before_commit(self, tx: Transaction) -> None:
         for check in self.commit_checks:

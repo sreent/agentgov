@@ -35,6 +35,9 @@ ENTRA_PACKAGE = "ffffffff-1111-2222-3333-444444444444"
 PEOPLE_PACKAGE = "eeeeeeee-1111-2222-3333-444444444444"
 STUDIO_BLUEPRINT = "25664c89-cea5-4ab6-b924-a54fd8a19ae0"
 SALES_ENTRA_ID = "aaaaaaaa-1111-2222-3333-444444444444"
+# When the alerts were last updated: inside the first read's window (a week back),
+# whenever the tests run.
+UPDATED = (ids.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def identity(id_: str, name: str, **extra: Any) -> dict[str, Any]:
@@ -116,7 +119,7 @@ def alert(id_: str, agent_id: str | None, **extra: Any) -> dict[str, Any]:
         "description": "A user tried to make the agent ignore its instructions.",
         "recommendedActions": "Review the conversation and the user's other activity.",
         "alertWebUrl": f"https://security.microsoft.com/alerts/{id_}",
-        "lastUpdateDateTime": "2026-10-09T15:00:00Z",
+        "lastUpdateDateTime": UPDATED,
         "evidence": evidence,
         **extra,
     }
@@ -472,13 +475,13 @@ class TestDefender:
 
     def test_resolved_in_defender_resolves_the_finding(self, ms, graph) -> None:
         sync(ms, "defender").raise_for_status()
-        graph.alerts = [alert("a-1", "bot-sales", status="resolved",
-                              lastUpdateDateTime="2026-10-10T08:00:00Z")]  # fmt: skip
+        later = (ids.utcnow() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        graph.alerts = [alert("a-1", "bot-sales", status="resolved", lastUpdateDateTime=later)]
         assert sync(ms, "defender").json()["resolved"] == 1
         open_ = ms.get("/v1/findings", params={"status": "open"}, headers=ADMIN).json()
         assert not [f for f in open_ if f["type"] == "defender.alert"]
         # The next read starts from the newest alert seen.
-        assert graph.alert_filters[-1] == "lastUpdateDateTime ge 2026-10-09T15:00:00Z"
+        assert graph.alert_filters[-1] == f"lastUpdateDateTime ge {UPDATED}"
 
 
 class TestCli:

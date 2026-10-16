@@ -122,8 +122,8 @@ The data layer:
   rolls back on its own (one of many findings acted on at once, say) is Django's savepoint
   (`Transaction.savepoint`). Then the sessions went, with what let them share Django's
   transaction: the modules take the transaction they run in (`agentgov.db.Transaction`).
-  SQLAlchemy's models of the tables stay for Alembic alone (`agentgov.models`), until
-  Django's migrations take over; its engine runs the migrations and the replicas'
+  SQLAlchemy's models of the tables stayed for Alembic alone (`agentgov.models`) until
+  Django's migrations took over, and its engine for the migrations and the replicas'
   coordination.
 - [x] Django's migrations: the first one matches the last Alembic revision; a release runs
   both. Django's first migration (`agentgov/db/migrations/0001_initial.py`) builds the schema
@@ -139,8 +139,13 @@ The data layer:
   tables, which Alembic's were written from, are gone. One difference stays on a database
   Django's migrations build: the foreign key from an agent to its blueprint sets it to null
   in Django, not in the database, which Django 5.2 can't declare.
+- [x] The replicas' coordinator off SQLAlchemy's engine: its `LISTEN`, the leader's lock and
+  jobs' locks are on PostgreSQL connections of its own, outside the pool, made as Django
+  makes the others (`Database.connect`). SQLAlchemy is left for what Alembic needs: the
+  engine its migrations run on, given the database's URL as AgentGov reads it; and the tests
+  that build and compare schemas with it.
 - [ ] Alembic goes, in a release after the one that runs both: databases from before it are
-  brought up to date by that release first.
+  brought up to date by that release first. SQLAlchemy goes with it.
 
 ## Consequences
 

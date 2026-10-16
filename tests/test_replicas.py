@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
+from django.db import connections
 
 from agentgov import ledger
 from agentgov.config import Settings
@@ -165,14 +166,24 @@ def test_another_agentgov_on_the_server_is_apart(pair: tuple[Runtime, Runtime]) 
 @postgres
 def test_every_connection_keeps_alive(settings: Settings) -> None:
     """The server lets go of a vanished replica's locks, a job's as well as the leader's,
-    within half a minute, not when the operating system's two hours are up."""
+    within half a minute, not when the operating system's two hours are up: the
+    connections of their own that hold them (Database.connect), and the transactions'."""
     db = Database(settings.database_url)
     try:
+        connection = db.connect("agentgov/test")
+        try:
+            assert connection.autocommit
+            assert connection.execute("SHOW tcp_keepalives_idle").fetchall() == [("10",)]
+            client = connection.info.get_parameters()
+            assert client["keepalives_idle"] == "10"
+            assert client["application_name"] == "agentgov/test"
+        finally:
+            connection.close()
         for _ in range(2):  # a new connection, then the same one back from the pool
-            with db.engine.connect() as connection:
-                server = connection.exec_driver_sql("SHOW tcp_keepalives_idle").scalar()
-                client = connection.connection.dbapi_connection.info.get_parameters()
-                assert server == "10" and client["keepalives_idle"] == "10"
+            with db.transaction() as tx:
+                assert tx.execute("SHOW tcp_keepalives_idle") == [("10",)]
+                client = connections[db.alias].connection.info.get_parameters()
+                assert client["keepalives_idle"] == "10"
     finally:
         db.dispose()
 
