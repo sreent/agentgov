@@ -1,6 +1,6 @@
 """The Django models (agentgov.db.models) against the database the migrations build: the
-same tables, columns, keys, constraints, indexes and defaults; and the values as the databases
-hold them (docs/adr/0007-django.md)."""
+same tables, columns, keys, constraints, indexes and defaults, whether Alembic's migrations
+built it or Django's; and the values as the databases hold them (docs/adr/0007-django.md)."""
 
 from __future__ import annotations
 
@@ -109,8 +109,8 @@ def database_tables(db: Database) -> dict[str, dict[str, Any]]:
     look = inspect(db.engine)
     tables = {}
     for name in look.get_table_names():
-        if name == "alembic_version":
-            continue
+        if name in ("alembic_version", "django_migrations"):
+            continue  # each tool's record of what it applied
         columns = look.get_columns(name)
         unique = {u["name"]: sorted(u["column_names"]) for u in look.get_unique_constraints(name)}
         indexes = {}

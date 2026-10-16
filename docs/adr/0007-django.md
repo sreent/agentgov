@@ -125,8 +125,22 @@ The data layer:
   SQLAlchemy's models of the tables stay for Alembic alone (`agentgov.models`), until
   Django's migrations take over; its engine runs the migrations and the replicas'
   coordination.
-- [ ] Django's migrations: the first one matches the last Alembic revision; a release runs
-  both; then Alembic goes.
+- [x] Django's migrations: the first one matches the last Alembic revision; a release runs
+  both. Django's first migration (`agentgov/db/migrations/0001_initial.py`) builds the schema
+  Alembic's last revision (0032) leaves, which `tests/test_migrations.py` checks on SQLite
+  and PostgreSQL: the same tables, columns, keys, constraints, indexes and defaults. Django's
+  PostgreSQL backend adds no indexes of its own for that (`agentgov.db.postgresql`: none of
+  the `_like` ones for `LIKE` on keys). `agentgov db upgrade`, and the control plane as it
+  starts, run both, one replica at a time (a PostgreSQL advisory lock): Alembic's up to their
+  last, then Django's, the first recorded as applied rather than run, since Alembic's built
+  its tables (`agentgov.migrations`). `agentgov db status` and `--sql` cover both, and a
+  migration of either that this version doesn't know is refused. New migrations are
+  Django's (`scripts/new-migration.sh`, `makemigrations`); SQLAlchemy's models of the
+  tables, which Alembic's were written from, are gone. One difference stays on a database
+  Django's migrations build: the foreign key from an agent to its blueprint sets it to null
+  in Django, not in the database, which Django 5.2 can't declare.
+- [ ] Alembic goes, in a release after the one that runs both: databases from before it are
+  brought up to date by that release first.
 
 ## Consequences
 

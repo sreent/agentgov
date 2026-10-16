@@ -22,9 +22,9 @@ matrix in docs/baseline-agent365.md maps one-to-one:
                    (``RuleMatch``).
 * ``McpSighting`` - an MCP server set up on a developer's machine, as reported.
 
-The same tables, columns and constraints as the migrations build (tests/test_django_models.py
-compares them with the database the migrations make). Django doesn't manage these tables yet
-(``managed = False``): Alembic does, until Django's migrations take over.
+Django's migrations build them (agentgov/db/migrations): the first, the schema Alembic's
+migrations left, which databases they built have recorded as applied (agentgov.migrations).
+tests/test_django_models.py compares the models with the database the migrations make.
 """
 
 from __future__ import annotations
@@ -190,7 +190,6 @@ class Blueprint(Row):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "blueprints"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_blueprints_name"),
@@ -287,7 +286,6 @@ class Agent(Row):
     deleted_at = UTCDateTimeField(null=True)
 
     class Meta:
-        managed = False
         db_table = "agents"
         indexes = [
             Index(fields=["blueprint"], name="ix_agents_blueprint_id"),
@@ -350,7 +348,6 @@ class ToolServer(Row):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "tool_servers"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_tool_servers_name"),
@@ -384,7 +381,6 @@ class ModelProvider(Row):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "model_providers"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_model_providers_name"),
@@ -432,7 +428,6 @@ class IdentityIssuer(Row):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "identity_issuers"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_identity_issuers_name"),
@@ -476,7 +471,6 @@ class Destination(Row):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "destinations"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_destinations_name"),
@@ -502,7 +496,6 @@ class ModelUsage(Row):
     pk = CompositePrimaryKey("agent_id", "day", "provider", "model")
 
     class Meta:
-        managed = False
         db_table = "model_usage"
         indexes = [
             Index(fields=["day"], name="ix_model_usage_day"),
@@ -522,7 +515,6 @@ class Policy(Row):
     updated_at = UTCDateTimeField(auto_now=True)
 
     class Meta:
-        managed = False
         db_table = "policies"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_policies_name"),
@@ -541,7 +533,6 @@ class FindingType(Row):
     changed_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "finding_types"
 
 
@@ -562,7 +553,6 @@ class FeatureSetting(Row):
     scopes = JSONField(default=list, db_default=[])
 
     class Meta:
-        managed = False
         db_table = "feature_settings"
 
 
@@ -583,7 +573,6 @@ class ApiKey(Row):
     expires_at = UTCDateTimeField(null=True)
 
     class Meta:
-        managed = False
         db_table = "api_keys"
         constraints = [
             UniqueConstraint(fields=["key_hash"], name="ix_api_keys_key_hash"),
@@ -613,7 +602,6 @@ class AdminSession(Row):
     expires_at = UTCDateTimeField()
 
     class Meta:
-        managed = False
         db_table = "admin_sessions"
         indexes = [
             Index(fields=["expires_at"], name="ix_admin_sessions_expires_at"),
@@ -640,7 +628,6 @@ class RoleGrant(Row):
     created_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "role_grants"
         indexes = [
             Index(fields=["email"], name="ix_role_grants_email"),
@@ -659,7 +646,6 @@ class LoginState(Row):
     expires_at = UTCDateTimeField()
 
     class Meta:
-        managed = False
         db_table = "login_states"
         indexes = [
             Index(fields=["expires_at"], name="ix_login_states_expires_at"),
@@ -682,7 +668,6 @@ class CliLogin(Row):
     expires_at = UTCDateTimeField()
 
     class Meta:
-        managed = False
         db_table = "cli_logins"
         indexes = [
             Index(fields=["expires_at"], name="ix_cli_logins_expires_at"),
@@ -704,7 +689,6 @@ class MicrosoftGrant(Row):
     updated_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "microsoft_grants"
         indexes = [
             Index(fields=["expires_at"], name="ix_microsoft_grants_expires_at"),
@@ -728,7 +712,6 @@ class PlatformAgent(Row):
     synced_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "platform_agents"
         indexes = [
             Index(fields=["agent_id"], name="ix_platform_agents_agent_id"),
@@ -746,7 +729,6 @@ class PlatformSync(Row):
     counts = JSONField(default=dict)
 
     class Meta:
-        managed = False
         db_table = "platform_syncs"
 
 
@@ -767,7 +749,6 @@ class ComponentReport(Row):
     pk = CompositePrimaryKey("component", "instance")
 
     class Meta:
-        managed = False
         db_table = "component_reports"
 
 
@@ -792,7 +773,6 @@ class Person(Row):
     checked_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "people"
         indexes = [
             Index(fields=["email"], name="ix_people_email"),
@@ -809,7 +789,6 @@ class IntegrationState(Row):
     updated_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "integration_state"
 
 
@@ -832,7 +811,6 @@ class AgentInstructions(Row):
     classifier = JSONField(default=dict)
 
     class Meta:
-        managed = False
         db_table = "agent_instructions"
         indexes = [
             Index(fields=["agent_id"], name="ix_agent_instructions_agent_id"),
@@ -849,7 +827,6 @@ class ApprovedConnector(Row):
     created_at = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "approved_connectors"
 
 
@@ -880,7 +857,6 @@ class ApprovalRequest(Row):
     deciders = CharField(max_length=16, default="approvers", db_default="approvers")
 
     class Meta:
-        managed = False
         db_table = "approval_requests"
         indexes = [
             Index(fields=["agent_id"], name="ix_approval_requests_agent_id"),
@@ -929,7 +905,6 @@ class Finding(Row):
     round = IntegerField(default=0, db_default=0)
 
     class Meta:
-        managed = False
         db_table = "findings"
         indexes = [
             Index(fields=["agent_id"], name="ix_findings_agent_id"),
@@ -963,7 +938,6 @@ class Team(Row):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "teams"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_teams_name"),
@@ -995,7 +969,6 @@ class AccessPackage(Row):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "access_packages"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_access_packages_name"),
@@ -1025,7 +998,6 @@ class AccessAssignment(Row):
     updated_at = UTCDateTimeField(auto_now=True)
 
     class Meta:
-        managed = False
         db_table = "access_assignments"
         indexes = [
             Index(fields=["agent_id"], name="ix_access_assignments_agent_id"),
@@ -1063,7 +1035,6 @@ class ManagementRule(Row):
     version = IntegerField(default=1, db_default=1)
 
     class Meta:
-        managed = False
         db_table = "management_rules"
         constraints = [
             UniqueConstraint(fields=["name"], name="ix_management_rules_name"),
@@ -1087,7 +1058,6 @@ class RuleMatch(Row):
     outcome = TextField(null=True)
 
     class Meta:
-        managed = False
         db_table = "rule_matches"
         indexes = [
             Index(fields=["agent_id"], name="ix_rule_matches_agent_id"),
@@ -1118,7 +1088,6 @@ class Notification(Row):
     sent_at = UTCDateTimeField(null=True)
 
     class Meta:
-        managed = False
         db_table = "notifications"
         indexes = [
             Index(fields=["finding_id"], name="ix_notifications_finding_id"),
@@ -1167,7 +1136,6 @@ class Ticket(Row):
     updated_at = UTCDateTimeField(auto_now=True)
 
     class Meta:
-        managed = False
         db_table = "tickets"
         indexes = [
             Index(fields=["destination_id"], name="ix_tickets_destination_id"),
@@ -1186,7 +1154,6 @@ class RiskSignal(Row):
     ts = UTCDateTimeField(default=utcnow)
 
     class Meta:
-        managed = False
         db_table = "risk_signals"
         indexes = [
             Index(fields=["agent_id", "ts"], name="ix_risk_signals_agent_ts"),
@@ -1206,7 +1173,6 @@ class AgentActivity(Row):
     pk = CompositePrimaryKey("agent_id", "day")
 
     class Meta:
-        managed = False
         db_table = "agent_activity"
 
 
@@ -1237,7 +1203,6 @@ class LedgerEntry(Row):
     hash = CharField(max_length=64)
 
     class Meta:
-        managed = False
         db_table = "ledger"
         indexes = [
             Index(fields=["agent_id"], name="ix_ledger_agent_id"),
@@ -1263,7 +1228,6 @@ class LedgerHead(Row):
     last_hash = CharField(max_length=64)
 
     class Meta:
-        managed = False
         db_table = "ledger_head"
 
 
@@ -1300,7 +1264,6 @@ class LedgerCheckpoint(Row):
     pruned_at = UTCDateTimeField(null=True)
 
     class Meta:
-        managed = False
         db_table = "ledger_checkpoints"
 
 
@@ -1327,7 +1290,6 @@ class McpSighting(Row):
     last_seen_at = UTCDateTimeField()
 
     class Meta:
-        managed = False
         db_table = "mcp_sightings"
         indexes = [
             Index(fields=["identity"], name="ix_mcp_sightings_identity"),

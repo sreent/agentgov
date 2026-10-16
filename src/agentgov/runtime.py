@@ -299,9 +299,9 @@ class Runtime:
     # -- lifecycle -----------------------------------------------------------
     def init_db(self) -> None:
         if self.settings.database_auto_migrate:
-            migrations.upgrade(self.db.engine)
+            migrations.upgrade(self.db)
         else:
-            migrations.check(self.db.engine)
+            migrations.check(self.db)
         # Replicas starting together: one at a time.
         with self.coordination.job("startup"):
             with self.db.transaction() as tx:

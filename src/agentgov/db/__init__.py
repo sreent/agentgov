@@ -6,7 +6,7 @@ entries written last, and its changes announced once it commits, never before. N
 a savepoint. Django's ORM uses the database whose transaction is open (``Router``); the
 modules' functions take the transaction they run in.
 
-SQLAlchemy's engine is kept for what runs outside the transactions: the migrations
+SQLAlchemy's engine is kept for what runs outside the transactions: Alembic's migrations
 (agentgov.migrations), and the coordinator's connections (agentgov.coordination).
 """
 
@@ -257,7 +257,7 @@ class Database:
         self.sqlite = here.get_backend_name() == "sqlite"
         self._local = threading.local()
 
-        # SQLAlchemy's own connections, for what runs outside the transactions: the
+        # SQLAlchemy's own connections, for what runs outside the transactions: Alembic's
         # migrations, and the coordinator's (agentgov.coordination).
         kwargs: dict[str, Any] = {}
         if self.sqlite:

@@ -396,7 +396,7 @@ def observe(workdir: Path) -> Observed:
     provider = FakeProvider()
     template = workdir / "template.db"
     db = Database(f"sqlite:///{template}")
-    migrations.upgrade(db.engine)
+    migrations.upgrade(db)
     db.dispose()
     with client_for(template, provider) as client:
         seeded = seed(client, provider)
