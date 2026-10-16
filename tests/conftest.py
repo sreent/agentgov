@@ -162,6 +162,6 @@ def signed_in(client: TestClient, email: str, *roles: str) -> dict[str, str]:
 
     rt = client.app.state.rt  # type: ignore[attr-defined]
     who = sso.Identity(subject=email, name=email, roles=list(roles), id_token="", email=email)
-    with rt.db.session() as s:
-        token, _ = sso.start_session(s, rt.settings, who)
+    with rt.db.transaction() as tx:
+        token, _ = sso.start_session(tx, rt.settings, who)
     return {"Authorization": f"Bearer {token}"}

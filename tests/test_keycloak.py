@@ -157,10 +157,10 @@ def reconciler(rt, settings, keycloak) -> IdentityReconciler:
 
 
 def _agent(rt, settings, approve=True):
-    with rt.db.session() as s:
-        blueprints.create(s, {"name": "bp", "require_sponsor": False}, actor="t")
+    with rt.db.transaction() as tx:
+        blueprints.create(tx, {"name": "bp", "require_sponsor": False}, actor="t")
         return agents.register(
-            s, settings, {"name": "bot", "blueprint": "bp"}, actor="t", approve=approve
+            tx, settings, {"name": "bot", "blueprint": "bp"}, actor="t", approve=approve
         ).id
 
 
@@ -180,8 +180,8 @@ def test_active_agent_gets_a_service_account_client(rt, settings, keycloak, reco
     mappers = {m["protocolMapper"]: m["config"] for m in client["protocolMappers"]}
     assert mappers["oidc-hardcoded-claim-mapper"]["claim.value"] == agent_id
     assert mappers["oidc-audience-mapper"]["included.custom.audience"] == "agentgov-gateway"
-    with rt.db.session() as s:
-        agent = agents.get(s, "bot")
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, "bot")
         assert agent.idp_client_uuid == client["id"]
         assert agent.identity_synced_at is not None
 
@@ -189,12 +189,12 @@ def test_active_agent_gets_a_service_account_client(rt, settings, keycloak, reco
 def test_blocking_disables_the_client(rt, settings, keycloak, reconciler) -> None:
     _agent(rt, settings)
     reconciler.reconcile_all()
-    with rt.db.session() as s:
-        agents.transition(s, settings, agents.get(s, "bot"), "block", actor="t")
+    with rt.db.transaction() as tx:
+        agents.transition(tx, settings, agents.get(tx, "bot"), "block", actor="t")
     reconciler.reconcile_all()
     assert keycloak.by_client_id("agent-bot")["enabled"] is False
-    with rt.db.session() as s:
-        agents.transition(s, settings, agents.get(s, "bot"), "unblock", actor="t")
+    with rt.db.transaction() as tx:
+        agents.transition(tx, settings, agents.get(tx, "bot"), "unblock", actor="t")
     reconciler.reconcile_all()
     assert keycloak.by_client_id("agent-bot")["enabled"] is True
 
@@ -208,8 +208,8 @@ def test_concurrent_creation_is_tolerated(rt, settings, keycloak, reconciler) ->
 
 def test_credentials_and_rotation(rt, settings, keycloak, reconciler) -> None:
     _agent(rt, settings)
-    with rt.db.session() as s:
-        agent = agents.get(s, "bot")
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, "bot")
         first = reconciler.credentials(agent)
         rotated = reconciler.credentials(agent, rotate=True)
     assert first["client_id"] == "agent-bot"
@@ -218,8 +218,8 @@ def test_credentials_and_rotation(rt, settings, keycloak, reconciler) -> None:
 
 def test_credentials_only_for_active_agents(rt, settings, reconciler) -> None:
     _agent(rt, settings, approve=False)
-    with rt.db.session() as s, pytest.raises(KeycloakError):
-        reconciler.credentials(agents.get(s, "bot"))
+    with rt.db.transaction() as tx, pytest.raises(KeycloakError):
+        reconciler.credentials(agents.get(tx, "bot"))
 
 
 def test_outage_is_recorded_on_the_agent(rt, settings) -> None:
@@ -232,8 +232,8 @@ def test_outage_is_recorded_on_the_agent(rt, settings) -> None:
     reconciler = IdentityReconciler(rt.db, settings, admin)
     _agent(rt, settings)
     assert reconciler.reconcile_all() == {"synced": 0, "failed": 1}
-    with rt.db.session() as s:
-        assert "connection refused" in agents.get(s, "bot").identity_error
+    with rt.db.transaction() as tx:
+        assert "connection refused" in agents.get(tx, "bot").identity_error
 
 
 def _people_reconciler(rt, settings, keycloak, apps: str = "chat") -> IdentityReconciler:
@@ -266,15 +266,15 @@ def test_agents_that_act_only_for_themselves_cannot(rt, settings, keycloak) -> N
     reconciler = _people_reconciler(rt, settings, keycloak)
     _agent(rt, settings)
     reconciler.reconcile_all()
-    with rt.db.session() as s:
-        blueprints.update(s, blueprints.get(s, "bp"), {"acts_for": "itself"}, actor="t")
+    with rt.db.transaction() as tx:
+        blueprints.update(tx, blueprints.get(tx, "bp"), {"acts_for": "itself"}, actor="t")
     reconciler.reconcile_all()
     client = keycloak.by_client_id("agent-bot")
     assert client["attributes"]["standard.token.exchange.enabled"] == "false"
     assert keycloak.scope("agent-bot") is None
     assert keycloak.optional_names("chat") == set()
-    with rt.db.session() as s:
-        blueprints.update(s, blueprints.get(s, "bp"), {"acts_for": "people"}, actor="t")
+    with rt.db.transaction() as tx:
+        blueprints.update(tx, blueprints.get(tx, "bp"), {"acts_for": "people"}, actor="t")
     reconciler.reconcile_all()
     assert keycloak.by_client_id("agent-bot")["attributes"]["standard.token.exchange.enabled"] == (
         "true"
@@ -312,8 +312,8 @@ def test_a_scope_agentgov_did_not_make_is_left_alone(rt, settings, keycloak) -> 
     reconciler = _people_reconciler(rt, settings, keycloak, apps="")
     _agent(rt, settings)
     assert reconciler.reconcile_all() == {"synced": 0, "failed": 1}
-    with rt.db.session() as s:
-        assert "AgentGov didn't make it" in agents.get(s, "bot").identity_error
+    with rt.db.transaction() as tx:
+        assert "AgentGov didn't make it" in agents.get(tx, "bot").identity_error
     assert keycloak.scopes["s1"]["attributes"] == {}
 
 
@@ -321,8 +321,8 @@ def test_deleting_an_agent_removes_its_scope(rt, settings, keycloak) -> None:
     reconciler = _people_reconciler(rt, settings, keycloak, apps="")
     _agent(rt, settings)
     reconciler.reconcile_all()
-    with rt.db.session() as s:
-        reconciler.delete(agents.get(s, "bot"))
+    with rt.db.transaction() as tx:
+        reconciler.delete(agents.get(tx, "bot"))
     assert keycloak.clients == {} and keycloak.scopes == {}
 
 
@@ -330,12 +330,12 @@ def test_deleting_an_agent_removes_its_scope(rt, settings, keycloak) -> None:
 
 
 def _public(rt, settings, **data):
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         blueprints.create(
-            s, {"name": "assistants", "require_sponsor": False, "acts_for": "people"}, actor="t"
+            tx, {"name": "assistants", "require_sponsor": False, "acts_for": "people"}, actor="t"
         )
         spec = {"name": "vscode", "blueprint": "assistants", "client_type": "public", **data}
-        return agents.register(s, settings, spec, actor="t", approve=True).id
+        return agents.register(tx, settings, spec, actor="t", approve=True).id
 
 
 def test_people_sign_in_to_a_public_client(rt, settings, keycloak) -> None:
@@ -359,12 +359,12 @@ def test_people_sign_in_to_a_public_client(rt, settings, keycloak) -> None:
     assert mappers["agentgov-gateway-audience"]["included.custom.audience"] == "agentgov-gateway"
     assert mappers["agentgov-sign-in"]["claim.name"] == "agentgov_sign_in"
     assert mappers["agentgov-sign-in"]["jsonType.label"] == "boolean"
-    with rt.db.session() as s:
-        creds = reconciler.credentials(agents.get(s, "vscode"))
+    with rt.db.transaction() as tx:
+        creds = reconciler.credentials(agents.get(tx, "vscode"))
         assert creds["method"] == "sign-in" and "client_secret" not in creds
         assert creds["redirect_uris"] == ["http://127.0.0.1/*", "http://localhost/*"]
         with pytest.raises(KeycloakError, match="no secret to rotate"):
-            reconciler.credentials(agents.get(s, "vscode"), rotate=True)
+            reconciler.credentials(agents.get(tx, "vscode"), rotate=True)
 
 
 def test_a_client_turns_public_and_back(rt, settings, keycloak) -> None:
@@ -374,9 +374,9 @@ def test_a_client_turns_public_and_back(rt, settings, keycloak) -> None:
     reconciler.reconcile_all()
     assert keycloak.scope("agent-bot") is not None
     uris = ["http://127.0.0.1/callback", "https://vscode.dev/redirect"]
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         changes = {"client_type": "public", "redirect_uris": uris}
-        agents.update(s, agents.get(s, "bot"), changes, actor="t")
+        agents.update(tx, agents.get(tx, "bot"), changes, actor="t")
     reconciler.reconcile_all()
     client = keycloak.by_client_id("agent-bot")
     assert client["publicClient"] is True and client["serviceAccountsEnabled"] is False
@@ -385,9 +385,9 @@ def test_a_client_turns_public_and_back(rt, settings, keycloak) -> None:
     assert keycloak.scope("agent-bot") is None
     reconciler.reconcile_all()  # converged
     before = keycloak.secrets[client["id"]]
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         changes = {"client_type": "service", "redirect_uris": []}
-        agents.update(s, agents.get(s, "bot"), changes, actor="t")
+        agents.update(tx, agents.get(tx, "bot"), changes, actor="t")
     reconciler.reconcile_all()
     client = keycloak.by_client_id("agent-bot")
     assert client["publicClient"] is False and client["serviceAccountsEnabled"] is True
@@ -404,9 +404,9 @@ def test_a_client_turns_public_and_back(rt, settings, keycloak) -> None:
 def _issuers(rt, *specs: dict[str, Any]) -> None:
     from agentgov.registry import identity_issuers
 
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         for spec in specs:
-            identity_issuers.create(s, spec, actor="t")
+            identity_issuers.create(tx, spec, actor="t")
 
 
 CLUSTER = {
@@ -456,10 +456,10 @@ def test_each_issuer_is_an_identity_provider(rt, settings, keycloak, reconciler)
     # Entra ID's tokens carry the app's audience, not the realm's URL.
     assert (entra["allowClientIdAsAudience"], entra["clientId"]) == ("true", "api://agentgov")
     assert entra["supportsClientAssertionReuse"] == "false"
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         from agentgov.registry import identity_issuers
 
-        assert all(i.synced_at and not i.sync_error for i in identity_issuers.list_all(s))
+        assert all(i.synced_at and not i.sync_error for i in identity_issuers.list_all(tx))
 
 
 def test_blocked_issuers_and_the_feature_switch_disable_providers(
@@ -469,17 +469,17 @@ def test_blocked_issuers_and_the_feature_switch_disable_providers(
 
     _issuers(rt, CLUSTER)
     reconciler.reconcile_all()
-    with rt.db.session() as s:
-        identity_issuers.set_status(s, identity_issuers.get(s, "cluster"), "block", actor="t")
+    with rt.db.transaction() as tx:
+        identity_issuers.set_status(tx, identity_issuers.get(tx, "cluster"), "block", actor="t")
     reconciler.reconcile_all()
     assert keycloak.providers["agentgov-cluster"]["enabled"] is False
-    with rt.db.session() as s:
-        identity_issuers.set_status(s, identity_issuers.get(s, "cluster"), "unblock", actor="t")
-        features.set_mode(s, settings, "workload-identity", "off", actor="t")
+    with rt.db.transaction() as tx:
+        identity_issuers.set_status(tx, identity_issuers.get(tx, "cluster"), "unblock", actor="t")
+        features.set_mode(tx, settings, "workload-identity", "off", actor="t")
     reconciler.reconcile_all()
     assert keycloak.providers["agentgov-cluster"]["enabled"] is False
-    with rt.db.session() as s:
-        features.set_mode(s, settings, "workload-identity", "on", actor="t")
+    with rt.db.transaction() as tx:
+        features.set_mode(tx, settings, "workload-identity", "on", actor="t")
     reconciler.reconcile_all()
     assert keycloak.providers["agentgov-cluster"]["enabled"] is True
 
@@ -493,8 +493,8 @@ def test_providers_of_deleted_issuers_go_but_others_stay(
     keycloak.providers["agentgov-by-hand"] = {"alias": "agentgov-by-hand", "config": {}}
     _issuers(rt, CLUSTER)
     reconciler.reconcile_all()
-    with rt.db.session() as s:
-        identity_issuers.delete(s, identity_issuers.get(s, "cluster"), actor="t")
+    with rt.db.transaction() as tx:
+        identity_issuers.delete(tx, identity_issuers.get(tx, "cluster"), actor="t")
     reconciler.reconcile_all()
     assert set(keycloak.providers) == {"github", "agentgov-by-hand"}
 
@@ -508,13 +508,13 @@ def test_an_issuer_keycloak_wont_take_says_why(rt, settings, keycloak, reconcile
     assert reconciler.reconcile_all() == {"synced": 1, "failed": 0}  # agents still sync
     keycloak.forbid_providers = False
     reconciler.reconcile_all()  # Entra ID's discovery document isn't there
-    with rt.db.session() as s:
-        assert identity_issuers.get(s, "cluster").sync_error is None
-        assert "couldn't read" in identity_issuers.get(s, "entra").sync_error
+    with rt.db.transaction() as tx:
+        assert identity_issuers.get(tx, "cluster").sync_error is None
+        assert "couldn't read" in identity_issuers.get(tx, "entra").sync_error
     keycloak.forbid_providers = True
     reconciler.reconcile_all()
-    with rt.db.session() as s:
-        assert "manage-identity-providers" in identity_issuers.get(s, "cluster").sync_error
+    with rt.db.transaction() as tx:
+        assert "manage-identity-providers" in identity_issuers.get(tx, "cluster").sync_error
 
 
 def test_agents_with_a_workload_identity_have_no_secret(rt, settings, keycloak, reconciler) -> None:
@@ -524,10 +524,10 @@ def test_agents_with_a_workload_identity_have_no_secret(rt, settings, keycloak, 
     client = keycloak.by_client_id("agent-bot")
     before = keycloak.secrets[client["id"]]
     subject = "system:serviceaccount:agents:bot"
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         agents.update(
-            s,
-            agents.get(s, "bot"),
+            tx,
+            agents.get(tx, "bot"),
             {"workload_identity": {"issuer": "cluster", "subject": subject}},
             actor="t",
         )
@@ -538,19 +538,19 @@ def test_agents_with_a_workload_identity_have_no_secret(rt, settings, keycloak, 
     assert client["attributes"]["jwt.credential.sub"] == subject
     # The secret it had can't authenticate it any more.
     assert keycloak.secrets[client["id"]] != before
-    with rt.db.session() as s:
-        creds = reconciler.credentials(agents.get(s, "bot"))
+    with rt.db.transaction() as tx:
+        creds = reconciler.credentials(agents.get(tx, "bot"))
         assert creds["method"] == "workload-identity" and "client_secret" not in creds
         assert (creds["issuer"], creds["subject"]) == ("cluster", subject)
         with pytest.raises(KeycloakError, match="no secret to rotate"):
-            reconciler.credentials(agents.get(s, "bot"), rotate=True)
+            reconciler.credentials(agents.get(tx, "bot"), rotate=True)
         # Back to a secret: a new one.
-        agents.update(s, agents.get(s, "bot"), {"workload_identity": None}, actor="t")
+        agents.update(tx, agents.get(tx, "bot"), {"workload_identity": None}, actor="t")
     reconciler.reconcile_all()
     client = keycloak.by_client_id("agent-bot")
     assert client["clientAuthenticatorType"] == "client-secret"
-    with rt.db.session() as s:
-        assert reconciler.credentials(agents.get(s, "bot"))["method"] == "client-secret"
+    with rt.db.transaction() as tx:
+        assert reconciler.credentials(agents.get(tx, "bot"))["method"] == "client-secret"
 
 
 def test_the_api_says_what_token_authenticates_an_agent(settings, keycloak) -> None:
@@ -568,8 +568,8 @@ def test_the_api_says_what_token_authenticates_an_agent(settings, keycloak) -> N
     rt.identity = IdentityReconciler(rt.db, settings, admin)
     keycloak.discovery[ENTRA["issuer"]] = {"jwks_uri": "https://login.example.com/keys"}
     _issuers(rt, CLUSTER, SPIRE, ENTRA)
-    with rt.db.session() as s:
-        blueprints.create(s, {"name": "bp", "require_sponsor": False}, actor="t")
+    with rt.db.transaction() as tx:
+        blueprints.create(tx, {"name": "bp", "require_sponsor": False}, actor="t")
         for name, issuer, subject in (
             ("pod", "cluster", "system:serviceaccount:agents:pod"),
             ("svid", "spire", "spiffe://example.org/agents/svid"),
@@ -577,8 +577,8 @@ def test_the_api_says_what_token_authenticates_an_agent(settings, keycloak) -> N
         ):
             identity = {"issuer": issuer, "subject": subject}
             data = {"name": name, "blueprint": "bp", "workload_identity": identity}
-            agents.register(s, settings, data, actor="t", approve=True)
-        agents.register(s, settings, {"name": "plain", "blueprint": "bp"}, actor="t", approve=True)
+            agents.register(tx, settings, data, actor="t", approve=True)
+        agents.register(tx, settings, {"name": "plain", "blueprint": "bp"}, actor="t", approve=True)
     rt.identity.reconcile_all()
     token_endpoint = "https://id.example.com/realms/agentgov/protocol/openid-connect/token"
     with TestClient(create_app(settings, runtime=rt, background=False)) as client:
@@ -604,9 +604,9 @@ def test_the_api_says_what_token_authenticates_an_agent(settings, keycloak) -> N
         rotate = client.post("/v1/agents/pod/credentials", json={"rotate": True}, headers=ADMIN)
         assert rotate.status_code == 409 and "no secret to rotate" in rotate.json()["detail"]
         # A public client: where people sign in to it. Nothing secret, nothing recorded.
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             data = {"name": "vscode", "blueprint": "bp", "client_type": "public"}
-            agents.register(s, settings, data, actor="t", approve=True)
+            agents.register(tx, settings, data, actor="t", approve=True)
         before = client.get("/v1/ledger", params={"type": "agent.credentials_read"}, headers=ADMIN)
         vscode = creds("vscode")
         assert vscode["method"] == "sign-in" and "client_secret" not in vscode
@@ -644,22 +644,24 @@ def _counted(keycloak: FakeKeycloak) -> tuple[KeycloakAdmin, Counter[str]]:
 def test_a_pass_syncs_only_the_agents_whose_clients_should_change(rt, settings, keycloak) -> None:
     admin, looked_up = _counted(keycloak)
     reconciler = IdentityReconciler(rt.db, settings.with_overrides(people_app_clients=""), admin)
-    with rt.db.session() as s:
-        blueprints.create(s, {"name": "bp", "require_sponsor": False}, actor="t")
+    with rt.db.transaction() as tx:
+        blueprints.create(tx, {"name": "bp", "require_sponsor": False}, actor="t")
         for name in ("one", "two"):
-            agents.register(s, settings, {"name": name, "blueprint": "bp"}, actor="t", approve=True)
+            agents.register(
+                tx, settings, {"name": name, "blueprint": "bp"}, actor="t", approve=True
+            )
     assert reconciler.reconcile_all(full=False) == {"synced": 2, "failed": 0}  # new ones
     looked_up.clear()
     assert reconciler.reconcile_all(full=False) == {"synced": 0, "failed": 0}
     assert not looked_up  # Keycloak isn't asked about either
-    with rt.db.session() as s:
-        agents.update(s, agents.get(s, "one"), {"description": "Answers tickets"}, actor="t")
+    with rt.db.transaction() as tx:
+        agents.update(tx, agents.get(tx, "one"), {"description": "Answers tickets"}, actor="t")
     assert reconciler.reconcile_all(full=False) == {"synced": 1, "failed": 0}
     assert set(looked_up) == {"agent-one"}
     assert keycloak.by_client_id("agent-one")["description"] == "Answers tickets"
     # A change to their blueprint changes both clients: they may act for people no more.
-    with rt.db.session() as s:
-        blueprints.update(s, blueprints.get(s, "bp"), {"acts_for": "itself"}, actor="t")
+    with rt.db.transaction() as tx:
+        blueprints.update(tx, blueprints.get(tx, "bp"), {"acts_for": "itself"}, actor="t")
     assert reconciler.reconcile_all(full=False) == {"synced": 2, "failed": 0}
     attributes = keycloak.by_client_id("agent-two")["attributes"]
     assert attributes["standard.token.exchange.enabled"] == "false"
@@ -693,8 +695,8 @@ def test_a_sync_that_failed_is_tried_again(rt, settings, keycloak) -> None:
     assert reconciler.reconcile_all(full=False) == {"synced": 0, "failed": 1}
     down["now"] = False
     assert reconciler.reconcile_all(full=False) == {"synced": 1, "failed": 0}
-    with rt.db.session() as s:
-        assert agents.get(s, "bot").identity_error is None
+    with rt.db.transaction() as tx:
+        assert agents.get(tx, "bot").identity_error is None
 
 
 def test_the_worker_syncs_every_agent_first_then_what_changed(

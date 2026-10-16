@@ -12,15 +12,13 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids, ledger
 from agentgov.api.app import create_app
 from agentgov.api.auth import Principal
 from agentgov.config import Settings
-from agentgov.db.models import Destination
-from agentgov.models import LedgerEntry
+from agentgov.db.models import Destination, LedgerEntry
 from agentgov.registry import destinations, findings, manifests, posture
 from agentgov.registry.errors import Forbidden, ValidationError
 from agentgov.runtime import Runtime
@@ -415,22 +413,22 @@ class TestHandoff:
         def who(*roles: str) -> Principal:
             return Principal("x", roles[0], frozenset(roles))
 
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             assert handoff.acting_as_secops(who("secops@sales"))
             with pytest.raises(Forbidden, match="triage"):
-                handoff.check(s, who("secops@sales"), handoff.TRIAGE)
+                handoff.check(tx, who("secops@sales"), handoff.TRIAGE)
             for roles in (("secops@sales",), ("approver",), ("auditor",), ("admin@sales",)):
                 with pytest.raises(Forbidden):
-                    handoff.check_kill_switch(s, who(*roles), "block")
-            handoff.check_kill_switch(s, who("admin"), "block")
+                    handoff.check_kill_switch(tx, who(*roles), "block")
+            handoff.check_kill_switch(tx, who("admin"), "block")
         level(client, "contain")
-        with rt.db.session() as s:
-            handoff.check_kill_switch(s, who("secops@sales"), "unblock")
+        with rt.db.transaction() as tx:
+            handoff.check_kill_switch(tx, who("secops@sales"), "unblock")
             with pytest.raises(Forbidden, match="nothing else"):
-                handoff.check_kill_switch(s, who("secops@sales"), "approve")
+                handoff.check_kill_switch(tx, who("secops@sales"), "approve")
             for roles in (("approver",), ("registrar",), ("admin@sales", "auditor")):
                 with pytest.raises(Forbidden):
-                    handoff.check_kill_switch(s, who(*roles), "block")
+                    handoff.check_kill_switch(tx, who(*roles), "block")
 
     def test_decide_lets_it_decide_approvers_requests(self, client) -> None:
         agent = seed(client)
@@ -645,13 +643,13 @@ metadata: {name: collector}
 spec: {kind: otlp, url: "http://otel-collector:4318", status: paused, backfill: true}
 """
         )
-        with rt.db.session() as s:
-            results = manifests.apply(s, rt.settings, docs, actor="admin:ada")
+        with rt.db.transaction() as tx:
+            results = manifests.apply(tx, rt.settings, docs, actor="admin:ada")
             assert [r["action"] for r in results] == ["created", "created"]
-            assert destinations.get(s, "collector").cursor == 0
-            again = manifests.apply(s, rt.settings, docs, actor="admin:ada")
+            assert destinations.get(tx, "collector").cursor == 0
+            again = manifests.apply(tx, rt.settings, docs, actor="admin:ada")
             assert [r["action"] for r in again] == ["unchanged", "unchanged"]
-            exported = [d for d in manifests.export(s) if d["kind"] == "Destination"]
+            exported = [d for d in manifests.export(tx) if d["kind"] == "Destination"]
         assert exported == [
             {
                 "apiVersion": "agentgov/v1alpha1",
@@ -826,9 +824,9 @@ class TestDelivery:
         destination(secops, name="cx", kind="slack", events=[])
         (secrets / "cx").write_text("https://hooks.slack.com/services/T0/B1/s3cret")
         agent = seed(secops)
-        with rt_of(secops).db.session() as s:
+        with rt_of(secops).db.transaction() as tx:
             findings.raise_finding(
-                s,
+                tx,
                 type="agent.prompt_injection",
                 severity="critical",
                 subject=agent["id"],
@@ -851,9 +849,9 @@ class TestDelivery:
         (secrets / "teams").write_text("https://example.webhook.office.com/workflows/s3cret")
         agent = seed(secops)
         rt = rt_of(secops)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             findings.raise_finding(
-                s,
+                tx,
                 type="agent.prompt_injection",
                 severity="high",
                 subject=agent["id"],
@@ -862,7 +860,7 @@ class TestDelivery:
                 category=findings.THREAT,
             )
             findings.raise_finding(
-                s,
+                tx,
                 type="agent.stale",
                 severity="low",
                 subject=agent["id"],
@@ -919,14 +917,14 @@ class TestDelivery:
         # It waits before it tries again.
         assert rt.delivery.run() == {}
         assert len(sink.requests) == 1
-        with rt.db.session() as s:
-            row = destinations.get(s, "soc")
+        with rt.db.transaction() as tx:
+            row = destinations.get(tx, "soc")
             row.retry_at, row.failures = None, posture.FAILING - 1
             row.save()
         rt.delivery.run()
-        with rt.db.session() as s:
-            assert destinations.get(s, "soc").failures == posture.FAILING
-            posture.scan(s, rt.settings)
+        with rt.db.transaction() as tx:
+            assert destinations.get(tx, "soc").failures == posture.FAILING
+            posture.scan(tx, rt.settings)
         failing = secops.get(
             "/v1/findings", params={"type": "destination.failing"}, headers=ADMIN
         ).json()
@@ -936,8 +934,8 @@ class TestDelivery:
         with rt.db.transaction():
             Destination.objects.filter(name="soc").update(retry_at=None)
         assert rt.delivery.run()["soc"] == {"sent": 1}
-        with rt.db.session() as s:
-            posture.scan(s, rt.settings)
+        with rt.db.transaction() as tx:
+            posture.scan(tx, rt.settings)
         assert (
             secops.get("/v1/findings", params={"type": "destination.failing"}, headers=ADMIN).json()
             == []
@@ -958,9 +956,9 @@ class TestDelivery:
         destination(secops, name="soc", kind="slack", events=["findings"])
         (secrets / "soc").write_text("https://hooks.slack.com/services/T0/B0/s3cret")
         rt = rt_of(secops)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             ledger.append(
-                s,
+                tx,
                 type="finding.raised",
                 actor="system:agentgov",
                 reason="old news",
@@ -969,7 +967,7 @@ class TestDelivery:
             )
             for n in range(14):
                 findings.raise_finding(
-                    s,
+                    tx,
                     type="agent.prompt_injection",
                     severity="critical",
                     subject=f"s-{n}",
@@ -982,8 +980,8 @@ class TestDelivery:
         assert titles[0] == "Critical-severity issue: Injection 0"
         assert titles[-1] == "5 more alerts"
         assert not [t for t in titles if "old news" in t]
-        with rt.db.session() as s:
-            assert destinations.get(s, "soc").cursor == destinations.head(s)
+        with rt.db.transaction() as tx:
+            assert destinations.get(tx, "soc").cursor == destinations.head(tx)
 
     def test_a_partial_failure_resumes_at_the_alert_that_failed(
         self, secops, sink, secrets
@@ -991,10 +989,10 @@ class TestDelivery:
         destination(secops, name="soc", kind="slack", events=["findings"])
         (secrets / "soc").write_text("https://hooks.slack.com/services/T0/B0/s3cret")
         rt = rt_of(secops)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             for n in range(3):
                 findings.raise_finding(
-                    s,
+                    tx,
                     type="agent.prompt_injection",
                     severity="high",
                     subject=f"s-{n}",
@@ -1027,8 +1025,8 @@ class TestDelivery:
         )
         level(secops, "inform")
         rt = rt_of(secops)
-        with rt.db.session() as s:
-            destination_id = destinations.get(s, "siem").id
+        with rt.db.transaction() as tx:
+            destination_id = destinations.get(tx, "siem").id
         first = rt.delivery._claim(destination_id)
         assert first is not None and first.events
         assert rt.delivery._claim(destination_id) is None  # claimed
@@ -1065,8 +1063,8 @@ class TestDelivery:
         monkeypatch.setattr(rt._delivery_worker, "trigger", lambda: woken.append("delivery"))
         monkeypatch.setattr(rt.bundles, "notify", lambda: woken.append("bundle"))
         rt.init_db()
-        with rt.db.session() as s:
-            ledger.append(s, type="agent.updated", actor="admin:ada")
+        with rt.db.transaction() as tx:
+            ledger.append(tx, type="agent.updated", actor="admin:ada")
         assert woken == ["delivery"]  # OPA's data didn't change
         rt.db.dispose()
 
@@ -1127,15 +1125,15 @@ class TestCli:
 
 
 def test_siem_events_skip_what_was_not_chosen(rt) -> None:
-    with rt.db.session() as s:
-        ledger.append(s, type="admin.login", actor="admin:ada")
-        ledger.append(s, type="agent.updated", actor="admin:ada", severity="warning")
-    with rt.db.session() as s:
-        entries = list(s.scalars(select(LedgerEntry).order_by(LedgerEntry.seq)))
-        assert [e["class_uid"] for e in delivery.siem_events(s, entries, ["access"], "info")] == [
+    with rt.db.transaction() as tx:
+        ledger.append(tx, type="admin.login", actor="admin:ada")
+        ledger.append(tx, type="agent.updated", actor="admin:ada", severity="warning")
+    with rt.db.transaction() as tx:
+        entries = list(LedgerEntry.objects.order_by("seq"))
+        assert [e["class_uid"] for e in delivery.siem_events(tx, entries, ["access"], "info")] == [
             3002
         ]
-        assert delivery.siem_events(s, entries, ["changes"], "high") == []
+        assert delivery.siem_events(tx, entries, ["changes"], "high") == []
 
 
 class TestCredentialHosts:
@@ -1178,13 +1176,13 @@ class TestCredentialHosts:
         self, listed: TestClient, sink: Sink, secrets: Path
     ) -> None:
         rt = rt_of(listed)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             # Set up before the deployment listed the hosts.
             for data in (
                 {"name": "siem", "kind": "webhook", "url": "https://siem.evil.example/in"},
                 {"name": "soc", "kind": "slack", "events": ["blocks"]},
             ):
-                destinations.create(s, data, actor="admin:test")
+                destinations.create(tx, data, actor="admin:test")
         (secrets / "siem").write_text("Authorization: Bearer t0ken\n")
         (secrets / "soc").write_text("https://hooks.evil.example/services/T0/B0/x\n")
         agent = seed(listed)

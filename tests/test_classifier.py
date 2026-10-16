@@ -283,10 +283,7 @@ def test_only_the_tool_results_since_the_model_last_answered() -> None:
 
 
 def test_the_control_plane_keeps_a_verdict_given_after(client) -> None:
-    from sqlalchemy import select
-
-    from agentgov.db.models import Finding
-    from agentgov.models import LedgerEntry
+    from agentgov.db.models import Finding, LedgerEntry
     from agentgov.secops import ocsf
     from tests.conftest import SERVICE, seed
 
@@ -317,10 +314,8 @@ def test_the_control_plane_keeps_a_verdict_given_after(client) -> None:
     resp = client.post("/v1/internal/decisions", json={"records": records}, headers=SERVICE)
     assert resp.status_code == 200, resp.text
     rt = client.app.state.rt  # type: ignore[attr-defined]
-    with rt.db.session() as s:
-        entries = s.scalars(
-            select(LedgerEntry).where(LedgerEntry.type == "detection.classifier")
-        ).all()
+    with rt.db.transaction():
+        entries = list(LedgerEntry.objects.filter(type="detection.classifier").order_by("seq"))
         found = {f.type: f for f in Finding.objects.all()}
         assert [e.reason for e in entries] == [
             "The classifier found instructions aimed at the agent in a tool result, after it "

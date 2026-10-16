@@ -43,13 +43,13 @@ class TestCoverage:
         c = report(client)["coverage"]
         assert (c["not_seen_names"], c["platforms_read"]) == (["support-bot"], ["copilot-studio"])
         # Seen at work (its telemetry, say): its calls not checked.
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             Agent.objects.filter(pk=bot["id"]).update(last_seen_at=ids.utcnow())
         assert seen(client) == (2, 0, 1, 1, 0)
         # Its calls checked.
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             ledger.append(
-                s,
+                tx,
                 type="decision.tool.request",
                 actor=f"agent:{bot['name']}",
                 agent_id=bot["id"],

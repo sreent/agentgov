@@ -33,10 +33,10 @@ class TestDismissing:
         )
         assert dismiss(client, fid, reason="again").status_code == 409
         rt = _rt(client)
-        with rt.db.session() as s:
-            assert issues.reopen_accepted(s, ids.utcnow() + timedelta(days=13)) == 0
-            assert issues.reopen_accepted(s, ids.utcnow() + timedelta(days=15)) == 1
-            again = findings.get(s, fid)
+        with rt.db.transaction() as tx:
+            assert issues.reopen_accepted(tx, ids.utcnow() + timedelta(days=13)) == 0
+            assert issues.reopen_accepted(tx, ids.utcnow() + timedelta(days=15)) == 1
+            again = findings.get(tx, fid)
             assert again.status == "open" and "dismissal" not in again.details
         assert history(client, fid)[0] == "finding.reopened"
 
@@ -44,15 +44,15 @@ class TestDismissing:
         fid = _raise(client, agent["id"])
         dismiss(client, fid, reason="A test agent").raise_for_status()
         _raise(client, agent["id"])  # found again: a posture finding stays dismissed
-        with _rt(client).db.session() as s:
-            assert issues.reopen_accepted(s, ids.utcnow() + timedelta(days=400)) == 0
-            assert findings.get(s, fid).status == "dismissed"
+        with _rt(client).db.transaction() as tx:
+            assert issues.reopen_accepted(tx, ids.utcnow() + timedelta(days=400)) == 0
+            assert findings.get(tx, fid).status == "dismissed"
 
 
 def _threat(client, agent_id: str, severity: str = "high") -> str:
-    with _rt(client).db.session() as s:
+    with _rt(client).db.transaction() as tx:
         finding, _ = findings.raise_finding(
-            s,
+            tx,
             type="threat.prompt_injection",
             severity=severity,
             subject=agent_id,
@@ -80,12 +80,12 @@ def test_people_are_told_again_when_it_gets_worse(client, agent) -> None:  # noq
     rt = _rt(client)
     fid = _raise(client, agent["id"], severity="medium")
     rt.run_issues()
-    with rt.db.session() as s:
-        issues.acknowledge(s, findings.get(s, fid), actor="person:cx-team@example.com")
+    with rt.db.transaction() as tx:
+        issues.acknowledge(tx, findings.get(tx, fid), actor="person:cx-team@example.com")
     # Worse: its chain starts over, and its first step is told again.
     _raise(client, agent["id"], severity="high")
-    with rt.db.session() as s:
-        f = findings.get(s, fid)
+    with rt.db.transaction() as tx:
+        f = findings.get(tx, fid)
         assert (f.level, f.acknowledged_at, f.round) == (None, None, 1)
     rt.run_issues()
     assert history(client, fid)[:2] == ["finding.assigned", "finding.severity_raised"]

@@ -155,9 +155,9 @@ class TestFixed:
         assert (out["fixed"], out["finding"]["status"]) == (False, "open")
 
     def test_what_cant_be_checked_on_demand(self, client, agent) -> None:  # noqa: F811
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             raised, _ = findings.raise_finding(
-                s,
+                tx,
                 type="defender.alert",
                 severity="high",
                 subject=agent["id"],

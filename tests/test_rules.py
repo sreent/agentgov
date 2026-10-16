@@ -7,12 +7,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
-from agentgov.db.models import AccessAssignment, Agent, Finding, RuleMatch
-from agentgov.models import LedgerEntry
+from agentgov.db.models import AccessAssignment, Agent, Finding, LedgerEntry, RuleMatch
 from agentgov.platforms import connections
 from agentgov.registry import access_packages, features, findings, issues, rules
 from agentgov.registry.errors import Conflict, ValidationError
@@ -45,20 +43,20 @@ def _seen(client: TestClient, name: str, *, days_ago: float) -> None:
 
 
 def _rule(client: TestClient, mode: str = "enforce", **spec: Any) -> str:
-    with _rt(client).db.session() as s:
-        return rules.create(s, {**INACTIVE, "mode": mode, **spec}, actor="admin:test").name
+    with _rt(client).db.transaction() as tx:
+        return rules.create(tx, {**INACTIVE, "mode": mode, **spec}, actor="admin:test").name
 
 
 def _feature(client: TestClient, key: str, mode: str) -> None:
     rt = _rt(client)
-    with rt.db.session() as s:
-        features.set_mode(s, rt.settings, key, mode, actor="admin:test")
+    with rt.db.transaction() as tx:
+        features.set_mode(tx, rt.settings, key, mode, actor="admin:test")
 
 
 def _run(client: TestClient, at: datetime) -> dict[str, Any]:
     rt = _rt(client)
-    with rt.db.session() as s:
-        return rules.evaluate(s, rt.settings, at)
+    with rt.db.transaction() as tx:
+        return rules.evaluate(tx, rt.settings, at)
 
 
 def _status(client: TestClient, name: str = "support-bot") -> str:
@@ -72,8 +70,8 @@ def _issues(client: TestClient, type_: str = rules.MATCHED) -> list[Finding]:
 
 
 def _ledger(client: TestClient, type_: str) -> list[LedgerEntry]:
-    with _rt(client).db.session() as s:
-        return list(s.scalars(select(LedgerEntry).where(LedgerEntry.type == type_)))
+    with _rt(client).db.transaction():
+        return list(LedgerEntry.objects.filter(type=type_).order_by("seq"))
 
 
 class TestValidation:
@@ -100,21 +98,24 @@ class TestValidation:
         ],
     )
     def test_what_a_rule_must_say(self, client, spec, message) -> None:
-        with pytest.raises(ValidationError, match=message), _rt(client).db.session() as s:
-            rules.create(s, {**INACTIVE, **spec}, actor="admin:test")
+        with pytest.raises(ValidationError, match=message), _rt(client).db.transaction() as tx:
+            rules.create(tx, {**INACTIVE, **spec}, actor="admin:test")
 
     def test_names_are_unique_and_fixed(self, client) -> None:
         _rule(client)
-        with pytest.raises(Conflict), _rt(client).db.session() as s:
-            rules.create(s, INACTIVE, actor="admin:test")
-        with pytest.raises(ValidationError, match="can't change"), _rt(client).db.session() as s:
-            rules.update(s, rules.get(s, "inactive-agents"), {"name": "x"}, actor="admin:test")
+        with pytest.raises(Conflict), _rt(client).db.transaction() as tx:
+            rules.create(tx, INACTIVE, actor="admin:test")
+        with (
+            pytest.raises(ValidationError, match="can't change"),
+            _rt(client).db.transaction() as tx,
+        ):
+            rules.update(tx, rules.get(tx, "inactive-agents"), {"name": "x"}, actor="admin:test")
 
     def test_issues_need_no_notice_and_owners_may_be_teams(self, client) -> None:
         client.post("/v1/teams", json={"name": "cx-platform"}, headers=ADMIN).raise_for_status()
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             rule = rules.create(
-                s,
+                tx,
                 {
                     "name": "ownerless",
                     "conditions": {"missing": ["owner"]},
@@ -126,8 +127,8 @@ class TestValidation:
             assert rule.params == {"owner": "cx-platform"}
             # Changing the action checks its params again.
             with pytest.raises(ValidationError, match="takes no params"):
-                rules.update(s, rule, {"action": "block"}, actor="admin:test")
-            rules.update(s, rule, {"action": "issue", "params": {}, "after_days": 0}, actor="t")
+                rules.update(tx, rule, {"action": "block"}, actor="admin:test")
+            rules.update(tx, rule, {"action": "issue", "params": {}, "after_days": 0}, actor="t")
             assert (rule.action, rule.after_days) == ("issue", 0)
 
 
@@ -218,15 +219,15 @@ class TestEnforce:
         now = ids.utcnow()
         _run(client, now)
         rt = _rt(client)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             issue = Finding.objects.get(type=rules.MATCHED)
-            issues.accept(s, issue, reason="Seasonal agent", until=30, actor="approver:ann")
+            issues.accept(tx, issue, reason="Seasonal agent", until=30, actor="approver:ann")
         _run(client, now + timedelta(days=8))
         assert _status(client) == "active"
         assert "risk is accepted until" in _issues(client)[0].title
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             assert RuleMatch.objects.get().warned_at is None
-            issues.reopen_accepted(s, now + timedelta(days=31))
+            issues.reopen_accepted(tx, now + timedelta(days=31))
         _run(client, now + timedelta(days=31))
         assert _status(client) == "active"  # told again: a full week's notice
         assert "will block" in _issues(client)[0].title
@@ -272,8 +273,8 @@ class TestEnforce:
         assert all("is held back" in i.title for i in _issues(client))
         _run(client, now + timedelta(days=9))
         assert len(_ledger(client, "rule.held_back")) == 1
-        with _rt(client).db.session() as s:
-            rules.update(s, rules.get(s, name), {"max_actions": 3}, actor="admin:test")
+        with _rt(client).db.transaction() as tx:
+            rules.update(tx, rules.get(tx, name), {"max_actions": 3}, actor="admin:test")
         _run(client, now + timedelta(days=10))
         assert {_status(client, n) for n in ("support-bot", "bot-a", "bot-b")} == {"blocked"}
         assert _issues(client, rules.TOO_MANY)[0].status == "resolved"
@@ -293,13 +294,13 @@ class TestEnforce:
                 created_at=now - timedelta(days=90),
             )
         name = _rule(client)
-        with rt.db.session() as s:
-            shown = rules.preview(s, rules.get(s, name), now)
+        with rt.db.transaction() as tx:
+            shown = rules.preview(tx, rules.get(tx, name), now)
             # Without its usage, nobody can tell that it's inactive.
             assert [u["agent"] for u in shown["unknown"]] == ["m365-helper"]
             assert "purview-audit" in shown["unknown"][0]["why"]
             connections.save_state(
-                s,
+                tx,
                 "purview-audit",
                 {
                     "usage_from": ids.isoformat(now - timedelta(days=60)),
@@ -313,17 +314,17 @@ class TestEnforce:
         assert _status(client, "m365-helper") == "active"
         m365 = next(i for i in _issues(client) if "m365-helper" in i.title)
         assert "block it in Microsoft 365's admin center" in m365.description
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             # Usage read last week, not since: it can't tell any more.
             connections.save_state(
-                s,
+                tx,
                 "purview-audit",
                 {
                     "usage_from": ids.isoformat(now - timedelta(days=60)),
                     "usage_until": ids.isoformat(now - timedelta(days=7)),
                 },
             )
-            shown = rules.preview(s, rules.get(s, name), now)
+            shown = rules.preview(tx, rules.get(tx, name), now)
             assert [u["agent"] for u in shown["unknown"]] == ["m365-helper"]
 
     def test_a_rule_names_teams_and_blueprints_there_are(self, client, agent) -> None:
@@ -346,19 +347,19 @@ class TestEnforce:
     def test_who_a_rule_looks_at(self, client, agent) -> None:
         client.post("/v1/blueprints", json={"name": "other"}, headers=ADMIN).raise_for_status()
         name = _rule(client, scope={"blueprints": ["other"]})
-        with _rt(client).db.session() as s:
-            assert rules.preview(s, rules.get(s, name))["matching"] == 0
+        with _rt(client).db.transaction() as tx:
+            assert rules.preview(tx, rules.get(tx, name))["matching"] == 0
             rules.update(
-                s, rules.get(s, name), {"scope": {"platforms": ["gateway"]}}, actor="admin:test"
+                tx, rules.get(tx, name), {"scope": {"platforms": ["gateway"]}}, actor="admin:test"
             )
-            assert rules.preview(s, rules.get(s, name))["matching"] == 1
+            assert rules.preview(tx, rules.get(tx, name))["matching"] == 1
         client.patch(
             "/v1/agents/support-bot",
             json={"labels": {rules.EXEMPT_LABEL: "other-rule, inactive-agents"}},
             headers=ADMIN,
         ).raise_for_status()
-        with _rt(client).db.session() as s:
-            assert rules.preview(s, rules.get(s, name))["matching"] == 0
+        with _rt(client).db.transaction() as tx:
+            assert rules.preview(tx, rules.get(tx, name))["matching"] == 0
 
     def test_assigning_an_owner(self, client, agent) -> None:
         client.post("/v1/teams", json={"name": "cx-platform"}, headers=ADMIN).raise_for_status()
@@ -404,9 +405,9 @@ class TestEnforce:
         now = ids.utcnow()
         _run(client, now)
         _run(client, now + timedelta(days=2))
-        with _rt(client).db.session() as s:
+        with _rt(client).db.transaction() as tx:
             assert AccessAssignment.objects.get().status == "revoked"
-            assert access_packages.held(s) == {}
+            assert access_packages.held(tx) == {}
         (revoked,) = _ledger(client, "access.revoked")
         assert revoked.actor == "system:rule:idle-access"
         assert _status(client) == "active"
@@ -470,9 +471,9 @@ class TestEnforce:
             after_days=0,
         )
         rt = _rt(client)
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             finding, _ = findings.raise_finding(
-                s,
+                tx,
                 type="agent.stale",
                 severity="low",
                 subject=agent["id"],
@@ -512,8 +513,8 @@ class TestEnforce:
     def test_deleting_a_rule_resolves_its_issues(self, client, agent) -> None:
         name = _rule(client)
         _run(client, ids.utcnow())
-        with _rt(client).db.session() as s:
-            rules.delete(s, rules.get(s, name), actor="admin:test")
+        with _rt(client).db.transaction() as tx:
+            rules.delete(tx, rules.get(tx, name), actor="admin:test")
             assert not RuleMatch.objects.exists()
         assert _issues(client)[0].status == "resolved"
         assert _ledger(client, "rule.deleted")
@@ -521,16 +522,16 @@ class TestEnforce:
 
 def test_previewing_a_rule_before_saving_it(client, agent) -> None:
     rt = _rt(client)
-    with rt.db.session() as s:
-        draft = rules.draft(s, {**INACTIVE, "mode": "enforce"})
-        shown = rules.preview(s, draft)
+    with rt.db.transaction() as tx:
+        draft = rules.draft(tx, {**INACTIVE, "mode": "enforce"})
+        shown = rules.preview(tx, draft)
         assert shown["rule"] is None and shown["matching"] == 1
         (entry,) = shown["agents"]
         assert entry["agent"] == "support-bot" and entry["state"] == "waiting"
         assert entry["reasons"][0].startswith("no activity for 40 days")
         # Monitored by the feature: it would only record it.
         assert shown["mode"] == "monitor" and entry["detail"].startswith("would block it on")
-        assert rules.list_all(s) == []
+        assert rules.list_all(tx) == []
 
 
 class TestApiCliManifests:

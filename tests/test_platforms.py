@@ -470,8 +470,8 @@ class TestCopilotStudio:
 
         assert shared()["verified"] is True
         rt = client.app.state.rt
-        with rt.db.session() as s:
-            platforms.set_sync(s, "copilot-studio", ok=False, counts={}, message="refused")
+        with rt.db.transaction() as tx:
+            platforms.set_sync(tx, "copilot-studio", ok=False, counts={}, message="refused")
         assert shared()["verified"] is False
         # The posture scan checks them again from the data the last good sync stored.
         client.post("/v1/posture/scan", headers=ADMIN).raise_for_status()
@@ -605,9 +605,9 @@ class TestCopilotStudio:
     def test_findings_of_their_own_to_review_from_before_resolve(self, client) -> None:
         import_inventory(client)
         sales = agent_named(client, "sales-helper")
-        with client.app.state.rt.db.session() as s:
+        with client.app.state.rt.db.transaction() as tx:
             findings.raise_finding(
-                s,
+                tx,
                 type="agent.unmanaged",
                 severity="medium",
                 subject=sales["id"],

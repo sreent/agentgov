@@ -360,8 +360,8 @@ class TestEntraAgentId:
         graph.identities[0]["disabledByMicrosoftStatus"] = "DisabledDueToSuspiciousActivity"
         sync(ms, "entra-agent-id").raise_for_status()
         rt = ms.app.state.rt
-        with rt.db.session() as s:
-            platforms.set_sync(s, "entra-agent-id", ok=False, counts={}, message="Graph is down")
+        with rt.db.transaction() as tx:
+            platforms.set_sync(tx, "entra-agent-id", ok=False, counts={}, message="Graph is down")
         (finding,) = ms.get(
             "/v1/findings", params={"type": "entra.disabled_by_microsoft"}, headers=ADMIN
         ).json()

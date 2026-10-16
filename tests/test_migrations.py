@@ -16,7 +16,8 @@ from typer.testing import CliRunner
 
 from agentgov import cli, migrations, models
 from agentgov.config import Settings
-from agentgov.db import Base, Database
+from agentgov.db import Database
+from agentgov.db.models import Agent, Blueprint, ToolServer
 from agentgov.runtime import Runtime
 
 runner = CliRunner()
@@ -44,7 +45,7 @@ def test_the_migrations_build_the_models_schema(tmp_path: Path) -> None:
             migrations.upgrade(database.engine)
             with database.engine.connect() as connection:
                 context = MigrationContext.configure(connection, opts={"compare_type": True})
-                differences = compare_metadata(context, Base.metadata)
+                differences = compare_metadata(context, models.Base.metadata)
             # A model changed without a migration: add one to agentgov/migrations/versions.
             assert differences == [], differences
         finally:
@@ -99,8 +100,8 @@ def test_a_database_from_before_migrations_is_adopted(db: Database) -> None:
 
     assert migrations.status(db.engine).up_to_date
     assert "integration_state" in inspect(db.engine).get_table_names()
-    with db.session() as session:
-        assert session.get(models.Blueprint, "bp_1").name == "support"  # data kept
+    with db.transaction():
+        assert Blueprint.objects.get(pk="bp_1").name == "support"  # data kept
 
 
 def test_a_schema_from_a_newer_version_is_refused(db: Database) -> None:
@@ -133,20 +134,20 @@ def test_what_was_blocked_before_is_read_from_the_ledger(db: Database, settings:
     from agentgov.registry import agents, toolservers
 
     migrations.upgrade(db.engine)
-    with db.session() as s:
-        made = agents.register(s, settings, {"name": "new-bot", "sponsors": ["a"]}, actor="t")
-        agents.transition(s, settings, made, "block", actor="t")
+    with db.transaction() as tx:
+        made = agents.register(tx, settings, {"name": "new-bot", "sponsors": ["a"]}, actor="t")
+        agents.transition(tx, settings, made, "block", actor="t")
         ts = toolservers.create(
-            s, {"name": "byo", "url": "http://byo/mcp"}, actor="t", approve=False
+            tx, {"name": "byo", "url": "http://byo/mcp"}, actor="t", approve=False
         )
-        toolservers.set_status(s, ts, "block", actor="t")
+        toolservers.set_status(tx, ts, "block", actor="t")
     with migrations._migrating(db.engine) as connection:
         command.downgrade(migrations._config(connection), "0031")
     assert "blocked_from" not in {c["name"] for c in inspect(db.engine).get_columns("agents")}
     migrations.upgrade(db.engine)
-    with db.session() as s:
-        assert s.get(models.Agent, made.id).blocked_from == "pending"
-        assert s.get(models.ToolServer, ts.id).blocked_from == "pending"
+    with db.transaction() as tx:
+        assert Agent.objects.get(pk=made.id).blocked_from == "pending"
+        assert ToolServer.objects.get(pk=ts.id).blocked_from == "pending"
 
 
 def test_foreign_keys_are_enforced_again_after_migrating(db: Database) -> None:

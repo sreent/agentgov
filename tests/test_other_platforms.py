@@ -215,9 +215,9 @@ def test_what_the_first_sync_finds_reaches_no_inbox(client, connector, settings)
     from agentgov.registry import findings, issues, teams
 
     rt = client.app.state.rt
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         teams.create(
-            s, {"name": "ai-gov", "emails": ["gov@example.com"], "default": True}, actor="a:b"
+            tx, {"name": "ai-gov", "emails": ["gov@example.com"], "default": True}, actor="a:b"
         )
     mail = replace(settings, smtp_url="smtp://mail:25", smtp_from="agentgov@example.com")
     part = "111122223333/us-east-1"
@@ -235,26 +235,26 @@ def test_what_the_first_sync_finds_reaches_no_inbox(client, connector, settings)
     later = open_findings(client, "billing-helper")["platform.plain_secret"]
     assert findings.BASELINE not in later["details"]
     summary = to_review(client, "aws")
-    with rt.db.session() as s:
-        issues.route(s, mail)
+    with rt.db.transaction() as tx:
+        issues.route(tx, mail)
         sent = set(Notification.objects.values_list("finding_id", flat=True))
         # Both are with the default team; only the new one is in its inbox, with the one
         # issue that says how many of the platform's agents are left to review.
-        assert findings.get(s, first["id"]).level == "team"
+        assert findings.get(tx, first["id"]).level == "team"
         assert sent == {later["id"], summary["id"]}
     # Gone, then back: news like any other.
-    with rt.db.session() as s:
-        findings.set_status(s, first["id"], "resolved", "admin:test")
+    with rt.db.transaction() as tx:
+        findings.set_status(tx, first["id"], "resolved", "admin:test")
     sync(client)
     again = open_findings(client, "billing-helper")["platform.no_guardrail"]
     assert findings.BASELINE not in again["details"]
-    with rt.db.session() as s:
-        issues.route(s, mail)
+    with rt.db.transaction() as tx:
+        issues.route(tx, mail)
         assert Notification.objects.filter(finding_id=first["id"]).exists()
     # Or every first sync's findings are sent, if the deployment says so.
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         loud = replace(mail, issues_quiet_first_sync=False)
-        assert issues._quiet(loud, findings.get(s, later["id"])) is None
+        assert issues._quiet(loud, findings.get(tx, later["id"])) is None
 
 
 def test_other_sources_findings_of_the_same_type_stay(client, connector) -> None:
@@ -306,8 +306,8 @@ def test_platforms_are_read_on_a_schedule(settings: Settings, connector, monkeyp
         assert rt._platforms_worker is not None
         rt._platforms_worker.fn()
         assert connector.calls == 1
-        with rt.db.session() as s:
-            features.set_mode(s, rt.settings, "aws", "off", actor="admin:ada")
+        with rt.db.transaction() as tx:
+            features.set_mode(tx, rt.settings, "aws", "off", actor="admin:ada")
         rt._platforms_worker.fn()
         assert connector.calls == 1
     finally:

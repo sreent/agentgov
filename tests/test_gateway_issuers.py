@@ -18,10 +18,10 @@ from starlette.testclient import TestClient
 
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.db.models import Agent, ModelUsage
+from agentgov.db.models import Agent, IdentityIssuer, ModelUsage
 from agentgov.gateway import render, to_yaml
 from agentgov.identity import issuer_keys
-from agentgov.models import DISCOVERED, IdentityIssuer
+from agentgov.models import DISCOVERED
 from agentgov.opa import bundle
 from agentgov.processor.a2a_answers import _identity as answer_identity
 from agentgov.processor.control_plane import DecisionRecorder
@@ -141,17 +141,17 @@ class TestKeys:
         assert issuer_keys.keys_location(cluster) == cluster.keys_url
 
     def test_the_last_good_keys_stay_when_a_fetch_fails(self, rt) -> None:
-        with rt.db.session() as s:
-            issuer = gateway_issuer(s, CLUSTER, None)
+        with rt.db.transaction() as tx:
+            issuer = gateway_issuer(tx, CLUSTER, None)
             issuer_id = issuer.id
-            assert issuer_keys.targets(s) == [(issuer_id, CLUSTER_URL + DISCOVERY)]
-            assert issuer_keys.store(s, {issuer_id: [KEY]}) == {
+            assert issuer_keys.targets(tx) == [(issuer_id, CLUSTER_URL + DISCOVERY)]
+            assert issuer_keys.store(tx, {issuer_id: [KEY]}) == {
                 "changed": ["cluster"],
                 "failed": [],
             }
-            assert issuer_keys.store(s, {issuer_id: [KEY]})["changed"] == []
+            assert issuer_keys.store(tx, {issuer_id: [KEY]})["changed"] == []
             down = issuer_keys.IssuerKeysError("couldn't read it")
-            assert issuer_keys.store(s, {issuer_id: down}) == {
+            assert issuer_keys.store(tx, {issuer_id: down}) == {
                 "changed": ["cluster"],
                 "failed": ["cluster"],
             }
@@ -159,44 +159,44 @@ class TestKeys:
             assert issuer.gateway_keys == [KEY]
             assert issuer.keys_error == "couldn't read it"
             # The same failure again changes nothing the gateway is given.
-            assert issuer_keys.store(s, {issuer_id: down})["changed"] == []
-            issuer_keys.store(s, {issuer_id: [KEY, NEXT]})
+            assert issuer_keys.store(tx, {issuer_id: down})["changed"] == []
+            issuer_keys.store(tx, {issuer_id: [KEY, NEXT]})
             issuer.refresh_from_db()
             assert (issuer.gateway_keys, issuer.keys_error) == ([KEY, NEXT], None)
 
     def test_only_issuers_the_gateway_trusts_are_fetched_and_kept(self, rt) -> None:
-        with rt.db.session() as s:
-            cluster = identity_issuers.create(s, CLUSTER, actor="admin:a")
-            assert issuer_keys.targets(s) == []
-            assert issuer_keys.store(s, {cluster.id: [KEY]})["changed"] == []
+        with rt.db.transaction() as tx:
+            cluster = identity_issuers.create(tx, CLUSTER, actor="admin:a")
+            assert issuer_keys.targets(tx) == []
+            assert issuer_keys.store(tx, {cluster.id: [KEY]})["changed"] == []
             assert cluster.gateway_keys is None
 
     def test_the_runtime_fetches_them_outside_a_transaction(self, rt) -> None:
         rt.issuer_http = httpx.Client(transport=issuer_server({CLUSTER_URL: [KEY]}))
-        with rt.db.session() as s:
-            gateway_issuer(s, CLUSTER, None)
-            gateway_issuer(s, ENTRA, None)
+        with rt.db.transaction() as tx:
+            gateway_issuer(tx, CLUSTER, None)
+            gateway_issuer(tx, ENTRA, None)
         assert rt.refresh_issuer_keys() == {"changed": ["cluster", "entra"], "failed": ["entra"]}
-        with rt.db.session() as s:
-            assert identity_issuers.get(s, "cluster").gateway_keys == [KEY]
-            assert "404" in identity_issuers.get(s, "entra").keys_error
+        with rt.db.transaction() as tx:
+            assert identity_issuers.get(tx, "cluster").gateway_keys == [KEY]
+            assert "404" in identity_issuers.get(tx, "entra").keys_error
 
 
 class TestIssuers:
     def test_the_gateway_takes_oidc_and_kubernetes_tokens(self, rt) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             with pytest.raises(ValidationError, match="gateway is true"):
-                identity_issuers.create(s, {**CLUSTER, "gateway": "yes"}, actor="a")
+                identity_issuers.create(tx, {**CLUSTER, "gateway": "yes"}, actor="a")
             with pytest.raises(ValidationError, match="SPIFFE trust domain's JWT-SVIDs"):
-                identity_issuers.create(s, {**SPIRE, "gateway": True}, actor="a")
-            assert gateway_issuer(s, CLUSTER, [KEY]).gateway
-            assert gateway_issuer(s, ENTRA, [KEY]).gateway
+                identity_issuers.create(tx, {**SPIRE, "gateway": True}, actor="a")
+            assert gateway_issuer(tx, CLUSTER, [KEY]).gateway
+            assert gateway_issuer(tx, ENTRA, [KEY]).gateway
 
     def test_no_longer_trusted_there_its_keys_go(self, rt) -> None:
-        with rt.db.session() as s:
-            issuer = gateway_issuer(s, CLUSTER, [KEY])
-            issuer_keys.store(s, {issuer.id: issuer_keys.IssuerKeysError("down")})
-            assert identity_issuers.update(s, issuer, {"gateway": False}, actor="a") == ["gateway"]
+        with rt.db.transaction() as tx:
+            issuer = gateway_issuer(tx, CLUSTER, [KEY])
+            issuer_keys.store(tx, {issuer.id: issuer_keys.IssuerKeysError("down")})
+            assert identity_issuers.update(tx, issuer, {"gateway": False}, actor="a") == ["gateway"]
             issuer.refresh_from_db()  # as stored
             assert (issuer.gateway_keys, issuer.keys_at, issuer.keys_error) == (None, None, None)
             assert identity_issuers.gateway_state(issuer) == {
@@ -208,19 +208,19 @@ class TestIssuers:
             }
 
     def test_whose_tokens_the_gateway_takes(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            cluster = gateway_issuer(s, CLUSTER, [KEY])
-            gateway_issuer(s, ENTRA, None)  # no keys yet
-            identity_issuers.create(s, SPIRE, actor="a")  # through Keycloak
-            assert [i.name for i in identity_issuers.at_the_gateway(s)] == ["cluster"]
+        with rt.db.transaction() as tx:
+            cluster = gateway_issuer(tx, CLUSTER, [KEY])
+            gateway_issuer(tx, ENTRA, None)  # no keys yet
+            identity_issuers.create(tx, SPIRE, actor="a")  # through Keycloak
+            assert [i.name for i in identity_issuers.at_the_gateway(tx)] == ["cluster"]
             assert identity_issuers.gateway_state(cluster)["taking"]
-            identity_issuers.set_status(s, cluster, "block", actor="a")
-            assert identity_issuers.at_the_gateway(s) == []
+            identity_issuers.set_status(tx, cluster, "block", actor="a")
+            assert identity_issuers.at_the_gateway(tx) == []
             assert not identity_issuers.gateway_state(cluster)["taking"]
-            identity_issuers.set_status(s, cluster, "unblock", actor="a")
+            identity_issuers.set_status(tx, cluster, "unblock", actor="a")
             # Agents' own identities off: no issuer is trusted, in Keycloak or here.
-            features.set_mode(s, settings, "workload-identity", "off", actor="a")
-            assert identity_issuers.at_the_gateway(s) == []
+            features.set_mode(tx, settings, "workload-identity", "off", actor="a")
+            assert identity_issuers.at_the_gateway(tx) == []
             assert identity_issuers.gateway_state(cluster)["taking"]  # as far as it goes
             assert not identity_issuers.gateway_state(cluster, on=False)["taking"]
 
@@ -231,13 +231,13 @@ class TestIssuers:
             "metadata": {"name": "cluster"},
             "spec": {"kind": "kubernetes", "issuer": CLUSTER_URL, "gateway": True},
         }
-        with rt.db.session() as s:
-            assert manifests.apply(s, settings, [doc], actor="ci")[0]["action"] == "created"
-            assert identity_issuers.get(s, "cluster").gateway
-        with rt.db.session() as s:
-            exported = {d["kind"]: d for d in manifests.export(s)}
+        with rt.db.transaction() as tx:
+            assert manifests.apply(tx, settings, [doc], actor="ci")[0]["action"] == "created"
+            assert identity_issuers.get(tx, "cluster").gateway
+        with rt.db.transaction() as tx:
+            exported = {d["kind"]: d for d in manifests.export(tx)}
             assert exported["IdentityIssuer"]["spec"] == {**doc["spec"], "status": "approved"}
-            assert manifests.apply(s, settings, [doc], actor="ci")[0]["action"] == "unchanged"
+            assert manifests.apply(tx, settings, [doc], actor="ci")[0]["action"] == "unchanged"
 
 
 class TestApi:
@@ -494,33 +494,33 @@ class TestGatewayConfig:
 
 class TestPolicyData:
     def test_workloads_name_agents_by_issuer_and_subject(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            gateway_issuer(s, CLUSTER, [KEY])
-            identity_issuers.create(s, ENTRA, actor="a")  # its agents come through Keycloak
-            bot = _register(s, settings, "bot", {"issuer": "cluster", "subject": SA})
+        with rt.db.transaction() as tx:
+            gateway_issuer(tx, CLUSTER, [KEY])
+            identity_issuers.create(tx, ENTRA, actor="a")  # its agents come through Keycloak
+            bot = _register(tx, settings, "bot", {"issuer": "cluster", "subject": SA})
             pending = _register(
-                s, settings, "new", {"issuer": "cluster", "subject": "sa:new"}, approve=False
+                tx, settings, "new", {"issuer": "cluster", "subject": "sa:new"}, approve=False
             )
-            _register(s, settings, "entra-bot", {"issuer": "entra", "subject": "f0e1"})
+            _register(tx, settings, "entra-bot", {"issuer": "entra", "subject": "f0e1"})
             seen = discovery.observe(
-                s, source="gateway", name="sa:seen", issuer=CLUSTER_URL, subject="sa:seen"
+                tx, source="gateway", name="sa:seen", issuer=CLUSTER_URL, subject="sa:seen"
             )
             assert seen is not None and seen.status == DISCOVERED
-            snapshot = bundle.registry_snapshot(s)
+            snapshot = bundle.registry_snapshot(tx)
             # The agent a token names, pending ones too (refused as such); not one found but
             # not adopted yet.
             assert snapshot["workloads"] == {CLUSTER_URL: {SA: bot.id, "sa:new": pending.id}}
 
     def test_none_while_the_issuer_is_blocked_or_own_identities_are_off(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            cluster = gateway_issuer(s, CLUSTER, [KEY])
-            _register(s, settings, "bot", {"issuer": "cluster", "subject": SA})
-            identity_issuers.set_status(s, cluster, "block", actor="a")
-            assert bundle.registry_snapshot(s)["workloads"] == {}
-            identity_issuers.set_status(s, cluster, "unblock", actor="a")
-            assert bundle.registry_snapshot(s)["workloads"] != {}
-            features.set_mode(s, settings, "workload-identity", "off", actor="a")
-            assert bundle.registry_snapshot(s)["workloads"] == {}
+        with rt.db.transaction() as tx:
+            cluster = gateway_issuer(tx, CLUSTER, [KEY])
+            _register(tx, settings, "bot", {"issuer": "cluster", "subject": SA})
+            identity_issuers.set_status(tx, cluster, "block", actor="a")
+            assert bundle.registry_snapshot(tx)["workloads"] == {}
+            identity_issuers.set_status(tx, cluster, "unblock", actor="a")
+            assert bundle.registry_snapshot(tx)["workloads"] != {}
+            features.set_mode(tx, settings, "workload-identity", "off", actor="a")
+            assert bundle.registry_snapshot(tx)["workloads"] == {}
 
 
 class WorkloadOpa(FakeOpa):
@@ -642,20 +642,20 @@ class TestProcessor:
 
 class TestDiscoveryAndUsage:
     def test_a_workload_found_calling_takes_its_identity_with_it(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            gateway_issuer(s, CLUSTER, [KEY])
+        with rt.db.transaction() as tx:
+            gateway_issuer(tx, CLUSTER, [KEY])
             found = discovery.observe(
-                s, source="gateway", name="sa:seen", issuer=CLUSTER_URL, subject="sa:seen"
+                tx, source="gateway", name="sa:seen", issuer=CLUSTER_URL, subject="sa:seen"
             )
             assert found is not None
             assert (found.workload_issuer, found.workload_subject) == ("cluster", "sa:seen")
             again = discovery.observe(
-                s, source="gateway", name="sa:seen", issuer=CLUSTER_URL, subject="sa:seen"
+                tx, source="gateway", name="sa:seen", issuer=CLUSTER_URL, subject="sa:seen"
             )
             assert again.id == found.id
             # A token of an issuer the gateway doesn't trust names no workload.
             other = discovery.observe(
-                s, source="gateway", name="elsewhere", issuer=ENTRA_URL, subject="x"
+                tx, source="gateway", name="elsewhere", issuer=ENTRA_URL, subject="x"
             )
             assert other is not None and other.workload_issuer is None
 
@@ -674,9 +674,9 @@ class TestDiscoveryAndUsage:
             assert agent.workload_issuer == "cluster"
 
     def test_model_calls_are_metered_by_workload_identity(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            gateway_issuer(s, CLUSTER, [KEY])
-            bot = _register(s, settings, "bot", {"issuer": "cluster", "subject": SA})
+        with rt.db.transaction() as tx:
+            gateway_issuer(tx, CLUSTER, [KEY])
+            bot = _register(tx, settings, "bot", {"issuer": "cluster", "subject": SA})
             bot_id = bot.id
 
         def by(issuer: str, subject: str) -> dict[str, Any]:
@@ -687,9 +687,9 @@ class TestDiscoveryAndUsage:
             ]
             return record
 
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             stats = model_usage.ingest_logs(
-                s, logs(by(CLUSTER_URL, SA), by(CLUSTER_URL, "sa:other"), by(ENTRA_URL, SA))
+                tx, logs(by(CLUSTER_URL, SA), by(CLUSTER_URL, "sa:other"), by(ENTRA_URL, SA))
             )
             assert (stats["model_calls"], stats["unidentified"]) == (3, 2)
             used = ModelUsage.objects.filter(agent_id=bot_id)

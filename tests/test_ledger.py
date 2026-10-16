@@ -86,23 +86,6 @@ def test_entries_go_with_a_savepoint_that_rolls_back(rt) -> None:
         assert ledger.verify(tx)["valid"] is True
 
 
-def test_entries_go_with_a_sqlalchemy_savepoint_that_rolls_back(rt) -> None:
-    """As the modules still on SQLAlchemy take savepoints (Session.begin_nested)."""
-    with rt.db.session() as s:
-        ledger.append(s, type="test.kept", actor="tester")
-        try:
-            with s.begin_nested():
-                ledger.append(s, type="test.undone", actor="tester")
-                raise RuntimeError("undo the savepoint")
-        except RuntimeError:
-            pass
-        with s.begin_nested():
-            ledger.append(s, type="test.saved", actor="tester")
-    with rt.db.transaction() as tx:
-        assert [e.type for e in ledger.iter_entries(tx)] == ["test.kept", "test.saved"]
-        assert ledger.verify(tx)["valid"] is True
-
-
 def test_rolled_back_appends_leave_no_gap(rt) -> None:
     _append(rt, 1)
     try:

@@ -94,8 +94,8 @@ def agent(client: TestClient, name: str) -> dict[str, Any]:
 
 def run_rules(client: TestClient, now: Any) -> None:
     rt = client.app.state.rt  # type: ignore[attr-defined]
-    with rt.db.session() as s:
-        rules.evaluate(s, rt.settings, now)
+    with rt.db.transaction() as tx:
+        rules.evaluate(tx, rt.settings, now)
 
 
 class TestTheControl:

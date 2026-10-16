@@ -586,9 +586,9 @@ class TestIssuesForPeople:
             "/v1/agents/support-bot", json={"owner": "alice@example.com"}, headers=ADMIN
         ).raise_for_status()
         rt = sso.app.state.rt
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             mine, _ = findings.raise_finding(
-                s,
+                tx,
                 type="agent.attestation_due",
                 severity="medium",
                 subject=agent["id"],
@@ -596,7 +596,7 @@ class TestIssuesForPeople:
                 title="support-bot is due for review",
             )
             other, _ = findings.raise_finding(
-                s, type="destination.failing", severity="high", subject="dst_1", title="Failing"
+                tx, type="destination.failing", severity="high", subject="dst_1", title="Failing"
             )
             mine_id, other_id = mine.id, other.id
         rt.run_issues()
@@ -662,9 +662,9 @@ class TestWhoAPersonIs:
             "/v1/agents/support-bot", json={"owner": "alice@example.com"}, headers=ADMIN
         ).raise_for_status()
         rt = sso.app.state.rt
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             findings.raise_finding(
-                s,
+                tx,
                 type="agent.attestation_due",
                 severity="medium",
                 subject=agent["id"],

@@ -14,10 +14,9 @@ from starlette.testclient import TestClient
 from agentgov import cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.db.models import FeatureSetting
+from agentgov.db.models import FeatureSetting, LedgerEntry
 from agentgov.gateway import render
 from agentgov.identity import chains
-from agentgov.models import LedgerEntry
 from agentgov.opa.client import OpaError
 from agentgov.processor.control_plane import DecisionRecorder
 from agentgov.processor.model_guard import PASS, ModelGuard
@@ -457,8 +456,8 @@ def test_unchecked_calls_are_warnings_in_the_ledger(client) -> None:
     }
     resp = client.post("/v1/internal/decisions", json={"records": [record]}, headers=SERVICE)
     assert resp.status_code == 200, resp.text
-    with client.app.state.rt.db.session() as s:
-        entry = s.query(LedgerEntry).filter(LedgerEntry.type == "decision.request").one()
+    with client.app.state.rt.db.transaction():
+        entry = LedgerEntry.objects.get(type="decision.request")
         assert entry.severity == "warning" and entry.decision == "allow"
         assert entry.details["unchecked"] == "the policy engine is unavailable: down"
 
@@ -483,8 +482,8 @@ class TestStartingPoints:
         # Applied, it changes nothing more.
         again = client.get("/v1/feature-presets", headers=ADMIN).json()["presets"][0]
         assert again["changes"] == []
-        with client.app.state.rt.db.session() as s:
-            entries = s.query(LedgerEntry).filter(LedgerEntry.type == "feature.changed").all()
+        with client.app.state.rt.db.transaction():
+            entries = list(LedgerEntry.objects.filter(type="feature.changed").order_by("seq"))
             assert entries and all(e.details["preset"] == "monitor" for e in entries)
             assert "(preset monitor)" in entries[0].reason
         assert client.post("/v1/feature-presets/nothing", headers=ADMIN).status_code == 404

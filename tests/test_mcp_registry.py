@@ -46,71 +46,73 @@ def listed(client) -> None:
 
 class TestToolServers:
     def test_how_a_server_is_used_is_checked(self, rt) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             with pytest.raises(ValidationError, match=r"gateway, listed for developers, reached"):
                 toolservers.create(
-                    s, {"name": "x", "url": "http://x/mcp", "gateway": False}, actor="a",
+                    tx, {"name": "x", "url": "http://x/mcp", "gateway": False}, actor="a",
                     approve=True,
                 )  # fmt: skip
             with pytest.raises(ValidationError, match="url or the packages"):
                 toolservers.create(
-                    s, {"name": "x", "gateway": False, "developers": True}, actor="a",
+                    tx, {"name": "x", "gateway": False, "developers": True}, actor="a",
                     approve=True,
                 )  # fmt: skip
             with pytest.raises(ValidationError, match="url is required"):
-                toolservers.create(s, {"name": "x"}, actor="a", approve=True)
+                toolservers.create(tx, {"name": "x"}, actor="a", approve=True)
             with pytest.raises(ValidationError, match="packages are for servers listed"):
                 toolservers.create(
-                    s, {"name": "x", "url": "http://x/mcp", "packages": [PLAYWRIGHT]},
+                    tx, {"name": "x", "url": "http://x/mcp", "packages": [PLAYWRIGHT]},
                     actor="a", approve=True,
                 )  # fmt: skip
             with pytest.raises(ValidationError, match="not latest"):
                 toolservers.create(
-                    s,
+                    tx,
                     {"name": "x", "gateway": False, "developers": True,
                      "packages": [{**PLAYWRIGHT, "version": "latest"}]},
                     actor="a", approve=True,
                 )  # fmt: skip
             with pytest.raises(ValidationError, match="namespace/name"):
                 toolservers.create(
-                    s, {"name": "x", "url": "http://x/mcp", "registry_name": "no-slash"},
+                    tx, {"name": "x", "url": "http://x/mcp", "registry_name": "no-slash"},
                     actor="a", approve=True,
                 )  # fmt: skip
 
     def test_registry_names_are_unique(self, rt) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             spec = {"url": "http://x/mcp", "developers": True, "registry_name": "com.acme/crm"}
-            toolservers.create(s, {"name": "a", **spec}, actor="a", approve=True)
+            toolservers.create(tx, {"name": "a", **spec}, actor="a", approve=True)
             with pytest.raises(Conflict, match=r"com\.acme/crm"):
-                toolservers.create(s, {"name": "b", **spec}, actor="a", approve=True)
+                toolservers.create(tx, {"name": "b", **spec}, actor="a", approve=True)
 
     def test_what_developers_see_bumps_the_revision(self, rt) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             ts = toolservers.create(
-                s, {"name": "crm", "url": "http://crm/mcp", "developers": True}, actor="a",
+                tx, {"name": "crm", "url": "http://crm/mcp", "developers": True}, actor="a",
                 approve=True,
             )  # fmt: skip
             assert ts.revision == 0
-            toolservers.update(s, ts, {"owner": "crm-team"}, actor="a")
+            toolservers.update(tx, ts, {"owner": "crm-team"}, actor="a")
             assert ts.revision == 0
-            toolservers.update(s, ts, {"description": "Customer records"}, actor="a")
+            toolservers.update(tx, ts, {"description": "Customer records"}, actor="a")
             assert ts.revision == 1
             assert mcp_registry.version(ts) == "1.0.1"
 
     def test_servers_only_for_developers_stay_off_the_gateway(self, rt, settings) -> None:
-        with rt.db.session() as s:
-            toolservers.create(s, {"name": "crm", "url": "http://crm/mcp"}, actor="a", approve=True)
+        with rt.db.transaction() as tx:
             toolservers.create(
-                s, {"name": "github", "url": "https://api.githubcopilot.com/mcp/",
+                tx, {"name": "crm", "url": "http://crm/mcp"}, actor="a", approve=True
+            )
+            toolservers.create(
+                tx, {"name": "github", "url": "https://api.githubcopilot.com/mcp/",
                     "gateway": False, "developers": True},
                 actor="a", approve=True,
             )  # fmt: skip
-            servers = toolservers.list_all(s)
+            servers = toolservers.list_all(tx)
             names = {
                 r["name"] for r in render(servers, settings)["binds"][0]["listeners"][0]["routes"]
             }
             assert names == {"mcp-crm", "agentgov-health"}
-            assert set(registry_snapshot(s)["toolservers"]) == {"crm"}
+            assert set(registry_snapshot(tx)["toolservers"]) == {"crm"}
 
     def test_manifests(self, rt, settings) -> None:
         doc = {
@@ -119,11 +121,11 @@ class TestToolServers:
             "metadata": {"name": "playwright"},
             "spec": {"gateway": False, "developers": True, "packages": [PLAYWRIGHT]},
         }
-        with rt.db.session() as s:
-            assert manifests.apply(s, settings, [doc], actor="ci")[0]["action"] == "created"
-        with rt.db.session() as s:
-            assert manifests.apply(s, settings, [doc], actor="ci")[0]["action"] == "unchanged"
-            [exported] = [d for d in manifests.export(s) if d["kind"] == "ToolServer"]
+        with rt.db.transaction() as tx:
+            assert manifests.apply(tx, settings, [doc], actor="ci")[0]["action"] == "created"
+        with rt.db.transaction() as tx:
+            assert manifests.apply(tx, settings, [doc], actor="ci")[0]["action"] == "unchanged"
+            [exported] = [d for d in manifests.export(tx) if d["kind"] == "ToolServer"]
         assert exported["spec"]["packages"] == [PLAYWRIGHT]
         assert exported["spec"]["gateway"] is False and "url" not in exported["spec"]
 
@@ -353,8 +355,8 @@ class TestSightings:
         assert seen["command"][:3] == ["mcp-remote", "-H", "Authorization: <redacted>"]
         rt = client.app.state.rt
         for _ in range(2):
-            with rt.db.session() as s:
-                mcp_sightings.refresh(s, settings)
+            with rt.db.transaction() as tx:
+                mcp_sightings.refresh(tx, settings)
             assert client.get("/v1/mcp/sightings", headers=ADMIN).json() == [seen]
 
     def test_what_was_kept_before_is_sanitised(self, client, settings) -> None:
@@ -368,8 +370,8 @@ class TestSightings:
                 url=secret, command=[], env=[], headers=[], first_seen_at=now,
                 last_seen_at=now, reported_by="registrar:mdm",
             )  # fmt: skip
-        with rt.db.session() as s:
-            mcp_sightings.refresh(s, settings)
+        with rt.db.transaction() as tx:
+            mcp_sightings.refresh(tx, settings)
         assert "9f8e7d6c" not in json.dumps(client.get("/v1/mcp/sightings", headers=ADMIN).json())
 
     def test_bad_reports_and_the_switch(self, client, listed) -> None:

@@ -200,9 +200,9 @@ def seed(client: TestClient, provider: FakeProvider) -> Seeded:
         )
         seeded.assignment[team] = asked["id"]
         now = ids.utcnow()
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             raised, _ = findings.raise_finding(
-                s,
+                tx,
                 type="test.thing",
                 severity="medium",
                 subject=made["id"],
@@ -225,9 +225,9 @@ def seed(client: TestClient, provider: FakeProvider) -> Seeded:
             seeded.approval[team] = approval
     # Each issue to its agent's owner and sponsor (as the issues job does); and each agent's
     # model calls, metered.
-    with rt.db.session() as s:
-        issues.route(s, rt.settings)
-        model_usage.ingest_logs(s, logs(*(access_log(agent_id=i) for i in seeded.agent.values())))
+    with rt.db.transaction() as tx:
+        issues.route(tx, rt.settings)
+        model_usage.ingest_logs(tx, logs(*(access_log(agent_id=i) for i in seeded.agent.values())))
     seeded.checkpoint = int(post("/v1/ledger/checkpoints", {})["seq"])
     for role in ROLES:
         made = post("/v1/apikeys", {"name": f"{role}-key", "role": role})

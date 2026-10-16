@@ -18,12 +18,11 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
-from sqlalchemy import select
 from typer.testing import CliRunner
 
 from agentgov import cli, compliance, ledger, transparency
 from agentgov.config import Settings
-from agentgov.models import LedgerCheckpoint
+from agentgov.db.models import LedgerCheckpoint
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
 from tests.test_cli import _Shared, ok
@@ -295,8 +294,8 @@ class TestCheckpoints:
     def test_checkpoints_go_into_the_log_checked(self, settings, log, keys) -> None:
         rt = _runtime(_settings(settings, keys), log)
         try:
-            with rt.db.session() as s:
-                ledger.append(s, type="admin.test", actor="admin:t")
+            with rt.db.transaction() as tx:
+                ledger.append(tx, type="admin.test", actor="admin:t")
             point = rt.make_checkpoint()
             assert point is not None
             assert point["log"] == {
@@ -307,8 +306,8 @@ class TestCheckpoints:
                 "checked": True,
                 "error": None,
             }
-            with rt.db.session() as s:
-                row = s.get(LedgerCheckpoint, point["seq"])
+            with rt.db.transaction():
+                row = LedgerCheckpoint.objects.get(pk=point["seq"])
                 statement = ledger.statement(row.seq, row.hash)
                 assert row.tlog_entry["logIndex"] == "0"
             # Once in the log, it isn't added again.
@@ -321,16 +320,16 @@ class TestCheckpoints:
     def test_failures_are_kept_and_tried_again(self, settings, log, keys) -> None:
         rt = _runtime(_settings(settings, keys), log)
         try:
-            with rt.db.session() as s:
-                ledger.append(s, type="admin.test", actor="admin:t")
+            with rt.db.transaction() as tx:
+                ledger.append(tx, type="admin.test", actor="admin:t")
             log.fail = 503
             point = rt.make_checkpoint()
             assert point["log"]["logged"] is False
             assert "HTTP 503" in point["log"]["error"]
             log.fail = None
             assert rt.log_checkpoints() == 1
-            with rt.db.session() as s:
-                row = s.scalar(select(LedgerCheckpoint))
+            with rt.db.transaction():
+                row = LedgerCheckpoint.objects.get()
                 assert (row.tlog_index, row.tlog_error, row.tlog_checked) == (0, None, True)
         finally:
             rt.db.dispose()
@@ -343,8 +342,8 @@ class TestCheckpoints:
         )
         rt = _runtime(_settings(settings, keys, ledger_rekor_log_key_file=str(wrong)), log)
         try:
-            with rt.db.session() as s:
-                ledger.append(s, type="admin.test", actor="admin:t")
+            with rt.db.transaction() as tx:
+                ledger.append(tx, type="admin.test", actor="admin:t")
             point = rt.make_checkpoint()
             assert point["log"]["logged"] is True and point["log"]["checked"] is False
             assert "proof doesn't check out" in point["log"]["error"]
@@ -356,8 +355,8 @@ class TestCheckpoints:
     def test_without_the_logs_key_entries_are_kept_unchecked(self, settings, log, keys) -> None:
         rt = _runtime(_settings(settings, keys, ledger_rekor_log_key_file=None), log)
         try:
-            with rt.db.session() as s:
-                ledger.append(s, type="admin.test", actor="admin:t")
+            with rt.db.transaction() as tx:
+                ledger.append(tx, type="admin.test", actor="admin:t")
             point = rt.make_checkpoint()
             assert point["log"]["logged"] is True and point["log"]["checked"] is None
         finally:
@@ -367,8 +366,8 @@ class TestCheckpoints:
         missing = _settings(settings, keys, ledger_rekor_signing_key_file=str(tmp_path / "x.pem"))
         rt = _runtime(missing, log)
         try:
-            with rt.db.session() as s:
-                ledger.append(s, type="admin.test", actor="admin:t")
+            with rt.db.transaction() as tx:
+                ledger.append(tx, type="admin.test", actor="admin:t")
             point = rt.make_checkpoint()
             assert "can't be read" in point["log"]["error"] and log.leaves == []
         finally:
@@ -394,8 +393,8 @@ class TestForAssessors:
         app.state.rt._tlog_http = _client(log)
         with TestClient(app) as client:
             assert client.get("/v1/info").json()["transparency_log"] == "https://rekor.example.com"
-            with app.state.rt.db.session() as s:
-                ledger.append(s, type="admin.test", actor="admin:t")
+            with app.state.rt.db.transaction() as tx:
+                ledger.append(tx, type="admin.test", actor="admin:t")
             point = client.post("/v1/ledger/checkpoints", headers=ADMIN).json()
             seq = point["seq"]
             about = client.get("/v1/ledger/transparency-log", headers=ADMIN).json()

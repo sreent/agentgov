@@ -341,9 +341,9 @@ class TestQuarantine:
 
     def test_microsoft_365_agents_are_blocked_through_graph(self, entra_client, entra, apis):
         rt = entra_client.app.state.rt
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             platforms.record_microsoft_365(
-                s,
+                tx,
                 [{"id": "T_expenses", "displayName": "Expense Helper", "type": "custom"}],
                 include_types={"custom"},
             )

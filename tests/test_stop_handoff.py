@@ -166,11 +166,11 @@ class TestCopilotStudio:
 class TestOtherPlatforms:
     def record(self, client: TestClient, *found: Found, read: set[str] | None = None) -> None:
         rt = client.app.state.rt  # type: ignore[attr-defined]
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             platforms.record_inventory(
-                s, "aws", Inventory(found=list(found), read=read or {"us-east-1"})
+                tx, "aws", Inventory(found=list(found), read=read or {"us-east-1"})
             )
-            platforms.refresh_risk(s, rt.settings)
+            platforms.refresh_risk(tx, rt.settings)
 
     def agent(self, *, stopped: bool | None = None) -> Found:
         return Found(

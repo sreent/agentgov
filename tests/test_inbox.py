@@ -45,10 +45,10 @@ def waiting(client: TestClient) -> None:
     ).raise_for_status()
     import_inventory(client)
     rt = client.app.state.rt  # type: ignore[attr-defined]
-    with rt.db.session() as s:
-        agent = agents.get(s, "support-bot")
+    with rt.db.transaction() as tx:
+        agent = agents.get(tx, "support-bot")
         approvals.check_or_request(
-            s,
+            tx,
             agent=agent,
             action="tools/call",
             resource="crm/delete_customer",
@@ -57,7 +57,7 @@ def waiting(client: TestClient) -> None:
             ttl_seconds=600,
         )
         finding, _ = findings.raise_finding(
-            s,
+            tx,
             type="agent.no_sponsor",
             severity="medium",
             subject=agent.id,
@@ -65,10 +65,10 @@ def waiting(client: TestClient) -> None:
             title="support-bot has no sponsor",
         )
         issues.ask_exception(
-            s, finding, actor="user:sam", name="sam", reason="A pilot, ends soon", until=30
+            tx, finding, actor="user:sam", name="sam", reason="A pilot, ends soon", until=30
         )
         findings.raise_finding(
-            s,
+            tx,
             type="toolserver.tool_drift",
             severity="high",
             subject="crm/delete_customer",

@@ -20,11 +20,10 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import select
 
 from agentgov.config import Settings
+from agentgov.db.models import LedgerEntry
 from agentgov.identity import assertions
-from agentgov.models import LedgerEntry
 from agentgov.registry import agents, blueprints, features, toolservers
 from agentgov.registry.errors import ValidationError
 from agentgov.secops import ocsf
@@ -271,24 +270,24 @@ def test_the_metadata() -> None:
 
 class TestServersOutsideTheGateway:
     def test_an_authorization_server_is_for_servers_outside_the_gateway(self, rt) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             data = {"name": "wiki", "url": WIKI, "authorization_server": WIKI_AS}
             with pytest.raises(ValidationError, match="outside the gateway"):
-                toolservers.create(s, data, actor="t", approve=True)
-            wiki = toolservers.create(s, {**data, "gateway": False}, actor="t", approve=True)
+                toolservers.create(tx, data, actor="t", approve=True)
+            wiki = toolservers.create(tx, {**data, "gateway": False}, actor="t", approve=True)
             view = toolservers.to_dict(wiki)
             assert view["authorization_server"] == WIKI_AS and view["oauth_client_id"] is None
             with pytest.raises(ValidationError, match="needs its url"):
-                toolservers.update(s, wiki, {"url": ""}, actor="t")
+                toolservers.update(tx, wiki, {"url": ""}, actor="t")
 
     def test_a_client_id_is_the_client_at_its_authorization_server(self, rt) -> None:
-        with rt.db.session() as s:
+        with rt.db.transaction() as tx:
             data = {"name": "crm", "url": "http://crm/mcp", "oauth_client_id": "x"}
             with pytest.raises(ValidationError, match="authorization_server"):
-                toolservers.create(s, data, actor="t", approve=True)
+                toolservers.create(tx, data, actor="t", approve=True)
             with pytest.raises(ValidationError, match="its issuer"):
                 toolservers.create(
-                    s,
+                    tx,
                     {"name": "x", "url": WIKI, "gateway": False, "authorization_server": "id"},
                     actor="t",
                     approve=True,
@@ -314,9 +313,9 @@ class TestServersOutsideTheGateway:
 
 def _seed(rt: Any, settings: Settings) -> tuple[str, str]:
     """A wiki outside the gateway, and a crm on it; bot may use the wiki, helper may not."""
-    with rt.db.session() as s:
+    with rt.db.transaction() as tx:
         blueprints.create(
-            s,
+            tx,
             {
                 "name": "support",
                 "require_sponsor": False,
@@ -328,7 +327,7 @@ def _seed(rt: Any, settings: Settings) -> tuple[str, str]:
             actor="t",
         )
         blueprints.create(
-            s,
+            tx,
             {
                 "name": "crm-only",
                 "require_sponsor": False,
@@ -336,9 +335,9 @@ def _seed(rt: Any, settings: Settings) -> tuple[str, str]:
             },
             actor="t",
         )
-        toolservers.create(s, {"name": "crm", "url": "http://crm/mcp"}, actor="t", approve=True)
+        toolservers.create(tx, {"name": "crm", "url": "http://crm/mcp"}, actor="t", approve=True)
         toolservers.create(
-            s,
+            tx,
             {
                 "name": "wiki",
                 "url": WIKI,
@@ -350,10 +349,10 @@ def _seed(rt: Any, settings: Settings) -> tuple[str, str]:
             approve=True,
         )
         bot = agents.register(
-            s, settings, {"name": "bot", "blueprint": "support"}, actor="t", approve=True
+            tx, settings, {"name": "bot", "blueprint": "support"}, actor="t", approve=True
         )
         helper = agents.register(
-            s, settings, {"name": "helper", "blueprint": "crm-only"}, actor="t", approve=True
+            tx, settings, {"name": "helper", "blueprint": "crm-only"}, actor="t", approve=True
         )
         return bot.id, helper.id
 
@@ -421,8 +420,10 @@ class TestTheTokenEndpoint:
         assert claims["act"] == {"sub": "agent-bot"} and claims["scope"] == "search"
         # On its own, the agent is the subject, and its own client ID the client there when
         # the server names none.
-        with app_rt.db.session() as s:
-            toolservers.update(s, toolservers.get(s, "wiki"), {"oauth_client_id": None}, actor="t")
+        with app_rt.db.transaction() as tx:
+            toolservers.update(
+                tx, toolservers.get(tx, "wiki"), {"oauth_client_id": None}, actor="t"
+            )
         own = exchange(agent_token(kc, bot, "agent-bot", sub="sa-bot")).json()
         alone = jwt.decode(own["access_token"], options={"verify_signature": False})
         assert (alone["sub"], alone["client_id"]) == ("sa-bot", "agent-bot") and "act" not in alone
@@ -447,14 +448,8 @@ class TestTheTokenEndpoint:
         client.put("/v1/features/least-privilege", json={"mode": "monitor"}, headers=ADMIN)
         assert exchange(agent_token(kc, helper, "agent-helper")).status_code == 200
 
-        with app_rt.db.session() as s:
-            entries = list(
-                s.scalars(
-                    select(LedgerEntry)
-                    .where(LedgerEntry.type == "decision.assertion")
-                    .order_by(LedgerEntry.seq)
-                )
-            )
+        with app_rt.db.transaction() as tx:
+            entries = list(LedgerEntry.objects.filter(type="decision.assertion").order_by("seq"))
         assert [(e.agent_name, e.decision) for e in entries] == [
             ("bot", "allow"),
             ("bot", "allow"),

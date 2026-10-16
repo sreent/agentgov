@@ -7,12 +7,10 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import cli, ids
-from agentgov.db.models import Finding, FindingType
-from agentgov.models import LedgerEntry
+from agentgov.db.models import Finding, FindingType, LedgerEntry
 from agentgov.registry import finding_types, findings, issues, teams
 from tests.conftest import ADMIN, seed
 from tests.test_api import key
@@ -30,9 +28,9 @@ def put(client: TestClient, type_: str, body: Any, headers=ADMIN) -> Any:
 
 
 def raise_(client: TestClient, subject: str, severity: str = "medium", type_: str = TYPE):
-    with _rt(client).db.session() as s:
+    with _rt(client).db.transaction() as tx:
         finding, new = findings.raise_finding(
-            s,
+            tx,
             type=type_,
             severity=severity,
             subject=subject,
@@ -42,23 +40,21 @@ def raise_(client: TestClient, subject: str, severity: str = "medium", type_: st
 
 
 def status(client: TestClient, fid: str) -> tuple[str, str]:
-    with _rt(client).db.session() as s:
-        f = findings.get(s, fid)
+    with _rt(client).db.transaction() as tx:
+        f = findings.get(tx, fid)
         return f.status, f.severity
 
 
 @pytest.fixture
 def team(client: TestClient) -> None:
     """The default team: it takes the findings about nothing else."""
-    with _rt(client).db.session() as s:
-        teams.create(s, {"name": "ai-governance", "default": True}, actor="admin:test")
+    with _rt(client).db.transaction() as tx:
+        teams.create(tx, {"name": "ai-governance", "default": True}, actor="admin:test")
 
 
 def entries(client: TestClient, type_: str) -> list[LedgerEntry]:
-    with _rt(client).db.session() as s:
-        rows = s.scalars(select(LedgerEntry).where(LedgerEntry.type == type_)).all()
-        s.expunge_all()
-        return list(rows)
+    with _rt(client).db.transaction():
+        return list(LedgerEntry.objects.filter(type=type_).order_by("seq"))
 
 
 class TestChoosing:
@@ -144,38 +140,38 @@ class TestOff:
         # Found again: still dismissed, and seen.
         _, new, state, _ = raise_(client, "a")
         assert (new, state) == (False, "dismissed")
-        with _rt(client).db.session() as s:
-            f = findings.get(s, fid)
+        with _rt(client).db.transaction() as tx:
+            f = findings.get(tx, fid)
             assert f.resolved_by == finding_types.ACTOR
             assert f.details[finding_types.SUPPRESSED] is True
-            assert issues.route(s, _rt(client).settings) == {"assigned": 0, "escalated": 0}
+            assert issues.route(tx, _rt(client).settings) == {"assigned": 0, "escalated": 0}
 
     def test_on_again_what_its_checks_find_again_comes_back(self, client, team) -> None:
         kept, *_ = raise_(client, "a")
         gone, *_ = raise_(client, "b")
         by_hand, *_ = raise_(client, "c")
-        with _rt(client).db.session() as s:
-            findings.set_status(s, by_hand, "dismissed", "admin:test")
+        with _rt(client).db.transaction() as tx:
+            findings.set_status(tx, by_hand, "dismissed", "admin:test")
         put(client, TYPE, {"mode": "off"})
         put(client, TYPE, {"mode": "on"})
         # Nothing comes back until its check finds it again.
         assert status(client, kept)[0] == "dismissed"
         _, reopened, state, _ = raise_(client, "a")
         assert (reopened, state) == (True, "open")
-        with _rt(client).db.session() as s:
-            assert finding_types.SUPPRESSED not in findings.get(s, kept).details
+        with _rt(client).db.transaction() as tx:
+            assert finding_types.SUPPRESSED not in findings.get(tx, kept).details
         assert status(client, gone)[0] == "dismissed"
         # Dismissed by a person: that stands.
         _, reopened, state, _ = raise_(client, "c")
         assert (reopened, state) == (False, "dismissed")
         # It goes to the people responsible again.
-        with _rt(client).db.session() as s:
-            assert issues.route(s, _rt(client).settings)["assigned"] == 1
+        with _rt(client).db.transaction() as tx:
+            assert issues.route(tx, _rt(client).settings)["assigned"] == 1
 
     def test_a_resolved_finding_back_while_off_is_kept_dismissed(self, client) -> None:
         fid, *_ = raise_(client, "a")
-        with _rt(client).db.session() as s:
-            findings.set_status(s, fid, "resolved", "admin:test")
+        with _rt(client).db.transaction() as tx:
+            findings.set_status(tx, fid, "resolved", "admin:test")
         put(client, TYPE, {"mode": "off"})
         _, reopened, state, _ = raise_(client, "a")
         assert (reopened, state) == (False, "dismissed")
@@ -183,20 +179,20 @@ class TestOff:
     def test_reopened_by_hand_while_off_it_goes_to_nobody(self, client, team) -> None:
         put(client, TYPE, {"mode": "off"})
         fid, *_ = raise_(client, "a")
-        with _rt(client).db.session() as s:
-            findings.set_status(s, fid, "open", "admin:test")
-            assert issues.route(s, _rt(client).settings)["assigned"] == 0
-            assert findings.get(s, fid).level is None
+        with _rt(client).db.transaction() as tx:
+            findings.set_status(tx, fid, "open", "admin:test")
+            assert issues.route(tx, _rt(client).settings)["assigned"] == 0
+            assert findings.get(tx, fid).level is None
 
     def test_an_accepted_risk_of_a_type_off_stays_closed(self, client) -> None:
         seed(client)
         fid, *_ = raise_(client, "a")
-        with _rt(client).db.session() as s:
-            issues.accept(s, findings.get(s, fid), reason="pilot", until=30, actor="admin:a")
+        with _rt(client).db.transaction() as tx:
+            issues.accept(tx, findings.get(tx, fid), reason="pilot", until=30, actor="admin:a")
         put(client, TYPE, {"mode": "off"})
-        with _rt(client).db.session() as s:
-            assert issues.reopen_accepted(s, ids.utcnow() + timedelta(days=31)) == 0
-            assert findings.get(s, fid).status == "dismissed"
+        with _rt(client).db.transaction() as tx:
+            assert issues.reopen_accepted(tx, ids.utcnow() + timedelta(days=31)) == 0
+            assert findings.get(tx, fid).status == "dismissed"
 
 
 class TestSeverity:

@@ -453,7 +453,7 @@ class TestRewrites:
 
         def pack(name: str) -> Path:
             with runtime.db.transaction() as tx:
-                zipped = compliance.pack(tx.orm(), runtime.settings, 30)
+                zipped = compliance.pack(tx, runtime.settings, 30)
             folder = tmp_path / name
             with zipfile.ZipFile(zipped) as z:
                 z.extractall(folder)
@@ -518,7 +518,7 @@ class TestRewrites:
             LedgerCheckpoint.objects.filter(seq=6).update(pruned_at=ids.utcnow())
             LedgerEntry.objects.filter(seq__lte=6).delete()
         with runtime.db.transaction() as tx:
-            zipped = compliance.pack(tx.orm(), runtime.settings, 30)
+            zipped = compliance.pack(tx, runtime.settings, 30)
         folder = tmp_path / "pack"
         with zipfile.ZipFile(zipped) as z:
             z.extractall(folder)
@@ -539,7 +539,7 @@ class TestRewrites:
         tsa.gen_time = (ids.utcnow() + timedelta(days=3)).strftime("%Y%m%d%H%M%SZ").encode()
         runtime = self._stamped(settings, tsa)
         with runtime.db.transaction() as tx:
-            zipped = compliance.pack(tx.orm(), runtime.settings, 30)
+            zipped = compliance.pack(tx, runtime.settings, 30)
         folder = tmp_path / "pack"
         with zipfile.ZipFile(zipped) as z:
             z.extractall(folder)
@@ -620,7 +620,7 @@ class TestArchives:
         rt = archiving
         _old_entries(rt, 5, 300)
         with rt.db.transaction() as tx:
-            features.set_mode(tx.orm(), rt.settings, "security-operations", "inform", actor="t")
+            features.set_mode(tx, rt.settings, "security-operations", "inform", actor="t")
             Destination.objects.create(
                 id="dst_1", name="siem", kind="webhook", url="https://siem.test", cursor=3
             )
@@ -628,7 +628,7 @@ class TestArchives:
             assert retention.archive(tx, rt.settings)["to"] == 3
         with rt.db.transaction() as tx:
             # Not sent to while security operations are off: they don't hold anything back.
-            features.set_mode(tx.orm(), rt.settings, "security-operations", "off", actor="t")
+            features.set_mode(tx, rt.settings, "security-operations", "off", actor="t")
         with rt.db.transaction() as tx:
             # The rest of the old ones (6 on are recent: the features' changes, the archive).
             assert retention.archive(tx, rt.settings)["to"] == 5

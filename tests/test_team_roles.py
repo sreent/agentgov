@@ -47,9 +47,9 @@ def agent(client: TestClient, name: str, **fields: Any) -> dict[str, Any]:
 
 
 def finding(client: TestClient, agent_id: str, title: str) -> str:
-    with _rt(client).db.session() as s:
+    with _rt(client).db.transaction() as tx:
         raised, _ = findings.raise_finding(
-            s, type="test.thing", severity="medium", subject=agent_id, agent_id=agent_id,
+            tx, type="test.thing", severity="medium", subject=agent_id, agent_id=agent_id,
             title=title,
         )  # fmt: skip
         return raised.id
@@ -661,8 +661,8 @@ class TestLoosening:
         )
         assert fewer.status_code == 200, fewer.text
         # Adopting it, too.
-        with _rt(client).db.session() as s:
-            assert discovery.observe(s, source="test", name="found-bot") is not None
+        with _rt(client).db.transaction() as tx:
+            assert discovery.observe(tx, source="test", name="found-bot") is not None
         client.patch(
             "/v1/agents/found-bot",
             json={"team": "sales", "blueprint": "support-only"},
