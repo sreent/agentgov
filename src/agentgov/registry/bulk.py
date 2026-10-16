@@ -10,9 +10,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from agentgov import ids
+from agentgov import db, ids
 from agentgov.config import Settings
-from agentgov.models import Agent, Finding
+from agentgov.db.models import Finding
+from agentgov.models import Agent
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import blueprints, classification, issues, platforms, teams, validation
 from agentgov.registry import findings as findings_svc
@@ -229,7 +230,7 @@ def findings(
             )
             continue
         try:
-            with session.begin_nested():
+            with db.transaction_of(session).savepoint():
                 if action == "acknowledge":
                     issues.acknowledge(session, finding, actor=actor)
                 elif action == "dismiss":
@@ -245,7 +246,7 @@ def findings(
                     )
                 else:
                     status = "resolved" if action == "resolve" else "open"
-                    findings_svc.set_status(session, finding.id, status, actor)
+                    finding = findings_svc.set_status(session, finding.id, status, actor)
         except RegistryError as exc:
             left.append((i, {"finding": finding.id, "title": finding.title, "why": str(exc)}))
             continue

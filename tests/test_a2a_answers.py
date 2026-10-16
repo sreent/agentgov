@@ -342,7 +342,8 @@ def test_the_classifier_reads_answers_too() -> None:
 def test_findings_are_about_the_agent_that_answered(client) -> None:
     from sqlalchemy import select
 
-    from agentgov.models import Finding, LedgerEntry
+    from agentgov.db.models import Finding
+    from agentgov.models import LedgerEntry
     from tests.conftest import ADMIN, SERVICE, seed
 
     caller = seed(client)
@@ -385,7 +386,7 @@ def test_findings_are_about_the_agent_that_answered(client) -> None:
     assert resp.status_code == 200, resp.text
     rt = client.app.state.rt  # type: ignore[attr-defined]
     with rt.db.session() as s:
-        found = {f.type: f for f in s.scalars(select(Finding)).all()}
+        found = {f.type: f for f in Finding.objects.all()}
         types = s.scalars(select(LedgerEntry.type).where(LedgerEntry.type.like("decision.%")))
         assert list(types) == ["decision.a2a.response", "decision.a2a.response"]
     injected = found["agent.prompt_injection_in_answers"]

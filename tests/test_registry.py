@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from agentgov import ids
+from agentgov.db.models import Finding
 from agentgov.models import ACTIVE, BLOCKED, DELETED, DISCOVERED, PENDING, LedgerEntry
 from agentgov.registry import (
     agents,
@@ -309,7 +310,7 @@ class TestToolCatalog:
             toolservers.approve_tool(s, ts, "get_customer", actor="admin")
             assert ts.tools[0]["changed_at"] is None
         with rt.db.session() as s:
-            assert any(f.type == "toolserver.tool_drift" for f in s.query(findings.Finding))
+            assert Finding.objects.filter(type="toolserver.tool_drift").exists()
 
     def test_reverting_to_the_approved_definition_clears_the_flag(self, rt) -> None:
         with rt.db.session() as s:
@@ -326,7 +327,7 @@ class TestToolCatalog:
                 toolservers.record_catalog(
                     s, ts, [self.tool], poisoned={"get_customer": ["hidden"]}
                 )
-            found = [f for f in s.query(findings.Finding) if f.type == "toolserver.tool_poisoning"]
+            found = list(Finding.objects.filter(type="toolserver.tool_poisoning"))
             assert len(found) == 1
             assert ts.tools[0]["poisoned"] is True
 
@@ -482,11 +483,12 @@ class TestRiskAndPosture:
                 risk.add_signal(s, agent.id, "prompt_injection")
             s.flush()
             assert agents.refresh_risk(s, settings, agent).level in ("high", "critical")
-            high = s.query(findings.Finding).filter_by(key=f"agent.high_risk:{agent.id}").one()
+            high = Finding.objects.get(key=f"agent.high_risk:{agent.id}")
             assert (high.status, high.category) == ("open", findings.THREAT)
             s.query(RiskSignal).filter_by(agent_id=agent.id).delete()
             s.flush()
             assert agents.refresh_risk(s, settings, agent).level not in ("high", "critical")
+            high.refresh_from_db()
             assert (high.status, high.resolved_by) == ("resolved", "system:risk")
 
     def test_levels(self) -> None:
@@ -507,14 +509,14 @@ class TestRiskAndPosture:
             agent = _agent(s, settings, owner=None, permissions=[{"server": "*", "tools": ["*"]}])
         with rt.db.session() as s:
             posture.scan(s, settings)
-            types = {f.type for f in s.query(findings.Finding).filter_by(status="open")}
+            types = set(Finding.objects.filter(status="open").values_list("type", flat=True))
             assert {"agent.no_owner", "agent.broad_permissions"} <= types
         with rt.db.session() as s:
             agent = agents.get(s, "bot")
             agents.update(s, agent, {"owner": "team", "permissions": []}, actor="test")
         with rt.db.session() as s:
             posture.scan(s, settings)
-            open_types = {f.type for f in s.query(findings.Finding).filter_by(status="open")}
+            open_types = set(Finding.objects.filter(status="open").values_list("type", flat=True))
             assert "agent.no_owner" not in open_types
             assert "agent.broad_permissions" not in open_types
 
@@ -527,7 +529,7 @@ class TestDiscovery:
             assert first.id == second.id
             assert first.status == DISCOVERED
             assert first.name == "notebook-agent"
-            assert any(f.type == "agent.unmanaged" for f in s.query(findings.Finding))
+            assert Finding.objects.filter(type="agent.unmanaged").exists()
 
     def test_registered_agents_are_matched_by_client_id(self, rt, settings) -> None:
         with rt.db.session() as s:

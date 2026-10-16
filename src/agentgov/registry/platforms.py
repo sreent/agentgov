@@ -37,13 +37,13 @@ from sqlalchemy.orm import Session
 from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import mark_changed
+from agentgov.db.models import Finding
 from agentgov.models import (
     BLOCKED,
     DELETED,
     DISCOVERED,
     Agent,
     ApprovedConnector,
-    Finding,
     PlatformAgent,
     PlatformSync,
 )
@@ -702,17 +702,14 @@ def first_sync(session: Session, source: str) -> Iterator[None]:
     yield
     if not first:
         return
-    for finding in session.scalars(
-        select(Finding).where(
-            Finding.status == "open",
-            Finding.level.is_(None),
-            Finding.first_seen >= since,
-            Finding.agent_id.in_(
-                select(PlatformAgent.agent_id).where(PlatformAgent.source == source)
-            ),
-        )
-    ):
-        finding.details = {**(finding.details or {}), findings.BASELINE: True}
+    theirs = set(
+        session.scalars(select(PlatformAgent.agent_id).where(PlatformAgent.source == source))
+    )
+    found = Finding.objects.filter(status="open", level__isnull=True, first_seen__gte=since)
+    for finding in found:
+        if finding.agent_id in theirs:
+            finding.details = {**(finding.details or {}), findings.BASELINE: True}
+            finding.save()
 
 
 def failed_sync(source: str, message: str | None) -> str:
@@ -1063,10 +1060,11 @@ def check_stop(
     if record is None:
         # Over, whatever became of it (dismissed, or its risk accepted): blocked again, it
         # is raised afresh.
-        finding = session.scalar(select(Finding).where(Finding.key == key))
+        finding = findings.by_key(session, key)
         if finding is not None and finding.status != "resolved":
-            findings.set_status(session, finding.id, "resolved", actor)
+            finding = findings.set_status(session, finding.id, "resolved", actor)
             finding.accepted_until = None
+            finding.save()
         return
     name = SOURCES[record.source]
     done, how = STOPPING[record.source]
@@ -1133,9 +1131,7 @@ def check_stops(session: Session, settings: Settings) -> None:
     blocked = select(PlatformAgent.agent_id).join(Agent, Agent.id == PlatformAgent.agent_id)
     agent_ids = set(session.scalars(blocked.where(Agent.status == BLOCKED)))
     agent_ids |= set(
-        session.scalars(
-            select(Finding.agent_id).where(Finding.type == STILL_RUNNING, Finding.status == "open")
-        )
+        Finding.objects.filter(type=STILL_RUNNING, status="open").values_list("agent_id", flat=True)
     )
     for agent_id in sorted(a for a in agent_ids if a):
         agent = session.get(Agent, agent_id)

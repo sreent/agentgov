@@ -12,8 +12,9 @@ from starlette.testclient import TestClient
 from agentgov import cli, telemetry
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.db.models import Finding
 from agentgov.gateway import GatewayConfigWriter
-from agentgov.models import Agent, AgentInstructions, Finding, LedgerEntry
+from agentgov.models import Agent, AgentInstructions, LedgerEntry
 from agentgov.opa import bundle as opa_bundle
 from agentgov.registry import agents, decisions, discovery, features, instructions, manifests
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -258,7 +259,7 @@ class TestWhereModesApply:
         with rt.db.session() as s:
             row = s.scalars(select(AgentInstructions)).one()
             assert row.issues and row.classifier_state == "off"
-            assert s.scalars(select(Finding).where(Finding.type == instructions.FINDING)).one()
+            assert Finding.objects.get(type=instructions.FINDING)
 
     def test_monitored_risk_only_raises_a_finding(self, rt, settings) -> None:
         strict = settings.with_overrides(auto_block_risk_score=1)
@@ -276,7 +277,7 @@ class TestWhereModesApply:
                 risk.add_signal(s, agent.id, "secret_detected", "crm/x")
             agents.refresh_risk(s, strict, agent)
             assert agent.status == "active"
-            types = {f.type for f in s.scalars(select(Finding))}
+            types = set(Finding.objects.values_list("type", flat=True))
             assert "agent.would_auto_block" in types
             assert "agent.auto_blocked" not in types
 

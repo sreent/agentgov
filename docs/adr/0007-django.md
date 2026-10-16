@@ -95,10 +95,16 @@ The data layer:
   `agentgov.registry.apikeys`, and the views and authentication that use them); tool
   servers, the MCP registry and developers' MCP servers, model providers, and identity
   issuers and their keys (`agentgov.registry.toolservers`, `mcp_registry`, `mcp_sightings`,
-  `model_providers`, `identity_issuers`, `agentgov.identity.issuer_keys`). Each read gives
+  `model_providers`, `identity_issuers`, `agentgov.identity.issuer_keys`); findings, the
+  issues they are and their kinds, their messages and daily digests, their tickets in service
+  desks, destinations, and what goes to the security team (`agentgov.registry.findings`,
+  `finding_types`, `issues`, `digest`, `tickets`, `destinations`, `agentgov.notify`,
+  `agentgov.ticketing`, `agentgov.secops`). Each read gives
   another object, where SQLAlchemy's session gave the same one: a row is locked and read
   afresh before it is changed (`agentgov.db.lock`, on SQLite too), and what was changed
-  before is saved first.
+  before is saved first. A part of a transaction that rolls back on its own (one of many
+  findings acted on at once, say) is Django's savepoint (`Transaction.savepoint`) once what
+  it changes is on Django.
 - [ ] Django's migrations: the first one matches the last Alembic revision; a release runs
   both; then Alembic goes.
 

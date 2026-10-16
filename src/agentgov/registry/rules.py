@@ -30,12 +30,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from django.db.models import Q
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
+from agentgov.db.models import Finding
 from agentgov.models import (
     ACTIVE,
     BLOCKED,
@@ -46,7 +48,6 @@ from agentgov.models import (
     SEVERITIES,
     AccessAssignment,
     Agent,
-    Finding,
     ManagementRule,
     RuleMatch,
 )
@@ -372,13 +373,12 @@ def update(
 
 def delete(session: Session, rule: ManagementRule, *, actor: str) -> None:
     """Delete a rule: its issues are resolved; what it did stays done."""
-    for finding in session.scalars(
-        select(Finding).where(
-            Finding.status == "open",
-            (Finding.key.like(f"{MATCHED}:{rule.id}:%")) | (Finding.key == f"{TOO_MANY}:{rule.id}"),
-        )
-    ):
-        findings.set_status(session, finding.id, "resolved", actor)
+    theirs = Finding.objects.filter(
+        Q(key__startswith=f"{MATCHED}:{rule.id}:") | Q(key=f"{TOO_MANY}:{rule.id}"),
+        status="open",
+    )
+    for finding_id in list(theirs.values_list("id", flat=True)):
+        findings.set_status(session, finding_id, "resolved", actor)
     session.execute(sql_delete(RuleMatch).where(RuleMatch.rule_id == rule.id))
     ledger.append(
         session, type="rule.deleted", actor=actor, resource=f"rule/{rule.name}", severity="warning"
@@ -480,9 +480,7 @@ def _context(session: Session, now: datetime, feature: str) -> _Context:
         ).unique()
     }
     open_findings: dict[str, list[Finding]] = defaultdict(list)
-    for finding in session.scalars(
-        select(Finding).where(Finding.status == "open", Finding.agent_id.is_not(None))
-    ):
+    for finding in Finding.objects.filter(status="open", agent_id__isnull=False):
         if finding.type not in FINDING_TYPES and finding.verified is not False:
             open_findings[str(finding.agent_id)].append(finding)
     holding = set(
@@ -681,7 +679,7 @@ def _key(rule: ManagementRule, agent_id: str) -> str:
 
 
 def _finding(session: Session, key: str) -> Finding | None:
-    return session.scalar(select(Finding).where(Finding.key == key))
+    return findings.by_key(session, key)
 
 
 def _remedy(rule: ManagementRule, a: Assessment) -> str:
@@ -767,6 +765,7 @@ def _drop(session: Session, rule: ManagementRule, row: RuleMatch | None, now: da
     if finding is not None and finding.status in ("dismissed", "accepted"):
         finding.status, finding.accepted_until = "resolved", None
         finding.resolved_at, finding.resolved_by = now, SYSTEM
+        finding.save()
         findings.record(session, finding, "resolved", SYSTEM)
     session.delete(row)
 
@@ -851,6 +850,7 @@ def _act(
     # News for the agent's people: it goes to them again, from the start of its chain.
     if finding.status == "open":
         findings.restart_chain(finding)
+        finding.save()
 
 
 def _would(

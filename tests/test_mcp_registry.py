@@ -8,13 +8,11 @@ from typing import Any
 from urllib.parse import quote
 
 import pytest
-from sqlalchemy import select
 
 from agentgov import cli, ids, mcp_scan
 from agentgov.config import Settings
-from agentgov.db.models import McpSighting
+from agentgov.db.models import Finding, McpSighting
 from agentgov.gateway import render
-from agentgov.models import Finding
 from agentgov.opa.bundle import registry_snapshot
 from agentgov.registry import manifests, mcp_registry, mcp_sightings, toolservers
 from agentgov.registry.errors import Conflict, ValidationError
@@ -295,15 +293,15 @@ class TestSightings:
     def test_approving_a_server_resolves_its_finding(self, client, listed) -> None:
         client.post("/v1/mcp/sightings", json=scanned(SHADOW), headers=ADMIN).raise_for_status()
         rt = client.app.state.rt
-        with rt.db.session() as s:
-            finding = s.scalar(select(Finding).where(Finding.type == "mcp.unapproved_server"))
+        with rt.db.transaction():
+            finding = Finding.objects.get(type="mcp.unapproved_server")
             assert finding.status == "open"
         package = {"registry_type": "pypi", "identifier": "notes-mcp",
                    "command": ["python3", "notes.py"]}  # fmt: skip
         register(client, "notes", gateway=False, developers=True, packages=[package])
         assert rt.refresh_developer_mcp() == 1  # the runtime does this when servers change
-        with rt.db.session() as s:
-            finding = s.scalar(select(Finding).where(Finding.type == "mcp.unapproved_server"))
+        with rt.db.transaction():
+            finding = Finding.objects.get(type="mcp.unapproved_server")
             assert finding.status == "resolved"
         view = client.get("/v1/mcp/sightings", headers=ADMIN).json()
         assert (view[0]["status"], view[0]["server"]) == ("approved", "notes")

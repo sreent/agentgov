@@ -19,7 +19,8 @@ from agentgov import ids, ledger
 from agentgov.api.app import create_app
 from agentgov.api.auth import Principal
 from agentgov.config import Settings
-from agentgov.models import Destination, LedgerEntry
+from agentgov.db.models import Destination
+from agentgov.models import LedgerEntry
 from agentgov.registry import destinations, findings, manifests, posture
 from agentgov.registry.errors import Forbidden, ValidationError
 from agentgov.runtime import Runtime
@@ -600,8 +601,8 @@ class TestDestinations:
             client.post("/v1/destinations/siem/resume", headers=ADMIN).json()["status"] == "active"
         )
         # Replay sends again what was sent: it goes back, never on past what wasn't.
-        with client.app.state.rt.db.session() as s:  # type: ignore[attr-defined]
-            s.scalar(select(Destination).where(Destination.name == "siem")).cursor = 5
+        with client.app.state.rt.db.transaction():  # type: ignore[attr-defined]
+            Destination.objects.filter(name="siem").update(cursor=5)
         forward = client.post("/v1/destinations/siem/replay", json={"after": 8}, headers=ADMIN)
         assert forward.status_code == 422 and "goes back" in forward.text
         replayed = client.post("/v1/destinations/siem/replay", json={"after": 3}, headers=ADMIN)
@@ -921,6 +922,7 @@ class TestDelivery:
         with rt.db.session() as s:
             row = destinations.get(s, "soc")
             row.retry_at, row.failures = None, posture.FAILING - 1
+            row.save()
         rt.delivery.run()
         with rt.db.session() as s:
             assert destinations.get(s, "soc").failures == posture.FAILING
@@ -931,8 +933,8 @@ class TestDelivery:
         assert failing[0]["severity"] == "high" and "s3cret" not in failing[0]["description"]
         # Once it works again it catches up, and the finding resolves.
         sink.status = 202
-        with rt.db.session() as s:
-            destinations.get(s, "soc").retry_at = None
+        with rt.db.transaction():
+            Destination.objects.filter(name="soc").update(retry_at=None)
         assert rt.delivery.run()["soc"] == {"sent": 1}
         with rt.db.session() as s:
             posture.scan(s, rt.settings)
@@ -1008,8 +1010,8 @@ class TestDelivery:
 
         rt.delivery.http = httpx.Client(transport=httpx.MockTransport(flaky))
         assert rt.delivery.run()["soc"]["sent"] == 1
-        with rt.db.session() as s:
-            destinations.get(s, "soc").retry_at = None
+        with rt.db.transaction():
+            Destination.objects.filter(name="soc").update(retry_at=None)
         assert rt.delivery.run() == {"soc": {"sent": 2}}
         titles = [json.loads(r.content)["blocks"][0]["text"]["text"] for r in sink.requests]
         assert titles == [
@@ -1102,8 +1104,8 @@ class TestCli:
         assert "no secret file" in listing and "siem" in listing
         ok(agentgov("destinations", "pause", "siem"))
         ok(agentgov("destinations", "resume", "siem"))
-        with secops.app.state.rt.db.session() as s:  # sent up to entry 4, say
-            s.scalar(select(Destination).where(Destination.name == "siem")).cursor = 4
+        with secops.app.state.rt.db.transaction():  # sent up to entry 4, say
+            Destination.objects.filter(name="siem").update(cursor=4)
         assert "from after entry 0" in ok(agentgov("destinations", "replay", "siem", "--yes"))
         failed = agentgov("destinations", "test", "soc")
         assert failed.exit_code != 0 and "no secret file" in failed.output

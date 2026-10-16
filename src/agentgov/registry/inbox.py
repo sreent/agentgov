@@ -23,7 +23,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentgov import ids
-from agentgov.models import DISCOVERED, PENDING, Agent, Finding, ToolServer
+from agentgov.db.models import Finding
+from agentgov.models import DISCOVERED, PENDING, Agent, ToolServer
 from agentgov.registry import access_packages, approvals, findings, issues, platforms
 from agentgov.secops import handoff
 
@@ -77,17 +78,10 @@ def gather(
         return bool(roles & DECIDERS) or (triage and "secops" in roles)
 
     if triages(frozenset(held)):
-        # The key as text: SQLite's JSON values come quoted, and a missing key would read
-        # as the text null rather than NULL.
-        asking = Finding.details[issues.ASKED].as_string().is_not(None)
         risks = [
             f
-            for f in session.scalars(
-                select(Finding)
-                .where(Finding.status == "open", asking)
-                .order_by(Finding.last_seen.desc())
-            )
-            if triages(at(f.agent_id))
+            for f in Finding.objects.filter(status="open").order_by("-last_seen")
+            if (f.details or {}).get(issues.ASKED) is not None and triages(at(f.agent_id))
         ]
         kind("risks", "Risks asked to be accepted", risks, lambda f: _risk(session, f))
 
@@ -107,13 +101,7 @@ def gather(
             )
         )
         kind("toolservers", "Tool servers waiting for approval", servers, _server)
-        drifted = list(
-            session.scalars(
-                select(Finding)
-                .where(Finding.status == "open", Finding.type == DRIFT)
-                .order_by(Finding.first_seen)
-            )
-        )
+        drifted = list(Finding.objects.filter(status="open", type=DRIFT).order_by("first_seen"))
         kind("definitions", "Tool definitions changed since they were approved", drifted, _drift)
         unreviewed = _unreviewed(session)
         kinds.append(

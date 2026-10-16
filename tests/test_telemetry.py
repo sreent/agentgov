@@ -5,7 +5,8 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from agentgov import telemetry
-from agentgov.models import AgentActivity, Finding
+from agentgov.db.models import Finding
+from agentgov.models import AgentActivity
 from agentgov.registry import agents, blueprints
 
 
@@ -107,7 +108,7 @@ def test_registered_agent_activity_and_ungranted_tools(rt, settings) -> None:
         activity = s.scalars(select(AgentActivity)).one()
         assert (activity.tool_calls, activity.model_calls, activity.input_tokens) == (2, 1, 120)
         assert agents.get(s, "bot").models == ["gpt-5"]
-        finding = s.scalars(select(Finding).where(Finding.type == "agent.ungranted_tool_use")).one()
+        finding = Finding.objects.get(type="agent.ungranted_tool_use")
         assert "local/shell" in finding.title
 
 

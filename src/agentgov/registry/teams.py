@@ -16,7 +16,8 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
-from agentgov.models import DELETED, Agent, Blueprint, Destination, Team
+from agentgov.db.models import Destination
+from agentgov.models import DELETED, Agent, Blueprint, Team
 from agentgov.registry import scopes, validation
 from agentgov.registry.destinations import CHAT
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -125,7 +126,7 @@ def _emails(value: Any) -> list[str]:
 def _destinations(session: Session, value: Any) -> list[str]:
     names = list(dict.fromkeys(validation.string_list(value, "destinations")))
     for name in names:
-        destination = session.scalar(select(Destination).where(Destination.name == name))
+        destination = Destination.objects.filter(name=name).first()
         if destination is None:
             raise ValidationError(f"destination {name!r} not found: add it first")
         if destination.kind not in CHAT:

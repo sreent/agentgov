@@ -6,12 +6,10 @@ from typing import Any
 
 from django.http import HttpRequest
 from ninja import Body
-from sqlalchemy import select
 
 from agentgov import ledger
 from agentgov.api.auth import READ_ROLES
 from agentgov.api.versions import if_match
-from agentgov.models import LedgerEntry
 from agentgov.registry import destinations, tickets
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 from agentgov.secops import handoff
@@ -29,15 +27,15 @@ MAX_EVENTS = 1000
 def secops_status(request: HttpRequest) -> dict[str, Any]:
     """The hand-off level, what it lets the secops role do, and the destinations' state."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        last = destinations.head(s)
-        counts = tickets.counts(s)
+    with rt.db.transaction() as tx:
+        last = destinations.head(tx)
+        counts = tickets.counts(tx)
         return {
-            **handoff.describe(s),
+            **handoff.describe(tx),
             "ledger_head": last,
             "destinations": [
                 destinations.to_dict(d, rt.settings, last, counts.get(d.id))
-                for d in destinations.list_all(s)
+                for d in destinations.list_all(tx)
             ],
             "events_api": "/v1/secops/events",
         }
@@ -63,25 +61,20 @@ def secops_events(
         raise ValidationError(f"events takes {', '.join(destinations.SIEM_EVENTS)}")
     if min_severity not in destinations.SEVERITIES:
         raise ValidationError(f"min_severity takes {', '.join(destinations.SEVERITIES)}")
-    with runtime(request).db.session() as s:
-        if not handoff.at_least(s, handoff.INFORM):
+    with runtime(request).db.transaction() as tx:
+        if not handoff.at_least(tx, handoff.INFORM):
             raise Conflict(
                 "the hand-off to security operations is off: an administrator turns it on "
                 f"(the {handoff.FEATURE} feature, inform or above)"
             )
-        entries = s.scalars(
-            select(LedgerEntry)
-            .where(LedgerEntry.seq > after, ledger.in_chain())
-            .order_by(LedgerEntry.seq)
-            .limit(limit)
-        ).all()
+        entries = list(ledger.chain().filter(seq__gt=after).order_by("seq")[:limit])
         last = entries[-1].seq if entries else after
         return {
             "events": siem_events(
-                s, list(entries), chosen or list(destinations.SIEM_EVENTS), min_severity
+                tx, entries, chosen or list(destinations.SIEM_EVENTS), min_severity
             ),
             "next": last,
-            "more": destinations.head(s) > last,
+            "more": destinations.head(tx) > last,
         }
 
 
@@ -96,19 +89,19 @@ def list_tickets(
     ``status`` (pending, open, closed, failed) narrow them."""
     if status and status not in tickets.STATUSES:
         raise ValidationError(f"status is one of {', '.join(tickets.STATUSES)}")
-    with runtime(request).db.session() as s:
-        return tickets.listing(s, desk=desk, status=status)
+    with runtime(request).db.transaction() as tx:
+        return tickets.listing(tx, desk=desk, status=status)
 
 
 @router.get("/v1/destinations", auth=read)
 def list_destinations(request: HttpRequest) -> list[dict[str, Any]]:
     rt = runtime(request)
-    with rt.db.session() as s:
-        last = destinations.head(s)
-        counts = tickets.counts(s)
+    with rt.db.transaction() as tx:
+        last = destinations.head(tx)
+        counts = tickets.counts(tx)
         return [
             destinations.to_dict(d, rt.settings, last, counts.get(d.id))
-            for d in destinations.list_all(s)
+            for d in destinations.list_all(tx)
         ]
 
 
@@ -117,18 +110,18 @@ def create_destination(request: HttpRequest, body: dict[str, Any] = Body(...)) -
     """Send a SIEM the ledger, a chat alerts, or a service desk issues as tickets. Its
     credential goes in its secret file."""
     rt = runtime(request)
-    with rt.db.session() as s:
-        destination = destinations.create(s, body, actor=request.auth.actor, settings=rt.settings)
-        return destinations.to_dict(destination, rt.settings, destinations.head(s))
+    with rt.db.transaction() as tx:
+        destination = destinations.create(tx, body, actor=request.auth.actor, settings=rt.settings)
+        return destinations.to_dict(destination, rt.settings, destinations.head(tx))
 
 
 @router.get("/v1/destinations/{ref}", auth=read)
 def get_destination(request: HttpRequest, ref: str) -> dict[str, Any]:
     rt = runtime(request)
-    with rt.db.session() as s:
-        destination = destinations.get(s, ref)
-        counts = tickets.counts(s).get(destination.id)
-        return destinations.to_dict(destination, rt.settings, destinations.head(s), counts)
+    with rt.db.transaction() as tx:
+        destination = destinations.get(tx, ref)
+        counts = tickets.counts(tx).get(destination.id)
+        return destinations.to_dict(destination, rt.settings, destinations.head(tx), counts)
 
 
 @router.patch("/v1/destinations/{ref}", auth=admin)
@@ -136,17 +129,17 @@ def update_destination(
     request: HttpRequest, ref: str, body: dict[str, Any] = Body(...)
 ) -> dict[str, Any]:
     rt = runtime(request)
-    with rt.db.session() as s:
-        destination = destinations.get(s, ref)
+    with rt.db.transaction() as tx:
+        destination = destinations.get(tx, ref)
         destinations.update(
-            s,
+            tx,
             destination,
             body,
             actor=request.auth.actor,
             version=if_match(request),
             settings=rt.settings,
         )
-        return destinations.to_dict(destination, rt.settings, destinations.head(s))
+        return destinations.to_dict(destination, rt.settings, destinations.head(tx))
 
 
 @router.post("/v1/destinations/{ref}/{action}", auth=admin)
@@ -160,23 +153,23 @@ def destination_action(
     rt = runtime(request)
     actor = request.auth.actor
     if action == "test":
-        with rt.db.session() as s:
-            desk = destinations.get(s, ref).kind in destinations.DESK
+        with rt.db.transaction() as tx:
+            desk = destinations.get(tx, ref).kind in destinations.DESK
         if desk:
             return rt.ticketing.test(ref, actor=actor)
         return rt.delivery.test(ref, actor=actor)
     if action not in ("pause", "resume", "replay"):
         raise NotFound(f"no action {action!r}: pause, resume, replay or test")
-    with rt.db.session() as s:
-        destination = destinations.get(s, ref)
+    with rt.db.transaction() as tx:
+        destination = destinations.get(tx, ref)
         if action == "replay":
-            destinations.replay(s, destination, body.get("after", 0), actor=actor)
+            destinations.replay(tx, destination, body.get("after", 0), actor=actor)
         else:
-            destinations.set_status(s, destination, action, actor=actor)
-        return destinations.to_dict(destination, rt.settings, destinations.head(s))
+            destinations.set_status(tx, destination, action, actor=actor)
+        return destinations.to_dict(destination, rt.settings, destinations.head(tx))
 
 
 @router.delete("/v1/destinations/{ref}", status_code=204, auth=admin)
 def delete_destination(request: HttpRequest, ref: str) -> None:
-    with runtime(request).db.session() as s:
-        destinations.delete(s, destinations.get(s, ref), actor=request.auth.actor)
+    with runtime(request).db.transaction() as tx:
+        destinations.delete(tx, destinations.get(tx, ref), actor=request.auth.actor)

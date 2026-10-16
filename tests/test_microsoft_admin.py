@@ -12,15 +12,13 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.db.models import MicrosoftGrant
+from agentgov.db.models import Finding, MicrosoftGrant
 from agentgov.identity.delegation import Delegations
-from agentgov.models import Finding
 from agentgov.registry import platforms
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
@@ -328,14 +326,14 @@ class TestQuarantine:
         assert resp.json()["still_runs_in"] == "Copilot Studio"
         rt = entra_client.app.state.rt
         key = f"{platforms.STILL_RUNNING}:{resp.json()['id']}"
-        with rt.db.session() as s:
-            asked = s.scalar(select(Finding).where(Finding.key == key))
+        with rt.db.transaction():
+            asked = Finding.objects.get(key=key)
             assert asked.status == "open"
             # Admins can do it from AgentGov here: the issue says so.
             assert "from its page in AgentGov (Quarantine)" in asked.remediation
         entra_client.post("/v1/agents/sales-helper/platform/block", headers=CSRF).raise_for_status()
-        with rt.db.session() as s:
-            asked = s.scalar(select(Finding).where(Finding.key == key))
+        with rt.db.transaction():
+            asked = Finding.objects.get(key=key)
             assert asked.status == "resolved"
             assert asked.resolved_by == "admin:alice@example.com"
         view = entra_client.get("/v1/agents/sales-helper", headers=ADMIN).json()

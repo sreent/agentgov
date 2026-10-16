@@ -11,6 +11,7 @@ from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
+from agentgov.db.models import Finding
 from agentgov.models import AccessAssignment, LedgerEntry
 from agentgov.registry import access_packages, features, findings
 from tests.conftest import ADMIN, requires_opa, seed
@@ -195,7 +196,7 @@ class TestLifecycle:
                 "reviews": 0,
             }
             assert access_packages.check(s, rt.settings, now + timedelta(days=20))["expiring"] == 1
-            reminder = findings.get(s, s.scalar(select(findings.Finding.id)))
+            reminder = Finding.objects.get()
             assert (reminder.type, reminder.severity) == ("access.expiring", "low")
             access_packages.check(s, rt.settings, now + timedelta(days=29, hours=12))
             assert findings.get(s, reminder.id).severity == "high"
@@ -203,9 +204,7 @@ class TestLifecycle:
             row = s.get(AccessAssignment, assignment_id)
             assert row.status == "expired"
             assert findings.get(s, reminder.id).status == "resolved"
-            expired = s.scalar(
-                select(findings.Finding).where(findings.Finding.type == "access.expired")
-            )
+            expired = Finding.objects.get(type="access.expired")
             assert "still uses" in expired.description  # monitored by default
         assert "access.expired" in _types(client)
         # Held still: OPA decides what an expired package grants, as the feature says.
@@ -237,7 +236,7 @@ class TestLifecycle:
                 "expiring": 0,
                 "reviews": 0,
             }
-            assert s.scalar(select(findings.Finding.id)) is None
+            assert not Finding.objects.exists()
         approver = _key(client, "approver", "ann")
         refused = client.post(f"/v1/access-assignments/{pending['id']}/approve", headers=approver)
         assert refused.status_code == 409 and "restore it first" in refused.text
@@ -298,9 +297,7 @@ class TestLifecycle:
         kept = client.post(url, json={"keep": True}, headers=approver).json()
         assert kept["status"] == "active" and kept["reviewed_at"]
         with rt.db.session() as s:
-            due = s.scalar(
-                select(findings.Finding).where(findings.Finding.type == "access.review_due")
-            )
+            due = Finding.objects.get(type="access.review_due")
             assert due.status == "resolved"
         removed = client.post(url, json={"keep": False}, headers=approver).json()
         assert removed["status"] == "revoked"

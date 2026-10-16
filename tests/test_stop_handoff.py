@@ -5,11 +5,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import cli
-from agentgov.models import FeatureSetting, Finding
+from agentgov.db.models import Finding
+from agentgov.models import FeatureSetting
 from agentgov.platforms import databricks, foundry
 from agentgov.platforms.base import Found, Inventory
 from agentgov.registry import platforms
@@ -29,11 +29,8 @@ STILL = platforms.STILL_RUNNING
 
 
 def issue(client: TestClient, agent_id: str) -> Finding | None:
-    with client.app.state.rt.db.session() as s:  # type: ignore[attr-defined]
-        found = s.scalar(select(Finding).where(Finding.key == f"{STILL}:{agent_id}"))
-        if found is not None:
-            s.expunge(found)
-        return found
+    with client.app.state.rt.db.transaction():  # type: ignore[attr-defined]
+        return Finding.objects.filter(key=f"{STILL}:{agent_id}").first()
 
 
 def block(client: TestClient, name: str, action: str = "block") -> dict[str, Any]:

@@ -23,7 +23,7 @@ from collections.abc import Callable
 from typing import Any
 
 from agentgov import __version__, ids
-from agentgov.models import Agent, LedgerEntry
+from agentgov.db.models import Agent, LedgerEntry
 
 OCSF_VERSION = "1.9.0"
 PRODUCT = {"name": "AgentGov", "vendor_name": "AgentGov", "version": __version__}

@@ -9,7 +9,8 @@ import pytest
 from sqlalchemy import select
 
 from agentgov import cli, ids
-from agentgov.models import Agent, Finding, LedgerEntry, ModelUsage
+from agentgov.db.models import Finding
+from agentgov.models import Agent, LedgerEntry, ModelUsage
 from agentgov.opa import bundle as opa_bundle
 from agentgov.registry import agents, blueprints, decisions, manifests, model_providers, model_usage
 from agentgov.registry.errors import Conflict, InvalidTransition, ValidationError
@@ -354,9 +355,7 @@ class TestDecisions:
                 select(LedgerEntry).where(LedgerEntry.type == "decision.model.request")
             ).one()
             assert (entry.decision, entry.resource) == ("deny", "openai/gpt-4o-mini")
-            finding = s.scalars(
-                select(Finding).where(Finding.type == "agent.credential_exfiltration_attempt")
-            ).one()
+            finding = Finding.objects.get(type="agent.credential_exfiltration_attempt")
             assert "model provider" in finding.title
             # Model calls' activity comes from the access logs, not from decisions.
             assert model_usage.tokens_used(s) == {}
@@ -381,9 +380,7 @@ class TestDecisions:
         with rt.db.session() as s:
             decisions.record_mcp_decisions(s, settings, [record])
         with rt.db.session() as s:
-            finding = s.scalars(
-                select(Finding).where(Finding.type == "agent.jailbreak_attempts")
-            ).one()
+            finding = Finding.objects.get(type="agent.jailbreak_attempts")
             assert finding.title == "People tried to jailbreak bot"
             assert "went through: jailbreak detection is not enforced" in finding.description
             entry = s.scalars(

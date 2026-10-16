@@ -14,7 +14,8 @@ from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov.config import Settings
-from agentgov.models import Finding, IntegrationState, LedgerEntry
+from agentgov.db.models import Finding
+from agentgov.models import IntegrationState, LedgerEntry
 from agentgov.notify import Notifier
 from agentgov.registry import destinations, digest, features, findings, issues, teams
 from agentgov.secops.delivery import Delivery
@@ -84,8 +85,7 @@ def _issues(client: TestClient, agent_id: str, settings: Settings) -> tuple[str,
             agent_id=agent_id,
             title="Its review is overdue",
         )
-        for f in s.scalars(select(Finding)):
-            f.first_seen = MONDAY - timedelta(hours=1)
+        Finding.objects.update(first_seen=MONDAY - timedelta(hours=1))
         issues.route(s, settings, MONDAY - timedelta(hours=1))
         return medium, low.id
 

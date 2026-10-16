@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
+from django.db.models import Count
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 from ninja import Body
 from sqlalchemy import func, select
@@ -18,13 +19,13 @@ from sqlalchemy import func, select
 from agentgov import ids, ledger, witness
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal
+from agentgov.db.models import Finding
 from agentgov.models import (
     DELETED,
     DISCOVERED,
     Agent,
     AgentActivity,
     ApprovalRequest,
-    Finding,
     LedgerEntry,
     ToolServer,
 )
@@ -187,30 +188,24 @@ def list_findings(
     if not 1 <= limit <= MAX_FINDINGS_PAGE or offset < 0:
         raise ValidationError(f"limit is 1 to {MAX_FINDINGS_PAGE}, and offset 0 or more")
     with runtime(request).db.session() as s:
-        conditions = []
+        found = Finding.objects.all()
         if status and status != "all":
-            conditions.append(Finding.status == status)
+            found = found.filter(status=status)
         if severity:
-            conditions.append(Finding.severity == severity)
+            found = found.filter(severity=severity)
         if type:
-            conditions.append(Finding.type == type)
+            found = found.filter(type=type)
         if agent:
-            conditions.append(Finding.agent_id == reach.agent(s, principal, agent).id)
+            found = found.filter(agent_id=reach.agent(s, principal, agent).id)
         reached = reach.agent_ids(s, principal, *READ_ROLES)
         if reached is not None:
-            conditions.append(Finding.agent_id.in_(reached))
+            found = found.filter(agent_id__in=reached)
         if asked:
-            conditions.append(Finding.details[issues.ASKED].as_string().is_not(None))
-        total = s.scalar(select(func.count()).select_from(Finding).where(*conditions))
-        response.headers["X-Total-Count"] = str(total or 0)
-        stmt = (
-            select(Finding)
-            .where(*conditions)
-            .order_by(Finding.last_seen.desc(), Finding.id)
-            .limit(limit)
-            .offset(offset)
-        )
-        return reach.mark([findings.to_dict(f) for f in s.scalars(stmt)], s, principal, "agent_id")
+            # Asked, a finding has the request in its details; answered, it no longer has.
+            found = found.filter(**{f"details__{issues.ASKED}__isnull": False})
+        response.headers["X-Total-Count"] = str(found.count())
+        page = found.order_by("-last_seen", "id")[offset : offset + limit]
+        return reach.mark([findings.to_dict(f) for f in page], s, principal, "agent_id")
 
 
 def _triages(session: Any, principal: Principal) -> bool:
@@ -616,11 +611,12 @@ def overview(request: HttpRequest) -> dict[str, Any]:
             key=lambda a: -a.risk_score,
         )
         servers = s.scalars(select(ToolServer)).all()
-        open_findings = s.execute(
-            select(Finding.severity, func.count())
-            .where(Finding.status == "open")
-            .group_by(Finding.severity)
-        ).all()
+        open_findings = list(
+            Finding.objects.filter(status="open")
+            .values("severity")
+            .annotate(n=Count("id"))
+            .values_list("severity", "n")
+        )
         pending_approvals = s.scalar(
             select(func.count())
             .select_from(ApprovalRequest)

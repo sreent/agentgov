@@ -11,7 +11,8 @@ from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
-from agentgov.models import AccessAssignment, Agent, Finding, LedgerEntry, RuleMatch
+from agentgov.db.models import Finding
+from agentgov.models import AccessAssignment, Agent, LedgerEntry, RuleMatch
 from agentgov.platforms import connections
 from agentgov.registry import access_packages, features, findings, issues, rules
 from agentgov.registry.errors import Conflict, ValidationError
@@ -67,8 +68,8 @@ def _status(client: TestClient, name: str = "support-bot") -> str:
 
 
 def _issues(client: TestClient, type_: str = rules.MATCHED) -> list[Finding]:
-    with _rt(client).db.session() as s:
-        return list(s.scalars(select(Finding).where(Finding.type == type_)))
+    with _rt(client).db.transaction():
+        return list(Finding.objects.filter(type=type_))
 
 
 def _ledger(client: TestClient, type_: str) -> list[LedgerEntry]:
@@ -219,7 +220,7 @@ class TestEnforce:
         _run(client, now)
         rt = _rt(client)
         with rt.db.session() as s:
-            issue = s.scalar(select(Finding).where(Finding.type == rules.MATCHED))
+            issue = Finding.objects.get(type=rules.MATCHED)
             issues.accept(s, issue, reason="Seasonal agent", until=30, actor="approver:ann")
         _run(client, now + timedelta(days=8))
         assert _status(client) == "active"
@@ -486,13 +487,13 @@ class TestEnforce:
                 title="Agent support-bot is stale",
             )
         assert _run(client, ids.utcnow())[name]["matching"] == 0  # not severe enough
-        with rt.db.session() as s:
-            s.get(Finding, finding.id).severity = "medium"
+        with rt.db.transaction():
+            Finding.objects.filter(pk=finding.id).update(severity="medium")
         assert _run(client, ids.utcnow())[name]["acted"] == 1
         assert "open issue: Agent support-bot is stale" in _issues(client)[0].title
-        with rt.db.session() as s:
+        with rt.db.transaction():
             # A finding a failed sync can't vouch for doesn't count.
-            s.get(Finding, finding.id).verified = False
+            Finding.objects.filter(pk=finding.id).update(verified=False)
         _run(client, ids.utcnow())
         assert _issues(client)[0].status == "resolved"
 

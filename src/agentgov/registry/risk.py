@@ -16,7 +16,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids
-from agentgov.models import DISCOVERED, Agent, Finding, RiskSignal
+from agentgov.db.models import Finding
+from agentgov.models import DISCOVERED, Agent, RiskSignal
 from agentgov.registry import validation
 
 TIER_POINTS = {"minimal": 0, "low": 5, "medium": 10, "high": 25, "critical": 40}
@@ -119,21 +120,17 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
         per, cap = SIGNAL_WEIGHTS.get(kind, (2, 10))
         factor(SIGNAL_LABELS.get(kind, kind), min(cap, per * count), f"{count} in {window_hours}h")
 
-    unsafe = session.scalar(
-        select(Finding.severity).where(
-            Finding.key == f"agent.unsafe_instructions:{agent.id}", Finding.status == "open"
-        )
+    unsafe = (
+        Finding.objects.filter(key=f"agent.unsafe_instructions:{agent.id}", status="open")
+        .values_list("severity", flat=True)
+        .first()
     )
     if unsafe:
         factor("Unsafe instructions", INSTRUCTION_POINTS.get(unsafe, 10), unsafe)
     if agent.on_platform:
-        open_types = session.scalars(
-            select(Finding.type).where(
-                Finding.agent_id == agent.id,
-                Finding.status == "open",
-                Finding.type.in_(FINDING_WEIGHTS),
-            )
-        )
+        open_types = Finding.objects.filter(
+            agent_id=agent.id, status="open", type__in=list(FINDING_WEIGHTS)
+        ).values_list("type", flat=True)
         for type_ in sorted(set(open_types)):
             factor(*FINDING_WEIGHTS[type_])
 
@@ -143,15 +140,15 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
     # score adds up to, the agent is at high risk at least (not critical, which would block
     # it where risk-based access is enforced).
     if level in ("low", "medium"):
-        worst = session.scalar(
-            select(Finding.title)
-            .where(
-                Finding.agent_id == agent.id,
-                Finding.status == "open",
-                Finding.severity.in_(("high", "critical")),
-                Finding.type.in_((*FINDING_WEIGHTS, "agent.unsafe_instructions")),
+        worst = (
+            Finding.objects.filter(
+                agent_id=agent.id,
+                status="open",
+                severity__in=("high", "critical"),
+                type__in=(*FINDING_WEIGHTS, "agent.unsafe_instructions"),
             )
-            .limit(1)
+            .values_list("title", flat=True)
+            .first()
         )
         if worst:
             level = "high"

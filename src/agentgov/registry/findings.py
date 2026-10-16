@@ -3,6 +3,10 @@
 Findings are also issues for the people responsible for them (agentgov.registry.issues,
 docs/issues.md): who it is with, whether they acknowledged it, and a risk accepted until a
 date. Raised again after being resolved or accepted, a finding starts its chain over.
+
+The functions here run in the caller's transaction (agentgov.db), on Django's ORM; what
+changes a finding saves it, but :func:`checked` and :func:`restart_chain`, which leave that
+to their callers.
 """
 
 from __future__ import annotations
@@ -10,12 +14,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from django.db.models import QuerySet
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.db import lock
-from agentgov.models import SEVERITIES, Agent, Finding
+from agentgov.db.models import Agent, Finding
+from agentgov.models import SEVERITIES
 from agentgov.registry.errors import InvalidTransition, NotFound, ValidationError
 
 POSTURE = "posture"
@@ -51,7 +55,7 @@ def restart_chain(finding: Finding) -> None:
 
 
 def record(
-    session: Session,
+    tx: db.Where,
     finding: Finding,
     change: str,
     actor: str,
@@ -63,7 +67,7 @@ def record(
     (assigned, escalated, acknowledged, accepted, notified), in the ledger (and so on its
     way to the security team's tools)."""
     ledger.append(
-        session,
+        tx,
         type=f"finding.{change}",
         actor=actor,
         severity=severity
@@ -72,7 +76,7 @@ def record(
             if change != "resolved" and finding.severity in ("high", "critical")
             else "info"
         ),
-        agent=session.get(Agent, finding.agent_id) if finding.agent_id else None,
+        agent=Agent.objects.filter(pk=finding.agent_id).first() if finding.agent_id else None,
         agent_id=finding.agent_id,
         resource=finding.subject,
         reason=finding.title,
@@ -92,7 +96,7 @@ _record = record
 
 
 def raise_finding(
-    session: Session,
+    tx: db.Where,
     *,
     type: str,
     severity: str,
@@ -118,9 +122,9 @@ def raise_finding(
 
     if severity not in SEVERITIES:
         raise ValidationError(f"unknown severity {severity!r}")
-    severity, off = finding_types.effective(session, type, severity)
+    severity, off = finding_types.effective(tx, type, severity)
     key = f"{type}:{subject}"
-    finding = session.scalar(select(Finding).where(Finding.key == key))
+    finding = Finding.objects.filter(key=key).first()
     now = ids.utcnow()
     if finding is None:
         finding = Finding(
@@ -140,12 +144,10 @@ def raise_finding(
         )
         if off:
             finding_types.suppress(finding, now)
-            session.add(finding)
-            session.flush()
+            finding.save(force_insert=True)
             return finding, False
-        session.add(finding)
-        session.flush()
-        _record(session, finding, "raised", SYSTEM)
+        finding.save(force_insert=True)
+        _record(tx, finding, "raised", SYSTEM)
         return finding, True
     finding.last_seen = now
     # The check ran and found it: it holds, as far as anyone can tell.
@@ -163,7 +165,7 @@ def raise_finding(
     if off and finding.status in ("open", "resolved"):
         # Found again, but its type is off.
         if finding.status == "open":
-            _record(session, finding, "dismissed", finding_types.ACTOR, reason="its type is off")
+            _record(tx, finding, "dismissed", finding_types.ACTOR, reason="its type is off")
         finding_types.suppress(finding, now)
     suppressed = finding.status == "dismissed" and finding_types.SUPPRESSED in (
         finding.details or {}
@@ -189,22 +191,23 @@ def raise_finding(
             if again
             else None
         )
-        _record(session, finding, "reopened", SYSTEM, **({"why": why} if why else {}))
+        _record(tx, finding, "reopened", SYSTEM, **({"why": why} if why else {}))
     elif finding.status == "open" and SEVERITIES.index(severity) > SEVERITIES.index(told):
         # Worse than its people were told: they are told again, from its first step.
         finding.details = {**(finding.details or {}), TOLD: severity}
         restart_chain(finding)
-        _record(session, finding, "severity_raised", SYSTEM, previous=told)
+        _record(tx, finding, "severity_raised", SYSTEM, previous=told)
+    finding.save()
     return finding, reopened
 
 
-def _open(types: set[str], subjects: set[str] | None) -> Any:
-    query = select(Finding).where(Finding.status == "open", Finding.type.in_(types))
-    return query if subjects is None else query.where(Finding.subject.in_(subjects))
+def _open(types: set[str], subjects: set[str] | None) -> QuerySet[Finding]:
+    found = Finding.objects.filter(status="open", type__in=types)
+    return found if subjects is None else found.filter(subject__in=subjects)
 
 
 def resolve_absent(
-    session: Session,
+    tx: db.Where,
     *,
     types: set[str],
     present_keys: set[str],
@@ -217,8 +220,7 @@ def resolve_absent(
     doesn't close and reopen them. ``subjects`` limits it to the findings about those (a
     platform's agents, where other platforms raise findings of the same types)."""
     count = 0
-    open_findings = session.scalars(_open(types, subjects)).all()
-    for finding in open_findings:
+    for finding in list(_open(types, subjects)):
         if finding.key in present_keys:
             continue
         checked(finding)
@@ -228,36 +230,35 @@ def resolve_absent(
             finding.resolved_at = ids.utcnow()
             finding.resolved_by = actor
             finding.escalate_at = None
-            _record(session, finding, "resolved", actor)
+            _record(tx, finding, "resolved", actor)
             count += 1
+        finding.save()
     return count
 
 
-def close_stale_threats(session: Session, days: int, now: datetime | None = None) -> int:
+def close_stale_threats(tx: db.Where, days: int, now: datetime | None = None) -> int:
     """Resolve the threats that haven't happened again for ``days`` days (0: none are): they
     were events, and one that happens again opens again."""
     if days <= 0:
         return 0
     now = now or ids.utcnow()
     count = 0
-    for finding in session.scalars(
-        select(Finding).where(
-            Finding.status == "open",
-            Finding.category == THREAT,
-            Finding.last_seen < now - timedelta(days=days),
-        )
-    ):
+    stale = Finding.objects.filter(
+        status="open", category=THREAT, last_seen__lt=now - timedelta(days=days)
+    )
+    for finding in list(stale):
         finding.status = "resolved"
         finding.resolved_at = now
         finding.resolved_by = SYSTEM
         finding.escalate_at = None
-        record(session, finding, "resolved", SYSTEM, why=f"it hasn't happened for {days} days")
+        finding.save()
+        record(tx, finding, "resolved", SYSTEM, why=f"it hasn't happened for {days} days")
         count += 1
     return count
 
 
 def mark_unverified(
-    session: Session,
+    tx: db.Where,
     *,
     types: set[str],
     verified: bool = False,
@@ -271,38 +272,45 @@ def mark_unverified(
     :func:`resolve_absent`; findings in ``present_keys`` were found again by a check that
     ran in part, so they still hold."""
     count = 0
-    for finding in session.scalars(_open(types, subjects)):
+    for finding in list(_open(types, subjects)):
         if present_keys and finding.key in present_keys:
             continue
         if verified:
             if finding.verified is False:
                 count += 1
             checked(finding)
+            finding.save()
             continue
         if finding.verified is not False:
             count += 1
         finding.verified = False
         if reason and (finding.details or {}).get(UNVERIFIED) != reason:
             finding.details = {**(finding.details or {}), UNVERIFIED: reason[:500]}
+        finding.save()
     return count
 
 
-def resolve_key(session: Session, key: str, *, actor: str) -> None:
+def resolve_key(tx: db.Where, key: str, *, actor: str) -> None:
     """Resolve the open finding ``key`` (``type:subject``), if there is one."""
-    finding = session.scalar(select(Finding).where(Finding.key == key))
-    if finding is not None and finding.status == "open":
-        set_status(session, finding.id, "resolved", actor)
+    found = Finding.objects.filter(key=key, status="open").values_list("id", flat=True).first()
+    if found is not None:
+        set_status(tx, found, "resolved", actor)
 
 
-def get(session: Session, finding_id: str) -> Finding:
-    finding = session.get(Finding, finding_id)
+def by_key(tx: db.Where, key: str) -> Finding | None:
+    """The finding ``key`` (``type:subject``), if there is one."""
+    return Finding.objects.filter(key=key).first()
+
+
+def get(tx: db.Where, finding_id: str) -> Finding:
+    finding = Finding.objects.filter(pk=finding_id).first()
     if finding is None:
         raise NotFound(f"finding {finding_id} not found")
     return finding
 
 
 def dismiss(
-    session: Session,
+    tx: db.Where,
     finding: Finding,
     *,
     reason: Any,
@@ -311,7 +319,7 @@ def dismiss(
 ) -> Finding:
     """Dismiss a finding that is wrong, saying why: it goes to nobody. With ``until``, it
     opens again then if it still holds (a threat opens again as soon as it happens again)."""
-    lock(session, finding)
+    lock(tx, finding)
     if finding.status == "dismissed":
         raise InvalidTransition("finding is dismissed already")
     why = str(reason or "").strip()
@@ -335,8 +343,9 @@ def dismiss(
     finding.resolved_at = now
     finding.resolved_by = actor
     finding.escalate_at = None
+    finding.save()
     _record(
-        session,
+        tx,
         finding,
         "dismissed",
         actor,
@@ -346,11 +355,11 @@ def dismiss(
     return finding
 
 
-def set_status(session: Session, finding_id: str, status: str, actor: str) -> Finding:
+def set_status(tx: db.Where, finding_id: str, status: str, actor: str) -> Finding:
     if status not in ("open", "resolved", "dismissed"):
         raise ValidationError("status must be open, resolved or dismissed")
-    finding = get(session, finding_id)
-    lock(session, finding)
+    finding = get(tx, finding_id)
+    lock(tx, finding)
     if finding.status == status:
         return finding
     previous, finding.status = finding.status, status
@@ -365,7 +374,8 @@ def set_status(session: Session, finding_id: str, status: str, actor: str) -> Fi
         finding.resolved_at = ids.utcnow()
         finding.resolved_by = actor
         finding.escalate_at = None
-    _record(session, finding, "reopened" if status == "open" else status, actor)
+    finding.save()
+    _record(tx, finding, "reopened" if status == "open" else status, actor)
     return finding
 
 

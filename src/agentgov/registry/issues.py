@@ -11,6 +11,8 @@ ends it. Raised again later, it starts over.
 
 Nothing is routed or sent while the issues feature is off; findings stay in AgentGov's
 list as before.
+
+The functions here run in the caller's transaction (agentgov.db), on Django's ORM.
 """
 
 from __future__ import annotations
@@ -19,14 +21,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock
-from agentgov.models import (
-    SEVERITIES,
+from agentgov.db.models import (
     Agent,
     Destination,
     Finding,
@@ -34,6 +32,7 @@ from agentgov.models import (
     Notification,
     ToolServer,
 )
+from agentgov.models import SEVERITIES
 from agentgov.registry import finding_types, findings, teams
 from agentgov.registry import people as directory_people
 from agentgov.registry.errors import Forbidden, InvalidTransition, ValidationError
@@ -66,11 +65,11 @@ class Recipient:
 class Directory:
     """The teams, read once for a round of routing or a list of issues."""
 
-    def __init__(self, session: Session) -> None:
-        self.teams = {t.name: t for t in teams.list_all(session)}
+    def __init__(self, tx: db.Where) -> None:
+        self.teams = {t.name: t for t in teams.list_all(db.orm(tx))}
         self.default = next((t for t in self.teams.values() if t.is_default), None)
         # People who left: an issue goes past them (docs/issues.md#people-who-leave).
-        self.left = set(directory_people.gone(session))
+        self.left = set(directory_people.gone(db.orm(tx)))
 
     def recipient(self, name: str | None) -> Recipient | None:
         """Who a name stands for: a team of that name, or else a person."""
@@ -98,25 +97,30 @@ class Directory:
         return self.recipient(self.default.name) if self.default else None
 
 
-def _server(session: Session, subject: str | None) -> ToolServer | None:
+def _server(tx: db.Where, subject: str | None) -> ToolServer | None:
     """The tool server an issue is about: its subject is the server (by ID or name), or one
     of its tools ("crm/export_customers")."""
     ref = (subject or "").split("/", 1)[0]
     if not ref:
         return None
-    return session.get(ToolServer, ref) or session.scalar(
-        select(ToolServer).where(ToolServer.name == ref)
-    )
+    return ToolServer.objects.filter(pk=ref).first() or ToolServer.objects.filter(name=ref).first()
+
+
+def _agent(finding: Finding) -> Agent | None:
+    """The agent a finding is about, if any."""
+    if not finding.agent_id:
+        return None
+    return Agent.objects.select_related("blueprint").filter(pk=finding.agent_id).first()
 
 
 def chain(
-    session: Session, finding: Finding, directory: Directory | None = None
+    tx: db.Where, finding: Finding, directory: Directory | None = None
 ) -> list[tuple[str, list[Recipient]]]:
     """The steps of a finding's chain, each with the people and teams at it that no earlier
     step reached. Steps with nobody new at them are left out."""
-    d = directory or Directory(session)
+    d = directory or Directory(tx)
     raw: list[tuple[str, list[Recipient | None]]] = []
-    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
+    agent = _agent(finding)
     if agent is not None:
         blueprint = agent.blueprint
         raw = [
@@ -125,7 +129,7 @@ def chain(
             (TEAM, [d.team(agent.team, blueprint.team if blueprint else None)]),
         ]
     elif finding.type.startswith("toolserver."):
-        server = _server(session, finding.subject)
+        server = _server(tx, finding.subject)
         raw = [(OWNER, [d.recipient(server.owner) if server else None]), (TEAM, [d.team()])]
     else:
         raw = [(TEAM, [d.team()])]
@@ -141,13 +145,13 @@ def chain(
     return steps
 
 
-def involved(session: Session, finding: Finding, directory: Directory | None = None) -> set[str]:
+def involved(tx: db.Where, finding: Finding, directory: Directory | None = None) -> set[str]:
     """Everyone the issue has reached so far, by email address and user name (lower case),
     team members included: they may see it and acknowledge it."""
     names: set[str] = set()
     if finding.level is None:
         return names
-    for level, people in chain(session, finding, directory):
+    for level, people in chain(tx, finding, directory):
         for person in people:
             if person.kind == "person":
                 names.add(person.name.lower())
@@ -169,7 +173,7 @@ def _next(
 
 
 def _give(
-    session: Session,
+    tx: db.Where,
     settings: Settings,
     finding: Finding,
     step: tuple[str, list[Recipient]],
@@ -183,10 +187,11 @@ def _give(
     finding.assignees = [p.describe() for p in people]
     hours = settings.escalation_delays()[finding.severity]
     finding.escalate_at = now + timedelta(hours=hours) if _next(steps, level) else None
+    finding.save()
     quiet = _quiet(settings, finding)
-    queued = 0 if quiet else _queue(session, settings, finding, level, people)
+    queued = 0 if quiet else _queue(tx, settings, finding, level, people)
     findings.record(
-        session,
+        tx,
         finding,
         "escalated" if escalated else "assigned",
         SYSTEM,
@@ -209,9 +214,7 @@ def _quiet(settings: Settings, finding: Finding) -> str | None:
     return None
 
 
-def addresses(
-    session: Session, settings: Settings, people: list[Recipient]
-) -> list[tuple[str, str]]:
+def addresses(tx: db.Where, settings: Settings, people: list[Recipient]) -> list[tuple[str, str]]:
     """Where messages for these people and teams go, as (channel, recipient): email to
     their addresses (with a mail server), and their teams' chats."""
     wanted: list[tuple[str, str]] = []
@@ -219,41 +222,37 @@ def addresses(
         if settings.smtp_url:
             wanted += [(EMAIL, address) for address in person.emails]
         for name in person.channels:
-            destination = session.scalar(select(Destination).where(Destination.name == name))
-            if destination is not None:
-                wanted.append((destination.kind, name))
+            kind = Destination.objects.filter(name=name).values_list("kind", flat=True).first()
+            if kind is not None:
+                wanted.append((kind, name))
     return list(dict.fromkeys(wanted))
 
 
 def _queue(
-    session: Session, settings: Settings, finding: Finding, level: str, people: list[Recipient]
+    tx: db.Where, settings: Settings, finding: Finding, level: str, people: list[Recipient]
 ) -> int:
     """Queue the messages for the people at this step."""
     count = 0
-    for channel, to in addresses(session, settings, people):
-        exists = session.scalar(
-            select(Notification.id).where(
-                Notification.finding_id == finding.id,
-                Notification.round == finding.round,
-                Notification.level == level,
-                Notification.channel == channel,
-                Notification.recipient == to,
-            )
+    for channel, to in addresses(tx, settings, people):
+        sent = Notification.objects.filter(
+            finding_id=finding.id,
+            round=finding.round,
+            level=level,
+            channel=channel,
+            recipient=to,
         )
-        if exists:
+        if sent.exists():
             continue
-        session.add(
-            Notification(
-                id=ids.new_id(ids.NOTIFICATION),
-                finding_id=finding.id,
-                round=finding.round or 0,
-                level=level,
-                channel=channel,
-                recipient=to,
-                status="pending",
-                attempts=0,
-                next_attempt_at=ids.utcnow(),
-            )
+        Notification.objects.create(
+            id=ids.new_id(ids.NOTIFICATION),
+            finding_id=finding.id,
+            round=finding.round or 0,
+            level=level,
+            channel=channel,
+            recipient=to,
+            status="pending",
+            attempts=0,
+            next_attempt_at=ids.utcnow(),
         )
         count += 1
     return count
@@ -262,22 +261,21 @@ def _queue(
 # ------------------------------------------------------------------------ rounds
 
 
-def route(session: Session, settings: Settings, now: datetime | None = None) -> dict[str, int]:
+def route(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict[str, int]:
     """Give open findings that aren't with anyone to the first step of their chain, and
     escalate those nobody acknowledged in time."""
     now = now or ids.utcnow()
     assigned = escalated = 0
-    directory = Directory(session)
-    off = finding_types.off_types(session)
-    open_findings = session.scalars(select(Finding).where(Finding.status == "open")).all()
-    for finding in open_findings:
+    directory = Directory(tx)
+    off = finding_types.off_types(tx)
+    for finding in list(Finding.objects.filter(status="open")):
         if finding.type in off:
             continue  # reopened by hand while its type is off: nobody is told
-        steps = chain(session, finding, directory)
+        steps = chain(tx, finding, directory)
         if finding.level is None:
             first = _next(steps, None)
             if first is not None:
-                _give(session, settings, finding, first, steps, now, escalated=False)
+                _give(tx, settings, finding, first, steps, now, escalated=False)
                 assigned += 1
         elif (
             finding.acknowledged_at is None
@@ -287,23 +285,20 @@ def route(session: Session, settings: Settings, now: datetime | None = None) -> 
             step = _next(steps, finding.level)
             if step is None:
                 finding.escalate_at = None
+                finding.save()
             else:
-                _give(session, settings, finding, step, steps, now, escalated=True)
+                _give(tx, settings, finding, step, steps, now, escalated=True)
                 escalated += 1
     return {"assigned": assigned, "escalated": escalated}
 
 
-def reopen_accepted(session: Session, now: datetime | None = None) -> int:
+def reopen_accepted(tx: db.Where, now: datetime | None = None) -> int:
     """Accepted risks, and dismissals given until a date, whose date has come open again,
     for someone to decide anew. If the condition is gone, the next check resolves them."""
     now = now or ids.utcnow()
     count = 0
-    off = finding_types.off_types(session)
-    # The key as text: SQLite's JSON values come quoted (a missing key reads as "null").
-    dismissed_until = Finding.details[findings.DISMISSAL].as_string().is_not(None)
-    for finding in session.scalars(
-        select(Finding).where(Finding.status == "dismissed", dismissed_until)
-    ):
+    off = finding_types.off_types(tx)
+    for finding in list(Finding.objects.filter(status="dismissed")):
         until = ((finding.details or {}).get(findings.DISMISSAL) or {}).get("until")
         if not until or datetime.fromisoformat(until) > now or finding.type in off:
             continue
@@ -313,21 +308,22 @@ def reopen_accepted(session: Session, now: datetime | None = None) -> int:
             k: v for k, v in (finding.details or {}).items() if k != findings.DISMISSAL
         }
         findings.restart_chain(finding)
+        finding.save()
         findings.record(
-            session, finding, "reopened", SYSTEM, why="the time it was dismissed for ran out"
+            tx, finding, "reopened", SYSTEM, why="the time it was dismissed for ran out"
         )
         count += 1
-    for finding in session.scalars(
-        select(Finding).where(Finding.status == "accepted", Finding.accepted_until <= now)
-    ):
+    for finding in list(Finding.objects.filter(status="accepted", accepted_until__lte=now)):
         if finding.type in off:
             finding_types.suppress(finding, now)
+            finding.save()
             continue
         finding.status = "open"
         finding.accepted_until = None
         findings.restart_chain(finding)
+        finding.save()
         findings.record(
-            session, finding, "reopened", SYSTEM, why="the time its risk was accepted for ran out"
+            tx, finding, "reopened", SYSTEM, why="the time its risk was accepted for ran out"
         )
         count += 1
     return count
@@ -336,16 +332,17 @@ def reopen_accepted(session: Session, now: datetime | None = None) -> int:
 # ---------------------------------------------------------------------- actions
 
 
-def acknowledge(session: Session, finding: Finding, *, actor: str) -> Finding:
+def acknowledge(tx: db.Where, finding: Finding, *, actor: str) -> Finding:
     """Someone it reached takes it on: it stops going further up its chain."""
-    lock(session, finding)
+    lock(tx, finding)
     if finding.status != "open":
         raise InvalidTransition(f"finding is {finding.status}: only open findings are acknowledged")
     if finding.acknowledged_at is None:
         finding.acknowledged_at = ids.utcnow()
         finding.acknowledged_by = actor
         finding.escalate_at = None
-        findings.record(session, finding, "acknowledged", actor, severity="info")
+        finding.save()
+        findings.record(tx, finding, "acknowledged", actor, severity="info")
     return finding
 
 
@@ -358,10 +355,10 @@ def _why(value: Any, what: str) -> str:
     return text
 
 
-def at_current_step(session: Session, finding: Finding, name: str) -> bool:
+def at_current_step(tx: db.Where, finding: Finding, name: str) -> bool:
     """Whether the person ``name`` is among the people and teams the issue is with now."""
     key = (name or "").lower()
-    for level, people in chain(session, finding):
+    for level, people in chain(tx, finding):
         if level != finding.level:
             continue
         for person in people:
@@ -373,7 +370,7 @@ def at_current_step(session: Session, finding: Finding, name: str) -> bool:
 
 
 def decline(
-    session: Session,
+    tx: db.Where,
     settings: Settings,
     finding: Finding,
     *,
@@ -384,28 +381,28 @@ def decline(
     """Someone it is with says it isn't theirs, and why: it goes on to the next step of its
     chain at once, which hears why. At the last step, it stays there. Returns whom it went
     to (none when it stayed)."""
-    lock(session, finding)
+    lock(tx, finding)
     if finding.status != "open":
         raise InvalidTransition(f"finding is {finding.status}: only open findings are declined")
     why = _why(reason, "why it isn't yours")
-    here = at_current_step(session, finding, name)
-    findings.record(session, finding, "declined", actor, severity="info", why=why, by=name)
-    steps = chain(session, finding)
+    here = at_current_step(tx, finding, name)
+    findings.record(tx, finding, "declined", actor, severity="info", why=why, by=name)
+    steps = chain(tx, finding)
     step = _next(steps, finding.level) if here else None
     if step is None:
         return []
     finding.acknowledged_at = None
     finding.acknowledged_by = None
-    _give(session, settings, finding, step, steps, ids.utcnow(), escalated=True)
+    _give(tx, settings, finding, step, steps, ids.utcnow(), escalated=True)
     return list(finding.assignees or [])
 
 
 def ask_exception(
-    session: Session, finding: Finding, *, actor: str, name: str, reason: Any, until: Any
+    tx: db.Where, finding: Finding, *, actor: str, name: str, reason: Any, until: Any
 ) -> Finding:
     """Someone it reached asks for its risk to be accepted until a date, and why: an approver
     decides (accept, or decline_exception). Meanwhile it stays with them, acknowledged."""
-    lock(session, finding)
+    lock(tx, finding)
     if finding.status != "open":
         raise InvalidTransition(f"finding is {finding.status}: only open findings take this")
     why = _why(reason, "why its risk is acceptable")
@@ -418,24 +415,22 @@ def ask_exception(
     if finding.acknowledged_at is None:
         finding.acknowledged_at, finding.acknowledged_by = now, actor
         finding.escalate_at = None
-    findings.record(
-        session, finding, "exception_requested", actor, why=why, until=ids.isoformat(end)
-    )
+    finding.save()
+    findings.record(tx, finding, "exception_requested", actor, why=why, until=ids.isoformat(end))
     return finding
 
 
-def decline_exception(session: Session, finding: Finding, *, actor: str, reason: Any) -> Finding:
+def decline_exception(tx: db.Where, finding: Finding, *, actor: str, reason: Any) -> Finding:
     """An approver turns down a request to accept its risk, saying why: it stays with
     whoever asked, to fix."""
-    lock(session, finding)
+    lock(tx, finding)
     asked = (finding.details or {}).get(ASKED)
     if not asked:
         raise InvalidTransition("nobody asked for its risk to be accepted")
     why = _why(reason, "why not")
     finding.details = {k: v for k, v in (finding.details or {}).items() if k != ASKED}
-    findings.record(
-        session, finding, "exception_declined", actor, why=why, asked_by=asked.get("by")
-    )
+    finding.save()
+    findings.record(tx, finding, "exception_declined", actor, why=why, asked_by=asked.get("by"))
     return finding
 
 
@@ -460,14 +455,14 @@ def parse_until(value: Any, now: datetime | None = None) -> datetime:
     return until
 
 
-def accountable(session: Session, agent: Agent, name: str | None) -> str | None:
+def accountable(tx: db.Where, agent: Agent, name: str | None) -> str | None:
     """How the person ``name`` (an email address or user name) is accountable for
     ``agent``, in words, or None: they own it, sponsor it, or are in its team (its own or
     its blueprint's; not the default team, which only gets what nobody else does)."""
     key = (name or "").strip().lower()
     if not key:
         return None
-    d = Directory(session)
+    d = Directory(tx)
     blueprint = agent.blueprint
     team = agent.team or (blueprint.team if blueprint else None)
     for names, as_person, as_team in (
@@ -486,11 +481,11 @@ def accountable(session: Session, agent: Agent, name: str | None) -> str | None:
     return None
 
 
-def _not_accountable(session: Session, finding: Finding, by: str | None, does: str) -> None:
+def _not_accountable(tx: db.Where, finding: Finding, by: str | None, does: str) -> None:
     """Refuse ``by``, the person answering an issue, what someone accountable for its agent
     mustn't do: someone else signs that off."""
-    agent = session.get(Agent, finding.agent_id) if finding.agent_id else None
-    why = accountable(session, agent, by) if agent is not None else None
+    agent = _agent(finding)
+    why = accountable(tx, agent, by) if agent is not None else None
     if why:
         raise Forbidden(
             f"{why[0].upper()}{why[1:]}: someone who isn't accountable for it {does} "
@@ -499,7 +494,7 @@ def _not_accountable(session: Session, finding: Finding, by: str | None, does: s
 
 
 def dismiss(
-    session: Session,
+    tx: db.Where,
     finding: Finding,
     *,
     reason: Any,
@@ -510,12 +505,12 @@ def dismiss(
     """Dismiss an issue that is wrong (findings.dismiss). It then goes to nobody, as one whose
     risk was accepted: ``by``, the person dismissing it, mustn't be accountable for its agent
     either."""
-    _not_accountable(session, finding, by, "dismisses its issues")
-    return findings.dismiss(session, finding, reason=reason, actor=actor, until=until)
+    _not_accountable(tx, finding, by, "dismisses its issues")
+    return findings.dismiss(tx, finding, reason=reason, actor=actor, until=until)
 
 
 def accept(
-    session: Session,
+    tx: db.Where,
     finding: Finding,
     *,
     reason: Any,
@@ -526,10 +521,10 @@ def accept(
     """Accept the risk until a date, for a reason: the finding stops going to anyone until
     then, and opens again at that date if it still holds. ``by``, the person accepting it,
     mustn't be accountable for the agent it is about: someone else signs that off."""
-    lock(session, finding)
+    lock(tx, finding)
     if finding.status not in ("open", "accepted"):
         raise InvalidTransition(f"finding is {finding.status}: only open findings are accepted")
-    _not_accountable(session, finding, by, "accepts its risks")
+    _not_accountable(tx, finding, by, "accepts its risks")
     reason = str(reason or "").strip()
     if not reason:
         raise ValidationError("say why the risk is acceptable (reason)")
@@ -541,8 +536,9 @@ def accept(
     finding.escalate_at = None
     # Whoever asked for it has their answer.
     finding.details = {k: v for k, v in (finding.details or {}).items() if k != ASKED}
+    finding.save()
     findings.record(
-        session,
+        tx,
         finding,
         "accepted",
         actor,
@@ -556,26 +552,26 @@ def accept(
 # ---------------------------------------------------------------- what people see
 
 
-def for_person(session: Session, name: str | None, *, status: str | None = None) -> list[Finding]:
+def for_person(tx: db.Where, name: str | None, *, status: str | None = None) -> list[Finding]:
     """The issues that reached this person (by any name they go by: their email address,
     user principal name or user name), or one of the teams they are in."""
-    names = directory_people.aliases(session, name)
+    names = directory_people.aliases(db.orm(tx), name)
     if not names:
         return []
-    stmt = select(Finding).where(Finding.level.is_not(None)).order_by(Finding.last_seen.desc())
+    found = Finding.objects.filter(level__isnull=False).order_by("-last_seen")
     if status and status != "all":
-        stmt = stmt.where(Finding.status == status)
-    directory = Directory(session)
-    return [f for f in session.scalars(stmt) if names & involved(session, f, directory)]
+        found = found.filter(status=status)
+    directory = Directory(tx)
+    return [f for f in found if names & involved(tx, f, directory)]
 
 
-def may_act(session: Session, finding: Finding, name: str | None) -> bool:
+def may_act(tx: db.Where, finding: Finding, name: str | None) -> bool:
     """Whether the issue reached the person, by any name they go by (their email address,
     or the user principal name they sign in with)."""
-    return bool(directory_people.aliases(session, name) & involved(session, finding))
+    return bool(directory_people.aliases(db.orm(tx), name) & involved(tx, finding))
 
 
-def describe(session: Session, finding: Finding) -> list[dict[str, Any]]:
+def describe(tx: db.Where, finding: Finding) -> list[dict[str, Any]]:
     """Its chain, step by step: who is at each step, and how far the issue has gone."""
     reached = LEVELS.index(finding.level) if finding.level else -1
     return [
@@ -585,31 +581,22 @@ def describe(session: Session, finding: Finding) -> list[dict[str, Any]]:
             "reached": LEVELS.index(level) <= reached,
             "current": level == finding.level,
         }
-        for level, people in chain(session, finding)
+        for level, people in chain(tx, finding)
     ]
 
 
-def history(session: Session, finding: Finding, limit: int = 200) -> list[LedgerEntry]:
+def history(tx: db.Where, finding: Finding, limit: int = 200) -> list[LedgerEntry]:
     """What happened to it, newest first, from the ledger."""
-    rows = session.scalars(
-        select(LedgerEntry)
-        .where(
-            LedgerEntry.type.like("finding.%"),
-            LedgerEntry.resource == finding.subject,
-            ledger.in_chain(),
-        )
-        .order_by(LedgerEntry.seq.desc())
-        .limit(limit * 5)
+    rows = (
+        ledger.chain()
+        .filter(type__startswith="finding.", resource=finding.subject)
+        .order_by("-seq")[: limit * 5]
     )
     return [e for e in rows if (e.details or {}).get("finding_id") == finding.id][:limit]
 
 
-def notifications(session: Session, finding: Finding) -> list[dict[str, Any]]:
-    rows = session.scalars(
-        select(Notification)
-        .where(Notification.finding_id == finding.id)
-        .order_by(Notification.created_at)
-    )
+def notifications(tx: db.Where, finding: Finding) -> list[dict[str, Any]]:
+    rows = Notification.objects.filter(finding_id=finding.id).order_by("created_at")
     return [
         {
             "round": n.round,

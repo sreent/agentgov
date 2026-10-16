@@ -711,9 +711,10 @@ def test_old_operational_records_go(settings: Settings) -> None:
                                            status="approved", requested_at=when,
                                            expires_at=when)  # fmt: skip
             finding, _ = findings.raise_finding(
-                tx.orm(), type="test.thing", severity="low", subject=tag, title=tag
+                tx, type="test.thing", severity="low", subject=tag, title=tag
             )
             finding.status, finding.resolved_at = "resolved", when
+            finding.save()
             Notification.objects.create(id=f"ntf_{tag}", finding_id=finding.id, level="team",
                                         channel="email", recipient="a@example.com",
                                         status="sent", created_at=when)  # fmt: skip

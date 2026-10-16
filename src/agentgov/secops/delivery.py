@@ -20,13 +20,12 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import or_, select, update
-from sqlalchemy.orm import Session
+from django.db.models import F, Q
 
-from agentgov import __version__, ids, ledger
+from agentgov import __version__, db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.models import Agent, Destination, LedgerEntry
+from agentgov.db.models import Agent, Destination, LedgerEntry
 from agentgov.registry import destinations
 from agentgov.registry.destinations import (
     ACTIVE,
@@ -91,14 +90,14 @@ class Delivery:
     # -- rounds -------------------------------------------------------------------
     def run(self) -> dict[str, dict[str, Any]]:
         """Send every active destination what is new; returns what each was sent."""
-        with self.db.session() as s:
-            if not handoff.at_least(s, handoff.INFORM):
+        with self.db.transaction() as tx:
+            if not handoff.at_least(tx, handoff.INFORM):
                 return {}
             now = ids.utcnow()
             # Service desks get issues as tickets instead (agentgov.ticketing).
             due = [
                 d.id
-                for d in s.scalars(select(Destination).where(Destination.status == ACTIVE))
+                for d in Destination.objects.filter(status=ACTIVE)
                 if d.kind not in DESK and (d.retry_at is None or d.retry_at <= now)
             ]
         return {name: outcome for name, outcome in map(self.deliver, due) if name}
@@ -129,33 +128,21 @@ class Delivery:
 
     def _claim(self, destination_id: str) -> _Batch | None:
         """Read the next entries for a destination and claim it while they are sent."""
-        with self.db.session() as s:
+        with self.db.transaction() as tx:
             now = ids.utcnow()
-            row = s.get(Destination, destination_id)
+            row = Destination.objects.filter(pk=destination_id).first()
             if row is None or row.status != ACTIVE or row.kind in DESK:
                 return None
             if row.retry_at is not None and row.retry_at > now:
                 return None
-            if destinations.head(s) <= row.cursor:
+            if destinations.head(tx) <= row.cursor:
                 return None
-            claimed = s.execute(
-                update(Destination)
-                .where(
-                    Destination.id == row.id,
-                    Destination.cursor == row.cursor,
-                    or_(Destination.retry_at.is_(None), Destination.retry_at <= now),
-                )
-                .values(retry_at=now + LEASE)
-                .execution_options(synchronize_session=False)
-            )
-            if claimed.rowcount != 1:
+            claimed = Destination.objects.filter(
+                Q(retry_at__isnull=True) | Q(retry_at__lte=now), id=row.id, cursor=row.cursor
+            ).update(retry_at=now + LEASE, updated_at=now)
+            if claimed != 1:
                 return None  # another replica has it
-            entries = s.scalars(
-                select(LedgerEntry)
-                .where(LedgerEntry.seq > row.cursor, ledger.in_chain())
-                .order_by(LedgerEntry.seq)
-                .limit(BATCH)
-            ).all()
+            entries = list(ledger.chain().filter(seq__gt=row.cursor).order_by("seq")[:BATCH])
             batch = _Batch(
                 id=row.id,
                 name=row.name,
@@ -182,13 +169,13 @@ class Delivery:
                     if found is not None:
                         batch.alerts.append((entry.seq, found))
             else:
-                batch.events = siem_events(s, entries, chosen, least)
+                batch.events = siem_events(tx, entries, chosen, least)
             return batch
 
     def _record(self, batch: _Batch, done: int, count: int, error: str | None) -> None:
-        with self.db.session() as s:
+        with self.db.transaction():
             now = ids.utcnow()
-            row = s.get(Destination, batch.id)
+            row = Destination.objects.filter(pk=batch.id).first()
             if row is None:
                 return
             failures = 0 if error is None else row.failures + 1
@@ -196,19 +183,15 @@ class Delivery:
                 "failures": failures,
                 "last_error": error[:1000] if error else None,
                 "retry_at": now + backoff(failures) if error else None,
+                "updated_at": now,
             }
             if done != batch.cursor:
                 values["cursor"] = done
             if count:
-                values["delivered"] = Destination.delivered + count
+                values["delivered"] = F("delivered") + count
                 values["delivered_at"] = now
             # Unless an administrator moved its cursor meanwhile (a replay): that wins.
-            s.execute(
-                update(Destination)
-                .where(Destination.id == batch.id, Destination.cursor == batch.cursor)
-                .values(**values)
-                .execution_options(synchronize_session=False)
-            )
+            Destination.objects.filter(id=batch.id, cursor=batch.cursor).update(**values)
 
     # -- sending ------------------------------------------------------------------
     def _send(self, batch: _Batch) -> tuple[int, int]:
@@ -293,8 +276,8 @@ class Delivery:
     def test(self, ref: str, *, actor: str) -> dict[str, Any]:
         """Send a destination a test event (SIEMs) or message (chats), now; the outcome is
         in the ledger."""
-        with self.db.session() as s:
-            row = destinations.get(s, ref)
+        with self.db.transaction() as tx:
+            row = destinations.get(tx, ref)
             target = _Batch(
                 id=row.id,
                 name=row.name,
@@ -327,13 +310,14 @@ class Delivery:
                     resource=f"destination/{target.name}",
                     reason="a test event: it changes nothing",
                     details={"test": True},
+                    hash=None,  # not in the ledger's chain
                 )
                 self._post_events(target, [ocsf.event(probe)])
         except (DeliveryError, SecretError) as exc:
             error = str(exc)
-        with self.db.session() as s:
+        with self.db.transaction() as tx:
             ledger.append(
-                s,
+                tx,
                 type="destination.tested",
                 actor=actor,
                 resource=f"destination/{target.name}",
@@ -353,13 +337,15 @@ class DeliveryPartial(Exception):
 
 
 def siem_events(
-    session: Session, entries: list[LedgerEntry], chosen: list[str], min_severity: str
+    tx: db.Where, entries: list[LedgerEntry], chosen: list[str], min_severity: str
 ) -> list[dict[str, Any]]:
     """The OCSF events a SIEM gets for these entries."""
     picked = [e for e in entries if destinations.category(e.type) in chosen]
     least = SEVERITIES.index(min_severity) + 1  # OCSF severity_id: info is 1
     return [
-        event
-        for event in ocsf.events(picked, agent_of=lambda agent_id: session.get(Agent, agent_id))
-        if event["severity_id"] >= least
+        event for event in ocsf.events(picked, agent_of=_agent) if event["severity_id"] >= least
     ]
+
+
+def _agent(agent_id: str) -> Agent | None:
+    return Agent.objects.filter(pk=agent_id).first()

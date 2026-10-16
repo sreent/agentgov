@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 
 from agentgov import cli
 from agentgov.config import Settings
-from agentgov.models import Agent, Finding, LedgerEntry
+from agentgov.db.models import Finding
+from agentgov.models import Agent, LedgerEntry
 from agentgov.opa import bundle
 from agentgov.registry import agents, blueprints, identity_issuers, manifests, posture
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
@@ -229,14 +230,14 @@ class TestAgents:
             blueprints.update(s, bp, {"require_workload_identity": True}, actor="a")
             posture.scan(s, settings)
         with rt.db.session() as s:
-            finding = s.scalar(select(Finding).where(Finding.type == "agent.no_workload_identity"))
+            finding = Finding.objects.filter(type="agent.no_workload_identity").first()
             assert finding is not None and finding.status == "open"
             assert "requires a workload identity" in finding.description
             identity = {"issuer": "cluster", "subject": SA}
             agents.update(s, agents.get(s, "plain"), {"workload_identity": identity}, actor="a")
             posture.scan(s, settings)
         with rt.db.session() as s:
-            finding = s.scalar(select(Finding).where(Finding.type == "agent.no_workload_identity"))
+            finding = Finding.objects.filter(type="agent.no_workload_identity").first()
             assert finding is not None and finding.status == "resolved"
 
     def test_posture_flags_issuers_out_of_sync(self, rt, settings, issuers) -> None:
@@ -249,10 +250,7 @@ class TestAgents:
             posture.scan(s, settings)
         with rt.db.session() as s:
             found = {
-                f.subject: f
-                for f in s.scalars(
-                    select(Finding).where(Finding.type == "identity_issuer.sync_error")
-                )
+                f.subject: f for f in Finding.objects.filter(type="identity_issuer.sync_error")
             }
             cluster, spire = identity_issuers.get(s, "cluster"), identity_issuers.get(s, "spire")
             assert found[cluster.id].severity == "medium"
@@ -264,9 +262,9 @@ class TestAgents:
                 issuer.save()
             posture.scan(s, settings)
         with rt.db.session() as s:
-            statuses = s.scalars(
-                select(Finding.status).where(Finding.type == "identity_issuer.sync_error")
-            ).all()
+            statuses = Finding.objects.filter(type="identity_issuer.sync_error").values_list(
+                "status", flat=True
+            )
             assert set(statuses) == {"resolved"}
 
     def test_opa_knows_how_each_agent_authenticates(self, rt, settings, issuers) -> None:

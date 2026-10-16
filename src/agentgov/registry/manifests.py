@@ -44,7 +44,8 @@ import yaml
 from sqlalchemy.orm import Session
 
 from agentgov.config import Settings
-from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions, FindingType
+from agentgov.db.models import FindingType
+from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
 from agentgov.registry import (
     access_packages,
     agents,
@@ -187,7 +188,7 @@ def _finding_type(session: Session, settings: Settings, spec: dict[str, Any], ac
         raise ValidationError(f"finding type {spec['name']}: spec takes only mode and severity")
     if "mode" not in spec and "severity" not in spec:
         raise ValidationError(f"finding type {spec['name']}: spec needs mode, severity or both")
-    row = session.get(FindingType, spec["name"])
+    row = FindingType.objects.filter(pk=spec["name"]).first()
     before = (row.mode, row.severity) if row is not None else None
     after = finding_types.configure(
         session, spec["name"], {k: spec[k] for k in ("mode", "severity") if k in spec}, actor=actor

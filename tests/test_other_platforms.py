@@ -211,9 +211,7 @@ def test_an_agent_read_in_part_says_what_was_missing(client, connector) -> None:
 def test_what_the_first_sync_finds_reaches_no_inbox(client, connector, settings) -> None:
     from dataclasses import replace
 
-    from sqlalchemy import select
-
-    from agentgov.models import Notification
+    from agentgov.db.models import Notification
     from agentgov.registry import findings, issues, teams
 
     rt = client.app.state.rt
@@ -239,7 +237,7 @@ def test_what_the_first_sync_finds_reaches_no_inbox(client, connector, settings)
     summary = to_review(client, "aws")
     with rt.db.session() as s:
         issues.route(s, mail)
-        sent = {n.finding_id for n in s.scalars(select(Notification))}
+        sent = set(Notification.objects.values_list("finding_id", flat=True))
         # Both are with the default team; only the new one is in its inbox, with the one
         # issue that says how many of the platform's agents are left to review.
         assert findings.get(s, first["id"]).level == "team"
@@ -252,7 +250,7 @@ def test_what_the_first_sync_finds_reaches_no_inbox(client, connector, settings)
     assert findings.BASELINE not in again["details"]
     with rt.db.session() as s:
         issues.route(s, mail)
-        assert first["id"] in {n.finding_id for n in s.scalars(select(Notification))}
+        assert Notification.objects.filter(finding_id=first["id"]).exists()
     # Or every first sync's findings are sent, if the deployment says so.
     with rt.db.session() as s:
         loud = replace(mail, issues_quiet_first_sync=False)

@@ -15,7 +15,8 @@ import pytest
 from sqlalchemy import select
 
 from agentgov import cli, telemetry
-from agentgov.models import Finding, LedgerEntry
+from agentgov.db.models import Finding
+from agentgov.models import LedgerEntry
 from agentgov.registry import agents, features, posture, reachability
 from agentgov.secops import ocsf
 from tests.conftest import ADMIN
@@ -44,9 +45,9 @@ def _mode(rt, mode: str) -> None:
 
 
 def _open(rt) -> dict[str, Finding]:
-    with rt.db.session() as s:
-        found = s.scalars(select(Finding).where(Finding.status == "open")).all()
-        return {f.type: f for f in found if f.type.startswith("agent.a2a_")}
+    with rt.db.transaction():
+        found = Finding.objects.filter(status="open", type__startswith="agent.a2a_")
+        return {f.type: f for f in found}
 
 
 class _Agent(httpcore.NetworkBackend):

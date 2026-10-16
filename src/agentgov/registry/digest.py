@@ -11,13 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock
-from agentgov.models import SEVERITIES, Agent, Finding, IntegrationState
+from agentgov.db.models import Agent, Finding, IntegrationState
+from agentgov.models import SEVERITIES
 from agentgov.registry import finding_types, issues
 
 STATE = "issues-digest"
@@ -54,13 +52,12 @@ def due(settings: Settings, now: datetime) -> str | None:
     return local.date().isoformat()
 
 
-def start(session: Session, day: str, now: datetime) -> dict[str, Any]:
+def start(tx: db.Where, day: str, now: datetime) -> dict[str, Any]:
     """The day's state: who has had it, and the tries for those who haven't. A new day
     starts afresh, remembering when the last one started."""
-    row = session.get(IntegrationState, STATE)
+    row = IntegrationState.objects.filter(pk=STATE).first()
     if row is None:
         row = IntegrationState(key=STATE, data={})
-        session.add(row)
     data = dict(row.data or {})
     if data.get("day") != day:
         data = {
@@ -72,6 +69,7 @@ def start(session: Session, day: str, now: datetime) -> dict[str, Any]:
             "next": {},
         }
         row.data, row.updated_at = data, now
+    row.save(force_insert=row._state.adding)
     return data
 
 
@@ -88,28 +86,23 @@ def waiting(state: dict[str, Any], target: tuple[str, str], now: datetime) -> bo
     return after is None or datetime.fromisoformat(after) <= now
 
 
-def gather(
-    session: Session, settings: Settings, since: datetime
-) -> dict[tuple[str, str], list[Line]]:
+def gather(tx: db.Where, settings: Settings, since: datetime) -> dict[tuple[str, str], list[Line]]:
     """For each address and chat: the open issues with it now (those at the step of their
     chain it is at), those waiting for someone to take them on first, the most severe
     first."""
-    directory = issues.Directory(session)
-    off = finding_types.off_types(session)
+    directory = issues.Directory(tx)
+    off = finding_types.off_types(tx)
     names: dict[str, str] = {}
     out: dict[tuple[str, str], list[Line]] = defaultdict(list)
-    open_issues = session.scalars(
-        select(Finding).where(Finding.status == "open", Finding.level.is_not(None))
-    )
-    for finding in open_issues:
+    for finding in Finding.objects.filter(status="open", level__isnull=False):
         if finding.type in off:
             continue
-        people = dict(issues.chain(session, finding, directory)).get(finding.level or "")
+        people = dict(issues.chain(tx, finding, directory)).get(finding.level or "")
         if not people:
             continue
         if finding.agent_id and finding.agent_id not in names:
-            agent = session.get(Agent, finding.agent_id)
-            names[finding.agent_id] = agent.name if agent else finding.subject
+            name = Agent.objects.filter(pk=finding.agent_id).values_list("name", flat=True).first()
+            names[finding.agent_id] = name or finding.subject
         line = Line(
             finding_id=finding.id,
             title=finding.title,
@@ -119,7 +112,7 @@ def gather(
             goes_further=None if finding.acknowledged_at else finding.escalate_at,
             new=finding.first_seen is not None and finding.first_seen > since,
         )
-        for target in issues.addresses(session, settings, people):
+        for target in issues.addresses(tx, settings, people):
             out[target].append(line)
     for lines in out.values():
         lines.sort(key=lambda x: (x.taken_on, -SEVERITIES.index(x.severity), x.title))
@@ -127,7 +120,7 @@ def gather(
 
 
 def record(
-    session: Session,
+    tx: db.Where,
     day: str,
     target: tuple[str, str],
     lines: list[Line],
@@ -140,10 +133,10 @@ def record(
     failed for good."""
     from agentgov.secops.delivery import backoff
 
-    row = session.get(IntegrationState, STATE)
+    row = IntegrationState.objects.filter(pk=STATE).first()
     if row is None:
         return
-    lock(session, row)
+    lock(tx, row)
     data = dict(row.data or {})
     if data.get("day") != day:
         return
@@ -157,20 +150,21 @@ def record(
     }
     if error is None:
         data["sent"] = [*data.get("sent", []), key]
-        ledger.append(session, type="issues.digest_sent", actor=issues.SYSTEM, details=details)
+        ledger.append(tx, type="issues.digest_sent", actor=issues.SYSTEM, details=details)
     else:
         tries = data.get("tries", {}).get(key, 0) + 1
         data["tries"] = {**data.get("tries", {}), key: tries}
         data["next"] = {**data.get("next", {}), key: ids.isoformat(now + backoff(tries))}
         if tries >= MAX_TRIES:
             ledger.append(
-                session,
+                tx,
                 type="issues.digest_failed",
                 actor=issues.SYSTEM,
                 severity="warning",
                 details={**details, "error": error[:500]},
             )
     row.data, row.updated_at = data, now
+    row.save()
 
 
 def since(state: dict[str, Any], now: datetime) -> datetime:

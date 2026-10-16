@@ -13,11 +13,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from django.db.models import Count
 
-from agentgov import ids, ledger
-from agentgov.models import SEVERITIES, Finding, FindingType
+from agentgov import db, ids, ledger
+from agentgov.db.models import Finding, FindingType
+from agentgov.models import SEVERITIES
 from agentgov.registry.errors import ValidationError
 
 ON, OFF = "on", "off"
@@ -31,22 +31,22 @@ ACTOR = "system:finding-types"
 TYPE = re.compile(r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)+$")
 
 
-def effective(session: Session, type_: str, severity: str) -> tuple[str, bool]:
+def effective(tx: db.Where, type_: str, severity: str) -> tuple[str, bool]:
     """The severity a finding of ``type_`` takes here, and whether its type is off."""
-    row = session.get(FindingType, type_)
+    row = FindingType.objects.filter(pk=type_).first()
     if row is None:
         return severity, False
     return row.severity or severity, row.mode == OFF and type_ not in ALWAYS_ON
 
 
-def off_types(session: Session) -> set[str]:
+def off_types(tx: db.Where) -> set[str]:
     """The types turned off here."""
-    off = set(session.scalars(select(FindingType.type).where(FindingType.mode == OFF)))
+    off = set(FindingType.objects.filter(mode=OFF).values_list("type", flat=True))
     return off - set(ALWAYS_ON)
 
 
 def suppress(finding: Finding, now: Any = None) -> None:
-    """Keep a finding dismissed, because its type is off."""
+    """Keep a finding dismissed, because its type is off (its caller saves it)."""
     finding.status = "dismissed"
     finding.resolved_at = now or ids.utcnow()
     finding.resolved_by = ACTOR
@@ -54,7 +54,7 @@ def suppress(finding: Finding, now: Any = None) -> None:
     finding.details = {**(finding.details or {}), SUPPRESSED: True}
 
 
-def configure(session: Session, type_: Any, data: Any, *, actor: str) -> dict[str, Any]:
+def configure(tx: db.Where, type_: Any, data: Any, *, actor: str) -> dict[str, Any]:
     """Turn a type on or off (``mode``), or set its severity (``severity``; null for the one
     its check gives). Turned off, its open findings are dismissed; on again, those its
     checks find again come back (:func:`agentgov.registry.findings.raise_finding`)."""
@@ -75,35 +75,33 @@ def configure(session: Session, type_: Any, data: Any, *, actor: str) -> dict[st
     severity = data.get("severity")
     if "severity" in data and severity is not None and severity not in SEVERITIES:
         raise ValidationError(f"severity is one of {', '.join(SEVERITIES)}, or null")
-    row = session.get(FindingType, type_) or FindingType(type=type_, mode=ON)
+    existing = FindingType.objects.filter(pk=type_).first()
+    row = existing or FindingType(type=type_, mode=ON)
     before = (row.mode, row.severity)
     if "mode" in data:
         row.mode = mode
     if "severity" in data:
         row.severity = severity
-    if (row.mode, row.severity) == before and session.get(FindingType, type_) is not None:
-        return to_dict(session, row)
+    if (row.mode, row.severity) == before and existing is not None:
+        return to_dict(tx, row)
     row.changed_by, row.changed_at = actor, ids.utcnow()
-    session.add(row)
-    session.flush()
+    row.save(force_insert=existing is None)
     dismissed = 0
     if before[0] != OFF and row.mode == OFF:
-        for finding in session.scalars(
-            select(Finding).where(Finding.type == type_, Finding.status == "open")
-        ):
+        for finding in list(Finding.objects.filter(type=type_, status="open")):
             suppress(finding)
-            findings.record(session, finding, "dismissed", actor, reason="its type is off")
+            finding.save()
+            findings.record(tx, finding, "dismissed", actor, reason="its type is off")
             dismissed += 1
     if row.severity is not None and row.severity != before[1]:
-        for finding in session.scalars(
-            select(Finding).where(Finding.type == type_, Finding.status == "open")
-        ):
+        for finding in list(Finding.objects.filter(type=type_, status="open")):
             finding.severity = row.severity
+            finding.save()
     weaker = row.mode == OFF and before[0] != OFF
     if row.severity and before[1] and SEVERITIES.index(row.severity) < SEVERITIES.index(before[1]):
         weaker = True
     ledger.append(
-        session,
+        tx,
         type="finding_type.changed",
         actor=actor,
         resource=f"finding-type/{type_}",
@@ -116,17 +114,16 @@ def configure(session: Session, type_: Any, data: Any, *, actor: str) -> dict[st
             "dismissed": dismissed,
         },
     )
-    return to_dict(session, row)
+    return to_dict(tx, row)
 
 
-def to_dict(session: Session, row: FindingType | None, type_: str | None = None) -> dict[str, Any]:
+def to_dict(tx: db.Where, row: FindingType | None, type_: str | None = None) -> dict[str, Any]:
     type_ = row.type if row is not None else str(type_)
     counts = dict(
-        session.execute(
-            select(Finding.status, func.count())
-            .where(Finding.type == type_)
-            .group_by(Finding.status)
-        ).all()
+        Finding.objects.filter(type=type_)
+        .values("status")
+        .annotate(n=Count("id"))
+        .values_list("status", "n")
     )
     return {
         "type": type_,
@@ -140,14 +137,14 @@ def to_dict(session: Session, row: FindingType | None, type_: str | None = None)
     }
 
 
-def listing(session: Session) -> list[dict[str, Any]]:
+def listing(tx: db.Where) -> list[dict[str, Any]]:
     """Every type AgentGov has raised findings of, and every type configured, with how many
     of its findings are open."""
-    rows = {r.type: r for r in session.scalars(select(FindingType))}
-    seen = set(session.scalars(select(Finding.type).distinct()))
-    return [to_dict(session, rows.get(t), t) for t in sorted(seen | set(rows))]
+    rows = {r.type: r for r in FindingType.objects.all()}
+    seen = set(Finding.objects.values_list("type", flat=True).distinct())
+    return [to_dict(tx, rows.get(t), t) for t in sorted(seen | set(rows))]
 
 
-def chosen(session: Session) -> list[FindingType]:
+def chosen(tx: db.Where) -> list[FindingType]:
     """The types configured here (for export)."""
-    return list(session.scalars(select(FindingType).order_by(FindingType.type)))
+    return list(FindingType.objects.order_by("type"))

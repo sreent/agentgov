@@ -26,7 +26,8 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.db import mark_changed
-from agentgov.models import Agent, AgentInstructions, Finding
+from agentgov.db.models import Finding
+from agentgov.models import Agent, AgentInstructions
 from agentgov.processor import detectors
 from agentgov.registry import features, finding_types, findings
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -266,7 +267,7 @@ def evaluate(session: Session, agent: Agent) -> Finding | None:
         return None
     found.sort(key=lambda i: rules.SEVERITIES.index(i["severity"]))
     fingerprint = sorted({f"{i['source']}:{i['rule']}" for i in found})
-    existing = session.scalar(select(Finding).where(Finding.key == key))
+    existing = findings.by_key(session, key)
     if (
         existing is not None
         and existing.status == "dismissed"

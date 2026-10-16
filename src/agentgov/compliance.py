@@ -25,11 +25,13 @@ from datetime import datetime, timedelta
 from tempfile import SpooledTemporaryFile
 from typing import Any
 
+from django.db.models import Count
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from agentgov import __version__, ids, ledger, transparency, witness
 from agentgov.config import LEDGER_MIN_DAYS, Settings
+from agentgov.db.models import Destination, Finding
 from agentgov.models import (
     ACTIVE,
     BLOCKED,
@@ -39,8 +41,6 @@ from agentgov.models import (
     AccessAssignment,
     Agent,
     Blueprint,
-    Destination,
-    Finding,
     IntegrationState,
     LedgerCheckpoint,
     LedgerEntry,
@@ -214,22 +214,15 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
     f.oldest = session.scalar(select(func.min(LedgerEntry.ts)).where(ledger.in_chain()))
     f.findings_open = Counter(
         dict(
-            session.execute(
-                select(Finding.severity, func.count())
-                .where(Finding.status == "open")
-                .group_by(Finding.severity)
-            ).all()
+            Finding.objects.filter(status="open")
+            .values("severity")
+            .annotate(n=Count("id"))
+            .values_list("severity", "n")
         )
     )
-    f.findings_raised = session.scalar(
-        select(func.count()).select_from(Finding).where(Finding.first_seen >= since)
-    )
-    f.findings_resolved = session.scalar(
-        select(func.count()).select_from(Finding).where(Finding.resolved_at >= since)
-    )
-    f.acknowledged = session.scalar(
-        select(func.count()).select_from(Finding).where(Finding.acknowledged_at >= since)
-    )
+    f.findings_raised = Finding.objects.filter(first_seen__gte=since).count()
+    f.findings_resolved = Finding.objects.filter(resolved_at__gte=since).count()
+    f.acknowledged = Finding.objects.filter(acknowledged_at__gte=since).count()
     teams = list(session.scalars(select(Team)))
     f.teams, f.default_team = len(teams), any(t.is_default for t in teams)
     f.blueprints = session.scalar(select(func.count()).select_from(Blueprint))
@@ -239,7 +232,7 @@ def facts(session: Session, settings: Settings, days: int, now: datetime | None 
         1 for s in servers if s.status == "approved" and s.trust_level != "verified"
     )
     f.providers = session.scalar(select(func.count()).select_from(ModelProvider))
-    destinations = list(session.scalars(select(Destination).where(Destination.status == "active")))
+    destinations = list(Destination.objects.filter(status="active"))
     f.destinations = len(destinations)
     f.failing_destinations = sum(1 for d in destinations if d.failures >= 3)
     f.rules_enforced = session.scalar(

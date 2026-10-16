@@ -13,7 +13,8 @@ from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import cli, ids
-from agentgov.models import Finding, LedgerEntry, Notification
+from agentgov.db.models import Finding, Notification
+from agentgov.models import LedgerEntry
 from agentgov.notify import MAX_ATTEMPTS, Notifier
 from agentgov.registry import destinations, features, findings, issues, teams
 from agentgov.registry.errors import Forbidden
@@ -134,7 +135,7 @@ class TestRouting:
             assert (f.level, f.assignees) == ("owner", ["team cx"])
             # Medium findings wait 72 hours at each step.
             assert f.escalate_at == now + timedelta(hours=72)
-            queued = s.scalars(select(Notification).where(Notification.finding_id == fid)).all()
+            queued = Notification.objects.filter(finding_id=fid)
             assert [(n.channel, n.recipient) for n in queued] == [("email", "cx-team@example.com")]
         with rt.db.session() as s:
             # Not yet due; then due.
@@ -162,7 +163,7 @@ class TestRouting:
             assert (f.level, f.acknowledged_by) == ("owner", "person:cx-team@example.com")
         # Without a mail server, nobody is emailed; the issue is in AgentGov.
         with rt.db.session() as s:
-            assert s.scalars(select(Notification)).all() == []
+            assert not Notification.objects.exists()
 
     def test_who_is_accountable_for_the_agent_doesnt_accept_its_risks(self, client, agent) -> None:
         """The people responsible for an agent acknowledge its issues; someone who isn't
@@ -258,7 +259,7 @@ class TestQuiet:
             assert issues.route(s, settings)["assigned"] == 2
             # Both are with its owner; only the high one is in their inbox.
             assert findings.get(s, medium).level == "owner"
-            sent = {n.finding_id for n in s.scalars(select(Notification))}
+            sent = set(Notification.objects.values_list("finding_id", flat=True))
             assert sent == {high_id}
         with rt.db.session() as s:  # the ledger is written as the transaction commits
             [quiet] = [
@@ -317,8 +318,8 @@ class TestStaleThreats:
     def test_the_issues_job_resolves_them(self, client, agent) -> None:
         fid = self._threat(client, agent["id"])
         rt = _rt(client)
-        with rt.db.session() as s:
-            findings.get(s, fid).last_seen = ids.utcnow() - timedelta(days=31)
+        with rt.db.transaction():
+            Finding.objects.filter(pk=fid).update(last_seen=ids.utcnow() - timedelta(days=31))
         assert rt.run_issues()["stale_threats"] == 1
 
 
@@ -407,12 +408,11 @@ class TestSending:
             issues.route(s, settings)
         assert notifier.run() == {"sent": 0, "failed": 1}
         for _ in range(MAX_ATTEMPTS - 1):
-            with rt.db.session() as s:
-                for n in s.scalars(select(Notification)):
-                    n.next_attempt_at = ids.utcnow()  # its backoff is over
+            with rt.db.transaction():
+                Notification.objects.update(next_attempt_at=ids.utcnow())  # its backoff is over
             notifier.run()
         with rt.db.session() as s:
-            (n,) = s.scalars(select(Notification)).all()
+            (n,) = Notification.objects.all()
             assert (n.status, n.attempts) == ("failed", MAX_ATTEMPTS)
             assert "connection refused" in (n.last_error or "")
             assert "finding.notification_failed" in _types(s)
@@ -551,6 +551,7 @@ class TestWhoSeesWhat:
         with _rt(client).db.session() as s:
             finding = findings.get(s, fid)
             finding.level = "sponsors"
+            finding.save()
             assert issues.may_act(s, finding, "alice.smith@contoso.onmicrosoft.com")
             assert issues.may_act(s, finding, "ALICE@example.com")
             assert not issues.may_act(s, finding, "mallory@contoso.onmicrosoft.com")
@@ -564,7 +565,7 @@ class TestWhoSeesWhat:
             features.set_mode(s, rt.settings, "issues", "off", actor="admin:test")
         assert "assigned" not in rt.run_issues()
         with rt.db.session() as s:
-            assert s.get(Finding, fid).level is None
+            assert findings.get(s, fid).level is None
             features.set_mode(s, rt.settings, "issues", "on", actor="admin:test")
         assert rt.run_issues()["assigned"] == 1
 

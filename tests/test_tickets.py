@@ -14,13 +14,12 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
-from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.models import Destination, Finding, Ticket
+from agentgov.db.models import Destination, Ticket
 from agentgov.registry import desks, destinations, findings, issues, teams
 from agentgov.registry.errors import ValidationError
 from agentgov.runtime import Runtime
@@ -489,9 +488,10 @@ class TestServiceNow:
         fid = issue(desks_client, agent["id"])
         run(desks_client)
         fake.snow["sys1"].update(state="2", assigned_to="Dana Lee")
-        with rt_of(desks_client).db.session() as s:
-            for t in s.scalars(select(Ticket)):
+        with rt_of(desks_client).db.transaction():
+            for t in Ticket.objects.all():
                 t.synced_at = ids.utcnow() - timedelta(minutes=10)
+                t.save()
         run(desks_client)
         f = desks_client.get(f"/v1/findings/{fid}", headers=ADMIN).json()
         assert f["acknowledged_by"] == "Dana Lee (itsm INC0000001)"
@@ -530,9 +530,10 @@ class TestServiceNow:
         rt = rt_of(desks_client)
 
         def read_again() -> None:
-            with rt.db.session() as s:
-                for t in s.scalars(select(Ticket)):
+            with rt.db.transaction():
+                for t in Ticket.objects.all():
                     t.synced_at = ids.utcnow() - timedelta(minutes=10)
+                    t.save()
             run(desks_client)
 
         read_again()
@@ -554,9 +555,10 @@ class TestServiceNow:
         fid = issue(desks_client, agent["id"], type_="platform.threat", category=findings.THREAT)
         run(desks_client)
         fake.snow["sys1"].update(state="7")
-        with rt_of(desks_client).db.session() as s:
-            for t in s.scalars(select(Ticket)):
+        with rt_of(desks_client).db.transaction():
+            for t in Ticket.objects.all():
                 t.synced_at = None
+                t.save()
         run(desks_client)
         f = desks_client.get(f"/v1/findings/{fid}", headers=ADMIN).json()
         assert (f["status"], f["resolved_by"]) == ("resolved", "itsm INC0000001")
@@ -641,10 +643,11 @@ class TestFailures:
         rt = rt_of(desks_client)
         rt.delivery.http = httpx.Client(transport=httpx.MockTransport(lost))
         assert run(desks_client)["desk_failures"] == 1
-        with rt.db.session() as s:
-            row = s.scalar(select(Destination).where(Destination.name == "itsm"))
+        with rt.db.transaction():
+            row = Destination.objects.get(name="itsm")
             assert "ReadTimeout" in (row.last_error or "") and row.retry_at is not None
             row.retry_at = None
+            row.save()
         rt.delivery.http = httpx.Client(transport=httpx.MockTransport(fake))
         assert run(desks_client)["tickets_opened"] == 1
         assert len(fake.snow) == 1 and ticket_of(desks_client, fid)["key"] == "INC0000001"
@@ -657,8 +660,8 @@ class TestFailures:
         fake.next.append(("POST", "/api/now", httpx.Response(429, headers={"Retry-After": "120"})))
         run(desks_client)
         rt = rt_of(desks_client)
-        with rt.db.session() as s:
-            row = s.scalar(select(Destination).where(Destination.name == "itsm"))
+        with rt.db.transaction():
+            row = Destination.objects.get(name="itsm")
             wait = (row.retry_at - ids.utcnow()).total_seconds()
             assert 100 < wait <= 120
         assert run(desks_client).get("tickets_opened", 0) == 0  # not yet
@@ -749,14 +752,15 @@ class TestJira:
         assert t["url"] == f"{JIRA}/browse/{made['key']}"
         # Taken on there.
         made["status"], made["assignee"] = ("In Progress", "indeterminate"), "Dana Lee"
-        with rt_of(desks_client).db.session() as s:
-            for row in s.scalars(select(Ticket)):
+        with rt_of(desks_client).db.transaction():
+            for row in Ticket.objects.all():
                 row.synced_at = None
+                row.save()
         run(desks_client)
         assert desks_client.get(f"/v1/findings/{fid}", headers=ADMIN).json()["acknowledged_at"]
         # Dismissed in AgentGov: resolved there, with an internal comment.
         with rt_of(desks_client).db.session() as s:
-            findings.dismiss(s, s.get(Finding, fid), actor="admin:ada", reason="a test agent")
+            findings.dismiss(s, findings.get(s, fid), actor="admin:ada", reason="a test agent")
         run(desks_client)
         assert made["status"] == ("Done", "done")
         (comment,) = made["comments"]
@@ -873,7 +877,7 @@ class TestWhatOthersWrote:
             )
         run(desks_client)
         with rt.db.session() as s:
-            findings.dismiss(s, s.get(Finding, fid), actor="admin:ada", reason=written)
+            findings.dismiss(s, findings.get(s, fid), actor="admin:ada", reason=written)
         run(desks_client)
         record = fake.snow["sys1"]
         texts = [
@@ -914,9 +918,10 @@ class TestFreshservice:
         assert ticket_of(desks_client, fid)["key"] == f"#{made['id']}"
         made["responder_id"] = 7
         with rt_of(desks_client).db.session() as s:
-            for row in s.scalars(select(Ticket)):
+            for row in Ticket.objects.all():
                 row.synced_at = None
-            f = s.get(Finding, fid)
+                row.save()
+            f = findings.get(s, fid)
             issues.accept(
                 s,
                 f,

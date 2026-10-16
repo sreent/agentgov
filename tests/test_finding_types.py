@@ -11,7 +11,8 @@ from sqlalchemy import select
 from starlette.testclient import TestClient
 
 from agentgov import cli, ids
-from agentgov.models import Finding, FindingType, LedgerEntry
+from agentgov.db.models import Finding, FindingType
+from agentgov.models import LedgerEntry
 from agentgov.registry import finding_types, findings, issues, teams
 from tests.conftest import ADMIN, seed
 from tests.test_api import key
@@ -112,8 +113,8 @@ class TestOff:
         resp = put(client, type_, {"mode": "off"})
         assert resp.status_code == 422 and "can't be turned off" in resp.text
         # One turned off before this, in the database: it still raises its issues.
-        with _rt(client).db.session() as s:
-            s.add(FindingType(type=type_, mode="off", changed_by="admin:before"))
+        with _rt(client).db.transaction():
+            FindingType.objects.create(type=type_, mode="off", changed_by="admin:before")
         _, new, state, _ = raise_(client, "ledger", type_=type_)
         assert (new, state) == (True, "open")
 
@@ -262,5 +263,5 @@ spec: {severity: low}
         assert out.strip() == f"finding-type/{TYPE}: on, its checks' severity"
         result = runner.invoke(cli.app, ["findings", "type", TYPE])
         assert result.exit_code != 0 and "give --on, --off or --severity" in result.output
-        with _rt(client).db.session() as s:
-            assert s.scalar(select(Finding.status).where(Finding.type == TYPE)) == "dismissed"
+        with _rt(client).db.transaction():
+            assert Finding.objects.get(type=TYPE).status == "dismissed"

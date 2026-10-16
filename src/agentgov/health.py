@@ -26,10 +26,10 @@ from sqlalchemy.orm import Session
 
 from agentgov import ids, timestamping
 from agentgov.config import FAILURE_SETTINGS, Settings
+from agentgov.db.models import Destination
 from agentgov.models import (
     ApprovedConnector,
     ComponentReport,
-    Destination,
     IdentityIssuer,
     PlatformSync,
     Team,
@@ -261,16 +261,10 @@ def situation(session: Session, settings: Settings, rt: Any) -> Situation:
         processors=reports(session),
         connections={row["key"]: row for row in connections.state(session, settings)},
         platforms=rows,
-        destinations=len(list(session.scalars(select(Destination.id)))),
-        people_channels=len(
-            list(
-                session.scalars(
-                    select(Destination.id).where(
-                        Destination.kind.in_((*destinations.CHAT, *destinations.DESK))
-                    )
-                )
-            )
-        ),
+        destinations=Destination.objects.count(),
+        people_channels=Destination.objects.filter(
+            kind__in=(*destinations.CHAT, *destinations.DESK)
+        ).count(),
         approved_connectors=len(list(session.scalars(select(ApprovedConnector.connector_id)))),
         default_team=session.scalar(select(Team.name).where(Team.is_default.is_(True))) is not None,
         gateway_issuers=[

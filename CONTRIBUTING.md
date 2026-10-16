@@ -213,8 +213,9 @@ transaction, and takes the transaction or, from a module still on SQLAlchemy, it
 (`agentgov.db.Where`); it calls those with `db.orm(tx)`. It hands them none of Django's
 objects to change: SQLAlchemy wouldn't write what they change. A model's `save()` writes
 the fields that changed since the row was read, as SQLAlchemy did, so set a JSON field to
-a new value rather than changing the one there. The module's tests move with it, onto
-`db.transaction()` and Django's models.
+a new value rather than changing the one there; and a change is saved, or it is lost. A part
+of the transaction that rolls back on its own is the transaction's `savepoint()`. The
+module's tests move with it, onto `db.transaction()` and Django's models.
 
 ## Pull requests
 
