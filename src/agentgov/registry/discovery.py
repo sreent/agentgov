@@ -13,12 +13,14 @@ import re
 from datetime import datetime
 from typing import Any
 
+from django.db.models import F
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.db import mark_changed
-from agentgov.models import DISCOVERED, Agent, AgentActivity, IdentityIssuer
+from agentgov.db.models import AgentActivity
+from agentgov.models import DISCOVERED, Agent, IdentityIssuer
 from agentgov.registry import findings, risk
 
 
@@ -162,7 +164,7 @@ def observe(
 
 
 def record_activity(
-    session: Session,
+    tx: db.Where,
     agent_id: str,
     *,
     when: datetime | None = None,
@@ -172,24 +174,18 @@ def record_activity(
     input_tokens: int = 0,
     output_tokens: int = 0,
 ) -> None:
+    """Add to the agent's counters for the day."""
     day = (when or ids.utcnow()).strftime("%Y-%m-%d")
-    row = session.get(AgentActivity, (agent_id, day))
-    if row is None:
-        row = AgentActivity(
-            agent_id=agent_id,
-            day=day,
-            tool_calls=0,
-            denied=0,
-            model_calls=0,
-            input_tokens=0,
-            output_tokens=0,
-        )
-        session.add(row)
-    row.tool_calls += tool_calls
-    row.denied += denied
-    row.model_calls += model_calls
-    row.input_tokens += input_tokens
-    row.output_tokens += output_tokens
+    counts = {
+        "tool_calls": tool_calls,
+        "denied": denied,
+        "model_calls": model_calls,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    added = {name: F(name) + n for name, n in counts.items() if n}
+    if added and not AgentActivity.objects.filter(agent_id=agent_id, day=day).update(**added):
+        AgentActivity.objects.create(agent_id=agent_id, day=day, **counts)
 
 
 def import_scan(

@@ -105,7 +105,10 @@ The data layer:
   `start`, and the state that connections, threat detection, posture scans and the OPA
   bundle keep); what platforms report of their agents and how each sync went, the connector
   allowlist, access packages and their assignments, and management rules and the agents they
-  match (`agentgov.registry.platforms`, `connector_policy`, `access_packages`, `rules`).
+  match (`agentgov.registry.platforms`, `connector_policy`, `access_packages`, `rules`);
+  approval requests, risk signals, agents' daily activity and model usage, and their
+  instructions (`agentgov.registry.approvals`, `risk`, `model_usage`, `instructions`, and
+  `discovery`'s counters, which add up in the database rather than in memory).
   Blueprints move with agents, which name them. Each read gives
   another object, where SQLAlchemy's session gave the same one: a row is locked and read
   afresh before it is changed (`agentgov.db.lock`, on SQLite too), and what was changed

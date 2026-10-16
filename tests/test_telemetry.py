@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
-
 from agentgov import telemetry
-from agentgov.db.models import Finding
-from agentgov.models import AgentActivity
+from agentgov.db.models import AgentActivity, Finding
 from agentgov.registry import agents, blueprints
 
 
@@ -105,7 +102,7 @@ def test_registered_agent_activity_and_ungranted_tools(rt, settings) -> None:
         "around_the_gateway": 0,
     }
     with rt.db.session() as s:
-        activity = s.scalars(select(AgentActivity)).one()
+        activity = AgentActivity.objects.get()
         assert (activity.tool_calls, activity.model_calls, activity.input_tokens) == (2, 1, 120)
         assert agents.get(s, "bot").models == ["gpt-5"]
         finding = Finding.objects.get(type="agent.ungranted_tool_use")

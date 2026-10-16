@@ -17,13 +17,11 @@ import json
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from agentgov import ids, ledger
+from agentgov import db, ids, ledger
 from agentgov.db import lock
+from agentgov.db.models import ApprovalRequest
 from agentgov.identity import people
-from agentgov.models import Agent, ApprovalRequest
+from agentgov.models import Agent
 from agentgov.registry import features, risk
 from agentgov.registry.errors import InvalidTransition, NotFound
 
@@ -43,30 +41,26 @@ def arguments_hash(arguments: Any) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _expire_stale(session: Session) -> None:
-    now = ids.utcnow()
-    for req in session.scalars(
-        select(ApprovalRequest).where(
-            ApprovalRequest.status.in_((PENDING, APPROVED)), ApprovalRequest.expires_at < now
-        )
-    ):
-        req.status = EXPIRED
+def _expire_stale() -> None:
+    ApprovalRequest.objects.filter(
+        status__in=(PENDING, APPROVED), expires_at__lt=ids.utcnow()
+    ).update(status=EXPIRED)
 
 
-def deciders_for(session: Session, agent: Agent, person: dict[str, Any] | None) -> str:
+def deciders_for(tx: db.Where, agent: Agent, person: dict[str, Any] | None) -> str:
     """Who decides a request the agent makes, for the person or on its own."""
     if (
         person
         and agent.blueprint is not None
         and agent.blueprint.approvals_by == PERSON
-        and features.is_on(session, "approvals-by-person")
+        and features.is_on(tx, "approvals-by-person")
     ):
         return PERSON
     return APPROVERS
 
 
 def check_or_request(
-    session: Session,
+    tx: db.Where,
     *,
     agent: Agent,
     action: str,
@@ -86,25 +80,22 @@ def check_or_request(
 
     A call for a person matches only requests made for that person.
     """
-    _expire_stale(session)
+    _expire_stale()
     digest = arguments_hash(arguments)
     person_id = person.get("id") if person else None
-    candidates = session.scalars(
-        select(ApprovalRequest)
-        .where(
-            ApprovalRequest.agent_id == agent.id,
-            ApprovalRequest.action == action,
-            ApprovalRequest.resource == resource,
-            ApprovalRequest.arguments_hash == digest,
-            ApprovalRequest.status.in_((PENDING, APPROVED, DENIED)),
-            ApprovalRequest.on_behalf_of_id == person_id
-            if person_id
-            else ApprovalRequest.on_behalf_of_id.is_(None),
+    candidates = list(
+        ApprovalRequest.objects.filter(
+            agent_id=agent.id,
+            action=action,
+            resource=resource,
+            arguments_hash=digest,
+            status__in=(PENDING, APPROVED, DENIED),
+            on_behalf_of_id=person_id or None,
         )
-        .order_by(ApprovalRequest.requested_at.desc())
+        .order_by("-requested_at")
         # Two identical calls at once: one of them uses an approval.
-        .with_for_update()
-    ).all()
+        .select_for_update()
+    )
     for status in (APPROVED, PENDING, DENIED):
         match = next((r for r in candidates if r.status == status), None)
         if match is None:
@@ -112,8 +103,9 @@ def check_or_request(
         if status == APPROVED:
             match.status = USED
             match.used_at = ids.utcnow()
+            match.save()
             ledger.append(
-                session,
+                tx,
                 type="approval.used",
                 actor=f"agent:{agent.name}",
                 agent=agent,
@@ -140,12 +132,11 @@ def check_or_request(
         expires_at=ids.utcnow() + timedelta(seconds=ttl_seconds),
         on_behalf_of=people.name_of(person),
         on_behalf_of_id=person_id,
-        deciders=deciders_for(session, agent, person),
+        deciders=deciders_for(tx, agent, person),
     )
-    session.add(req)
-    session.flush()
+    req.save(force_insert=True)
     ledger.append(
-        session,
+        tx,
         type="approval.requested",
         actor=f"agent:{agent.name}",
         agent=agent,
@@ -159,45 +150,40 @@ def check_or_request(
     return "created", req
 
 
-def get(session: Session, approval_id: str) -> ApprovalRequest:
-    req = session.get(ApprovalRequest, approval_id)
+def get(tx: db.Where, approval_id: str) -> ApprovalRequest:
+    req = ApprovalRequest.objects.filter(pk=approval_id).first()
     if req is None:
         raise NotFound(f"approval {approval_id} not found")
     return req
 
 
 def list_requests(
-    session: Session,
+    tx: db.Where,
     status: str | None = None,
     limit: int = 200,
     agent_ids: set[str] | None = None,
 ) -> list[ApprovalRequest]:
     """The newest requests; with ``agent_ids``, those agents' only."""
-    _expire_stale(session)
-    stmt = select(ApprovalRequest).order_by(ApprovalRequest.requested_at.desc()).limit(limit)
+    _expire_stale()
+    found = ApprovalRequest.objects.order_by("-requested_at")
     if status:
-        stmt = stmt.where(ApprovalRequest.status == status)
+        found = found.filter(status=status)
     if agent_ids is not None:
-        stmt = stmt.where(ApprovalRequest.agent_id.in_(agent_ids))
-    return list(session.scalars(stmt))
+        found = found.filter(agent_id__in=agent_ids)
+    return list(found[:limit])
 
 
 def list_for_person(
-    session: Session, subject: str | None, status: str | None = None, limit: int = 200
+    tx: db.Where, subject: str | None, status: str | None = None, limit: int = 200
 ) -> list[ApprovalRequest]:
     """The requests that wait for this person (or did), by their ID."""
     if not subject:
         return []
-    _expire_stale(session)
-    stmt = (
-        select(ApprovalRequest)
-        .where(ApprovalRequest.deciders == PERSON, ApprovalRequest.on_behalf_of_id == subject)
-        .order_by(ApprovalRequest.requested_at.desc())
-        .limit(limit)
-    )
+    _expire_stale()
+    found = ApprovalRequest.objects.filter(deciders=PERSON, on_behalf_of_id=subject)
     if status:
-        stmt = stmt.where(ApprovalRequest.status == status)
-    return list(session.scalars(stmt))
+        found = found.filter(status=status)
+    return list(found.order_by("-requested_at")[:limit])
 
 
 def may_decide(
@@ -214,18 +200,19 @@ def may_decide(
 
 
 def decide(
-    session: Session, req: ApprovalRequest, *, approve: bool, actor: str, note: str | None = None
+    tx: db.Where, req: ApprovalRequest, *, approve: bool, actor: str, note: str | None = None
 ) -> ApprovalRequest:
-    _expire_stale(session)
-    lock(session, req)
+    _expire_stale()
+    lock(tx, req)
     if req.status != PENDING:
         raise InvalidTransition(f"approval {req.id} is {req.status}, not pending")
     req.status = APPROVED if approve else DENIED
     req.decided_by = actor
     req.decided_at = ids.utcnow()
     req.decision_note = note
+    req.save()
     ledger.append(
-        session,
+        tx,
         type="approval.approved" if approve else "approval.denied",
         actor=actor,
         agent_id=req.agent_id,
@@ -238,27 +225,25 @@ def decide(
         on_behalf_of=req.on_behalf_of,
     )
     if not approve:
-        risk.add_signal(session, req.agent_id, "approval_denied", req.resource)
+        risk.add_signal(tx, req.agent_id, "approval_denied", req.resource)
     return req
 
 
-def cancel_for_agent(session: Session, agent: Agent, *, actor: str, reason: str) -> int:
+def cancel_for_agent(tx: db.Where, agent: Agent, *, actor: str, reason: str) -> int:
     """Withdraw an agent's open requests and unused approvals (it was blocked or deleted)."""
-    open_requests = session.scalars(
-        select(ApprovalRequest)
-        .where(
-            ApprovalRequest.agent_id == agent.id,
-            ApprovalRequest.status.in_((PENDING, APPROVED)),
-        )
-        .with_for_update()
-    ).all()
+    open_requests = list(
+        ApprovalRequest.objects.filter(agent_id=agent.id, status__in=(PENDING, APPROVED))
+        .order_by("requested_at")
+        .select_for_update()
+    )
     for req in open_requests:
         req.status = CANCELLED
         req.decided_by = actor
         req.decided_at = ids.utcnow()
         req.decision_note = reason
+        req.save()
         ledger.append(
-            session,
+            tx,
             type="approval.cancelled",
             actor=actor,
             agent=agent,

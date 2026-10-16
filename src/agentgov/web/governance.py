@@ -11,7 +11,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from django.db.models import Count
+from django.db.models import Count, Sum
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 from ninja import Body
 from sqlalchemy import func, select
@@ -19,13 +19,11 @@ from sqlalchemy import func, select
 from agentgov import ids, ledger, witness
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal
-from agentgov.db.models import Finding
+from agentgov.db.models import AgentActivity, ApprovalRequest, Finding
 from agentgov.models import (
     DELETED,
     DISCOVERED,
     Agent,
-    AgentActivity,
-    ApprovalRequest,
     LedgerEntry,
     ToolServer,
 )
@@ -617,22 +615,15 @@ def overview(request: HttpRequest) -> dict[str, Any]:
             .annotate(n=Count("id"))
             .values_list("severity", "n")
         )
-        pending_approvals = s.scalar(
-            select(func.count())
-            .select_from(ApprovalRequest)
-            .where(ApprovalRequest.status == "pending")
-        )
+        pending_approvals = ApprovalRequest.objects.filter(status="pending").count()
         since_day = (now - timedelta(days=13)).strftime("%Y-%m-%d")
-        activity_rows = s.execute(
-            select(
-                AgentActivity.day,
-                func.sum(AgentActivity.tool_calls),
-                func.sum(AgentActivity.denied),
-                func.sum(AgentActivity.model_calls),
-            )
-            .where(AgentActivity.day >= since_day)
-            .group_by(AgentActivity.day)
-        ).all()
+        activity_rows = (
+            AgentActivity.objects.filter(day__gte=since_day)
+            .values("day")
+            .annotate(t=Sum("tool_calls"), n=Sum("denied"), m=Sum("model_calls"))
+            .order_by()
+            .values_list("day", "t", "n", "m")
+        )
         by_day = {d: (int(t or 0), int(n or 0), int(m or 0)) for d, t, n, m in activity_rows}
         days = [(now - timedelta(days=13 - i)).strftime("%Y-%m-%d") for i in range(14)]
         decisions = s.execute(

@@ -44,8 +44,8 @@ import yaml
 from sqlalchemy.orm import Session
 
 from agentgov.config import Settings
-from agentgov.db.models import FindingType
-from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions
+from agentgov.db.models import AgentInstructions, FindingType
+from agentgov.models import ACTIVE, BLOCKED, PENDING, Agent
 from agentgov.registry import (
     access_packages,
     agents,
@@ -327,8 +327,11 @@ def _instructions(
     """Apply ``spec.instructions``; returns whether they changed."""
     if text is None:
         return False
-    before = session.get(AgentInstructions, f"{agent.id}:registered")
-    digest = before.sha256 if before is not None else None
+    digest = (
+        AgentInstructions.objects.filter(pk=f"{agent.id}:registered")
+        .values_list("sha256", flat=True)
+        .first()
+    )
     row = instructions.report(
         session,
         agent,
@@ -481,7 +484,7 @@ def export(session: Session) -> list[dict[str, Any]]:
             spec["classification"] = {
                 k: agent.classification.get(k, "") for k in classification.FIELDS
             }
-        registered = session.get(AgentInstructions, f"{agent.id}:registered")
+        registered = AgentInstructions.objects.filter(pk=f"{agent.id}:registered").first()
         if registered is not None and not registered.truncated:
             spec["instructions"] = registered.text
         docs.append(_doc("Agent", agent.name, spec))

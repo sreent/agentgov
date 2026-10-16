@@ -12,12 +12,11 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from django.db.models import Count
 
-from agentgov import ids
-from agentgov.db.models import Finding
-from agentgov.models import DISCOVERED, Agent, RiskSignal
+from agentgov import db, ids
+from agentgov.db.models import Finding, RiskSignal
+from agentgov.models import DISCOVERED, Agent
 from agentgov.registry import validation
 
 TIER_POINTS = {"minimal": 0, "low": 5, "medium": 10, "high": 25, "critical": 40}
@@ -79,11 +78,13 @@ class RiskResult:
     factors: list[dict[str, Any]] = field(default_factory=list)
 
 
-def add_signal(session: Session, agent_id: str, kind: str, detail: str | None = None) -> None:
-    session.add(RiskSignal(id=ids.new_id(ids.SIGNAL), agent_id=agent_id, kind=kind, detail=detail))
+def add_signal(tx: db.Where, agent_id: str, kind: str, detail: str | None = None) -> None:
+    RiskSignal.objects.create(
+        id=ids.new_id(ids.SIGNAL), agent_id=agent_id, kind=kind, detail=detail
+    )
 
 
-def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
+def evaluate(tx: db.Where, agent: Agent, window_hours: int) -> RiskResult:
     factors: list[dict[str, Any]] = []
 
     def factor(name: str, points: int, detail: str = "") -> None:
@@ -111,11 +112,13 @@ def evaluate(session: Session, agent: Agent, window_hours: int) -> RiskResult:
         factor("Unrestricted tool permissions (*/*)", 15)
 
     since = ids.utcnow() - timedelta(hours=window_hours)
-    rows = session.execute(
-        select(RiskSignal.kind, func.count())
-        .where(RiskSignal.agent_id == agent.id, RiskSignal.ts >= since)
-        .group_by(RiskSignal.kind)
-    ).all()
+    rows = (
+        RiskSignal.objects.filter(agent_id=agent.id, ts__gte=since)
+        .values("kind")
+        .annotate(n=Count("id"))
+        .order_by("kind")
+        .values_list("kind", "n")
+    )
     for kind, count in rows:
         per, cap = SIGNAL_WEIGHTS.get(kind, (2, 10))
         factor(SIGNAL_LABELS.get(kind, kind), min(cap, per * count), f"{count} in {window_hours}h")

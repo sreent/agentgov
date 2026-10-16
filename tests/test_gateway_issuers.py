@@ -19,9 +19,10 @@ from starlette.testclient import TestClient
 
 from agentgov.api.app import create_app
 from agentgov.config import Settings
+from agentgov.db.models import ModelUsage
 from agentgov.gateway import render, to_yaml
 from agentgov.identity import issuer_keys
-from agentgov.models import DISCOVERED, Agent, IdentityIssuer, ModelUsage
+from agentgov.models import DISCOVERED, Agent, IdentityIssuer
 from agentgov.opa import bundle
 from agentgov.processor.a2a_answers import _identity as answer_identity
 from agentgov.processor.control_plane import DecisionRecorder
@@ -692,7 +693,7 @@ class TestDiscoveryAndUsage:
                 s, logs(by(CLUSTER_URL, SA), by(CLUSTER_URL, "sa:other"), by(ENTRA_URL, SA))
             )
             assert (stats["model_calls"], stats["unidentified"]) == (3, 2)
-            used = s.scalars(select(ModelUsage).where(ModelUsage.agent_id == bot_id)).all()
+            used = ModelUsage.objects.filter(agent_id=bot_id)
             assert sum(u.input_tokens for u in used) == 100
 
 

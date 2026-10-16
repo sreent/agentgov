@@ -35,8 +35,7 @@ from agentgov import ids, migrations
 from agentgov.api.app import api_routes, create_app
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.db.models import AdminSession, ApiKey
-from agentgov.models import ApprovalRequest
+from agentgov.db.models import AdminSession, ApiKey, ApprovalRequest
 from agentgov.registry import findings, issues, model_usage
 from agentgov.runtime import Runtime
 from tests.test_models import access_log, logs
@@ -212,18 +211,16 @@ def seed(client: TestClient, provider: FakeProvider) -> Seeded:
             )
             seeded.finding[team] = raised.id
             approval = f"apr_{team}_matrix"
-            s.add(
-                ApprovalRequest(
-                    id=approval,
-                    agent_id=made["id"],
-                    agent_name=f"{team}-bot",
-                    action="tools/call",
-                    resource="crm/update",
-                    arguments_hash="h",
-                    status="pending",
-                    requested_at=now,
-                    expires_at=now + timedelta(hours=1),
-                )
+            ApprovalRequest.objects.create(
+                id=approval,
+                agent_id=made["id"],
+                agent_name=f"{team}-bot",
+                action="tools/call",
+                resource="crm/update",
+                arguments_hash="h",
+                status="pending",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
             )
             seeded.approval[team] = approval
     # Each issue to its agent's owner and sponsor (as the issues job does); and each agent's

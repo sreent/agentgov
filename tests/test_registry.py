@@ -369,6 +369,7 @@ class TestApprovals:
                 ttl_seconds=60,
             )
             assert used == "approved"
+            req.refresh_from_db()
             assert req.status == "used"
             # Single use: the next identical call needs a new approval.
             nxt, _ = approvals.check_or_request(
@@ -448,6 +449,7 @@ class TestApprovals:
                 ttl_seconds=60,
             )
             req.expires_at = ids.utcnow() - timedelta(seconds=1)
+            req.save()
             with pytest.raises(InvalidTransition):
                 approvals.decide(s, req, approve=True, actor="bob")
             assert req.status == "expired"
@@ -473,7 +475,7 @@ class TestRiskAndPosture:
     ) -> None:
         """A threat when what the agent did adds to its risk; otherwise about how it is set
         up. Either way it resolves when the risk is back below high."""
-        from agentgov.models import RiskSignal
+        from agentgov.db.models import RiskSignal
 
         with rt.db.session() as s:
             _blueprint(s)
@@ -485,8 +487,7 @@ class TestRiskAndPosture:
             assert agents.refresh_risk(s, settings, agent).level in ("high", "critical")
             high = Finding.objects.get(key=f"agent.high_risk:{agent.id}")
             assert (high.status, high.category) == ("open", findings.THREAT)
-            s.query(RiskSignal).filter_by(agent_id=agent.id).delete()
-            s.flush()
+            RiskSignal.objects.filter(agent_id=agent.id).delete()
             assert agents.refresh_risk(s, settings, agent).level not in ("high", "critical")
             high.refresh_from_db()
             assert (high.status, high.resolved_by) == ("resolved", "system:risk")

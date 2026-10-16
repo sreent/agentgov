@@ -210,10 +210,10 @@ class TestApi:
         rt = client.app.state.rt
         client.post("/v1/agents/support-bot/delete", headers=ADMIN).raise_for_status()
         client.delete("/v1/agents/support-bot", headers=ADMIN).raise_for_status()
-        from agentgov.models import AgentInstructions
+        from agentgov.db.models import AgentInstructions
 
-        with rt.db.session() as s:
-            assert s.query(AgentInstructions).count() == 0
+        with rt.db.transaction():
+            assert AgentInstructions.objects.count() == 0
 
     def test_credentials_are_redacted_before_storing(self, client) -> None:
         seed(client)

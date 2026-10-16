@@ -9,8 +9,8 @@ import pytest
 from sqlalchemy import select
 
 from agentgov import cli, ids
-from agentgov.db.models import Finding
-from agentgov.models import Agent, LedgerEntry, ModelUsage
+from agentgov.db.models import Finding, ModelUsage
+from agentgov.models import Agent, LedgerEntry
 from agentgov.opa import bundle as opa_bundle
 from agentgov.registry import agents, blueprints, decisions, manifests, model_providers, model_usage
 from agentgov.registry.errors import Conflict, InvalidTransition, ValidationError
@@ -254,10 +254,13 @@ class TestMetering:
             )
         assert stats == {"records": 4, "model_calls": 3, "unidentified": 1}
         with rt.db.session() as s:
-            [row] = s.scalars(select(ModelUsage).where(ModelUsage.agent_id == bot)).all()
+            [row] = ModelUsage.objects.filter(agent_id=bot)
             assert (row.calls, row.refused, row.input_tokens, row.output_tokens) == (2, 1, 100, 20)
             assert row.cost_usd == pytest.approx((100 * 2.5 + 20 * 10) / 1e6)
-            assert s.get(ModelUsage, ("", model_usage.today(), "openai", "gpt-4o-mini")).calls == 1
+            unidentified = ModelUsage.objects.get(
+                agent_id="", day=model_usage.today(), provider="openai", model="gpt-4o-mini"
+            )
+            assert unidentified.calls == 1
             assert model_usage.tokens_used(s) == {bot: 120}
             assert s.get(Agent, bot).last_seen_at is not None
 

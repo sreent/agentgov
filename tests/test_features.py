@@ -12,9 +12,9 @@ from starlette.testclient import TestClient
 from agentgov import cli, telemetry
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.db.models import Finding
+from agentgov.db.models import AgentInstructions, Finding
 from agentgov.gateway import GatewayConfigWriter
-from agentgov.models import Agent, AgentInstructions, LedgerEntry
+from agentgov.models import Agent, LedgerEntry
 from agentgov.opa import bundle as opa_bundle
 from agentgov.registry import agents, decisions, discovery, features, instructions, manifests
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -256,8 +256,8 @@ class TestWhereModesApply:
         with rt.db.session() as s:
             features.set_mode(s, settings, "instruction-checks", "on", actor="a")
         assert rt.check_unchecked_instructions() == 1
-        with rt.db.session() as s:
-            row = s.scalars(select(AgentInstructions)).one()
+        with rt.db.transaction():
+            row = AgentInstructions.objects.get()
             assert row.issues and row.classifier_state == "off"
             assert Finding.objects.get(type=instructions.FINDING)
 

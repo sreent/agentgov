@@ -6,13 +6,13 @@ import fnmatch
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.db.models import AccessAssignment
+from agentgov.db.models import AccessAssignment, AgentInstructions
 from agentgov.models import (
     ACTIVE,
     AGENT_STATUSES,
@@ -21,7 +21,6 @@ from agentgov.models import (
     DISCOVERED,
     PENDING,
     Agent,
-    AgentInstructions,
 )
 from agentgov.registry import (
     approvals,
@@ -518,7 +517,7 @@ def purge(session: Session, agent: Agent, *, actor: str) -> None:
     ledger.append(session, type="agent.purged", actor=actor, agent=agent, severity="warning")
     # Its instructions and access packages go too: the ledger keeps their history (and the
     # instructions' hashes, not their text).
-    session.execute(delete(AgentInstructions).where(AgentInstructions.agent_id == agent.id))
+    AgentInstructions.objects.filter(agent_id=agent.id).delete()
     AccessAssignment.objects.filter(agent_id=agent.id).delete()
     session.delete(agent)
     mark_changed(session, "agents")

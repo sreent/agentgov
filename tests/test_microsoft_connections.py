@@ -10,14 +10,13 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from django.db.models import Sum
 from starlette.testclient import TestClient
 
 from agentgov import cli, ids
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.db.models import IntegrationState
-from agentgov.models import AgentActivity
+from agentgov.db.models import AgentActivity, IntegrationState
 from agentgov.registry import platforms
 from agentgov.runtime import Runtime
 from tests.conftest import ADMIN
@@ -416,12 +415,10 @@ class TestPurviewAudit:
         usage = sales["platforms"][0]["usage"]
         assert usage["recent_users"] == ["bob@contoso.com", "alice@contoso.com"]
         assert usage["hosts"] == {"Teams": 2}
-        with ms.app.state.rt.db.session() as s:
-            calls = s.scalar(
-                select(func.sum(AgentActivity.model_calls)).where(
-                    AgentActivity.agent_id == sales["id"]
-                )
-            )
+        with ms.app.state.rt.db.transaction():
+            calls = AgentActivity.objects.filter(agent_id=sales["id"]).aggregate(
+                n=Sum("model_calls")
+            )["n"]
         assert calls == 2  # each interaction counts as a model call on the agent
         open_ = ms.get("/v1/findings", params={"status": "open"}, headers=ADMIN).json()
         assert "agent.jailbreak_attempts" in {f["type"] for f in open_}
