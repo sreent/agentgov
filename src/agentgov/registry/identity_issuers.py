@@ -23,8 +23,7 @@ from urllib.parse import urlsplit
 
 from agentgov import db, ids, ledger
 from agentgov.db import lock, mark_changed
-from agentgov.db.models import Agent, IdentityIssuer
-from agentgov.models import BLOCKED, ISSUER_KINDS
+from agentgov.db.models import BLOCKED, ISSUER_KINDS, Agent, IdentityIssuer
 from agentgov.registry import features, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
@@ -49,7 +48,7 @@ JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 JWT_SPIFFE = "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
 
 
-def get(tx: db.Where, ref: str) -> IdentityIssuer:
+def get(tx: db.Transaction, ref: str) -> IdentityIssuer:
     issuer = (
         IdentityIssuer.objects.filter(pk=ref).first()
         or IdentityIssuer.objects.filter(name=ref).first()
@@ -59,7 +58,7 @@ def get(tx: db.Where, ref: str) -> IdentityIssuer:
     return issuer
 
 
-def list_all(tx: db.Where) -> list[IdentityIssuer]:
+def list_all(tx: db.Transaction) -> list[IdentityIssuer]:
     return list(IdentityIssuer.objects.order_by("name"))
 
 
@@ -136,13 +135,13 @@ def _check(issuer: IdentityIssuer) -> None:
         issuer.gateway_keys = issuer.keys_at = issuer.keys_error = None
 
 
-def _unique(tx: db.Where, issuer: IdentityIssuer) -> None:
+def _unique(tx: db.Transaction, issuer: IdentityIssuer) -> None:
     taken = IdentityIssuer.objects.filter(issuer=issuer.issuer).exclude(id=issuer.id).first()
     if taken is not None:
         raise Conflict(f"identity issuer {taken.name!r} already has issuer {issuer.issuer}")
 
 
-def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> IdentityIssuer:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str) -> IdentityIssuer:
     name = validation.slug(data.get("name"), "name")
     if IdentityIssuer.objects.filter(name=name).exists():
         raise Conflict(f"identity issuer {name!r} already exists")
@@ -175,7 +174,7 @@ def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> IdentityIssuer:
 
 
 def update(
-    tx: db.Where,
+    tx: db.Transaction,
     issuer: IdentityIssuer,
     data: dict[str, Any],
     *,
@@ -199,7 +198,9 @@ def update(
     return changed
 
 
-def set_status(tx: db.Where, issuer: IdentityIssuer, action: str, *, actor: str) -> IdentityIssuer:
+def set_status(
+    tx: db.Transaction, issuer: IdentityIssuer, action: str, *, actor: str
+) -> IdentityIssuer:
     """Block an issuer: none of its tokens authenticate an agent until it is unblocked."""
     if action not in ("block", "unblock"):
         raise ValidationError(f"unknown action {action!r}")
@@ -223,11 +224,11 @@ def set_status(tx: db.Where, issuer: IdentityIssuer, action: str, *, actor: str)
     return issuer
 
 
-def agent_count(tx: db.Where, issuer: IdentityIssuer) -> int:
+def agent_count(tx: db.Transaction, issuer: IdentityIssuer) -> int:
     return Agent.objects.filter(workload_issuer=issuer.name).count()
 
 
-def delete(tx: db.Where, issuer: IdentityIssuer, *, actor: str) -> None:
+def delete(tx: db.Transaction, issuer: IdentityIssuer, *, actor: str) -> None:
     used = agent_count(tx, issuer)
     if used:
         raise Conflict(
@@ -252,7 +253,7 @@ class Taken(Conflict):
         self.agent = agent
 
 
-def workload_identity(tx: db.Where, agent: Agent, value: Any) -> tuple[str, str] | None:
+def workload_identity(tx: db.Transaction, agent: Agent, value: Any) -> tuple[str, str] | None:
     """Check an agent's workload identity, ``{"issuer": name, "subject": sub}`` or null."""
     if value is None:
         return None
@@ -280,7 +281,7 @@ def _taking(issuer: IdentityIssuer) -> bool:
     return bool(issuer.gateway and issuer.gateway_keys and issuer.status == APPROVED)
 
 
-def at_the_gateway(tx: db.Where) -> list[IdentityIssuer]:
+def at_the_gateway(tx: db.Transaction) -> list[IdentityIssuer]:
     """The identity issuers whose tokens the gateway takes
     (docs/agent-identity.md#straight-to-the-gateway): trusted there and approved, with the
     keys AgentGov fetched from them; none while agents' own identities are off, as in

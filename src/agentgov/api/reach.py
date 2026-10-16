@@ -44,13 +44,13 @@ def teams(principal: Principal, *roles: str) -> frozenset[str] | None:
     )
 
 
-def agent_ids(tx: db.Where, principal: Principal, *roles: str) -> set[str] | None:
+def agent_ids(tx: db.Transaction, principal: Principal, *roles: str) -> set[str] | None:
     """The agents, by ID, that ``principal`` reaches with one of ``roles``: None for all."""
     names = teams(principal, *roles)
     return None if names is None else teams_svc.agents_in(tx, names)
 
 
-def reaches(tx: db.Where, principal: Principal, agent: Agent, *roles: str) -> bool:
+def reaches(tx: db.Transaction, principal: Principal, agent: Agent, *roles: str) -> bool:
     """Whether ``principal`` reaches ``agent`` with one of ``roles``."""
     names = teams(principal, *roles)
     if names is None:
@@ -59,7 +59,7 @@ def reaches(tx: db.Where, principal: Principal, agent: Agent, *roles: str) -> bo
     return team is not None and team.lower() in {name.lower() for name in names}
 
 
-def roles_at(tx: db.Where, principal: Principal, agent: Agent | None) -> frozenset[str]:
+def roles_at(tx: db.Transaction, principal: Principal, agent: Agent | None) -> frozenset[str]:
     """``principal``'s roles where ``agent`` is: those held for every team, and those held
     for the agent's team, by their own names (approver), so that the checks that name roles
     take them there."""
@@ -71,13 +71,13 @@ def roles_at(tx: db.Where, principal: Principal, agent: Agent | None) -> frozens
     return principal.roles | here
 
 
-def here(tx: db.Where, principal: Principal, agent: Agent | None) -> Principal:
+def here(tx: db.Transaction, principal: Principal, agent: Agent | None) -> Principal:
     """``principal`` as it is where ``agent`` is (see roles_at), for the checks that look at
     a principal's roles."""
     return replace(principal, roles=roles_at(tx, principal, agent))
 
 
-def by_agent(tx: db.Where, principal: Principal) -> Callable[[str | None], frozenset[str]]:
+def by_agent(tx: db.Transaction, principal: Principal) -> Callable[[str | None], frozenset[str]]:
     """``principal``'s roles where each agent is, by its ID (see roles_at), worked out once
     for a list."""
     held = {role: teams_svc.agents_in(tx, names) for role, names in principal.teams.items()}
@@ -90,7 +90,7 @@ def by_agent(tx: db.Where, principal: Principal) -> Callable[[str | None], froze
     return at
 
 
-def agent(tx: db.Where, principal: Principal, ref: str, *roles: str) -> Agent:
+def agent(tx: db.Transaction, principal: Principal, ref: str, *roles: str) -> Agent:
     """The agent ``ref`` names, if ``principal`` reaches it with one of ``roles`` (any role
     that reads, by default); else not found."""
     found = agents_svc.get(tx, ref)
@@ -99,7 +99,7 @@ def agent(tx: db.Where, principal: Principal, ref: str, *roles: str) -> Agent:
 
 
 def check(
-    tx: db.Where, principal: Principal, agent: Agent, *roles: str, ref: str | None = None
+    tx: db.Transaction, principal: Principal, agent: Agent, *roles: str, ref: str | None = None
 ) -> None:
     """Not found, for an agent ``principal`` doesn't reach with one of ``roles``: in the words
     used for one there isn't (registry.agents.get)."""
@@ -107,7 +107,7 @@ def check(
         raise NotFound(f"agent {ref or agent.id!r} not found")
 
 
-def keep(tx: db.Where, principal: Principal, agent: Agent, *roles: str) -> None:
+def keep(tx: db.Transaction, principal: Principal, agent: Agent, *roles: str) -> None:
     """Refuse a change that takes ``agent`` out of the teams ``principal`` reaches."""
     if not reaches(tx, principal, agent, *roles):
         names = ", ".join(sorted(teams(principal, *roles) or ()))
@@ -238,7 +238,7 @@ class Hold:
     (docs/administration.md#roles-for-one-team). Call ``before`` ahead of each change,
     ``check`` after it."""
 
-    def __init__(self, tx: db.Where, principal: Principal) -> None:
+    def __init__(self, tx: db.Transaction, principal: Principal) -> None:
         self.free = principal.is_admin
         self.was: dict[str, Governed] = {}
         if not self.free:
@@ -325,7 +325,7 @@ read = require(*READ_ROLES)
 
 
 def mark(
-    rows: list[dict[str, Any]], tx: db.Where, principal: Principal, key: str = "id"
+    rows: list[dict[str, Any]], tx: db.Transaction, principal: Principal, key: str = "id"
 ) -> list[dict[str, Any]]:
     """For someone with roles for some teams only: on each row about an agent (its ID at
     ``key``), ``your_roles``, the roles they hold where that agent is, which the admin UI

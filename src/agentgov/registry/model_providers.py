@@ -21,8 +21,7 @@ from urllib.parse import urlsplit
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.db.models import Agent, ModelProvider
-from agentgov.models import BLOCKED, MODEL_PROVIDER_KINDS
+from agentgov.db.models import BLOCKED, MODEL_PROVIDER_KINDS, Agent, ModelProvider
 from agentgov.registry import validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
@@ -32,7 +31,7 @@ KEY_DIR = "/model-keys"
 FIELDS = ("kind", "description", "base_url", "key_file", "trust_level", "prices", "labels")
 
 
-def get(tx: db.Where, ref: str) -> ModelProvider:
+def get(tx: db.Transaction, ref: str) -> ModelProvider:
     provider = (
         ModelProvider.objects.filter(pk=ref).first()
         or ModelProvider.objects.filter(name=ref).first()
@@ -42,7 +41,7 @@ def get(tx: db.Where, ref: str) -> ModelProvider:
     return provider
 
 
-def list_all(tx: db.Where) -> list[ModelProvider]:
+def list_all(tx: db.Transaction) -> list[ModelProvider]:
     return list(ModelProvider.objects.order_by("name"))
 
 
@@ -143,7 +142,7 @@ def _apply(
 
 
 def create(
-    tx: db.Where, data: dict[str, Any], *, actor: str, settings: Settings | None = None
+    tx: db.Transaction, data: dict[str, Any], *, actor: str, settings: Settings | None = None
 ) -> ModelProvider:
     name = validation.slug(data.get("name"), "name")
     if ModelProvider.objects.filter(name=name).exists():
@@ -173,7 +172,7 @@ def create(
 
 
 def update(
-    tx: db.Where,
+    tx: db.Transaction,
     provider: ModelProvider,
     data: dict[str, Any],
     *,
@@ -197,7 +196,9 @@ def update(
     return changed
 
 
-def set_status(tx: db.Where, provider: ModelProvider, action: str, *, actor: str) -> ModelProvider:
+def set_status(
+    tx: db.Transaction, provider: ModelProvider, action: str, *, actor: str
+) -> ModelProvider:
     if action not in ("block", "unblock"):
         raise ValidationError(f"unknown action {action!r}")
     lock(tx, provider)
@@ -220,7 +221,7 @@ def set_status(tx: db.Where, provider: ModelProvider, action: str, *, actor: str
     return provider
 
 
-def delete(tx: db.Where, provider: ModelProvider, *, actor: str) -> None:
+def delete(tx: db.Transaction, provider: ModelProvider, *, actor: str) -> None:
     ledger.append(
         tx,
         type="model_provider.deleted",

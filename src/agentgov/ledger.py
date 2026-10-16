@@ -9,8 +9,7 @@ Checkpoints keep points of the chain for good (docs/evidence.md). Once the entri
 up to a checkpoint are archived and removed (agentgov.retention), the chain in the
 database goes on from it, and :func:`verify_records` checks the archives offline.
 
-The functions here run in the caller's transaction (agentgov.db), on Django's ORM; they
-take the transaction, or, from the modules still on SQLAlchemy, its session.
+The functions here run in the caller's transaction (agentgov.db), on Django's ORM.
 """
 
 from __future__ import annotations
@@ -27,24 +26,17 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from django.db.models import F, Max, QuerySet, Subquery
-from sqlalchemy import event, select
-from sqlalchemy.orm import Session, SessionTransaction
 
 from agentgov import db, ids, timestamping
-from agentgov import models as sqlalchemy_models
 from agentgov.db import mark_changed
 from agentgov.db.models import Agent, LedgerCheckpoint, LedgerEntry, LedgerHead
 
 if TYPE_CHECKING:
-    from sqlalchemy.sql.elements import ColumnElement
-
     from agentgov.config import Settings
 
 GENESIS = "0" * 64
-# A transaction's entries, until it commits; and how many there were when each of its
-# savepoints began.
+# A transaction's entries, until it commits.
 _PENDING = "agentgov.ledger.pending"
-_SAVEPOINTS = "agentgov.ledger.savepoints"
 # What archiving writes into the chain (agentgov.retention): the range it archived and
 # removed, so that the chain itself says where it may start; and each checkpoint's
 # time-stamp, so that one replaced later shows.
@@ -60,7 +52,7 @@ CHECKPOINT_HOURS = 24
 _LENGTHS = {f.column: f.max_length for f in LedgerEntry._meta.concrete_fields}
 
 
-def ensure_head(tx: db.Where) -> None:
+def ensure_head(tx: db.Transaction) -> None:
     LedgerHead.objects.get_or_create(id=1, defaults={"last_seq": 0, "last_hash": GENESIS})
 
 
@@ -157,7 +149,7 @@ def _utc(value: datetime | None) -> datetime | None:
 
 
 def append(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     type: str,
     actor: str,
@@ -201,7 +193,7 @@ def append(
         trace_id=storable(trace_id, _LENGTHS["trace_id"]),
         on_behalf_of=storable(on_behalf_of, _LENGTHS["on_behalf_of"]),
     )
-    db.transaction_of(tx).info.setdefault(_PENDING, []).append(entry)
+    tx.info.setdefault(_PENDING, []).append(entry)
     # For what sends the ledger on (agentgov.secops.delivery), once this commits.
     mark_changed(tx, "ledger")
     return entry
@@ -247,29 +239,8 @@ def _savepoint(tx: db.Transaction) -> Callable[[], None]:
 db.SAVEPOINTS.append(_savepoint)
 
 
-# Savepoints of the modules still on SQLAlchemy (Session.begin_nested).
-@event.listens_for(Session, "after_transaction_create")
-def _savepoint_begins(session: Session, transaction: SessionTransaction) -> None:
-    if transaction.nested:
-        tx = db.transaction_of(session)
-        marks = tx.info.setdefault(_SAVEPOINTS, {})
-        marks[transaction] = len(tx.info.get(_PENDING) or ())
-
-
-@event.listens_for(Session, "after_soft_rollback")
-def _rolled_back(session: Session, previous: SessionTransaction) -> None:
-    """Entries appended since a savepoint of the session's (begin_nested) that rolled back
-    go with it."""
-    if previous.nested:
-        tx = db.transaction_of(session)
-        start = (tx.info.get(_SAVEPOINTS) or {}).get(previous)
-        pending = tx.info.get(_PENDING)
-        if start is not None and pending is not None:
-            del pending[start:]
-
-
 def iter_entries(
-    tx: db.Where, *, batch: int = 1000, after: int = 0, until: int | None = None
+    tx: db.Transaction, *, batch: int = 1000, after: int = 0, until: int | None = None
 ) -> Iterator[LedgerEntry]:
     last = after
     while True:
@@ -283,12 +254,12 @@ def iter_entries(
         last = page[-1].seq
 
 
-def _chain_head(tx: db.Where) -> tuple[int, str] | None:
+def _chain_head(tx: db.Transaction) -> tuple[int, str] | None:
     """The chain's head as the database has it now: its last entry's seq and hash."""
     return LedgerHead.objects.filter(id=1).values_list("last_seq", "last_hash").first()
 
 
-def head_seq(tx: db.Where) -> int:
+def head_seq(tx: db.Transaction) -> int:
     """Where the chain ends: rows stored past it aren't the ledger's."""
     head = _chain_head(tx)
     return head[0] if head is not None else 0
@@ -310,20 +281,13 @@ def of_type(entries: QuerySet[LedgerEntry], pattern: str) -> QuerySet[LedgerEntr
     return entries.filter(type__regex="^" + ".*".join(map(re.escape, pattern.split("*"))) + "$")
 
 
-def in_chain() -> ColumnElement[bool]:
-    """:func:`chain`, for the modules still on SQLAlchemy: the entries the chain's head
-    accounts for."""
-    entry, head = sqlalchemy_models.LedgerEntry, sqlalchemy_models.LedgerHead
-    return entry.seq <= select(head.last_seq).where(head.id == 1).scalar_subquery()
-
-
-def base(tx: db.Where) -> tuple[int, str]:
+def base(tx: db.Transaction) -> tuple[int, str]:
     """Where the chain in the database starts: the checkpoint the entries before it were
     archived up to, or the beginning."""
     return _floor(LedgerCheckpoint.objects.all())
 
 
-def _previous_floor(tx: db.Where, seq: int) -> tuple[int, str]:
+def _previous_floor(tx: db.Transaction, seq: int) -> tuple[int, str]:
     return _floor(LedgerCheckpoint.objects.filter(seq__lt=seq))
 
 
@@ -336,7 +300,7 @@ def _floor(points: QuerySet[LedgerCheckpoint]) -> tuple[int, str]:
 
 
 def _vouching(
-    tx: db.Where, floor: tuple[int, str], archived: list[LedgerEntry]
+    tx: db.Transaction, floor: tuple[int, str], archived: list[LedgerEntry]
 ) -> tuple[tuple[int, str] | None, str | None]:
     """Whether one of the chain's ``ledger.archived`` entries (``archived``, after the
     floor) says the entries up to the floor were archived: exactly that range, up to that
@@ -383,7 +347,7 @@ def _vouching(
     return None, None
 
 
-def vouched_floor(tx: db.Where) -> tuple[int, str] | None:
+def vouched_floor(tx: db.Transaction) -> tuple[int, str] | None:
     """Where the chain in the database starts, when the chain says the entries before it
     were archived (or nothing was): None when it doesn't, which :func:`verify` reports."""
     floor = base(tx)
@@ -402,7 +366,7 @@ def stamp_window(checkpoint_hours: int) -> timedelta:
 
 
 def verify(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     start: tuple[int, str] | None = None,
     settings: Settings | None = None,
@@ -686,7 +650,7 @@ def recorded_problems(
     return []
 
 
-def checkpoint(tx: db.Where) -> LedgerCheckpoint | None:
+def checkpoint(tx: db.Transaction) -> LedgerCheckpoint | None:
     """Keep the chain's current head as a checkpoint (the one there already is, if the
     chain hasn't grown since). None while the ledger is empty."""
     head = _chain_head(tx)
@@ -743,7 +707,7 @@ class IntegrityMonitor:
         self._last: dict[str, Any] | None = None
         self._full_at = 0.0
 
-    def check(self, tx: db.Where) -> dict[str, Any]:
+    def check(self, tx: db.Transaction) -> dict[str, Any]:
         with self._lock:
             last, now = self._last, time.monotonic()
             if last is None or not last["valid"] or now - self._full_at >= self.full_every:

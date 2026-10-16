@@ -83,7 +83,7 @@ def lifetime(value: Any, *, max_days: int = 0) -> int | None:
 
 
 def create(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     name: str,
     role: str,
@@ -119,7 +119,7 @@ def create(
     return key, token
 
 
-def revoke(tx: db.Where, key_id: str, *, actor: str) -> ApiKey:
+def revoke(tx: db.Transaction, key_id: str, *, actor: str) -> ApiKey:
     key = ApiKey.objects.filter(pk=key_id).first()
     if key is None:
         raise NotFound(f"api key {key_id} not found")
@@ -138,7 +138,7 @@ def revoke(tx: db.Where, key_id: str, *, actor: str) -> ApiKey:
     return key
 
 
-def authenticate(tx: db.Where, token: str, *, max_days: int = 0) -> ApiKey | None:
+def authenticate(tx: db.Transaction, token: str, *, max_days: int = 0) -> ApiKey | None:
     """The key ``token`` is, if it works; raises Expired for one that has expired."""
     if not token.startswith("agk_"):
         return None
@@ -166,7 +166,7 @@ def expiring(key: ApiKey, max_days: int = 0, now: datetime | None = None) -> dat
     return when
 
 
-def list_all(tx: db.Where) -> list[ApiKey]:
+def list_all(tx: db.Transaction) -> list[ApiKey]:
     return list(ApiKey.objects.order_by("-created_at"))
 
 

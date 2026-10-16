@@ -34,11 +34,11 @@ MAY = {
 }
 
 
-def level(tx: db.Where) -> str:
+def level(tx: db.Transaction) -> str:
     return features.mode(tx, FEATURE)
 
 
-def at_least(tx: db.Where, needed: str) -> bool:
+def at_least(tx: db.Transaction, needed: str) -> bool:
     return LEVELS.index(level(tx)) >= LEVELS.index(needed)
 
 
@@ -55,7 +55,7 @@ def acting_as_secops(principal: Any, *also: str) -> bool:
     return ROLE in _held(principal) and not principal.roles & ({"admin"} | set(also))
 
 
-def check(tx: db.Where, principal: Any, needed: str, *, also: tuple[str, ...] = ()) -> None:
+def check(tx: db.Transaction, principal: Any, needed: str, *, also: tuple[str, ...] = ()) -> None:
     """Refuse the secops role what the hand-off level doesn't give it."""
     if not acting_as_secops(principal, *also):
         return
@@ -68,7 +68,7 @@ def check(tx: db.Where, principal: Any, needed: str, *, also: tuple[str, ...] = 
         )
 
 
-def check_kill_switch(tx: db.Where, principal: Any, action: str) -> None:
+def check_kill_switch(tx: db.Transaction, principal: Any, action: str) -> None:
     """Block and unblock: what the secops role may do to agents, tool servers, model
     providers and identity issuers, from contain on. Nothing else of theirs, and nothing at
     all of anyone's but administrators' (``principal`` as it is where the agent is, for an
@@ -82,12 +82,12 @@ def check_kill_switch(tx: db.Where, principal: Any, action: str) -> None:
     check(tx, principal, CONTAIN)
 
 
-def reached(tx: db.Where) -> list[str]:
+def reached(tx: db.Transaction) -> list[str]:
     """The levels the hand-off has reached, beyond off."""
     return list(LEVELS[1 : LEVELS.index(level(tx)) + 1])
 
 
-def describe(tx: db.Where) -> dict[str, Any]:
+def describe(tx: db.Transaction) -> dict[str, Any]:
     current = level(tx)
     reached = LEVELS.index(current)
     return {

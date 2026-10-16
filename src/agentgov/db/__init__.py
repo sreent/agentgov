@@ -1,46 +1,34 @@
-"""The database: its connections and transactions, which Django runs (docs/adr/0007-django.md),
-and the SQLAlchemy models and sessions that the modules use until they move to Django's ORM.
+"""The database: its connections and transactions, which Django runs (docs/adr/0007-django.md).
 
 ``Database.transaction()`` is one of Django's atomic blocks on the database, with the rules
 every transaction keeps (``Transaction``): checks it must pass before it commits, the ledger's
 entries written last, and its changes announced once it commits, never before. Nested, it is
-a savepoint. ``Database.session()`` is the same transaction with a SQLAlchemy session in it, on
-Django's connection: what either writes commits, or rolls back, with what the other wrote.
+a savepoint. Django's ORM uses the database whose transaction is open (``Router``); the
+modules' functions take the transaction they run in.
 
-Django's ORM uses the database whose transaction is open (``Router``), and sees what the
-session changed: the session writes it first, as it does before its own queries. The
-session doesn't see what Django's ORM changed in rows it already loaded, until it loads them
-again: a module that moved to Django's ORM doesn't change what one still on SQLAlchemy holds,
-nor hands it Django's objects to change.
+SQLAlchemy's engine is kept for what runs outside the transactions: the migrations
+(agentgov.migrations), and the coordinator's connections (agentgov.coordination).
 """
 
 from __future__ import annotations
 
 import itertools
 import logging
-import re
 import shutil
 import tempfile
 import threading
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
-from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from django.db import DEFAULT_DB_ALIAS, connections
 from django.db import transaction as django_transaction
-from django.db.models import Model as DjangoModel
-from sqlalchemy import DateTime, MetaData, create_engine, event, inspect, select
-from sqlalchemy.dialects import registry
-from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
-from sqlalchemy.dialects.sqlite.pysqlite import SQLiteDialect_pysqlite
+from django.db.models import Model
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-from sqlalchemy.pool import NullPool
-from sqlalchemy.types import TypeDecorator
 
 from agentgov import web
 
@@ -56,8 +44,6 @@ WRITE_LAST: list[Callable[[Transaction], None]] = []
 # is called as one begins, and returns what to undo if it rolls back (agentgov.ledger's
 # entries appended in it go with it).
 SAVEPOINTS: list[Callable[[Transaction], Callable[[], None]]] = []
-# Where a SQLAlchemy session keeps the transaction it is in.
-_TRANSACTION = "agentgov.transaction"
 # Connections open at once, by each process, to a PostgreSQL database: as many as SQLAlchemy's
 # pool allowed (5, and 10 more when busy).
 POOL_SIZE = 15
@@ -73,22 +59,9 @@ class Transaction:
         self.topics: set[str] = set()
         # What the modules keep until the commit (agentgov.ledger's entries).
         self.info: dict[str, Any] = {}
-        self._session: Session | None = None
-
-    def orm(self) -> Session:
-        """The SQLAlchemy session in this transaction, made the first time it is asked for."""
-        if self._session is None:
-            self._session = self.database._sessions(info={_TRANSACTION: self})
-        return self._session
-
-    def flush(self) -> None:
-        """What the SQLAlchemy session holds, written: before anything else reads it."""
-        if self._session is not None:
-            self._session.flush()
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         """``sql`` (``%s`` for each parameter) in this transaction: the rows it returns."""
-        self.flush()
         with connections[self.database.alias].cursor() as cursor:
             cursor.execute(sql, params)
             return list(cursor.fetchall()) if cursor.description else []
@@ -96,125 +69,40 @@ class Transaction:
     @contextmanager
     def savepoint(self) -> Iterator[None]:
         """A part of this transaction that rolls back alone when it fails."""
-        self.flush()
         undo = [mark(self) for mark in SAVEPOINTS]
         try:
             with django_transaction.atomic(using=self.database.alias):
                 yield
-                self.flush()
         except BaseException:
             for step in reversed(undo):
                 step()
-            if self._session is not None:
-                # The session forgets what it wrote in the part rolled back, and reads what
-                # it loaded before again.
-                self._session.rollback()
             raise
 
-    def _close(self) -> None:
-        if self._session is not None:
-            self._session.close()
-            self._session = None
 
-
-# What the modules' functions take for the transaction they run in: the transaction, or,
-# from the modules still on SQLAlchemy, its session (Database.session).
-Where = Transaction | Session
-
-
-def transaction_of(where: Where) -> Transaction:
-    """The transaction a session is in (Database.session)."""
-    if isinstance(where, Transaction):
-        return where
-    found = where.info.get(_TRANSACTION)
-    if found is None:
-        raise RuntimeError("a session that isn't one of Database.session()'s")
-    return found
-
-
-def orm(where: Where) -> Session:
-    """The SQLAlchemy session of the transaction ``where`` names, for the modules still on
-    SQLAlchemy."""
-    return transaction_of(where).orm()
-
-
-def lock(where: Where, instance: Any) -> None:
+def lock(tx: Transaction, instance: Model) -> None:
     """Lock ``instance``'s row until the transaction ends, and read it afresh: decisions on
     the same thing (two approvers deciding one request at once, say) take turns, and the
-    later one sees the earlier one's outcome. No lock on SQLite, where each write
-    transaction holds the whole database. ``instance`` is one of Django's models, read
-    afresh there too, since each read gives another object (SQLAlchemy's session gives the
-    same one), and what was changed on it before is saved first (as SQLAlchemy's session
-    wrote it before it read); or, from the modules still on SQLAlchemy, one of its."""
-    sqlite = transaction_of(where).database.sqlite
-    if isinstance(instance, DjangoModel):
-        if instance._state.adding:
-            return  # not in the database yet
-        changed = getattr(instance, "changed", None)
-        if changed is not None and changed():
-            instance.save()
-        if not sqlite:
-            rows = type(instance).objects.select_for_update().filter(pk=instance.pk)
-            list(rows.values_list("pk", flat=True))
-        instance.refresh_from_db()
-        return
-    if sqlite:
-        return
-    session = orm(where)
-    state = inspect(instance)
-    if state.identity is None:
+    later one sees the earlier one's outcome. What was changed on it before is saved first.
+    No lock on SQLite, where each write transaction holds the whole database; read afresh
+    there too, since each read gives another object."""
+    if instance._state.adding:
         return  # not in the database yet
-    keys = state.mapper.primary_key
-    match = [key == value for key, value in zip(keys, state.identity, strict=True)]
-    session.execute(select(*keys).where(*match).with_for_update())
-    session.refresh(instance)
+    changed = getattr(instance, "changed", None)
+    if changed is not None and changed():
+        instance.save()
+    if not tx.database.sqlite:
+        rows = type(instance).objects.select_for_update().filter(pk=instance.pk)
+        list(rows.values_list("pk", flat=True))
+    instance.refresh_from_db()
 
 
-def mark_changed(where: Where, *topics: str) -> None:
+def mark_changed(tx: Transaction, *topics: str) -> None:
     """Record that this transaction changed registry state.
 
     Topics are delivered to ``Database.on_commit`` only after the transaction
     commits, so reconcilers never act on state that is later rolled back.
     """
-    transaction_of(where).topics.update(topics)
-
-
-class UTCDateTime(TypeDecorator):
-    """Stores naive UTC timestamps and always returns timezone-aware UTC datetimes.
-
-    SQLite has no native timezone support, so normalising here keeps comparisons
-    consistent across SQLite and PostgreSQL.
-    """
-
-    impl = DateTime
-    cache_ok = True
-
-    def process_bind_param(self, value: datetime | None, dialect: Any) -> datetime | None:
-        if value is None:
-            return None
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=UTC)
-        return value.astimezone(UTC).replace(tzinfo=None)
-
-    def process_result_value(self, value: datetime | None, dialect: Any) -> datetime | None:
-        if value is None:
-            return None
-        return value.replace(tzinfo=UTC)
-
-
-# Constraint names as PostgreSQL gives them when none is set, so databases made before
-# migrations existed and databases built by them name every constraint the same way.
-NAMING_CONVENTION = {
-    "pk": "%(table_name)s_pkey",
-    "uq": "%(table_name)s_%(column_0_name)s_key",
-    "fk": "%(table_name)s_%(column_0_name)s_fkey",
-    "ix": "ix_%(column_0_label)s",
-    "ck": "%(table_name)s_%(constraint_name)s_check",
-}
-
-
-class Base(DeclarativeBase):
-    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+    tx.topics.update(topics)
 
 
 def _configure_sqlite(engine: Engine) -> None:
@@ -261,72 +149,6 @@ def _configure_postgresql(engine: Engine) -> None:
             for statement in SERVER_KEEPALIVES:
                 cursor.execute(statement)
         dbapi_connection.commit()
-
-
-# ------------------------------------------------- SQLAlchemy on Django's connections
-
-
-class _Lent:
-    """Django's connection, as a session in Database.session() sees it: Django commits,
-    rolls back and closes it, so those do nothing here."""
-
-    __slots__ = ("_connection",)
-
-    def __init__(self, connection: Any) -> None:
-        object.__setattr__(self, "_connection", connection)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._connection, name)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        setattr(self._connection, name, value)
-
-    def commit(self) -> None:
-        pass
-
-    def rollback(self) -> None:
-        pass
-
-    def close(self) -> None:
-        pass
-
-
-class _LentPostgreSQL(PGDialect_psycopg):
-    """psycopg's dialect, on a connection Django lent: it adds nothing to the connection, as
-    it does to one of its own (a handler for the server's notices, each time it is lent)."""
-
-    supports_statement_cache = True
-
-    def on_connect(self) -> None:  # type: ignore[override]
-        return None
-
-
-class _LentSQLite(SQLiteDialect_pysqlite):
-    supports_statement_cache = True
-
-    def on_connect(self) -> None:  # type: ignore[override]
-        return None
-
-
-registry.register("postgresql.agentgov", __name__, "_LentPostgreSQL")
-registry.register("sqlite.agentgov", __name__, "_LentSQLite")
-
-
-# Statements that read or write the tables, as Django's ORM runs them.
-_READS_OR_WRITES = re.compile(r"\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b", re.IGNORECASE)
-
-
-def _autoflush(
-    tx: Transaction, execute: Callable[..., Any], sql: Any, params: Any, many: bool, context: Any
-) -> Any:
-    """What the transaction's SQLAlchemy session holds, written before Django runs a
-    statement that reads or writes the tables, as SQLAlchemy does before its own queries
-    (and doesn't in its ``no_autoflush`` blocks). Not before Django's savepoint statements:
-    rolling one back must not fail on what was changed in it."""
-    session = tx._session
-    if session is not None and isinstance(sql, str) and _READS_OR_WRITES.match(sql):
-        session._autoflush()
-    return execute(sql, params, many, context)
 
 
 # ------------------------------------------------------------------- the databases
@@ -391,7 +213,8 @@ def _django_database(url: str) -> tuple[dict[str, Any], Path | None]:
             # concurrent commit; BEGIN IMMEDIATE avoids that class of error entirely.
             "transaction_mode": "IMMEDIATE",
             "init_command": "PRAGMA journal_mode=WAL",
-            # Timestamps as text, which the SQLAlchemy models read themselves.
+            # Times as the text they are stored as, which UTCDateTimeField reads
+            # (agentgov.db.fields).
             "detect_types": 0,
         }
         return {"ENGINE": "agentgov.db.sqlite3", "NAME": name, "OPTIONS": options}, scratch
@@ -455,21 +278,7 @@ class Database:
             from agentgov.db.sqlite3.base import POOLS, Pool
 
             POOLS[self.alias] = Pool(POOL_SIZE)
-        # The sessions in Database.session(), on the connection Django has open for it.
-        lent = here.set(drivername=f"{here.get_backend_name()}+agentgov")
-        extra = {} if self.sqlite else {"use_native_hstore": False}
-        self._lent = create_engine(
-            lent, creator=self._lend, poolclass=NullPool, pool_reset_on_return=None, **extra
-        )
-        self._sessions = sessionmaker(bind=self._lent, expire_on_commit=False)
         _LIVE.add(self)
-
-    def _lend(self) -> _Lent:
-        connection = connections[self.alias]
-        if not connection.in_atomic_block:
-            raise RuntimeError("a database session used outside its transaction")
-        connection.ensure_connection()
-        return _Lent(connection.connection)
 
     @contextmanager
     def transaction(self) -> Iterator[Transaction]:
@@ -491,31 +300,19 @@ class Database:
         open_.append(self.alias)
         tx = self._local.transaction = Transaction(self)
         try:
-            with (
-                connections[self.alias].execute_wrapper(partial(_autoflush, tx)),
-                django_transaction.atomic(using=self.alias),
-            ):
+            with django_transaction.atomic(using=self.alias):
                 yield tx
                 self._before_commit(tx)
         finally:
             open_.pop()
             self._local.transaction = None
-            tx._close()
             self._release()
 
-    @contextmanager
-    def session(self) -> Iterator[Session]:
-        """A transaction, as a SQLAlchemy session."""
-        with self.transaction() as tx:
-            yield tx.orm()
-
     def _before_commit(self, tx: Transaction) -> None:
-        tx.flush()
         for check in self.commit_checks:
             check(tx)
         for write in WRITE_LAST:
             write(tx)
-        tx.flush()
         if not tx.topics:
             return
         topics = set(tx.topics)
@@ -559,7 +356,6 @@ class Database:
             if psycopg_pool is not None:
                 psycopg_pool.close()
         connections.settings.pop(self.alias, None)
-        self._lent.dispose()
         self.engine.dispose()
         if self._scratch is not None:
             shutil.rmtree(self._scratch, ignore_errors=True)

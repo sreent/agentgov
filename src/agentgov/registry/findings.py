@@ -18,8 +18,7 @@ from django.db.models import QuerySet
 
 from agentgov import db, ids, ledger
 from agentgov.db import lock
-from agentgov.db.models import Agent, Finding
-from agentgov.models import SEVERITIES
+from agentgov.db.models import SEVERITIES, Agent, Finding
 from agentgov.registry.errors import InvalidTransition, NotFound, ValidationError
 
 POSTURE = "posture"
@@ -55,7 +54,7 @@ def restart_chain(finding: Finding) -> None:
 
 
 def record(
-    tx: db.Where,
+    tx: db.Transaction,
     finding: Finding,
     change: str,
     actor: str,
@@ -96,7 +95,7 @@ _record = record
 
 
 def raise_finding(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     type: str,
     severity: str,
@@ -207,7 +206,7 @@ def _open(types: set[str], subjects: set[str] | None) -> QuerySet[Finding]:
 
 
 def resolve_absent(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     types: set[str],
     present_keys: set[str],
@@ -236,7 +235,7 @@ def resolve_absent(
     return count
 
 
-def close_stale_threats(tx: db.Where, days: int, now: datetime | None = None) -> int:
+def close_stale_threats(tx: db.Transaction, days: int, now: datetime | None = None) -> int:
     """Resolve the threats that haven't happened again for ``days`` days (0: none are): they
     were events, and one that happens again opens again."""
     if days <= 0:
@@ -258,7 +257,7 @@ def close_stale_threats(tx: db.Where, days: int, now: datetime | None = None) ->
 
 
 def mark_unverified(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     types: set[str],
     verified: bool = False,
@@ -290,19 +289,19 @@ def mark_unverified(
     return count
 
 
-def resolve_key(tx: db.Where, key: str, *, actor: str) -> None:
+def resolve_key(tx: db.Transaction, key: str, *, actor: str) -> None:
     """Resolve the open finding ``key`` (``type:subject``), if there is one."""
     found = Finding.objects.filter(key=key, status="open").values_list("id", flat=True).first()
     if found is not None:
         set_status(tx, found, "resolved", actor)
 
 
-def by_key(tx: db.Where, key: str) -> Finding | None:
+def by_key(tx: db.Transaction, key: str) -> Finding | None:
     """The finding ``key`` (``type:subject``), if there is one."""
     return Finding.objects.filter(key=key).first()
 
 
-def get(tx: db.Where, finding_id: str) -> Finding:
+def get(tx: db.Transaction, finding_id: str) -> Finding:
     finding = Finding.objects.filter(pk=finding_id).first()
     if finding is None:
         raise NotFound(f"finding {finding_id} not found")
@@ -310,7 +309,7 @@ def get(tx: db.Where, finding_id: str) -> Finding:
 
 
 def dismiss(
-    tx: db.Where,
+    tx: db.Transaction,
     finding: Finding,
     *,
     reason: Any,
@@ -355,7 +354,7 @@ def dismiss(
     return finding
 
 
-def set_status(tx: db.Where, finding_id: str, status: str, actor: str) -> Finding:
+def set_status(tx: db.Transaction, finding_id: str, status: str, actor: str) -> Finding:
     if status not in ("open", "resolved", "dismissed"):
         raise ValidationError("status must be open, resolved or dismissed")
     finding = get(tx, finding_id)

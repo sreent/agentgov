@@ -1,6 +1,6 @@
-"""Django fields for the columns as the SQLAlchemy models made them (agentgov.models), so
-that both read and write the same values: times in UTC without a zone, and JSON in ``json``
-columns (Django's own JSONField has ``jsonb``)."""
+"""Django fields for the columns as the migrations make them, holding what AgentGov has
+always written: times in UTC without a zone, and JSON in ``json`` columns (Django's own
+JSONField has ``jsonb``)."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ from django.utils.dateparse import parse_datetime
 
 
 class UTCDateTimeField(models.DateTimeField):
-    """A time, stored in UTC without a zone (``TIMESTAMP`` on PostgreSQL, text on SQLite, as
-    agentgov.db.UTCDateTime stores it) and read back in UTC. One given without a zone is
-    taken as UTC, not as some local time."""
+    """A time, stored in UTC without a zone (``TIMESTAMP`` on PostgreSQL; text on SQLite,
+    always with microseconds) and read back in UTC. One given without a zone is taken as
+    UTC, not as some local time."""
 
     def db_type(self, connection: Any) -> str:
         return "TIMESTAMP WITHOUT TIME ZONE" if connection.vendor == "postgresql" else "DATETIME"
@@ -33,7 +33,7 @@ class UTCDateTimeField(models.DateTimeField):
             return value
         value = value.astimezone(UTC).replace(tzinfo=None)
         if connection.vendor == "sqlite":
-            # As SQLAlchemy writes it, always with microseconds: times compare as text.
+            # Always with microseconds, as the rows there have them: times compare as text.
             return value.isoformat(" ", timespec="microseconds")
         return value
 
@@ -49,8 +49,8 @@ class UTCDateTimeField(models.DateTimeField):
 
 
 class JSONField(models.JSONField):
-    """JSON in a ``json`` column (text on SQLite), written as text as SQLAlchemy writes it
-    (``jsonb`` would reorder it), and read as psycopg gives it from PostgreSQL, decoded."""
+    """JSON in a ``json`` column (text on SQLite), written as text (``jsonb`` would reorder
+    it), and read as psycopg gives it from PostgreSQL, decoded."""
 
     def db_type(self, connection: Any) -> str:
         return "JSON"

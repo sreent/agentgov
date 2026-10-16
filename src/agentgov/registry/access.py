@@ -31,7 +31,7 @@ SIGN_IN_EVENTS = ("admin.login", "admin.login_denied")
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-def live_sessions(tx: db.Where) -> list[AdminSession]:
+def live_sessions(tx: db.Transaction) -> list[AdminSession]:
     return list(AdminSession.objects.filter(expires_at__gt=ids.utcnow()).order_by("-created_at"))
 
 
@@ -46,7 +46,7 @@ def session_to_dict(record: AdminSession) -> dict[str, Any]:
     }
 
 
-def people(tx: db.Where) -> list[dict[str, Any]]:
+def people(tx: db.Transaction) -> list[dict[str, Any]]:
     """Everyone who has signed in or been refused, most recently active first."""
     by_subject: dict[str, list[AdminSession]] = defaultdict(list)
     for record in live_sessions(tx):
@@ -95,7 +95,7 @@ def people(tx: db.Where) -> list[dict[str, Any]]:
     return result
 
 
-def _end(tx: db.Where, records: list[AdminSession], *, actor: str) -> int:
+def _end(tx: db.Transaction, records: list[AdminSession], *, actor: str) -> int:
     if records:
         ledger.append(
             tx,
@@ -112,7 +112,7 @@ def _end(tx: db.Where, records: list[AdminSession], *, actor: str) -> int:
     return len(records)
 
 
-def end_session(tx: db.Where, session_id: str, *, actor: str) -> int:
+def end_session(tx: db.Transaction, session_id: str, *, actor: str) -> int:
     """End one session (an admin's action; the person's own sign-out is admin.logout)."""
     record = AdminSession.objects.filter(pk=session_id).first()
     if record is None:
@@ -120,11 +120,11 @@ def end_session(tx: db.Where, session_id: str, *, actor: str) -> int:
     return _end(tx, [record], actor=actor)
 
 
-def session_ids(tx: db.Where, subject: str) -> list[str]:
+def session_ids(tx: db.Transaction, subject: str) -> list[str]:
     return list(AdminSession.objects.filter(subject=subject).values_list("id", flat=True))
 
 
-def sign_out(tx: db.Where, subject: str, *, actor: str) -> int:
+def sign_out(tx: db.Transaction, subject: str, *, actor: str) -> int:
     """End every session of one person; returns how many were ended."""
     return _end(tx, list(AdminSession.objects.filter(subject=subject)), actor=actor)
 
@@ -150,11 +150,11 @@ def grant_to_dict(grant: RoleGrant) -> dict[str, Any]:
     }
 
 
-def grants(tx: db.Where) -> list[RoleGrant]:
+def grants(tx: db.Transaction) -> list[RoleGrant]:
     return list(RoleGrant.objects.order_by("email", "role"))
 
 
-def team_role(tx: db.Where, role: Any, team: Any, allowed: tuple[str, ...]) -> str:
+def team_role(tx: db.Transaction, role: Any, team: Any, allowed: tuple[str, ...]) -> str:
     """``role``, held for team ``team`` when one is given (``approver@sales``): one of
     ``allowed``, and for a team, one of the roles that can be held for a team, and a team
     there is."""
@@ -171,7 +171,7 @@ def team_role(tx: db.Where, role: Any, team: Any, allowed: tuple[str, ...]) -> s
 
 
 def grant(
-    tx: db.Where,
+    tx: db.Transaction,
     email: str,
     role: str,
     *,
@@ -203,7 +203,7 @@ def grant(
     return record
 
 
-def revoke(tx: db.Where, email: str, role: str, *, actor: str) -> list[str]:
+def revoke(tx: db.Transaction, email: str, role: str, *, actor: str) -> list[str]:
     """Take a role given in AgentGov away, and end the person's sessions, so that it no
     longer applies; returns the IDs of the sessions ended."""
     email = _email(email)

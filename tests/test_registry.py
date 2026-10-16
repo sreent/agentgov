@@ -5,8 +5,7 @@ from datetime import timedelta
 import pytest
 
 from agentgov import ids
-from agentgov.db.models import Finding, LedgerEntry
-from agentgov.models import ACTIVE, BLOCKED, DELETED, DISCOVERED, PENDING
+from agentgov.db.models import ACTIVE, BLOCKED, DELETED, DISCOVERED, PENDING, Finding, LedgerEntry
 from agentgov.registry import (
     agents,
     approvals,

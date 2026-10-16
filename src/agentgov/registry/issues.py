@@ -25,6 +25,7 @@ from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock
 from agentgov.db.models import (
+    SEVERITIES,
     Agent,
     Destination,
     Finding,
@@ -32,7 +33,6 @@ from agentgov.db.models import (
     Notification,
     ToolServer,
 )
-from agentgov.models import SEVERITIES
 from agentgov.registry import finding_types, findings, teams
 from agentgov.registry import people as directory_people
 from agentgov.registry.errors import Forbidden, InvalidTransition, ValidationError
@@ -65,7 +65,7 @@ class Recipient:
 class Directory:
     """The teams, read once for a round of routing or a list of issues."""
 
-    def __init__(self, tx: db.Where) -> None:
+    def __init__(self, tx: db.Transaction) -> None:
         self.teams = {t.name: t for t in teams.list_all(tx)}
         self.default = next((t for t in self.teams.values() if t.is_default), None)
         # People who left: an issue goes past them (docs/issues.md#people-who-leave).
@@ -97,7 +97,7 @@ class Directory:
         return self.recipient(self.default.name) if self.default else None
 
 
-def _server(tx: db.Where, subject: str | None) -> ToolServer | None:
+def _server(tx: db.Transaction, subject: str | None) -> ToolServer | None:
     """The tool server an issue is about: its subject is the server (by ID or name), or one
     of its tools ("crm/export_customers")."""
     ref = (subject or "").split("/", 1)[0]
@@ -114,7 +114,7 @@ def _agent(finding: Finding) -> Agent | None:
 
 
 def chain(
-    tx: db.Where, finding: Finding, directory: Directory | None = None
+    tx: db.Transaction, finding: Finding, directory: Directory | None = None
 ) -> list[tuple[str, list[Recipient]]]:
     """The steps of a finding's chain, each with the people and teams at it that no earlier
     step reached. Steps with nobody new at them are left out."""
@@ -145,7 +145,7 @@ def chain(
     return steps
 
 
-def involved(tx: db.Where, finding: Finding, directory: Directory | None = None) -> set[str]:
+def involved(tx: db.Transaction, finding: Finding, directory: Directory | None = None) -> set[str]:
     """Everyone the issue has reached so far, by email address and user name (lower case),
     team members included: they may see it and acknowledge it."""
     names: set[str] = set()
@@ -173,7 +173,7 @@ def _next(
 
 
 def _give(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     finding: Finding,
     step: tuple[str, list[Recipient]],
@@ -214,7 +214,9 @@ def _quiet(settings: Settings, finding: Finding) -> str | None:
     return None
 
 
-def addresses(tx: db.Where, settings: Settings, people: list[Recipient]) -> list[tuple[str, str]]:
+def addresses(
+    tx: db.Transaction, settings: Settings, people: list[Recipient]
+) -> list[tuple[str, str]]:
     """Where messages for these people and teams go, as (channel, recipient): email to
     their addresses (with a mail server), and their teams' chats."""
     wanted: list[tuple[str, str]] = []
@@ -229,7 +231,7 @@ def addresses(tx: db.Where, settings: Settings, people: list[Recipient]) -> list
 
 
 def _queue(
-    tx: db.Where, settings: Settings, finding: Finding, level: str, people: list[Recipient]
+    tx: db.Transaction, settings: Settings, finding: Finding, level: str, people: list[Recipient]
 ) -> int:
     """Queue the messages for the people at this step."""
     count = 0
@@ -261,7 +263,7 @@ def _queue(
 # ------------------------------------------------------------------------ rounds
 
 
-def route(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict[str, int]:
+def route(tx: db.Transaction, settings: Settings, now: datetime | None = None) -> dict[str, int]:
     """Give open findings that aren't with anyone to the first step of their chain, and
     escalate those nobody acknowledged in time."""
     now = now or ids.utcnow()
@@ -292,7 +294,7 @@ def route(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict
     return {"assigned": assigned, "escalated": escalated}
 
 
-def reopen_accepted(tx: db.Where, now: datetime | None = None) -> int:
+def reopen_accepted(tx: db.Transaction, now: datetime | None = None) -> int:
     """Accepted risks, and dismissals given until a date, whose date has come open again,
     for someone to decide anew. If the condition is gone, the next check resolves them."""
     now = now or ids.utcnow()
@@ -332,7 +334,7 @@ def reopen_accepted(tx: db.Where, now: datetime | None = None) -> int:
 # ---------------------------------------------------------------------- actions
 
 
-def acknowledge(tx: db.Where, finding: Finding, *, actor: str) -> Finding:
+def acknowledge(tx: db.Transaction, finding: Finding, *, actor: str) -> Finding:
     """Someone it reached takes it on: it stops going further up its chain."""
     lock(tx, finding)
     if finding.status != "open":
@@ -355,7 +357,7 @@ def _why(value: Any, what: str) -> str:
     return text
 
 
-def at_current_step(tx: db.Where, finding: Finding, name: str) -> bool:
+def at_current_step(tx: db.Transaction, finding: Finding, name: str) -> bool:
     """Whether the person ``name`` is among the people and teams the issue is with now."""
     key = (name or "").lower()
     for level, people in chain(tx, finding):
@@ -370,7 +372,7 @@ def at_current_step(tx: db.Where, finding: Finding, name: str) -> bool:
 
 
 def decline(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     finding: Finding,
     *,
@@ -398,7 +400,7 @@ def decline(
 
 
 def ask_exception(
-    tx: db.Where, finding: Finding, *, actor: str, name: str, reason: Any, until: Any
+    tx: db.Transaction, finding: Finding, *, actor: str, name: str, reason: Any, until: Any
 ) -> Finding:
     """Someone it reached asks for its risk to be accepted until a date, and why: an approver
     decides (accept, or decline_exception). Meanwhile it stays with them, acknowledged."""
@@ -420,7 +422,7 @@ def ask_exception(
     return finding
 
 
-def decline_exception(tx: db.Where, finding: Finding, *, actor: str, reason: Any) -> Finding:
+def decline_exception(tx: db.Transaction, finding: Finding, *, actor: str, reason: Any) -> Finding:
     """An approver turns down a request to accept its risk, saying why: it stays with
     whoever asked, to fix."""
     lock(tx, finding)
@@ -455,7 +457,7 @@ def parse_until(value: Any, now: datetime | None = None) -> datetime:
     return until
 
 
-def accountable(tx: db.Where, agent: Agent, name: str | None) -> str | None:
+def accountable(tx: db.Transaction, agent: Agent, name: str | None) -> str | None:
     """How the person ``name`` (an email address or user name) is accountable for
     ``agent``, in words, or None: they own it, sponsor it, or are in its team (its own or
     its blueprint's; not the default team, which only gets what nobody else does)."""
@@ -481,7 +483,7 @@ def accountable(tx: db.Where, agent: Agent, name: str | None) -> str | None:
     return None
 
 
-def _not_accountable(tx: db.Where, finding: Finding, by: str | None, does: str) -> None:
+def _not_accountable(tx: db.Transaction, finding: Finding, by: str | None, does: str) -> None:
     """Refuse ``by``, the person answering an issue, what someone accountable for its agent
     mustn't do: someone else signs that off."""
     agent = _agent(finding)
@@ -494,7 +496,7 @@ def _not_accountable(tx: db.Where, finding: Finding, by: str | None, does: str) 
 
 
 def dismiss(
-    tx: db.Where,
+    tx: db.Transaction,
     finding: Finding,
     *,
     reason: Any,
@@ -510,7 +512,7 @@ def dismiss(
 
 
 def accept(
-    tx: db.Where,
+    tx: db.Transaction,
     finding: Finding,
     *,
     reason: Any,
@@ -552,7 +554,7 @@ def accept(
 # ---------------------------------------------------------------- what people see
 
 
-def for_person(tx: db.Where, name: str | None, *, status: str | None = None) -> list[Finding]:
+def for_person(tx: db.Transaction, name: str | None, *, status: str | None = None) -> list[Finding]:
     """The issues that reached this person (by any name they go by: their email address,
     user principal name or user name), or one of the teams they are in."""
     names = directory_people.aliases(tx, name)
@@ -565,13 +567,13 @@ def for_person(tx: db.Where, name: str | None, *, status: str | None = None) -> 
     return [f for f in found if names & involved(tx, f, directory)]
 
 
-def may_act(tx: db.Where, finding: Finding, name: str | None) -> bool:
+def may_act(tx: db.Transaction, finding: Finding, name: str | None) -> bool:
     """Whether the issue reached the person, by any name they go by (their email address,
     or the user principal name they sign in with)."""
     return bool(directory_people.aliases(tx, name) & involved(tx, finding))
 
 
-def describe(tx: db.Where, finding: Finding) -> list[dict[str, Any]]:
+def describe(tx: db.Transaction, finding: Finding) -> list[dict[str, Any]]:
     """Its chain, step by step: who is at each step, and how far the issue has gone."""
     reached = LEVELS.index(finding.level) if finding.level else -1
     return [
@@ -585,7 +587,7 @@ def describe(tx: db.Where, finding: Finding) -> list[dict[str, Any]]:
     ]
 
 
-def history(tx: db.Where, finding: Finding, limit: int = 200) -> list[LedgerEntry]:
+def history(tx: db.Transaction, finding: Finding, limit: int = 200) -> list[LedgerEntry]:
     """What happened to it, newest first, from the ledger."""
     rows = (
         ledger.chain()
@@ -595,7 +597,7 @@ def history(tx: db.Where, finding: Finding, limit: int = 200) -> list[LedgerEntr
     return [e for e in rows if (e.details or {}).get("finding_id") == finding.id][:limit]
 
 
-def notifications(tx: db.Where, finding: Finding) -> list[dict[str, Any]]:
+def notifications(tx: db.Transaction, finding: Finding) -> list[dict[str, Any]]:
     rows = Notification.objects.filter(finding_id=finding.id).order_by("created_at")
     return [
         {

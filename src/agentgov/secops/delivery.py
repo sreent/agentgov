@@ -337,7 +337,7 @@ class DeliveryPartial(Exception):
 
 
 def siem_events(
-    tx: db.Where, entries: list[LedgerEntry], chosen: list[str], min_severity: str
+    tx: db.Transaction, entries: list[LedgerEntry], chosen: list[str], min_severity: str
 ) -> list[dict[str, Any]]:
     """The OCSF events a SIEM gets for these entries."""
     picked = [e for e in entries if destinations.category(e.type) in chosen]

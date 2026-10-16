@@ -1,85 +1,72 @@
-"""Registry data model.
-
-The vocabulary mirrors Microsoft Agent 365 / Entra Agent ID so the parity
-matrix in docs/baseline-agent365.md maps one-to-one:
-
-* ``Blueprint``  - IT-approved template for a class of agents: the tools its
-                   agents may use, risk tier, sponsor and attestation rules
-                   (Entra "agent identity blueprint").
-* ``Agent``      - one agent identity with owner, sponsors and lifecycle state.
-                   Its credentials live in Keycloak, not here.
-* ``ToolServer`` - an approved MCP server: published through agentgateway for
-                   agents, listed in the MCP registry for developers' tools, or both.
-* ``ModelProvider`` - a model provider agents call through agentgateway.
-* ``Policy``     - an organisation Rego module distributed to OPA.
-* ``FeatureSetting`` - which of AgentGov's features are used, and how strictly.
-* ``Team``       - people and chat channels that own agents, and that issues about
-                   agents escalate to.
-* ``AccessPackage`` - grants an agent can hold for a while, once approved
-                   (``AccessAssignment``).
-* ``ManagementRule`` - acts on the agents that match it, after telling their people
-                   (``RuleMatch``).
-* ``McpSighting`` - an MCP server set up on a developer's machine, as reported.
+"""The tables as SQLAlchemy describes them, for Alembic (agentgov.migrations): what
+scripts/new-migration.sh compares the migrations with to write the next one, until Django's
+migrations take over (docs/adr/0007-django.md). The application reads and writes the tables
+through Django's models (agentgov.db.models), which tests/test_django_models.py compares with
+the database the migrations build.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    MetaData,
     String,
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
-from agentgov.db import Base, UTCDateTime
+from agentgov.db.models import PENDING
 from agentgov.ids import utcnow
 
-# Agent lifecycle (Agent 365 terms in brackets).
-PENDING = "pending"  # registration awaiting review ("Pending review")
-ACTIVE = "active"  # approved and usable ("Available")
-BLOCKED = "blocked"  # blocked by an admin, the kill switch or risk ("Blocked")
-DELETED = "deleted"  # soft-deleted, restorable for a retention period ("Deleted")
-DISCOVERED = "discovered"  # seen at runtime but never registered ("Unmanaged")
-AGENT_STATUSES = (PENDING, ACTIVE, BLOCKED, DELETED, DISCOVERED)
 
-# Tool server review states (bring-your-own MCP server approval flow).
-TOOLSERVER_STATUSES = (PENDING, "approved", BLOCKED)
+class UTCDateTime(TypeDecorator):
+    """Stores naive UTC timestamps and always returns timezone-aware UTC datetimes.
 
-RISK_TIERS = ("minimal", "low", "medium", "high", "critical")
-RISK_LEVELS = ("low", "medium", "high", "critical")
-TRUST_LEVELS = ("verified", "unverified")
-DATA_CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
-SEVERITIES = ("info", "low", "medium", "high", "critical")
-# Model providers agentgateway can call with an API key. "openai-compatible" is any
-# server that speaks OpenAI's API (vLLM, Ollama, LiteLLM, hosted APIs) at base_url.
-MODEL_PROVIDER_KINDS = ("openai", "anthropic", "gemini", "openai-compatible")
-# Who a blueprint's agents act for, and who decides approvals made for a person.
-ACTS_FOR = ("people", "itself", "either")
-APPROVALS_BY = ("approvers", "person")
-# Identity providers whose tokens agents may authenticate with instead of a secret.
-ISSUER_KINDS = ("kubernetes", "spiffe", "oidc")
-# Where events and alerts go: SIEMs (OpenTelemetry logs, an HTTP input, Splunk's HTTP Event
-# Collector) and chats; and service desks, where issues become tickets.
-DESTINATION_KINDS = (
-    "otlp",
-    "webhook",
-    "splunk-hec",
-    "slack",
-    "teams",
-    "servicenow",
-    "jira",
-    "freshservice",
-)
+    SQLite has no native timezone support, so normalising here keeps comparisons
+    consistent across SQLite and PostgreSQL.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: Any) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).replace(tzinfo=None)
+
+    def process_result_value(self, value: datetime | None, dialect: Any) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC)
+
+
+# Constraint names as PostgreSQL gives them when none is set, so databases made before
+# migrations existed and databases built by them name every constraint the same way.
+NAMING_CONVENTION = {
+    "pk": "%(table_name)s_pkey",
+    "uq": "%(table_name)s_%(column_0_name)s_key",
+    "fk": "%(table_name)s_%(column_0_name)s_fkey",
+    "ix": "ix_%(column_0_label)s",
+    "ck": "%(table_name)s_%(constraint_name)s_check",
+}
+
+
+class Base(DeclarativeBase):
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 def _created() -> Mapped[datetime]:

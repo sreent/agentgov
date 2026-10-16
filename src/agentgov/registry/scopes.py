@@ -56,7 +56,7 @@ def parse(value: Any, what: str = "scope") -> dict[str, Any]:
     return out
 
 
-def known(tx: db.Where) -> dict[str, set[str]]:
+def known(tx: db.Transaction) -> dict[str, set[str]]:
     """The names a scope may use: the teams and blueprints there are, and the platforms."""
     return {
         "teams": set(Team.objects.values_list("name", flat=True)),
@@ -76,7 +76,7 @@ def missing(scope: dict[str, Any], names: dict[str, set[str]]) -> list[str]:
 
 
 def check_names(
-    tx: db.Where,
+    tx: db.Transaction,
     scope: dict[str, Any],
     what: str = "scope",
     *,
@@ -100,7 +100,7 @@ def check_names(
         )
 
 
-def naming(tx: db.Where, key: str, name: str) -> list[str]:
+def naming(tx: db.Transaction, key: str, name: str) -> list[str]:
     """The controls' exceptions and management rules that name ``name``, a team or a
     blueprint (``key``): without it, their scopes would match no agent, and a rule that
     gives agents an owner couldn't give them that team."""

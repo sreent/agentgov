@@ -13,8 +13,7 @@ from typing import Any
 
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.db.models import Agent, FeatureSetting, IntegrationState
-from agentgov.models import DELETED, DISCOVERED
+from agentgov.db.models import DELETED, DISCOVERED, Agent, FeatureSetting, IntegrationState
 from agentgov.registry import features, teams
 from agentgov.registry.errors import ValidationError
 
@@ -70,7 +69,7 @@ def _row() -> IntegrationState:
     return IntegrationState.objects.filter(pk=STATE).first() or IntegrationState(key=STATE, data={})
 
 
-def answer(tx: db.Where, settings: Settings, value: Any, *, actor: str) -> dict[str, Any]:
+def answer(tx: db.Transaction, settings: Settings, value: Any, *, actor: str) -> dict[str, Any]:
     """Where the organisation's agents are (``{"places": [...]}``): what reads them on,
     what reads other places off (but what the deployment pins), and the starting point."""
     if not isinstance(value, dict) or set(value) - {"places"}:
@@ -110,7 +109,7 @@ def answer(tx: db.Where, settings: Settings, value: Any, *, actor: str) -> dict[
     return checklist(tx)
 
 
-def hide(tx: db.Where, hidden: bool, *, actor: str) -> dict[str, Any]:
+def hide(tx: db.Transaction, hidden: bool, *, actor: str) -> dict[str, Any]:
     """Hide the checklist (or show it again)."""
     row = _row()
     row.data = {**(row.data or {}), "hidden": bool(hidden)}
@@ -119,7 +118,7 @@ def hide(tx: db.Where, hidden: bool, *, actor: str) -> dict[str, Any]:
     return checklist(tx)
 
 
-def checklist(tx: db.Where) -> dict[str, Any]:
+def checklist(tx: db.Transaction) -> dict[str, Any]:
     """Where the organisation is: what it said it has, and each step to a first useful day,
     done or not, worked out from the registry."""
     data = _row().data or {}

@@ -13,9 +13,8 @@ from agentgov import gateway, ledger
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal
 from agentgov.api.versions import if_match
-from agentgov.db.models import PlatformAgent
+from agentgov.db.models import ACTIVE, PlatformAgent
 from agentgov.identity.keycloak import KeycloakError
-from agentgov.models import ACTIVE
 from agentgov.registry import (
     agents,
     apikeys,

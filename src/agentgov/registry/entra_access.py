@@ -17,8 +17,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from agentgov import db, ids, ledger
-from agentgov.db.models import Agent
-from agentgov.models import DELETED
+from agentgov.db.models import DELETED, Agent
 from agentgov.platforms import connections
 from agentgov.registry import features, findings
 from agentgov.registry.errors import InvalidTransition, NotFound, ValidationError
@@ -63,7 +62,7 @@ def agent_policies(package: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(policies, key=lambda p: AGENT_SCOPES.index(p["allowedTargetScope"]))
 
 
-def _identities(tx: db.Where) -> dict[str, Agent]:
+def _identities(tx: db.Transaction) -> dict[str, Agent]:
     """Agents by their Entra identity's object ID (lower case)."""
     out = {}
     for agent in Agent.objects.exclude(status=DELETED):
@@ -74,7 +73,7 @@ def _identities(tx: db.Where) -> dict[str, Agent]:
 
 
 def record(
-    tx: db.Where,
+    tx: db.Transaction,
     packages: list[dict[str, Any]],
     assignments: dict[str, list[dict[str, Any]]],
     now: datetime | None = None,
@@ -170,7 +169,7 @@ def record(
 # ------------------------------------------------------------------------- views
 
 
-def view(tx: db.Where) -> dict[str, Any]:
+def view(tx: db.Transaction) -> dict[str, Any]:
     """The packages agents can hold, and what each agent's identity holds."""
     state = connections.load_state(tx, FEATURE)
     held = state.get("held", {})
@@ -187,7 +186,7 @@ def view(tx: db.Where) -> dict[str, Any]:
     }
 
 
-def for_agent(tx: db.Where, agent: Agent) -> dict[str, Any]:
+def for_agent(tx: db.Transaction, agent: Agent) -> dict[str, Any]:
     state = view(tx)
     entra = (agent.external_ids or {}).get("entra_agent_id")
     return {
@@ -203,7 +202,7 @@ def for_agent(tx: db.Where, agent: Agent) -> dict[str, Any]:
 # ------------------------------------------------------------------------ manage
 
 
-def target(tx: db.Where, agent: Agent, package_id: str) -> tuple[str, str, str]:
+def target(tx: db.Transaction, agent: Agent, package_id: str) -> tuple[str, str, str]:
     """What an adminAdd for this agent needs: its Entra identity, the package and its
     policy for agents. Refused unless the feature manages packages."""
     if features.mode(tx, FEATURE) != features.MANAGE:
@@ -227,7 +226,7 @@ def target(tx: db.Where, agent: Agent, package_id: str) -> tuple[str, str, str]:
     return str(entra), package["id"], package["policies"][0]["id"]
 
 
-def holding(tx: db.Where, agent: Agent, assignment_id: str) -> dict[str, Any]:
+def holding(tx: db.Transaction, agent: Agent, assignment_id: str) -> dict[str, Any]:
     """One of the agent's Entra assignments, for an adminRemove."""
     if features.mode(tx, FEATURE) != features.MANAGE:
         raise InvalidTransition(
@@ -241,7 +240,7 @@ def holding(tx: db.Where, agent: Agent, assignment_id: str) -> dict[str, Any]:
 
 
 def requested(
-    tx: db.Where, agent: Agent, *, change: str, package: str, actor: str, **details: Any
+    tx: db.Transaction, agent: Agent, *, change: str, package: str, actor: str, **details: Any
 ) -> None:
     """An Entra request AgentGov's app made, in the ledger."""
     ledger.append(

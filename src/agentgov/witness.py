@@ -141,18 +141,18 @@ def write(path: str, seq: int, hash_: str | None, ts: str | None = None) -> None
         raise WitnessError(f"can't write {path}: {exc.strerror}") from None
 
 
-def head(tx: db.Where) -> tuple[int, str | None]:
+def head(tx: db.Transaction) -> tuple[int, str | None]:
     row = LedgerHead.objects.filter(id=1).values_list("last_seq", "last_hash").first()
     return row if row is not None else (0, None)
 
 
-def written(tx: db.Where, seq: int) -> str | None:
+def written(tx: db.Transaction, seq: int) -> str | None:
     """When the database's entry ``seq`` was written, if it has it."""
     ts = LedgerEntry.objects.filter(seq=seq).values_list("ts", flat=True).first() if seq else None
     return ids.isoformat(ts)
 
 
-def compare(tx: db.Where, path: str) -> Status:
+def compare(tx: db.Transaction, path: str) -> Status:
     """The database's ledger against the file."""
     seq, hash_ = head(tx)
     status = Status(NEW, path, seq, hash_, written(tx, seq))
@@ -188,7 +188,7 @@ def compare(tx: db.Where, path: str) -> Status:
     return status
 
 
-def _archived(tx: db.Where, kept: dict[str, Any]) -> bool:
+def _archived(tx: db.Transaction, kept: dict[str, Any]) -> bool:
     """Whether the entry the file names, gone from the database, went with an archive: at
     or before where the chain in the database starts, as the chain itself says, the
     checkpoint there (if any) naming it; and written before the least retention period, as

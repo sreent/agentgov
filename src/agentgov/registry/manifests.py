@@ -44,8 +44,7 @@ import yaml
 
 from agentgov import db
 from agentgov.config import Settings
-from agentgov.db.models import Agent, AgentInstructions, FindingType
-from agentgov.models import ACTIVE, BLOCKED, PENDING
+from agentgov.db.models import ACTIVE, BLOCKED, PENDING, Agent, AgentInstructions, FindingType
 from agentgov.registry import (
     access_packages,
     agents,
@@ -114,7 +113,7 @@ def _spec(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def apply(
-    tx: db.Where, settings: Settings, docs: list[dict[str, Any]], *, actor: str
+    tx: db.Transaction, settings: Settings, docs: list[dict[str, Any]], *, actor: str
 ) -> list[dict[str, str]]:
     results = []
     # Features' exceptions, set last: they may name teams and blueprints applied here.
@@ -160,7 +159,7 @@ def _about(kind: str, name: str) -> Iterator[None]:
         raise type(exc)(f"{what}: {exc}") from None
 
 
-def _feature(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _feature(tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     """A feature's mode. Its exceptions are set after the other documents
     (``_feature_scopes``), once the teams and blueprints they name are there."""
     if set(spec) - {"name", "mode", "scopes", "labels"}:
@@ -176,14 +175,16 @@ def _feature(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str)
     return "configured" if changed else "unchanged"
 
 
-def _feature_scopes(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> bool:
+def _feature_scopes(
+    tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str
+) -> bool:
     try:
         return features.set_scopes(tx, settings, spec["name"], spec["scopes"], actor=actor)
     except NotFound as exc:
         raise ValidationError(str(exc)) from None
 
 
-def _finding_type(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _finding_type(tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     if set(spec) - {"name", "mode", "severity", "labels"}:
         raise ValidationError(f"finding type {spec['name']}: spec takes only mode and severity")
     if "mode" not in spec and "severity" not in spec:
@@ -196,7 +197,7 @@ def _finding_type(tx: db.Where, settings: Settings, spec: dict[str, Any], actor:
     return "unchanged" if before == (after["mode"], after["severity"]) else "configured"
 
 
-def _destination(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _destination(tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", destinations.ACTIVE)
     if desired not in (destinations.ACTIVE, destinations.PAUSED):
         raise ValidationError(f"destination {spec['name']}: status must be active or paused")
@@ -218,7 +219,7 @@ def _destination(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: 
     return action
 
 
-def _team(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _team(tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     spec.pop("labels", None)
     team = teams.find(tx, spec["name"])
     if team is None:
@@ -227,7 +228,9 @@ def _team(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) ->
     return "configured" if teams.update_team(tx, team, spec, actor=actor) else "unchanged"
 
 
-def _identity_issuer(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _identity_issuer(
+    tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str
+) -> str:
     desired = spec.pop("status", identity_issuers.APPROVED)
     if desired not in (identity_issuers.APPROVED, BLOCKED):
         raise ValidationError(f"identity issuer {spec['name']}: status must be approved or blocked")
@@ -245,7 +248,7 @@ def _identity_issuer(tx: db.Where, settings: Settings, spec: dict[str, Any], act
     return action
 
 
-def _blueprint(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _blueprint(tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     try:
         bp = blueprints.get(tx, spec["name"])
     except NotFound:
@@ -254,7 +257,7 @@ def _blueprint(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: st
     return "configured" if blueprints.update(tx, bp, spec, actor=actor) else "unchanged"
 
 
-def _toolserver(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _toolserver(tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", None)
     try:
         ts = toolservers.get(tx, spec["name"])
@@ -275,7 +278,9 @@ def _toolserver(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: s
     return action
 
 
-def _model_provider(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _model_provider(
+    tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str
+) -> str:
     desired = spec.pop("status", model_providers.APPROVED)
     if desired not in (model_providers.APPROVED, BLOCKED):
         raise ValidationError(f"model provider {spec['name']}: status must be approved or blocked")
@@ -293,7 +298,9 @@ def _model_provider(tx: db.Where, settings: Settings, spec: dict[str, Any], acto
     return action
 
 
-def _access_package(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _access_package(
+    tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str
+) -> str:
     try:
         package = access_packages.get(tx, spec["name"])
     except NotFound:
@@ -303,7 +310,7 @@ def _access_package(tx: db.Where, settings: Settings, spec: dict[str, Any], acto
     return "configured" if changed else "unchanged"
 
 
-def _rule(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _rule(tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     try:
         rule = rules.get(tx, spec["name"])
     except NotFound:
@@ -312,7 +319,7 @@ def _rule(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) ->
     return "configured" if rules.update(tx, rule, spec, actor=actor) else "unchanged"
 
 
-def _policy(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _policy(tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     try:
         policy = policies.get(tx, spec["name"])
     except NotFound:
@@ -321,7 +328,9 @@ def _policy(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) 
     return "configured" if policies.update(tx, policy, spec, actor=actor) else "unchanged"
 
 
-def _instructions(tx: db.Where, settings: Settings, agent: Agent, text: Any, actor: str) -> bool:
+def _instructions(
+    tx: db.Transaction, settings: Settings, agent: Agent, text: Any, actor: str
+) -> bool:
     """Apply ``spec.instructions``; returns whether they changed."""
     if text is None:
         return False
@@ -341,7 +350,7 @@ def _instructions(tx: db.Where, settings: Settings, agent: Agent, text: Any, act
     return row.sha256 != digest
 
 
-def _agent(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -> str:
+def _agent(tx: db.Transaction, settings: Settings, spec: dict[str, Any], actor: str) -> str:
     desired = spec.pop("status", ACTIVE)
     text = spec.pop("instructions", None)
     # Its classification, when the manifest gives one (none: it is left as it is).
@@ -378,7 +387,7 @@ def _agent(tx: db.Where, settings: Settings, spec: dict[str, Any], actor: str) -
     return action
 
 
-def export(tx: db.Where) -> list[dict[str, Any]]:
+def export(tx: db.Transaction) -> list[dict[str, Any]]:
     # Features administrators chose; the deployment's pins belong to the deployment.
     docs: list[dict[str, Any]] = [
         _doc("Feature", key, spec) for key, spec in features.chosen(tx).items()

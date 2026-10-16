@@ -16,8 +16,7 @@ from typing import Any
 from django.db.models import Count
 
 from agentgov import db, ids, ledger
-from agentgov.db.models import Finding, FindingType
-from agentgov.models import SEVERITIES
+from agentgov.db.models import SEVERITIES, Finding, FindingType
 from agentgov.registry.errors import ValidationError
 
 ON, OFF = "on", "off"
@@ -31,7 +30,7 @@ ACTOR = "system:finding-types"
 TYPE = re.compile(r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)+$")
 
 
-def effective(tx: db.Where, type_: str, severity: str) -> tuple[str, bool]:
+def effective(tx: db.Transaction, type_: str, severity: str) -> tuple[str, bool]:
     """The severity a finding of ``type_`` takes here, and whether its type is off."""
     row = FindingType.objects.filter(pk=type_).first()
     if row is None:
@@ -39,7 +38,7 @@ def effective(tx: db.Where, type_: str, severity: str) -> tuple[str, bool]:
     return row.severity or severity, row.mode == OFF and type_ not in ALWAYS_ON
 
 
-def off_types(tx: db.Where) -> set[str]:
+def off_types(tx: db.Transaction) -> set[str]:
     """The types turned off here."""
     off = set(FindingType.objects.filter(mode=OFF).values_list("type", flat=True))
     return off - set(ALWAYS_ON)
@@ -54,7 +53,7 @@ def suppress(finding: Finding, now: Any = None) -> None:
     finding.details = {**(finding.details or {}), SUPPRESSED: True}
 
 
-def configure(tx: db.Where, type_: Any, data: Any, *, actor: str) -> dict[str, Any]:
+def configure(tx: db.Transaction, type_: Any, data: Any, *, actor: str) -> dict[str, Any]:
     """Turn a type on or off (``mode``), or set its severity (``severity``; null for the one
     its check gives). Turned off, its open findings are dismissed; on again, those its
     checks find again come back (:func:`agentgov.registry.findings.raise_finding`)."""
@@ -117,7 +116,9 @@ def configure(tx: db.Where, type_: Any, data: Any, *, actor: str) -> dict[str, A
     return to_dict(tx, row)
 
 
-def to_dict(tx: db.Where, row: FindingType | None, type_: str | None = None) -> dict[str, Any]:
+def to_dict(
+    tx: db.Transaction, row: FindingType | None, type_: str | None = None
+) -> dict[str, Any]:
     type_ = row.type if row is not None else str(type_)
     counts = dict(
         Finding.objects.filter(type=type_)
@@ -137,7 +138,7 @@ def to_dict(tx: db.Where, row: FindingType | None, type_: str | None = None) -> 
     }
 
 
-def listing(tx: db.Where) -> list[dict[str, Any]]:
+def listing(tx: db.Transaction) -> list[dict[str, Any]]:
     """Every type AgentGov has raised findings of, and every type configured, with how many
     of its findings are open."""
     rows = {r.type: r for r in FindingType.objects.all()}
@@ -145,6 +146,6 @@ def listing(tx: db.Where) -> list[dict[str, Any]]:
     return [to_dict(tx, rows.get(t), t) for t in sorted(seen | set(rows))]
 
 
-def chosen(tx: db.Where) -> list[FindingType]:
+def chosen(tx: db.Transaction) -> list[FindingType]:
     """The types configured here (for export)."""
     return list(FindingType.objects.order_by("type"))

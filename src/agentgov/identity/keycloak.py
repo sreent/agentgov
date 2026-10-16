@@ -48,8 +48,7 @@ import httpx
 from agentgov import ids
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.db.models import Agent, IdentityIssuer
-from agentgov.models import ACTIVE, DISCOVERED
+from agentgov.db.models import ACTIVE, DISCOVERED, Agent, IdentityIssuer
 from agentgov.registry import features, identity_issuers, validation
 
 log = logging.getLogger(__name__)

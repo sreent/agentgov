@@ -42,8 +42,7 @@ import httpcore
 import httpx
 
 from agentgov import __version__, db, ids, ledger
-from agentgov.db.models import Agent
-from agentgov.models import DELETED
+from agentgov.db.models import DELETED, Agent
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import features
 
@@ -296,7 +295,7 @@ def call(
     return _result(INCONCLUSIVE, f"it answered HTTP {status}", url, status)
 
 
-def targets(tx: db.Where) -> dict[str, str] | None:
+def targets(tx: db.Transaction) -> dict[str, str] | None:
     """The agents to test, by ID: their A2A URLs (None unless the feature says "test")."""
     modes = features.modes(tx)
     if modes.get(FEATURE) != TEST or not on(modes):
@@ -321,7 +320,7 @@ def call_all(urls: dict[str, str], **options: Any) -> dict[str, Any]:
 Flag = Callable[..., None]
 
 
-def scan(tx: db.Where, agent: Agent, flag: Flag, *, tested: dict[str, Any] | None) -> None:
+def scan(tx: db.Transaction, agent: Agent, flag: Flag, *, tested: dict[str, Any] | None) -> None:
     """Record the agent's test, if this scan tested it, and raise what it shows (and what
     its owners haven't said) for posture.scan."""
     if tested is not None:
@@ -414,7 +413,7 @@ def _same_host(a: str, b: str) -> bool:
     return "." not in rest or ".svc" in f".{rest}"
 
 
-def endpoints(tx: db.Where, modes: dict[str, str]) -> list[tuple[str, int | None, Agent]]:
+def endpoints(tx: db.Transaction, modes: dict[str, str]) -> list[tuple[str, int | None, Agent]]:
     """Where the agents whose calls around the gateway are looked for serve A2A."""
     if not on(modes):
         return []

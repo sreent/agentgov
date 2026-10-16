@@ -17,8 +17,7 @@ from django.db.models import F, Q
 
 from agentgov import db, ids, ledger
 from agentgov.db import mark_changed
-from agentgov.db.models import Agent, AgentActivity, IdentityIssuer
-from agentgov.models import DISCOVERED
+from agentgov.db.models import DISCOVERED, Agent, AgentActivity, IdentityIssuer
 from agentgov.registry import findings, risk
 
 
@@ -28,7 +27,7 @@ def slugify(value: str) -> str:
     return slug or "agent"
 
 
-def unique_name(tx: db.Where, base: str) -> str:
+def unique_name(tx: db.Transaction, base: str) -> str:
     """``base``, or ``base-2``, ``base-3``... if an agent already has that name."""
     name, n = base, 1
     while Agent.objects.filter(name=name).exists():
@@ -37,7 +36,9 @@ def unique_name(tx: db.Where, base: str) -> str:
     return name
 
 
-def _workload(tx: db.Where, issuer: str | None, subject: str | None) -> tuple[str, str] | None:
+def _workload(
+    tx: db.Transaction, issuer: str | None, subject: str | None
+) -> tuple[str, str] | None:
     """The workload identity (issuer name, subject) a token of an issuer the gateway trusts
     names, or None."""
     if not issuer or not subject:
@@ -47,7 +48,7 @@ def _workload(tx: db.Where, issuer: str | None, subject: str | None) -> tuple[st
 
 
 def find(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     agent_id: str | None = None,
     client_id: str | None = None,
@@ -68,7 +69,7 @@ def find(
 
 
 def observe(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     source: str,
     agent_id: str | None = None,
@@ -162,7 +163,7 @@ def seen(agent_id: str, when: datetime) -> None:
 
 
 def record_activity(
-    tx: db.Where,
+    tx: db.Transaction,
     agent_id: str,
     *,
     when: datetime | None = None,
@@ -187,7 +188,7 @@ def record_activity(
 
 
 def import_scan(
-    tx: db.Where, items: list[dict[str, Any]], *, source: str, discover: bool = True
+    tx: db.Transaction, items: list[dict[str, Any]], *, source: str, discover: bool = True
 ) -> dict[str, int]:
     """Import scanner results: ``[{"name": ..., "framework": ..., "location": ...}]``. One
     that names an agent there is matched; one that doesn't is recorded as unmanaged while

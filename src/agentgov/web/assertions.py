@@ -75,7 +75,7 @@ def _subject_tokens(rt: Any) -> assertions.SubjectTokens:
         return found
 
 
-def _server(s: db.Where, request: assertions.Request) -> ToolServer:
+def _server(tx: db.Transaction, request: assertions.Request) -> ToolServer:
     """The tool server the assertion is for: the one registered with that authorization
     server, or, of several, the one at the resource asked for."""
     listed = list(ToolServer.objects.filter(authorization_server=request.audience))
@@ -118,7 +118,7 @@ def _decide(rt: Any, opa_input: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _agent(s: db.Where, identity: dict[str, Any]) -> Agent | None:
+def _agent(tx: db.Transaction, identity: dict[str, Any]) -> Agent | None:
     found = (
         Agent.objects.filter(pk=identity["agent_id"]).first() if identity.get("agent_id") else None
     )

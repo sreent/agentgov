@@ -20,8 +20,7 @@ from collections.abc import Callable
 from typing import Any
 
 from agentgov import db, ids
-from agentgov.db.models import Agent, Finding, ToolServer
-from agentgov.models import DISCOVERED, PENDING
+from agentgov.db.models import DISCOVERED, PENDING, Agent, Finding, ToolServer
 from agentgov.registry import access_packages, approvals, findings, issues, platforms
 from agentgov.secops import handoff
 
@@ -33,7 +32,7 @@ DRIFT = "toolserver.tool_drift"
 
 
 def gather(
-    tx: db.Where,
+    tx: db.Transaction,
     principal: Any,
     roles_at: Callable[[str | None], frozenset[str]] | None = None,
 ) -> dict[str, Any]:
@@ -106,7 +105,7 @@ def gather(
     return {"total": sum(k["count"] for k in kinds), "kinds": kinds}
 
 
-def _risk(tx: db.Where, f: Finding) -> dict[str, Any]:
+def _risk(tx: db.Transaction, f: Finding) -> dict[str, Any]:
     agent = Agent.objects.filter(pk=f.agent_id).first() if f.agent_id else None
     return {
         **findings.to_dict(f),
@@ -145,7 +144,7 @@ def _drift(f: Finding) -> dict[str, Any]:
     return {"finding_id": f.id, "server": server, "tool": tool, "since": since}
 
 
-def _unreviewed(tx: db.Where) -> dict[str, int]:
+def _unreviewed(tx: db.Transaction) -> dict[str, int]:
     """Agents found on each platform with nobody's review yet (gone ones aren't)."""
     gone = platforms.gone_agents(tx)
     counts: dict[str, int] = {}
@@ -160,6 +159,6 @@ def _unreviewed(tx: db.Where) -> dict[str, int]:
     return counts
 
 
-def total(tx: db.Where, principal: Any) -> int:
+def total(tx: db.Transaction, principal: Any) -> int:
     """How many decisions wait for ``principal``."""
     return int(gather(tx, principal)["total"])

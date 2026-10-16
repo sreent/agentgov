@@ -47,8 +47,6 @@ from agentgov.db import (
     SERVER_KEEPALIVES,
     Database,
     Transaction,
-    Where,
-    transaction_of,
 )
 from agentgov.registry.errors import Conflict
 
@@ -346,14 +344,14 @@ class Coordinator:
             connection.close()
 
     # -- the replicas ------------------------------------------------------------------
-    def replicas(self, tx: Where) -> list[dict[str, Any]]:
+    def replicas(self, tx: Transaction) -> list[dict[str, Any]]:
         """The replicas connected to the database now, and which one leads. This one is
         among them even while it has lost touch with the others (``listening`` false)."""
         if not self.shared:
             return [{**self.status(), "this": True, "connected_since": None}]
         # Of this database only: another AgentGov on the same server has replicas, and a
         # leader, of its own.
-        rows = transaction_of(tx).execute(
+        rows = tx.execute(
             "SELECT a.application_name, a.backend_start, EXISTS ("
             "  SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND l.locktype = 'advisory'"
             "  AND l.granted AND l.classid = %s AND l.objid = %s AND l.objsubid = 2"

@@ -26,8 +26,7 @@ from typing import Any
 
 from agentgov import db, ids
 from agentgov.config import Settings
-from agentgov.db.models import Agent, Destination, Finding, Ticket
-from agentgov.models import SEVERITIES
+from agentgov.db.models import SEVERITIES, Agent, Destination, Finding, Ticket
 from agentgov.registry import desks, finding_types, findings, issues
 
 SYSTEM = "system:tickets"
@@ -42,11 +41,11 @@ MAX_ATTEMPTS = 13
 READ_EVERY = timedelta(minutes=5)
 
 
-def active_desks(tx: db.Where) -> list[Destination]:
+def active_desks(tx: db.Transaction) -> list[Destination]:
     return list(Destination.objects.filter(kind__in=desks.DESKS, status="active").order_by("name"))
 
 
-def team_of(tx: db.Where, finding: Finding, directory: issues.Directory) -> str | None:
+def team_of(tx: db.Transaction, finding: Finding, directory: issues.Directory) -> str | None:
     """The issue's team: the first team in its chain (its owner, a sponsor, or its team)."""
     for _level, people in issues.chain(tx, finding, directory):
         for person in people:
@@ -81,7 +80,7 @@ def _new(desk: Destination, finding: Finding, team: str | None, status: str) -> 
     )
 
 
-def plan(tx: db.Where, settings: Settings) -> int:
+def plan(tx: db.Transaction, settings: Settings) -> int:
     """Tickets to open: for the open issues each desk takes that have none for their round
     (an open ticket of an earlier round follows the issue instead)."""
     chosen = active_desks(tx)
@@ -115,7 +114,7 @@ def plan(tx: db.Where, settings: Settings) -> int:
     return count
 
 
-def skip_open(tx: db.Where, desk: Destination) -> int:
+def skip_open(tx: db.Transaction, desk: Destination) -> int:
     """A desk just added: the issues already open get no ticket there (until they are
     raised again), so that it isn't flooded with what was there before it."""
     count = 0
@@ -125,7 +124,7 @@ def skip_open(tx: db.Where, desk: Destination) -> int:
     return count
 
 
-def retry_failed(tx: db.Where, desk: Destination) -> int:
+def retry_failed(tx: db.Transaction, desk: Destination) -> int:
     """The desk's settings changed: what it refused is tried again now."""
     now = ids.utcnow()
     count = 0
@@ -140,7 +139,7 @@ def retry_failed(tx: db.Where, desk: Destination) -> int:
     return count
 
 
-def forget(tx: db.Where, desk: Destination) -> None:
+def forget(tx: db.Transaction, desk: Destination) -> None:
     """The desk is deleted: AgentGov stops keeping its tickets in step (they stay there)."""
     Ticket.objects.filter(destination_id=desk.id).delete()
 
@@ -170,7 +169,7 @@ def marker(ticket: Ticket) -> str:
     return f"agentgov-{ticket.id}"
 
 
-def _about(tx: db.Where, finding: Finding, team: str | None) -> list[str]:
+def _about(tx: db.Transaction, finding: Finding, team: str | None) -> list[str]:
     from agentgov.registry.platforms import SOURCES
 
     agent = Agent.objects.filter(pk=finding.agent_id).first() if finding.agent_id else None
@@ -191,7 +190,7 @@ def _about(tx: db.Where, finding: Finding, team: str | None) -> list[str]:
 
 
 def new_ticket(
-    tx: db.Where, settings: Settings, desk: Destination, ticket: Ticket, finding: Finding
+    tx: db.Transaction, settings: Settings, desk: Destination, ticket: Ticket, finding: Finding
 ) -> NewTicket:
     agent = Agent.objects.filter(pk=finding.agent_id).first() if finding.agent_id else None
     severity = finding.severity
@@ -355,7 +354,7 @@ def _who(desk: Destination, ticket: Ticket, seen: Seen) -> str:
 
 
 def seen(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     desk: Destination,
     ticket: Ticket,
@@ -372,7 +371,7 @@ def seen(
 
 
 def _seen(
-    tx: db.Where,
+    tx: db.Transaction,
     desk: Destination,
     ticket: Ticket,
     finding: Finding,
@@ -448,7 +447,7 @@ def _seen(
 
 
 def opened(
-    tx: db.Where,
+    tx: db.Transaction,
     desk: Destination,
     ticket: Ticket,
     finding: Finding | None,
@@ -483,7 +482,7 @@ def opened(
 
 
 def failed(
-    tx: db.Where, desk: Destination, ticket: Ticket, finding: Finding | None, error: str
+    tx: db.Transaction, desk: Destination, ticket: Ticket, finding: Finding | None, error: str
 ) -> None:
     """It couldn't go: tried again later, until it is given up on."""
     from agentgov.secops.delivery import backoff
@@ -508,7 +507,9 @@ def failed(
     ticket.save()
 
 
-def told(tx: db.Where, desk: Destination, ticket: Ticket, finding: Finding, done: Work) -> None:
+def told(
+    tx: db.Transaction, desk: Destination, ticket: Ticket, finding: Finding, done: Work
+) -> None:
     """The desk has what changed (as ``done`` told it: what changed since goes next)."""
     ticket.told = done.state
     ticket.round = done.state.get("round", ticket.round)
@@ -559,7 +560,7 @@ def to_dict(t: Ticket, desk: Destination | None) -> dict[str, Any]:
     }
 
 
-def for_finding(tx: db.Where, finding: Finding) -> list[dict[str, Any]]:
+def for_finding(tx: db.Transaction, finding: Finding) -> list[dict[str, Any]]:
     rows = list(
         Ticket.objects.filter(finding_id=finding.id).exclude(status=SKIPPED).order_by("created_at")
     )
@@ -568,7 +569,7 @@ def for_finding(tx: db.Where, finding: Finding) -> list[dict[str, Any]]:
 
 
 def listing(
-    tx: db.Where, *, desk: str | None = None, status: str | None = None, limit: int = 500
+    tx: db.Transaction, *, desk: str | None = None, status: str | None = None, limit: int = 500
 ) -> list[dict[str, Any]]:
     named = {d.id: d for d in Destination.objects.all()}
     rows = Ticket.objects.exclude(status=SKIPPED).order_by("-created_at")
@@ -579,7 +580,7 @@ def listing(
     return [to_dict(t, named.get(t.destination_id)) for t in rows[:limit]]
 
 
-def counts(tx: db.Where) -> dict[str, dict[str, int]]:
+def counts(tx: db.Transaction) -> dict[str, dict[str, int]]:
     """By desk: its tickets AgentGov keeps in step, those waiting to open, those it gave up
     opening, and those whose last try failed."""
     out: dict[str, dict[str, int]] = {}

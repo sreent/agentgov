@@ -9,18 +9,16 @@ from typing import Any
 
 import pytest
 from django.db import IntegrityError, connections
-from sqlalchemy import event, select
 
 from agentgov import ledger
-from agentgov.db import Database, Transaction, mark_changed, transaction_of
-from agentgov.db import models as django_models
-from agentgov.models import IntegrationState
+from agentgov.db import Database, Transaction, mark_changed
+from agentgov.db.models import IntegrationState
 
 WHEN = "2026-10-15 00:00:00.000000"
 
 
 def put(tx: Transaction, key: str) -> None:
-    """A row written by Django, on the transaction's connection."""
+    """A row written by a statement of the transaction's own."""
     tx.execute(
         "INSERT INTO integration_state (key, data, updated_at) VALUES (%s, %s, %s)",
         [key, "{}", WHEN],
@@ -54,49 +52,25 @@ def db(database_url: str, heard: list[set[str]]) -> Database:
     return Database(database_url, on_commit=heard.append)
 
 
-def test_what_django_and_sqlalchemy_write_commits_together(db: Database) -> None:
+def test_what_the_orm_and_statements_write_commits_together(db: Database) -> None:
     with db.transaction() as tx:
-        tx.orm().add(IntegrationState(key="by-sqlalchemy", data={}))
-        put(tx, "by-django")
+        IntegrationState.objects.create(key="by-the-orm", data={})
+        put(tx, "by-a-statement")
         # Each sees what the other wrote: one connection, one transaction.
-        assert tx.orm().get(IntegrationState, "by-django") is not None
-    assert keys(db) == ["by-django", "by-sqlalchemy"]
+        assert IntegrationState.objects.filter(key="by-a-statement").exists()
+    assert keys(db) == ["by-a-statement", "by-the-orm"]
 
 
-def test_what_both_write_rolls_back_together(db: Database, heard: list[set[str]]) -> None:
-    with pytest.raises(RuntimeError), db.session() as s:
-        s.add(IntegrationState(key="by-sqlalchemy", data={}))
-        put(transaction_of(s), "by-django")
-        ledger.append(s, type="test.rolled-back", actor="tests")
+def test_what_a_transaction_wrote_rolls_back_together(db: Database, heard: list[set[str]]) -> None:
+    with pytest.raises(RuntimeError), db.transaction() as tx:
+        IntegrationState.objects.create(key="by-the-orm", data={})
+        put(tx, "by-a-statement")
+        ledger.append(tx, type="test.rolled-back", actor="tests")
+        mark_changed(tx, "agents")
         raise RuntimeError("the request failed")
     assert keys(db) == []
     assert entries(db) == []
     assert heard == []
-
-
-def test_djangos_orm_sees_what_the_session_holds(db: Database) -> None:
-    """What the session holds is written before Django's ORM reads or writes, as before
-    SQLAlchemy's own queries: a module that moved to Django's ORM sees what one still on
-    SQLAlchemy changed in the same transaction."""
-    rows = django_models.IntegrationState.objects
-    with db.session() as s:
-        s.add(IntegrationState(key="pending", data={}))
-        assert rows.filter(key="pending").exists()
-        with s.no_autoflush:  # unless the session is told not to
-            s.add(IntegrationState(key="held", data={}))
-            assert not rows.filter(key="held").exists()
-        assert rows.filter(key="held").exists()
-    assert keys(db) == ["held", "pending"]
-
-
-def test_a_savepoint_rolls_back_without_writing_what_the_session_holds(db: Database) -> None:
-    with db.transaction() as tx:
-        put(tx, "taken")
-        with pytest.raises(RuntimeError, match="this part failed"), db.transaction():
-            tx.orm().add(IntegrationState(key="taken", data={}))  # can't be written
-            raise RuntimeError("this part failed")
-        put(tx, "after")
-    assert keys(db) == ["after", "taken"]
 
 
 def test_a_savepoint_rolls_back_alone(db: Database) -> None:
@@ -106,7 +80,7 @@ def test_a_savepoint_rolls_back_alone(db: Database) -> None:
         with pytest.raises(RuntimeError), db.transaction() as inner:
             assert inner is tx  # the same transaction, in part
             put(tx, "in-savepoint")
-            tx.orm().add(IntegrationState(key="in-savepoint-too", data={}))
+            IntegrationState.objects.create(key="in-savepoint-too", data={})
             ledger.append(tx, type="test.rolled-back", actor="tests")
             raise RuntimeError("this part failed")
         put(tx, "after")
@@ -118,15 +92,11 @@ def test_a_savepoint_rolls_back_alone(db: Database) -> None:
 def test_ledger_entries_are_written_last(db: Database) -> None:
     statements: list[str] = []
 
-    def heard_sqlalchemy(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
-        statements.append(what(statement))
-
-    def heard_django(execute: Any, sql: str, params: Any, many: bool, context: Any) -> Any:
+    def heard(execute: Any, sql: str, params: Any, many: bool, context: Any) -> Any:
         statements.append(what(sql))
         return execute(sql, params, many, context)
 
-    event.listen(db._lent, "before_cursor_execute", heard_sqlalchemy)
-    with connections[db.alias].execute_wrapper(heard_django), db.transaction() as tx:
+    with connections[db.alias].execute_wrapper(heard), db.transaction() as tx:
         ledger.append(tx, type="test.first", actor="tests")
         # Not written yet: the transaction's own queries don't see it.
         assert tx.execute("SELECT count(*) FROM ledger") == [(0,)]
@@ -192,11 +162,9 @@ def test_a_transaction_commits_only_past_its_checks(db: Database, heard: list[se
     assert heard == [] and told == []
 
 
-def test_a_session_works_only_in_its_transaction(db: Database) -> None:
-    with db.session() as s:
-        s.add(IntegrationState(key="x", data={}))
-    with pytest.raises(RuntimeError, match="outside its transaction"):
-        s.execute(select(IntegrationState))
+def test_the_models_are_used_only_in_a_transaction(db: Database) -> None:
+    with pytest.raises(RuntimeError, match="used in a transaction"):
+        IntegrationState.objects.count()
 
 
 def test_each_transaction_gives_its_connection_back(db: Database) -> None:

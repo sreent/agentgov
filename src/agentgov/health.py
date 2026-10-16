@@ -138,7 +138,7 @@ class Cached:
 # ------------------------------------------------------------ the processors' reports
 
 
-def record(tx: db.Where, body: Any) -> None:
+def record(tx: db.Transaction, body: Any) -> None:
     """Keep what one instance of a component said it can reach, in place of its last
     report, and forget the reports nobody sent for a week."""
     if not isinstance(body, dict):
@@ -180,7 +180,7 @@ def _fresh(row: ComponentReport, now: datetime) -> bool:
     return row.reported_at >= now - timedelta(seconds=max(180, MISSED * row.interval))
 
 
-def reports(tx: db.Where) -> list[dict[str, Any]]:
+def reports(tx: db.Transaction) -> list[dict[str, Any]]:
     """Every processor that reported in the last week, the newest first, with whether it
     is in touch (``fresh``)."""
     now = ids.utcnow()
@@ -231,7 +231,7 @@ class Situation:
         return [p for p in self.processors if p["fresh"]]
 
 
-def situation(tx: db.Where, settings: Settings, rt: Any) -> Situation:
+def situation(tx: db.Transaction, settings: Settings, rt: Any) -> Situation:
     """What the runtime ``rt`` knows now."""
     from agentgov.platforms import connections
     from agentgov.registry import destinations, platforms

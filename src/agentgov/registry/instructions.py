@@ -69,7 +69,7 @@ def issues_of(row: AgentInstructions) -> list[dict[str, Any]]:
 
 
 def report(
-    tx: db.Where,
+    tx: db.Transaction,
     agent: Agent,
     *,
     source: str,
@@ -127,7 +127,7 @@ def _scan(row: AgentInstructions, classify: bool) -> None:
     row.classifier_state, row.classifier = ("pending" if classify else "off"), {}
 
 
-def clear(tx: db.Where, agent: Agent, *, source: str, actor: str) -> None:
+def clear(tx: db.Transaction, agent: Agent, *, source: str, actor: str) -> None:
     row = AgentInstructions.objects.filter(pk=f"{agent.id}:{source}").first()
     if row is None:
         raise NotFound(f"agent {agent.name} has no {source} instructions")
@@ -142,7 +142,7 @@ def clear(tx: db.Where, agent: Agent, *, source: str, actor: str) -> None:
     evaluate(tx, agent)
 
 
-def rescan(tx: db.Where, agent: Agent, *, actor: str, classify: bool) -> int:
+def rescan(tx: db.Transaction, agent: Agent, *, actor: str, classify: bool) -> int:
     """Check the stored instructions again (after a rules update, or for the classifier)."""
     if not features.is_on(tx, "instruction-checks"):
         raise Conflict("instruction checks are off: turn them on in Features first")
@@ -163,7 +163,7 @@ def rescan(tx: db.Where, agent: Agent, *, actor: str, classify: bool) -> int:
     return len(rows)
 
 
-def check_unchecked(tx: db.Where, *, classify: bool) -> list[Agent]:
+def check_unchecked(tx: db.Transaction, *, classify: bool) -> list[Agent]:
     """Check the instructions that arrived while instruction checks were off; returns
     the agents they belong to."""
     rows = list(AgentInstructions.objects.filter(classifier_state=UNCHECKED))
@@ -184,21 +184,21 @@ def check_unchecked(tx: db.Where, *, classify: bool) -> list[Agent]:
 # ---------------------------------------------------------------- classifier
 
 
-def queue_unclassified(tx: db.Where) -> int:
+def queue_unclassified(tx: db.Transaction) -> int:
     """Queue instructions stored before the classifier was configured."""
     return AgentInstructions.objects.filter(classifier_state="off").update(
         classifier_state="pending"
     )
 
 
-def pending(tx: db.Where, limit: int = 5) -> list[tuple[str, str, str]]:
+def pending(tx: db.Transaction, limit: int = 5) -> list[tuple[str, str, str]]:
     """``(id, text, sha256)`` of instructions waiting for the classifier."""
     rows = AgentInstructions.objects.filter(classifier_state="pending").order_by("updated_at")
     return list(rows.values_list("id", "text", "sha256")[:limit])
 
 
 def record_classification(
-    tx: db.Where,
+    tx: db.Transaction,
     row_id: str,
     digest: str,
     result: dict[str, Any],
@@ -232,7 +232,7 @@ def record_classification(
 # ------------------------------------------------------------------- finding
 
 
-def evaluate(tx: db.Where, agent: Agent) -> Finding | None:
+def evaluate(tx: db.Transaction, agent: Agent) -> Finding | None:
     """Raise, update or resolve the agent's ``agent.unsafe_instructions`` finding."""
     found = [
         {**issue, "source": row.source}
@@ -291,7 +291,7 @@ def to_dict(row: AgentInstructions) -> dict[str, Any]:
     }
 
 
-def for_agent(tx: db.Where, agent_id: str) -> list[dict[str, Any]]:
+def for_agent(tx: db.Transaction, agent_id: str) -> list[dict[str, Any]]:
     return [
         to_dict(row)
         for row in AgentInstructions.objects.filter(agent_id=agent_id).order_by("source")

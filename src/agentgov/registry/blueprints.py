@@ -29,18 +29,18 @@ FIELDS = (
 )
 
 
-def get(tx: db.Where, ref: str) -> Blueprint:
+def get(tx: db.Transaction, ref: str) -> Blueprint:
     bp = Blueprint.objects.filter(pk=ref).first() or Blueprint.objects.filter(name=ref).first()
     if bp is None:
         raise NotFound(f"blueprint {ref!r} not found")
     return bp
 
 
-def list_all(tx: db.Where) -> list[Blueprint]:
+def list_all(tx: db.Transaction) -> list[Blueprint]:
     return list(Blueprint.objects.order_by("name"))
 
 
-def _apply(tx: db.Where, bp: Blueprint, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Transaction, bp: Blueprint, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in FIELDS:
         if key not in data:
@@ -79,7 +79,7 @@ def _apply(tx: db.Where, bp: Blueprint, data: dict[str, Any]) -> list[str]:
     return changed
 
 
-def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> Blueprint:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str) -> Blueprint:
     name = validation.slug(data.get("name"), "name")
     if Blueprint.objects.filter(name=name).exists():
         raise Conflict(f"blueprint {name!r} already exists")
@@ -109,7 +109,7 @@ def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> Blueprint:
 
 
 def update(
-    tx: db.Where,
+    tx: db.Transaction,
     bp: Blueprint,
     data: dict[str, Any],
     *,
@@ -132,7 +132,7 @@ def update(
     return changed
 
 
-def delete(tx: db.Where, bp: Blueprint, *, actor: str) -> None:
+def delete(tx: db.Transaction, bp: Blueprint, *, actor: str) -> None:
     in_use = Agent.objects.filter(blueprint_id=bp.id).count()
     if in_use:
         raise Conflict(f"blueprint {bp.name!r} is used by {in_use} agent(s)")

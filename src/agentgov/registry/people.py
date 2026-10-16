@@ -29,8 +29,7 @@ from django.db.models.functions import Lower
 
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.db.models import Agent, IntegrationState, Person, PlatformAgent
-from agentgov.models import DELETED, DISCOVERED
+from agentgov.db.models import DELETED, DISCOVERED, Agent, IntegrationState, Person, PlatformAgent
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import platforms, teams
 from agentgov.registry.errors import NotFound, RegistryError, ValidationError
@@ -80,13 +79,13 @@ def named(record: PlatformAgent) -> list[dict[str, str]]:
     return out
 
 
-def _records(tx: db.Where) -> list[PlatformAgent]:
+def _records(tx: db.Transaction) -> list[PlatformAgent]:
     """The platform records of agents in the registry (not deleted)."""
     deleted = set(Agent.objects.filter(status=DELETED).values_list("id", flat=True))
     return [r for r in PlatformAgent.objects.all() if r.agent_id not in deleted]
 
 
-def owners_and_sponsors(tx: db.Where) -> set[str]:
+def owners_and_sponsors(tx: db.Transaction) -> set[str]:
     """The people AgentGov names as owners and sponsors of agents in the registry, by email
     address (lower case): not teams, nor user names it can't look up."""
     team_names = {t.lower() for t in teams.all_names(tx)}
@@ -103,7 +102,7 @@ def _names(person: Person) -> set[str]:
     return {n.lower() for n in (person.email, person.upn) if n}
 
 
-def aliases(tx: db.Where, name: str | None) -> set[str]:
+def aliases(tx: db.Transaction, name: str | None) -> set[str]:
     """The names a person goes by, lower case: the one given, and, where the directory knows
     them by it, their email address and user principal name too. Owners are named by their
     email address; a person may sign in by their user principal name."""
@@ -118,7 +117,9 @@ def aliases(tx: db.Where, name: str | None) -> set[str]:
     return found
 
 
-def wanted(tx: db.Where, now: datetime | None = None, *, limit: int = MAX_LOOKUP) -> list[str]:
+def wanted(
+    tx: db.Transaction, now: datetime | None = None, *, limit: int = MAX_LOOKUP
+) -> list[str]:
     """The Entra object IDs to look up: those platforms name that AgentGov hasn't looked up,
     then those of the people platforms or AgentGov name that it looked up over a week ago,
     the longest ago first."""
@@ -135,13 +136,13 @@ def wanted(tx: db.Where, now: datetime | None = None, *, limit: int = MAX_LOOKUP
     return (unknown + [p.id for p in stale])[:limit]
 
 
-def _misses(tx: db.Where) -> dict[str, str]:
+def _misses(tx: db.Transaction) -> dict[str, str]:
     row = IntegrationState.objects.filter(pk=MISSES).first()
     return dict((row.data or {}).get("emails") or {}) if row is not None else {}
 
 
 def wanted_emails(
-    tx: db.Where, now: datetime | None = None, *, limit: int = MAX_LOOKUP
+    tx: db.Transaction, now: datetime | None = None, *, limit: int = MAX_LOOKUP
 ) -> list[str]:
     """The owners and sponsors AgentGov names by email address that it doesn't know yet,
     but those the directory had no user for in the past week."""
@@ -158,7 +159,7 @@ def wanted_emails(
 
 
 def record_lookup(
-    tx: db.Where,
+    tx: db.Transaction,
     found: list[dict[str, Any]],
     missing: list[str],
     *,
@@ -243,7 +244,7 @@ def _column(row: dict[str, Any], key: str) -> Any:
     return None
 
 
-def import_list(tx: db.Where, payload: Any, *, actor: str) -> dict[str, int]:
+def import_list(tx: db.Transaction, payload: Any, *, actor: str) -> dict[str, int]:
     """Keep the people in a list of users uploaded from the directory. A user the list
     leaves out isn't taken to have left: it may be filtered."""
     rows = _rows(payload)
@@ -308,7 +309,9 @@ def _describe(entry: dict[str, str], person: Person | None) -> dict[str, Any]:
     return out
 
 
-def for_records(tx: db.Where, records: list[PlatformAgent]) -> dict[str, list[dict[str, Any]]]:
+def for_records(
+    tx: db.Transaction, records: list[PlatformAgent]
+) -> dict[str, list[dict[str, Any]]]:
     """For each agent, the people its platforms name, with what AgentGov knows about each:
     its owner on the platform first. One entry per person, with their roles."""
     entries: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
@@ -338,7 +341,7 @@ def for_records(tx: db.Where, records: list[PlatformAgent]) -> dict[str, list[di
     return out
 
 
-def for_agent(tx: db.Where, agent_id: str) -> list[dict[str, Any]]:
+def for_agent(tx: db.Transaction, agent_id: str) -> list[dict[str, Any]]:
     """The people the agent's platforms name, with what AgentGov knows about each."""
     found = PlatformAgent.objects.filter(agent_id=agent_id)
     return for_records(tx, list(found)).get(agent_id, [])
@@ -368,7 +371,7 @@ def shown(makers: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next((m for m in makers if _usable(m)), makers[0] if makers else None)
 
 
-def gone(tx: db.Where) -> dict[str, Person]:
+def gone(tx: db.Transaction) -> dict[str, Person]:
     """The people who have left, as far as AgentGov goes, by email address and user
     principal name (lower case): the directory no longer has them, or their account is
     disabled."""
@@ -380,7 +383,7 @@ def gone(tx: db.Where) -> dict[str, Person]:
 
 
 def who_left(
-    tx: db.Where, agent: Agent, left: dict[str, Person] | None = None
+    tx: db.Transaction, agent: Agent, left: dict[str, Person] | None = None
 ) -> list[dict[str, Any]]:
     """The agent's owner and sponsors who have left, and how: "left" (not in the directory
     any more) or "disabled" (their account)."""
@@ -401,7 +404,7 @@ def who_left(
     return out
 
 
-def summary(tx: db.Where) -> dict[str, int]:
+def summary(tx: db.Transaction) -> dict[str, int]:
     """How many people platforms name, how many AgentGov knows, and how many have left."""
     named_ids = {n["entra_id"] for r in _records(tx) for n in named(r) if "entra_id" in n}
     known = Person.objects.in_bulk()
@@ -415,7 +418,7 @@ def summary(tx: db.Where) -> dict[str, int]:
 
 
 def adopt(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     refs: list[str],
     *,
@@ -462,7 +465,7 @@ def adopt(
             )
             continue
         try:
-            with db.transaction_of(tx).savepoint():
+            with tx.savepoint():
                 agents_svc.update(
                     tx, agent, {"owner": its_owner, "sponsors": its_sponsors}, actor=actor
                 )

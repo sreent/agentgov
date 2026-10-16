@@ -130,7 +130,7 @@ class Delegations:
             for key in [k for k in self._access if k[0] in session_ids]:
                 del self._access[key]
 
-    def has(self, session_id: str | None, *, tx: db.Where | None = None) -> bool:
+    def has(self, session_id: str | None, *, tx: db.Transaction | None = None) -> bool:
         """Whether AgentGov can act as this session's administrator (in ``tx``, a
         transaction the caller has open, if given)."""
         if not session_id:

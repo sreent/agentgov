@@ -25,8 +25,7 @@ from urllib.parse import urlsplit
 from agentgov import ids
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.db.models import Agent, Destination, Finding, Notification
-from agentgov.models import SEVERITIES
+from agentgov.db.models import SEVERITIES, Agent, Destination, Finding, Notification
 from agentgov.registry import digest, features, findings
 from agentgov.registry.destinations import ACTIVE, SecretError
 from agentgov.registry.issues import EMAIL, OWNER, SPONSORS, SYSTEM

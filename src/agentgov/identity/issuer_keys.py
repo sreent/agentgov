@@ -89,7 +89,7 @@ def fetch(where: str, http: httpx.Client) -> list[dict[str, Any]]:
     return vet(_key_set(http, where), where)
 
 
-def targets(tx: db.Where, names: list[str] | None = None) -> list[tuple[str, str]]:
+def targets(tx: db.Transaction, names: list[str] | None = None) -> list[tuple[str, str]]:
     """The issuers the gateway is set to trust (all, or those ``names``), by ID, with where
     their keys are: blocked ones too, whose keys stay current for when they are unblocked."""
     issuers = IdentityIssuer.objects.filter(gateway=True)
@@ -112,7 +112,7 @@ def fetch_all(
 
 
 def store(
-    tx: db.Where,
+    tx: db.Transaction,
     found: dict[str, list[dict[str, Any]] | IssuerKeysError],
     *,
     now: datetime | None = None,

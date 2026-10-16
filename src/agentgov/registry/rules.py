@@ -34,8 +34,7 @@ from django.db.models import Q
 
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.db.models import AccessAssignment, Agent, Finding, ManagementRule, RuleMatch
-from agentgov.models import (
+from agentgov.db.models import (
     ACTIVE,
     BLOCKED,
     DELETED,
@@ -43,6 +42,11 @@ from agentgov.models import (
     PENDING,
     RISK_LEVELS,
     SEVERITIES,
+    AccessAssignment,
+    Agent,
+    Finding,
+    ManagementRule,
+    RuleMatch,
 )
 from agentgov.platforms import connections
 from agentgov.registry import access_packages, features, findings, scopes, teams, validation
@@ -152,14 +156,14 @@ def effective(rule_mode: str, feature_mode: str) -> str:
 # ----------------------------------------------------------------------- rules
 
 
-def get(tx: db.Where, ref: str) -> ManagementRule:
+def get(tx: db.Transaction, ref: str) -> ManagementRule:
     rule = ManagementRule.objects.filter(Q(name=ref) | Q(id=ref)).first()
     if rule is None:
         raise NotFound(f"management rule {ref!r} not found")
     return rule
 
 
-def list_all(tx: db.Where) -> list[ManagementRule]:
+def list_all(tx: db.Transaction) -> list[ManagementRule]:
     return list(ManagementRule.objects.order_by("name"))
 
 
@@ -222,7 +226,7 @@ def _scope(value: Any) -> dict[str, Any]:
     return scopes.parse(value)
 
 
-def _params(tx: db.Where, action: str, value: Any) -> dict[str, Any]:
+def _params(tx: db.Transaction, action: str, value: Any) -> dict[str, Any]:
     value = value or {}
     if not isinstance(value, dict):
         raise ValidationError("params is a mapping")
@@ -242,7 +246,7 @@ def _params(tx: db.Where, action: str, value: Any) -> dict[str, Any]:
     return {"owner": owner}
 
 
-def _apply(tx: db.Where, rule: ManagementRule, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Transaction, rule: ManagementRule, data: dict[str, Any]) -> list[str]:
     changed = []
     action = data.get("action", rule.action)
     for key in FIELDS:
@@ -314,7 +318,7 @@ def _new(name: str) -> ManagementRule:
     )
 
 
-def draft(tx: db.Where, data: dict[str, Any]) -> ManagementRule:
+def draft(tx: db.Transaction, data: dict[str, Any]) -> ManagementRule:
     """A rule that isn't saved: to preview it before creating it."""
     _known(data)
     rule = _new(str(data.get("name") or "draft"))
@@ -322,7 +326,7 @@ def draft(tx: db.Where, data: dict[str, Any]) -> ManagementRule:
     return rule
 
 
-def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> ManagementRule:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str) -> ManagementRule:
     _known(data)
     name = validation.slug(data.get("name"), "name")
     if ManagementRule.objects.filter(name=name).exists():
@@ -337,7 +341,7 @@ def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> ManagementRule:
 
 
 def update(
-    tx: db.Where,
+    tx: db.Transaction,
     rule: ManagementRule,
     data: dict[str, Any],
     *,
@@ -362,7 +366,7 @@ def update(
     return changed
 
 
-def delete(tx: db.Where, rule: ManagementRule, *, actor: str) -> None:
+def delete(tx: db.Transaction, rule: ManagementRule, *, actor: str) -> None:
     """Delete a rule: its issues are resolved; what it did stays done."""
     theirs = Finding.objects.filter(
         Q(key__startswith=f"{MATCHED}:{rule.id}:") | Q(key=f"{TOO_MANY}:{rule.id}"),
@@ -392,7 +396,7 @@ def _details(rule: ManagementRule) -> dict[str, Any]:
     }
 
 
-def to_dict(tx: db.Where, rule: ManagementRule) -> dict[str, Any]:
+def to_dict(tx: db.Transaction, rule: ManagementRule) -> dict[str, Any]:
     rows = list(RuleMatch.objects.filter(rule_id=rule.id))
     return {
         "id": rule.id,
@@ -450,7 +454,7 @@ def _parse(value: Any) -> datetime | None:
         return None
 
 
-def _usage(tx: db.Where, now: datetime) -> tuple[datetime, datetime] | None:
+def _usage(tx: db.Transaction, now: datetime) -> tuple[datetime, datetime] | None:
     """The stretch of time AgentGov read Microsoft 365 and Copilot Studio agents' usage for,
     from the Purview audit log, while it keeps reading it."""
     if not features.is_on(tx, "purview-audit"):
@@ -462,7 +466,7 @@ def _usage(tx: db.Where, now: datetime) -> tuple[datetime, datetime] | None:
     return start, until
 
 
-def _context(tx: db.Where, now: datetime, feature: str) -> _Context:
+def _context(tx: db.Transaction, now: datetime, feature: str) -> _Context:
     # In the posture scan's order (registry/posture), as the rules act on them.
     agents = {a.id: a for a in Agent.objects.exclude(status=DELETED).order_by("id")}
     open_findings: dict[str, list[Finding]] = defaultdict(list)
@@ -662,7 +666,7 @@ def _key(rule: ManagementRule, agent_id: str) -> str:
     return f"{MATCHED}:{rule.id}:{agent_id}"
 
 
-def _finding(tx: db.Where, key: str) -> Finding | None:
+def _finding(tx: db.Transaction, key: str) -> Finding | None:
     return findings.by_key(tx, key)
 
 
@@ -676,7 +680,7 @@ def _remedy(rule: ManagementRule, a: Assessment) -> str:
 
 
 def _raise(
-    tx: db.Where,
+    tx: db.Transaction,
     rule: ManagementRule,
     agent: Agent,
     *,
@@ -700,7 +704,7 @@ def _raise(
 
 
 def _heads_up(
-    tx: db.Where,
+    tx: db.Transaction,
     rule: ManagementRule,
     agent: Agent,
     row: RuleMatch,
@@ -740,7 +744,7 @@ def _heads_up(
     )
 
 
-def _drop(tx: db.Where, rule: ManagementRule, row: RuleMatch | None, now: datetime) -> None:
+def _drop(tx: db.Transaction, rule: ManagementRule, row: RuleMatch | None, now: datetime) -> None:
     """The agent no longer matches: its match goes. Its issue is resolved by the end of the
     round; one dismissed or accepted is resolved too, so that a later match starts afresh."""
     if row is None:
@@ -755,7 +759,7 @@ def _drop(tx: db.Where, rule: ManagementRule, row: RuleMatch | None, now: dateti
 
 
 def _act(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     rule: ManagementRule,
     agent: Agent,
@@ -835,7 +839,9 @@ def _act(
         finding.save()
 
 
-def _would(tx: db.Where, rule: ManagementRule, agent: Agent, row: RuleMatch, a: Assessment) -> None:
+def _would(
+    tx: db.Transaction, rule: ManagementRule, agent: Agent, row: RuleMatch, a: Assessment
+) -> None:
     """A monitored rule's turn to act: what it would have done, in the ledger, once."""
     row.monitored_at = row.monitored_at or ids.utcnow()
     row.outcome = f"would {_verb(rule)} it"
@@ -853,7 +859,7 @@ def _would(tx: db.Where, rule: ManagementRule, agent: Agent, row: RuleMatch, a: 
 
 
 def _hold_back(
-    tx: db.Where,
+    tx: db.Transaction,
     rule: ManagementRule,
     due: list[tuple[Agent, RuleMatch, Assessment]],
     mode: str,
@@ -914,7 +920,7 @@ def _hold_back(
 
 
 def _round(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     rule: ManagementRule,
     ctx: _Context,
@@ -995,7 +1001,7 @@ def _round(
             counts["would_act"] += 1
             continue
         try:
-            with db.transaction_of(tx).savepoint():
+            with tx.savepoint():
                 _act(tx, settings, rule, agent, row, a, ctx.now)
         except RegistryError as exc:
             # As it was before (what it did is rolled back), but for why it failed.
@@ -1009,7 +1015,7 @@ def _round(
     return counts
 
 
-def _clear(tx: db.Where, now: datetime) -> dict[str, Any]:
+def _clear(tx: db.Transaction, now: datetime) -> dict[str, Any]:
     """Rules are off: no rule matches anything, and their issues are resolved."""
     for rule in list_all(tx):
         for row in list(RuleMatch.objects.filter(rule_id=rule.id)):
@@ -1018,7 +1024,7 @@ def _clear(tx: db.Where, now: datetime) -> dict[str, Any]:
     return {"off": True, "resolved": resolved}
 
 
-def evaluate(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict[str, Any]:
+def evaluate(tx: db.Transaction, settings: Settings, now: datetime | None = None) -> dict[str, Any]:
     """A round of every rule; returns what each did. Nothing runs while posture checks are
     off: rules are about what they find."""
     now = now or ids.utcnow()
@@ -1078,7 +1084,9 @@ def _state(
     )
 
 
-def preview(tx: db.Where, rule: ManagementRule, now: datetime | None = None) -> dict[str, Any]:
+def preview(
+    tx: db.Transaction, rule: ManagementRule, now: datetime | None = None
+) -> dict[str, Any]:
     """Which agents the rule matches now, since when, and what it will do to each: for a
     saved rule, or one that isn't saved yet. Changes nothing."""
     now = now or ids.utcnow()
@@ -1152,7 +1160,7 @@ def preview(tx: db.Where, rule: ManagementRule, now: datetime | None = None) -> 
     }
 
 
-def for_agent(tx: db.Where, agent: Agent) -> list[dict[str, Any]]:
+def for_agent(tx: db.Transaction, agent: Agent) -> list[dict[str, Any]]:
     """The rules that match the agent, and what each will do or did."""
     feature = features.mode(tx, FEATURE)
     modes = features.modes(tx)

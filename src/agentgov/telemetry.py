@@ -28,8 +28,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from agentgov import db, ledger
-from agentgov.db.models import Agent
-from agentgov.models import ACTIVE
+from agentgov.db.models import ACTIVE, Agent
 from agentgov.registry import (
     access_packages,
     discovery,
@@ -151,7 +150,9 @@ def granted(grants: list[dict[str, Any]], server: str, tool: str) -> bool:
     )
 
 
-def ingest(tx: db.Where, payload: dict[str, Any], *, classify: bool = False) -> dict[str, Any]:
+def ingest(
+    tx: db.Transaction, payload: dict[str, Any], *, classify: bool = False
+) -> dict[str, Any]:
     stats = {
         "spans": 0,
         "genai_spans": 0,
@@ -268,7 +269,7 @@ def ingest(tx: db.Where, payload: dict[str, Any], *, classify: bool = False) -> 
 
 
 def _around_the_gateway(
-    tx: db.Where,
+    tx: db.Transaction,
     resource: dict[str, Any],
     span: dict[str, Any],
     target: Agent,

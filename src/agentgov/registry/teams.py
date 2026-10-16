@@ -15,8 +15,7 @@ from typing import Any
 from django.db.models import Q
 
 from agentgov import db, ids, ledger
-from agentgov.db.models import Agent, Blueprint, Destination, Team
-from agentgov.models import DELETED
+from agentgov.db.models import DELETED, Agent, Blueprint, Destination, Team
 from agentgov.registry import scopes, validation
 from agentgov.registry.destinations import CHAT
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
@@ -31,30 +30,30 @@ def is_email(value: str) -> bool:
     return bool(_EMAIL.match(value))
 
 
-def get(tx: db.Where, ref: str) -> Team:
+def get(tx: db.Transaction, ref: str) -> Team:
     team = Team.objects.filter(Q(name=ref) | Q(id=ref)).first()
     if team is None:
         raise NotFound(f"team {ref!r} not found")
     return team
 
 
-def find(tx: db.Where, name: str | None) -> Team | None:
+def find(tx: db.Transaction, name: str | None) -> Team | None:
     """The team of this name, if there is one."""
     if not name:
         return None
     return Team.objects.filter(name=name).first()
 
 
-def default(tx: db.Where) -> Team | None:
+def default(tx: db.Transaction) -> Team | None:
     return Team.objects.filter(is_default=True).first()
 
 
-def all_names(tx: db.Where) -> set[str]:
+def all_names(tx: db.Transaction) -> set[str]:
     """The teams' names."""
     return set(Team.objects.values_list("name", flat=True))
 
 
-def reference(tx: db.Where, value: Any) -> str | None:
+def reference(tx: db.Transaction, value: Any) -> str | None:
     """A blueprint's or an agent's team: the name of a team there is, or none."""
     if value in (None, ""):
         return None
@@ -75,7 +74,7 @@ def _with(
     return fallback
 
 
-def team_of(tx: db.Where, agent: Agent) -> str | None:
+def team_of(tx: db.Transaction, agent: Agent) -> str | None:
     """The team ``agent`` is with, as its issues reach a team: its own, else its
     blueprint's, else the default team."""
     blueprint = agent.blueprint
@@ -88,7 +87,7 @@ def team_of(tx: db.Where, agent: Agent) -> str | None:
     )
 
 
-def agents_in(tx: db.Where, names: Any) -> set[str]:
+def agents_in(tx: db.Transaction, names: Any) -> set[str]:
     """The agents, by ID, that are with the teams ``names`` (any case): see team_of."""
     wanted = {str(name).lower() for name in names if name}
     if not wanted:
@@ -104,7 +103,7 @@ def agents_in(tx: db.Where, names: Any) -> set[str]:
     }
 
 
-def list_all(tx: db.Where) -> list[Team]:
+def list_all(tx: db.Transaction) -> list[Team]:
     return list(Team.objects.order_by("name"))
 
 
@@ -122,7 +121,7 @@ def _emails(value: Any) -> list[str]:
     return list(dict.fromkeys(emails))
 
 
-def _destinations(tx: db.Where, value: Any) -> list[str]:
+def _destinations(tx: db.Transaction, value: Any) -> list[str]:
     names = list(dict.fromkeys(validation.string_list(value, "destinations")))
     for name in names:
         destination = Destination.objects.filter(name=name).first()
@@ -136,7 +135,7 @@ def _destinations(tx: db.Where, value: Any) -> list[str]:
     return names
 
 
-def _apply(tx: db.Where, team: Team, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Transaction, team: Team, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in FIELDS:
         if key not in data:
@@ -176,7 +175,7 @@ def _known(data: dict[str, Any], also: tuple[str, ...]) -> None:
         )
 
 
-def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> Team:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str) -> Team:
     _known(data, ("name",))
     name = validation.slug(data.get("name"), "name")
     if find(tx, name):
@@ -203,7 +202,7 @@ def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> Team:
 
 
 def update_team(
-    tx: db.Where,
+    tx: db.Transaction,
     team: Team,
     data: dict[str, Any],
     *,
@@ -228,7 +227,7 @@ def update_team(
     return changed
 
 
-def users(tx: db.Where, name: str, *, reached: set[str] | None = None) -> list[str]:
+def users(tx: db.Transaction, name: str, *, reached: set[str] | None = None) -> list[str]:
     """The blueprints and agents that name a team (as their team, owner or sponsor), and
     the controls' exceptions and management rules. ``reached``: the agents (by ID) of a role
     for some teams only, which reads only those, and no exceptions or rules."""
@@ -248,7 +247,7 @@ def users(tx: db.Where, name: str, *, reached: set[str] | None = None) -> list[s
     return sorted(found)
 
 
-def delete(tx: db.Where, team: Team, *, actor: str) -> None:
+def delete(tx: db.Transaction, team: Team, *, actor: str) -> None:
     named_by = users(tx, team.name)
     if named_by:
         more = f" and {len(named_by) - 5} more" if len(named_by) > 5 else ""

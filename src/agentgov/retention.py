@@ -67,12 +67,12 @@ class ArchiveError(Exception):
 # ------------------------------------------------------------------ checkpoints
 
 
-def latest_checkpoint(tx: db.Where) -> LedgerCheckpoint | None:
+def latest_checkpoint(tx: db.Transaction) -> LedgerCheckpoint | None:
     return LedgerCheckpoint.objects.order_by("-seq").first()
 
 
 def checkpoint_if_due(
-    tx: db.Where, settings: Settings, now: datetime | None = None
+    tx: db.Transaction, settings: Settings, now: datetime | None = None
 ) -> LedgerCheckpoint | None:
     """Keep the head as a checkpoint when the last one is older than the period and the
     chain has grown since."""
@@ -89,14 +89,14 @@ def checkpoint_if_due(
     return point
 
 
-def unstamped(tx: db.Where) -> list[tuple[int, str]]:
+def unstamped(tx: db.Transaction) -> list[tuple[int, str]]:
     """Checkpoints still to be time-stamped, newest first."""
     rows = LedgerCheckpoint.objects.filter(timestamp__isnull=True).order_by("-seq")
     return list(rows.values_list("seq", "hash")[:STAMP_BATCH])
 
 
 def save_stamp(
-    tx: db.Where,
+    tx: db.Transaction,
     seq: int,
     url: str,
     *,
@@ -135,7 +135,7 @@ def save_stamp(
     )
 
 
-def unlogged(tx: db.Where) -> list[tuple[int, str]]:
+def unlogged(tx: db.Transaction) -> list[tuple[int, str]]:
     """Checkpoints still to be added to the transparency log, newest first (one that the
     log took, and whose proof didn't check out, isn't added again)."""
     rows = LedgerCheckpoint.objects.filter(tlog_entry__isnull=True).order_by("-seq")
@@ -143,7 +143,7 @@ def unlogged(tx: db.Where) -> list[tuple[int, str]]:
 
 
 def save_log_entry(
-    tx: db.Where,
+    tx: db.Transaction,
     seq: int,
     url: str,
     *,
@@ -165,7 +165,7 @@ def save_log_entry(
 # --------------------------------------------------------------------- archives
 
 
-def _cursor_floor(tx: db.Where) -> int | None:
+def _cursor_floor(tx: db.Transaction) -> int | None:
     """The furthest entry every active destination has been sent, while they are sent to."""
     if features.mode(tx, "security-operations") == features.OFF:
         return None
@@ -173,7 +173,7 @@ def _cursor_floor(tx: db.Where) -> int | None:
     return min(cursors, default=None)
 
 
-def archivable(tx: db.Where, settings: Settings, now: datetime) -> tuple[int, int]:
+def archivable(tx: db.Transaction, settings: Settings, now: datetime) -> tuple[int, int]:
     """The entries to archive now: after the chain's base, up to the last one older than
     the retention period whose predecessors are all older too, and no further than what
     every active destination has had."""
@@ -189,7 +189,9 @@ def archivable(tx: db.Where, settings: Settings, now: datetime) -> tuple[int, in
     return floor, min(last, floor + ARCHIVE_BATCH)
 
 
-def archive(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict[str, Any] | None:
+def archive(
+    tx: db.Transaction, settings: Settings, now: datetime | None = None
+) -> dict[str, Any] | None:
     """Archive the entries past the retention period, then remove them from the database.
     None when there is nothing to archive (or retention is off)."""
     if settings.ledger_retention_days <= 0 or not settings.ledger_archive_dir:
@@ -279,7 +281,7 @@ def _same_entries(one: Path, other: Path) -> bool:
         return False
 
 
-def _archive_failed(tx: db.Where, error: str) -> None:
+def _archive_failed(tx: db.Transaction, error: str) -> None:
     findings.raise_finding(
         tx,
         type=ARCHIVE_FAILED,
@@ -305,7 +307,9 @@ def read_archive(path: str | Path) -> Any:
 # ---------------------------------------------------------------------- records
 
 
-def prune_records(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict[str, int]:
+def prune_records(
+    tx: db.Transaction, settings: Settings, now: datetime | None = None
+) -> dict[str, int]:
     """Remove the operational records older than AGENTGOV_DATA_RETENTION_DAYS."""
     days = settings.data_retention_days
     if days <= 0:

@@ -21,7 +21,6 @@ from datetime import datetime
 from typing import Any
 
 from django.db.models import Model
-from sqlalchemy import inspect
 
 from agentgov import db
 from agentgov.registry.errors import RegistryError
@@ -64,7 +63,7 @@ LONGEST = 1000
 _BEFORE = "_agentgov_before"
 
 
-def start_edit(tx: db.Where, obj: Any, version: int | None, what: str) -> None:
+def start_edit(tx: db.Transaction, obj: Any, version: int | None, what: str) -> None:
     """Lock the object for the edit (edits take turns), and refuse it if it was made from
     an older version than the one stored. What it is now is kept, for :func:`changes`."""
     db.lock(tx, obj)
@@ -84,12 +83,9 @@ def _snapshot(obj: Any) -> dict[str, Any]:
     }
 
 
-def _fields(obj: Any) -> list[str]:
-    """The object's columns, by attribute: one of Django's models, or, from the modules
-    still on SQLAlchemy, one of its."""
-    if isinstance(obj, Model):
-        return [f.attname for f in obj._meta.concrete_fields]
-    return [attr.key for attr in inspect(obj).mapper.column_attrs]
+def _fields(obj: Model) -> list[str]:
+    """The object's columns, by attribute."""
+    return [f.attname for f in obj._meta.concrete_fields]
 
 
 def _shown(value: Any) -> Any:

@@ -7,7 +7,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from agentgov.models import (
+from agentgov.db.models import (
     ACTS_FOR,
     APPROVALS_BY,
     DATA_CLASSIFICATIONS,

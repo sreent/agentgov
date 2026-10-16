@@ -26,8 +26,7 @@ from typing import Any
 
 from agentgov import db, ids, ledger, mcp_scan
 from agentgov.config import Settings
-from agentgov.db.models import Finding, McpSighting, ToolServer
-from agentgov.models import BLOCKED
+from agentgov.db.models import BLOCKED, Finding, McpSighting, ToolServer
 from agentgov.registry import findings, mcp_registry
 from agentgov.registry.errors import ValidationError
 
@@ -42,7 +41,7 @@ KEEP_DAYS = 90  # servers no machine has reported for this long are forgotten
 ACTOR = "system:mcp-discovery"
 
 
-def matcher(tx: db.Where, settings: Settings) -> Callable[[str], tuple[str, str | None]]:
+def matcher(tx: db.Transaction, settings: Settings) -> Callable[[str], tuple[str, str | None]]:
     """``identity`` -> (status, the tool server it is). Addresses compare as reported: by
     scheme, host, port and their path's hash (agentgov.mcp_scan.address)."""
     known: dict[str, tuple[str, str]] = {}
@@ -101,7 +100,7 @@ def _sanitised(url: str | None, command: list[str], identity: str) -> tuple[Any,
 
 
 def report(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     *,
     machine: Any,
@@ -177,7 +176,7 @@ def report(
 
 
 def view(
-    tx: db.Where, settings: Settings, identities: set[str] | None = None
+    tx: db.Transaction, settings: Settings, identities: set[str] | None = None
 ) -> list[dict[str, Any]]:
     """Every server reported (or those of ``identities``), with the machines and people
     that have it and its status."""
@@ -227,7 +226,7 @@ def _what(group: dict[str, Any]) -> str:
     return group["url"] or " ".join(group["command"]) or group["identity"]
 
 
-def refresh(tx: db.Where, settings: Settings, identities: set[str] | None = None) -> int:
+def refresh(tx: db.Transaction, settings: Settings, identities: set[str] | None = None) -> int:
     """Raise a finding for each reported server that isn't approved, and resolve the rest;
     returns how many resolved. After a report, only for the servers it named or dropped
     (``identities``): the runtime refreshes everything when tool servers change, and hourly."""

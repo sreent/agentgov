@@ -1,10 +1,30 @@
-"""The database's tables, as Django models (docs/adr/0007-django.md).
+"""The database's tables, as Django models (docs/adr/0007-django.md), and the values some of
+their columns take.
 
-The same tables, columns and constraints as the SQLAlchemy models in agentgov.models, which
-the migrations build, for the modules to use as they move to Django's ORM one at a time
-(tests/test_django_models.py compares them with the database the migrations make). Django
-doesn't manage these tables yet (``managed = False``): Alembic does, until Django's
-migrations take over.
+The vocabulary mirrors Microsoft Agent 365 / Entra Agent ID so the parity
+matrix in docs/baseline-agent365.md maps one-to-one:
+
+* ``Blueprint``  - IT-approved template for a class of agents: the tools its
+                   agents may use, risk tier, sponsor and attestation rules
+                   (Entra "agent identity blueprint").
+* ``Agent``      - one agent identity with owner, sponsors and lifecycle state.
+                   Its credentials live in Keycloak, not here.
+* ``ToolServer`` - an approved MCP server: published through agentgateway for
+                   agents, listed in the MCP registry for developers' tools, or both.
+* ``ModelProvider`` - a model provider agents call through agentgateway.
+* ``Policy``     - an organisation Rego module distributed to OPA.
+* ``FeatureSetting`` - which of AgentGov's features are used, and how strictly.
+* ``Team``       - people and chat channels that own agents, and that issues about
+                   agents escalate to.
+* ``AccessPackage`` - grants an agent can hold for a while, once approved
+                   (``AccessAssignment``).
+* ``ManagementRule`` - acts on the agents that match it, after telling their people
+                   (``RuleMatch``).
+* ``McpSighting`` - an MCP server set up on a developer's machine, as reported.
+
+The same tables, columns and constraints as the migrations build (tests/test_django_models.py
+compares them with the database the migrations make). Django doesn't manage these tables yet
+(``managed = False``): Alembic does, until Django's migrations take over.
 """
 
 from __future__ import annotations
@@ -32,14 +52,51 @@ from django.db.models import (
 from agentgov.db.fields import JSONField, UTCDateTimeField
 from agentgov.ids import utcnow
 
+# Agent lifecycle (Agent 365 terms in brackets).
+PENDING = "pending"  # registration awaiting review ("Pending review")
+ACTIVE = "active"  # approved and usable ("Available")
+BLOCKED = "blocked"  # blocked by an admin, the kill switch or risk ("Blocked")
+DELETED = "deleted"  # soft-deleted, restorable for a retention period ("Deleted")
+DISCOVERED = "discovered"  # seen at runtime but never registered ("Unmanaged")
+AGENT_STATUSES = (PENDING, ACTIVE, BLOCKED, DELETED, DISCOVERED)
+
+# Tool server review states (bring-your-own MCP server approval flow).
+TOOLSERVER_STATUSES = (PENDING, "approved", BLOCKED)
+
+RISK_TIERS = ("minimal", "low", "medium", "high", "critical")
+RISK_LEVELS = ("low", "medium", "high", "critical")
+TRUST_LEVELS = ("verified", "unverified")
+DATA_CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
+SEVERITIES = ("info", "low", "medium", "high", "critical")
+# Model providers agentgateway can call with an API key. "openai-compatible" is any
+# server that speaks OpenAI's API (vLLM, Ollama, LiteLLM, hosted APIs) at base_url.
+MODEL_PROVIDER_KINDS = ("openai", "anthropic", "gemini", "openai-compatible")
+# Who a blueprint's agents act for, and who decides approvals made for a person.
+ACTS_FOR = ("people", "itself", "either")
+APPROVALS_BY = ("approvers", "person")
+# Identity providers whose tokens agents may authenticate with instead of a secret.
+ISSUER_KINDS = ("kubernetes", "spiffe", "oidc")
+# Where events and alerts go: SIEMs (OpenTelemetry logs, an HTTP input, Splunk's HTTP Event
+# Collector) and chats; and service desks, where issues become tickets.
+DESTINATION_KINDS = (
+    "otlp",
+    "webhook",
+    "splunk-hec",
+    "slack",
+    "teams",
+    "servicenow",
+    "jira",
+    "freshservice",
+)
+
 
 class Row(Model):
-    """A row of one of the tables, written as SQLAlchemy wrote one: ``save()`` writes the
-    fields that changed since it was read, and the time it was updated with them, rather
-    than every field. Two transactions that change different fields of one row (a job its
-    last sighting, a person its description) keep both changes; a save that changed
-    nothing writes nothing. A JSON value counts as changed when another is set, not when
-    the one there is changed in place."""
+    """A row of one of the tables: ``save()`` writes the fields that changed since it was
+    read, and the time it was updated with them, rather than every field. Two transactions
+    that change different fields of one row (a job its last sighting, a person its
+    description) keep both changes; a save that changed nothing writes nothing. A JSON
+    value counts as changed when another is set, not when the one there is changed in
+    place."""
 
     class Meta:
         abstract = True
@@ -141,8 +198,8 @@ class Blueprint(Row):
 
 
 class _WithBlueprint(Manager):
-    """Agents, read with their blueprints (as SQLAlchemy's relationship read them): most
-    of what is worked out about an agent is its blueprint's too."""
+    """Agents, read with their blueprints: most of what is worked out about an agent is
+    its blueprint's too."""
 
     def get_queryset(self) -> QuerySet[Any]:
         return super().get_queryset().select_related("blueprint")

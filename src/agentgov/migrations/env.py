@@ -8,8 +8,7 @@ from alembic import context
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Connection
 
-from agentgov import models  # noqa: F401  (register the tables)
-from agentgov.db import Base, UTCDateTime
+from agentgov.models import Base, UTCDateTime
 
 config = context.config
 

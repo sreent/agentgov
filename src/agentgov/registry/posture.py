@@ -12,8 +12,15 @@ from typing import Any
 
 from agentgov import db, ids
 from agentgov.config import Settings
-from agentgov.db.models import Agent, IntegrationState, ToolServer
-from agentgov.models import ACTIVE, BLOCKED, DELETED, PENDING
+from agentgov.db.models import (
+    ACTIVE,
+    BLOCKED,
+    DELETED,
+    PENDING,
+    Agent,
+    IntegrationState,
+    ToolServer,
+)
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import (
     apikeys,
@@ -88,7 +95,7 @@ def _people_who_left(agent: Agent, gone: list[dict[str, Any]], flag: Any) -> Non
 
 
 def scan(
-    tx: db.Where, settings: Settings, *, tested: dict[str, Any] | None = None
+    tx: db.Transaction, settings: Settings, *, tested: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """``tested``: what calling each agent's A2A URL around the gateway found, by agent ID,
     when the scan's test ran (registry/reachability); None when it didn't."""

@@ -27,8 +27,7 @@ from typing import Any
 from agentgov import db, ids, ledger
 from agentgov.config import FEATURE_PRESETS, Settings
 from agentgov.db import mark_changed
-from agentgov.db.models import Agent, FeatureSetting, IntegrationState
-from agentgov.models import DELETED
+from agentgov.db.models import DELETED, Agent, FeatureSetting, IntegrationState
 from agentgov.registry import scopes as scope_rules
 from agentgov.registry.errors import Conflict, NotFound, ValidationError
 
@@ -972,7 +971,7 @@ def unmet(key: str, mode: str, settings: Settings) -> str | None:
     return None
 
 
-def _rows(tx: db.Where) -> dict[str, FeatureSetting]:
+def _rows(tx: db.Transaction) -> dict[str, FeatureSetting]:
     return {row.key: row for row in FeatureSetting.objects.all()}
 
 
@@ -980,18 +979,18 @@ def _row(key: str) -> FeatureSetting | None:
     return FeatureSetting.objects.filter(pk=key).first()
 
 
-def modes(tx: db.Where) -> dict[str, str]:
+def modes(tx: db.Transaction) -> dict[str, str]:
     """The mode of every feature."""
     rows = _rows(tx)
     return {f.key: rows[f.key].mode if f.key in rows else f.default for f in CATALOG}
 
 
-def mode(tx: db.Where, key: str) -> str:
+def mode(tx: db.Transaction, key: str) -> str:
     row = _row(key)
     return row.mode if row is not None else feature(key).default
 
 
-def is_on(tx: db.Where, key: str) -> bool:
+def is_on(tx: db.Transaction, key: str) -> bool:
     return mode(tx, key) != OFF
 
 
@@ -1000,7 +999,7 @@ def _weaker(f: Feature, before: str, after: str) -> bool:
 
 
 def _set(
-    tx: db.Where,
+    tx: db.Transaction,
     f: Feature,
     new: str,
     *,
@@ -1034,7 +1033,7 @@ def _set(
     return True
 
 
-def set_mode(tx: db.Where, settings: Settings, key: str, new: Any, *, actor: str) -> bool:
+def set_mode(tx: db.Transaction, settings: Settings, key: str, new: Any, *, actor: str) -> bool:
     """An administrator's choice; returns whether anything changed."""
     f = feature(key)
     check_mode(f, new)
@@ -1051,7 +1050,7 @@ def set_mode(tx: db.Where, settings: Settings, key: str, new: Any, *, actor: str
     return _set(tx, f, new, actor=actor, pinned=False)
 
 
-def apply_pins(tx: db.Where, settings: Settings) -> None:
+def apply_pins(tx: db.Transaction, settings: Settings) -> None:
     """Make the database match AGENTGOV_FEATURES (when the control plane starts)."""
     pins = parse_pins(settings.features)
     for key, new in pins.items():
@@ -1066,7 +1065,7 @@ def apply_pins(tx: db.Where, settings: Settings) -> None:
             row.save()
 
 
-def preview_preset(tx: db.Where, settings: Settings, name: str) -> dict[str, Any]:
+def preview_preset(tx: db.Transaction, settings: Settings, name: str) -> dict[str, Any]:
     """What applying preset ``name`` would change, and what it leaves: features the
     deployment pins, and modes that can't be used yet."""
     try:
@@ -1112,7 +1111,9 @@ def preview_preset(tx: db.Where, settings: Settings, name: str) -> dict[str, Any
     }
 
 
-def apply_preset(tx: db.Where, settings: Settings, name: str, *, actor: str) -> dict[str, Any]:
+def apply_preset(
+    tx: db.Transaction, settings: Settings, name: str, *, actor: str
+) -> dict[str, Any]:
     """Set the modes preset ``name`` sets, but for those preview_preset says it keeps;
     each change is a feature.changed entry that names the preset."""
     plan = preview_preset(tx, settings, name)
@@ -1126,13 +1127,13 @@ def apply_preset(tx: db.Where, settings: Settings, name: str, *, actor: str) -> 
     return plan
 
 
-def deployment_preset(tx: db.Where) -> str | None:
+def deployment_preset(tx: db.Transaction) -> str | None:
     """The AGENTGOV_FEATURE_PRESET last applied, if any."""
     state = IntegrationState.objects.filter(pk=PRESET_STATE).first()
     return (state.data or {}).get("applied") if state is not None else None
 
 
-def apply_deployment_preset(tx: db.Where, settings: Settings) -> None:
+def apply_deployment_preset(tx: db.Transaction, settings: Settings) -> None:
     """AGENTGOV_FEATURE_PRESET, when the control plane starts with one it hasn't applied
     (before the pins, which then hold)."""
     name = settings.feature_preset
@@ -1200,7 +1201,7 @@ def _scopes_weaken(f: Feature, mode: str, before: list[Any], after: list[Any]) -
 
 
 def _set_scopes(
-    tx: db.Where,
+    tx: db.Transaction,
     f: Feature,
     new: list[dict[str, Any]],
     *,
@@ -1234,7 +1235,7 @@ def _set_scopes(
     return True
 
 
-def set_scopes(tx: db.Where, settings: Settings, key: str, value: Any, *, actor: str) -> bool:
+def set_scopes(tx: db.Transaction, settings: Settings, key: str, value: Any, *, actor: str) -> bool:
     """An administrator's exceptions to a control; returns whether anything changed."""
     f = feature(key)
     new = check_scopes(f, value, settings)
@@ -1250,7 +1251,7 @@ def set_scopes(tx: db.Where, settings: Settings, key: str, value: Any, *, actor:
     return _set_scopes(tx, f, new, actor=actor)
 
 
-def all_scopes(tx: db.Where) -> dict[str, list[dict[str, Any]]]:
+def all_scopes(tx: db.Transaction) -> dict[str, list[dict[str, Any]]]:
     """Each control's exceptions that apply: none while the deployment pins the control."""
     return {
         row.key: list(row.scopes)
@@ -1281,7 +1282,7 @@ def exceptions_for(
     return out
 
 
-def mode_for(tx: db.Where, agent: Agent, key: str) -> str:
+def mode_for(tx: db.Transaction, agent: Agent, key: str) -> str:
     """A feature's mode for one agent: its exception's, or the feature's."""
     current = {key: mode(tx, key)}
     exceptions = {k: v for k, v in all_scopes(tx).items() if k == key}
@@ -1302,7 +1303,7 @@ def strictest(
     return out
 
 
-def strictest_modes(tx: db.Where) -> dict[str, str]:
+def strictest_modes(tx: db.Transaction) -> dict[str, str]:
     return strictest(modes(tx), all_scopes(tx))
 
 
@@ -1317,7 +1318,9 @@ def _reach(entries: list[dict[str, Any]], agents: list[Agent]) -> list[int]:
     return counts
 
 
-def describe(tx: db.Where, settings: Settings, key: str | None = None) -> list[dict[str, Any]]:
+def describe(
+    tx: db.Transaction, settings: Settings, key: str | None = None
+) -> list[dict[str, Any]]:
     rows = _rows(tx)
     agents: list[Agent] | None = None
     names: dict[str, set[str]] = {}
@@ -1375,7 +1378,7 @@ def describe(tx: db.Where, settings: Settings, key: str | None = None) -> list[d
     return out
 
 
-def chosen(tx: db.Where) -> dict[str, dict[str, Any]]:
+def chosen(tx: db.Transaction) -> dict[str, dict[str, Any]]:
     """Modes, and exceptions, administrators chose (for export: pins belong to the
     deployment)."""
     return {

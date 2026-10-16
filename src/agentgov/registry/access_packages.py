@@ -25,8 +25,7 @@ from django.db.models import Q
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.db.models import AccessAssignment, AccessPackage, Agent, Blueprint
-from agentgov.models import DELETED
+from agentgov.db.models import DELETED, AccessAssignment, AccessPackage, Agent, Blueprint
 from agentgov.registry import features, findings, issues, validation
 from agentgov.registry.errors import (
     Conflict,
@@ -75,14 +74,14 @@ DECIDERS = frozenset({"admin", "approver"})
 # --------------------------------------------------------------------- packages
 
 
-def get(tx: db.Where, ref: str) -> AccessPackage:
+def get(tx: db.Transaction, ref: str) -> AccessPackage:
     package = AccessPackage.objects.filter(Q(name=ref) | Q(id=ref)).first()
     if package is None:
         raise NotFound(f"access package {ref!r} not found")
     return package
 
 
-def list_all(tx: db.Where) -> list[AccessPackage]:
+def list_all(tx: db.Transaction) -> list[AccessPackage]:
     return list(AccessPackage.objects.order_by("name"))
 
 
@@ -92,7 +91,7 @@ def _days(value: Any, field: str) -> int:
     return value
 
 
-def _apply(tx: db.Where, package: AccessPackage, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Transaction, package: AccessPackage, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in FIELDS:
         if key not in data:
@@ -138,7 +137,7 @@ def _known(data: dict[str, Any]) -> None:
         )
 
 
-def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> AccessPackage:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str) -> AccessPackage:
     _known(data)
     name = validation.slug(data.get("name"), "name")
     if AccessPackage.objects.filter(name=name).exists():
@@ -170,7 +169,7 @@ def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> AccessPackage:
 
 
 def update(
-    tx: db.Where,
+    tx: db.Transaction,
     package: AccessPackage,
     data: dict[str, Any],
     *,
@@ -196,7 +195,7 @@ def update(
     return changed
 
 
-def delete(tx: db.Where, package: AccessPackage, *, actor: str) -> None:
+def delete(tx: db.Transaction, package: AccessPackage, *, actor: str) -> None:
     held = AccessAssignment.objects.filter(
         package_id=package.id, status__in=(REQUESTED, *HELD)
     ).exists()
@@ -230,7 +229,7 @@ def _details(package: AccessPackage) -> dict[str, Any]:
     }
 
 
-def to_dict(tx: db.Where, package: AccessPackage) -> dict[str, Any]:
+def to_dict(tx: db.Transaction, package: AccessPackage) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for status in AccessAssignment.objects.filter(package_id=package.id).values_list(
         "status", flat=True
@@ -250,7 +249,7 @@ def to_dict(tx: db.Where, package: AccessPackage) -> dict[str, Any]:
 # ------------------------------------------------------------------ assignments
 
 
-def assignment(tx: db.Where, assignment_id: str) -> AccessAssignment:
+def assignment(tx: db.Transaction, assignment_id: str) -> AccessAssignment:
     row = AccessAssignment.objects.filter(pk=assignment_id).first()
     if row is None:
         raise NotFound(f"access assignment {assignment_id} not found")
@@ -258,7 +257,7 @@ def assignment(tx: db.Where, assignment_id: str) -> AccessAssignment:
 
 
 def assignments(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     status: str | None = None,
     agent_id: str | None = None,
@@ -277,7 +276,7 @@ def assignments(
     return list(rows[:limit])
 
 
-def responsible(tx: db.Where, agent: Agent) -> set[str]:
+def responsible(tx: db.Transaction, agent: Agent) -> set[str]:
     """The agent's owner and sponsors, as people sign in (lower case), with the members
     and addresses of teams named as either."""
     directory = issues.Directory(tx)
@@ -292,7 +291,7 @@ def responsible(tx: db.Where, agent: Agent) -> set[str]:
     return names
 
 
-def may_request(tx: db.Where, roles: frozenset[str], name: str | None, agent: Agent) -> bool:
+def may_request(tx: db.Transaction, roles: frozenset[str], name: str | None, agent: Agent) -> bool:
     return bool(roles & REQUESTERS) or (name or "").lower() in responsible(tx, agent)
 
 
@@ -311,7 +310,7 @@ def _resource(row: AccessAssignment, package: AccessPackage, agent: Agent) -> st
 
 
 def _record(
-    tx: db.Where,
+    tx: db.Transaction,
     row: AccessAssignment,
     change: str,
     actor: str,
@@ -345,14 +344,14 @@ def _not_deleted(agent: Agent | None) -> None:
         raise InvalidTransition(f"{agent.name} is deleted: restore it first")
 
 
-def _held(tx: db.Where, agent_id: str, package_id: str) -> AccessAssignment | None:
+def _held(tx: db.Transaction, agent_id: str, package_id: str) -> AccessAssignment | None:
     return AccessAssignment.objects.filter(
         agent_id=agent_id, package_id=package_id, status__in=HELD
     ).first()
 
 
 def request(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     agent: Agent,
     package: AccessPackage,
@@ -409,7 +408,7 @@ def request(
     return row
 
 
-def _grant(tx: db.Where, row: AccessAssignment, *, actor: str, note: str | None) -> None:
+def _grant(tx: db.Transaction, row: AccessAssignment, *, actor: str, note: str | None) -> None:
     now = ids.utcnow()
     until = now + timedelta(days=row.days)
     held = _held(tx, row.agent_id, row.package_id)
@@ -430,7 +429,7 @@ def _grant(tx: db.Where, row: AccessAssignment, *, actor: str, note: str | None)
 
 
 def decide(
-    tx: db.Where, row: AccessAssignment, *, approve: bool, actor: str, note: Any = None
+    tx: db.Transaction, row: AccessAssignment, *, approve: bool, actor: str, note: Any = None
 ) -> AccessAssignment:
     lock(tx, row)
     if row.status != REQUESTED:
@@ -450,7 +449,7 @@ def decide(
 
 
 def revoke(
-    tx: db.Where, row: AccessAssignment, *, actor: str, reason: Any = None
+    tx: db.Transaction, row: AccessAssignment, *, actor: str, reason: Any = None
 ) -> AccessAssignment:
     lock(tx, row)
     if row.status not in HELD:
@@ -465,7 +464,7 @@ def revoke(
 
 
 def review(
-    tx: db.Where, row: AccessAssignment, *, keep: bool, actor: str, note: Any = None
+    tx: db.Transaction, row: AccessAssignment, *, keep: bool, actor: str, note: Any = None
 ) -> AccessAssignment:
     """Someone looked at whether the agent still needs it: kept, or revoked."""
     lock(tx, row)
@@ -480,7 +479,7 @@ def review(
     return row
 
 
-def _settle(tx: db.Where, row: AccessAssignment, *, actor: str) -> None:
+def _settle(tx: db.Transaction, row: AccessAssignment, *, actor: str) -> None:
     """It no longer needs anyone's attention: its open issues are resolved."""
     for type_ in FINDING_TYPES:
         findings.resolve_key(tx, f"{type_}:{row.id}", actor=actor)
@@ -490,7 +489,7 @@ def _settle(tx: db.Where, row: AccessAssignment, *, actor: str) -> None:
 
 
 def _raise(
-    tx: db.Where,
+    tx: db.Transaction,
     row: AccessAssignment,
     type_: str,
     severity: str,
@@ -512,7 +511,7 @@ def _raise(
     )
 
 
-def check(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict[str, int]:
+def check(tx: db.Transaction, settings: Settings, now: datetime | None = None) -> dict[str, int]:
     """Expire assignments whose time is up, tell agents' people about those expiring, and
     ask for the reviews that are due. Nothing while the feature is off."""
     if not features.is_on(tx, FEATURE):
@@ -582,7 +581,7 @@ def check(tx: db.Where, settings: Settings, now: datetime | None = None) -> dict
 # --------------------------------------------------------------------- policy
 
 
-def held(tx: db.Where) -> dict[str, list[dict[str, Any]]]:
+def held(tx: db.Transaction) -> dict[str, list[dict[str, Any]]]:
     """What each agent holds, for OPA (data.registry.agents[id].packages): each package's
     grants, and when they end."""
     out: dict[str, list[dict[str, Any]]] = {}
@@ -599,7 +598,7 @@ def held(tx: db.Where) -> dict[str, list[dict[str, Any]]]:
     return out
 
 
-def current(tx: db.Where, agent_id: str) -> dict[str, list[Any]]:
+def current(tx: db.Transaction, agent_id: str) -> dict[str, list[Any]]:
     """What an agent's packages grant it now, as OPA decides: those in force, and expired
     ones while the feature is monitored. Off, nothing."""
     out: dict[str, list[Any]] = {"permissions": [], "model_access": [], "agent_access": []}
@@ -629,7 +628,7 @@ def _with_packages(rows: Any) -> list[tuple[AccessAssignment, AccessPackage]]:
     return sorted(found, key=lambda pair: pair[1].name)
 
 
-def assignment_dict(tx: db.Where, row: AccessAssignment) -> dict[str, Any]:
+def assignment_dict(tx: db.Transaction, row: AccessAssignment) -> dict[str, Any]:
     package = AccessPackage.objects.filter(pk=row.package_id).first()
     agent = Agent.objects.filter(pk=row.agent_id).first()
     expired = row.status == EXPIRED or (

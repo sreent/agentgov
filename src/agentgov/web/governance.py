@@ -18,8 +18,15 @@ from ninja import Body
 from agentgov import ids, ledger, witness
 from agentgov.api import reach
 from agentgov.api.auth import READ_ROLES, Principal
-from agentgov.db.models import Agent, AgentActivity, ApprovalRequest, Finding, ToolServer
-from agentgov.models import DELETED, DISCOVERED
+from agentgov.db.models import (
+    DELETED,
+    DISCOVERED,
+    Agent,
+    AgentActivity,
+    ApprovalRequest,
+    Finding,
+    ToolServer,
+)
 from agentgov.opa import WHAT_IF
 from agentgov.opa.bundle import opa_status
 from agentgov.platforms.base import PlatformError

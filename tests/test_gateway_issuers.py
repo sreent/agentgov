@@ -18,10 +18,9 @@ from starlette.testclient import TestClient
 
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.db.models import Agent, IdentityIssuer, ModelUsage
+from agentgov.db.models import DISCOVERED, Agent, IdentityIssuer, ModelUsage
 from agentgov.gateway import render, to_yaml
 from agentgov.identity import issuer_keys
-from agentgov.models import DISCOVERED
 from agentgov.opa import bundle
 from agentgov.processor.a2a_answers import _identity as answer_identity
 from agentgov.processor.control_plane import DecisionRecorder

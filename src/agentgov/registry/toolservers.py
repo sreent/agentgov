@@ -25,8 +25,7 @@ from typing import Any
 
 from agentgov import db, ids, ledger
 from agentgov.db import lock, mark_changed
-from agentgov.db.models import ToolServer
-from agentgov.models import BLOCKED, PENDING
+from agentgov.db.models import BLOCKED, PENDING, ToolServer
 from agentgov.registry import findings, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
@@ -53,14 +52,14 @@ PACKAGE_TYPES = ("npm", "pypi", "oci", "nuget", "cargo", "mcpb")
 REGISTRY_NAME = re.compile(r"^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$")
 
 
-def get(tx: db.Where, ref: str) -> ToolServer:
+def get(tx: db.Transaction, ref: str) -> ToolServer:
     ts = ToolServer.objects.filter(pk=ref).first() or ToolServer.objects.filter(name=ref).first()
     if ts is None:
         raise NotFound(f"tool server {ref!r} not found")
     return ts
 
 
-def list_all(tx: db.Where, status: str | None = None) -> list[ToolServer]:
+def list_all(tx: db.Transaction, status: str | None = None) -> list[ToolServer]:
     servers = ToolServer.objects.order_by("name")
     if status:
         servers = servers.filter(status=status)
@@ -181,13 +180,13 @@ def _check(ts: ToolServer) -> None:
         raise ValidationError("packages are for servers listed for developers (developers: true)")
 
 
-def _unique_registry_name(tx: db.Where, ts: ToolServer) -> None:
+def _unique_registry_name(tx: db.Transaction, ts: ToolServer) -> None:
     taken = ToolServer.objects.filter(registry_name=ts.registry_name).exclude(id=ts.id)
     if ts.registry_name and taken.exists():
         raise Conflict(f"another tool server is already {ts.registry_name!r} in the registry")
 
 
-def create(tx: db.Where, data: dict[str, Any], *, actor: str, approve: bool) -> ToolServer:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str, approve: bool) -> ToolServer:
     """Register a server. Requests from non-admins start ``pending`` review."""
     name = validation.slug(data.get("name"), "name")
     if ToolServer.objects.filter(name=name).exists():
@@ -227,7 +226,7 @@ def create(tx: db.Where, data: dict[str, Any], *, actor: str, approve: bool) -> 
 
 
 def update(
-    tx: db.Where,
+    tx: db.Transaction,
     ts: ToolServer,
     data: dict[str, Any],
     *,
@@ -251,7 +250,7 @@ def update(
     return changed
 
 
-def set_status(tx: db.Where, ts: ToolServer, action: str, *, actor: str) -> ToolServer:
+def set_status(tx: db.Transaction, ts: ToolServer, action: str, *, actor: str) -> ToolServer:
     targets = {"approve": APPROVED, "block": BLOCKED, "unblock": APPROVED}
     if action not in targets:
         raise ValidationError(f"unknown action {action!r}")
@@ -283,7 +282,7 @@ def set_status(tx: db.Where, ts: ToolServer, action: str, *, actor: str) -> Tool
     return ts
 
 
-def delete(tx: db.Where, ts: ToolServer, *, actor: str) -> None:
+def delete(tx: db.Transaction, ts: ToolServer, *, actor: str) -> None:
     ledger.append(tx, type="toolserver.deleted", actor=actor, resource=f"toolserver/{ts.name}")
     ts.delete()
     mark_changed(tx, "toolservers")
@@ -301,7 +300,7 @@ def fingerprint(tool: dict[str, Any]) -> str:
 
 
 def record_catalog(
-    tx: db.Where,
+    tx: db.Transaction,
     ts: ToolServer,
     tools: list[dict[str, Any]],
     *,
@@ -399,7 +398,9 @@ def _policy_view(entry: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def approve_tool(tx: db.Where, ts: ToolServer, tool_name: str, *, actor: str) -> dict[str, Any]:
+def approve_tool(
+    tx: db.Transaction, ts: ToolServer, tool_name: str, *, actor: str
+) -> dict[str, Any]:
     """Accept a tool's current definition as the approved one."""
     catalog = [dict(t) for t in ts.tools or []]
     for entry in catalog:

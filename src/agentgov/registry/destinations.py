@@ -39,8 +39,7 @@ from urllib.parse import urlsplit
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.db.models import Destination
-from agentgov.models import DESTINATION_KINDS
+from agentgov.db.models import DESTINATION_KINDS, Destination
 from agentgov.registry import desks, teams, validation
 from agentgov.registry.errors import Conflict, InvalidTransition, NotFound, ValidationError
 from agentgov.registry.versions import changes, edited, start_edit
@@ -85,12 +84,12 @@ def category(entry_type: str) -> str:
     return "changes"
 
 
-def head(tx: db.Where) -> int:
+def head(tx: db.Transaction) -> int:
     """The last ledger entry's sequence number."""
     return ledger.head_seq(tx)
 
 
-def get(tx: db.Where, ref: str) -> Destination:
+def get(tx: db.Transaction, ref: str) -> Destination:
     destination = (
         Destination.objects.filter(pk=ref).first() or Destination.objects.filter(name=ref).first()
     )
@@ -99,7 +98,7 @@ def get(tx: db.Where, ref: str) -> Destination:
     return destination
 
 
-def list_all(tx: db.Where) -> list[Destination]:
+def list_all(tx: db.Transaction) -> list[Destination]:
     return list(Destination.objects.order_by("name"))
 
 
@@ -331,7 +330,7 @@ def _known(data: dict[str, Any], also: tuple[str, ...]) -> None:
 
 
 def create(
-    tx: db.Where, data: dict[str, Any], *, actor: str, settings: Settings | None = None
+    tx: db.Transaction, data: dict[str, Any], *, actor: str, settings: Settings | None = None
 ) -> Destination:
     _known(data, ("name", "kind", "status", "backfill"))
     name = validation.slug(data.get("name"), "name")
@@ -386,7 +385,7 @@ def create(
 
 
 def update(
-    tx: db.Where,
+    tx: db.Transaction,
     destination: Destination,
     data: dict[str, Any],
     *,
@@ -424,7 +423,9 @@ def update(
     return changed
 
 
-def set_status(tx: db.Where, destination: Destination, action: str, *, actor: str) -> Destination:
+def set_status(
+    tx: db.Transaction, destination: Destination, action: str, *, actor: str
+) -> Destination:
     """Pause a destination (it keeps its place in the ledger), or resume it."""
     if action not in ("pause", "resume"):
         raise ValidationError(f"unknown action {action!r}")
@@ -446,7 +447,7 @@ def set_status(tx: db.Where, destination: Destination, action: str, *, actor: st
     return destination
 
 
-def replay(tx: db.Where, destination: Destination, after: Any, *, actor: str) -> Destination:
+def replay(tx: db.Transaction, destination: Destination, after: Any, *, actor: str) -> Destination:
     """Send a SIEM the ledger again, from after entry ``after`` (0: from its start)."""
     if destination.kind not in SIEM:
         raise ValidationError("replay is for SIEMs: chats and desks get what happens as it does")
@@ -475,7 +476,7 @@ def replay(tx: db.Where, destination: Destination, after: Any, *, actor: str) ->
     return destination
 
 
-def delete(tx: db.Where, destination: Destination, *, actor: str) -> None:
+def delete(tx: db.Transaction, destination: Destination, *, actor: str) -> None:
     posting = sorted(
         t.name for t in teams.list_all(tx) if destination.name in (t.destinations or [])
     )

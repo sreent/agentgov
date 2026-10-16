@@ -15,8 +15,7 @@ from typing import Any
 from django.db.models import Count
 
 from agentgov import db, ids
-from agentgov.db.models import Agent, Finding, RiskSignal
-from agentgov.models import DISCOVERED
+from agentgov.db.models import DISCOVERED, Agent, Finding, RiskSignal
 from agentgov.registry import validation
 
 TIER_POINTS = {"minimal": 0, "low": 5, "medium": 10, "high": 25, "critical": 40}
@@ -78,13 +77,13 @@ class RiskResult:
     factors: list[dict[str, Any]] = field(default_factory=list)
 
 
-def add_signal(tx: db.Where, agent_id: str, kind: str, detail: str | None = None) -> None:
+def add_signal(tx: db.Transaction, agent_id: str, kind: str, detail: str | None = None) -> None:
     RiskSignal.objects.create(
         id=ids.new_id(ids.SIGNAL), agent_id=agent_id, kind=kind, detail=detail
     )
 
 
-def evaluate(tx: db.Where, agent: Agent, window_hours: int) -> RiskResult:
+def evaluate(tx: db.Transaction, agent: Agent, window_hours: int) -> RiskResult:
     factors: list[dict[str, Any]] = []
 
     def factor(name: str, points: int, detail: str = "") -> None:

@@ -101,9 +101,8 @@ import yaml
 
 from agentgov.config import Settings
 from agentgov.db import Database
-from agentgov.db.models import Agent, IdentityIssuer, ModelProvider, ToolServer
+from agentgov.db.models import PENDING, Agent, IdentityIssuer, ModelProvider, ToolServer
 from agentgov.identity import chains
-from agentgov.models import PENDING
 from agentgov.registry import features, identity_issuers, model_providers
 from agentgov.registry.agents import a2a_published
 

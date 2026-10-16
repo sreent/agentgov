@@ -544,7 +544,7 @@ class OIDCClient:
 # --------------------------------------------------------------------- sessions
 
 
-def with_given_roles(tx: db.Where, who: Identity) -> Identity:
+def with_given_roles(tx: db.Transaction, who: Identity) -> Identity:
     """Add the roles given to the person in AgentGov (agentgov.registry.access), by the
     email address the provider vouches for."""
     if not who.email:
@@ -555,7 +555,7 @@ def with_given_roles(tx: db.Where, who: Identity) -> Identity:
     return replace(who, roles=ordered(given | set(who.roles)), given=tuple(ordered(given)))
 
 
-def without_role(tx: db.Where, settings: Settings) -> str | None:
+def without_role(tx: db.Transaction, settings: Settings) -> str | None:
     """What someone gets who signs in with no role given to them: the person role, to see
     what is sent to them, while issues or approvals go to people; None if they are refused
     then (AGENTGOV_OIDC_REQUIRE_ROLE)."""
@@ -564,7 +564,7 @@ def without_role(tx: db.Where, settings: Settings) -> str | None:
     return PERSON
 
 
-def admit(tx: db.Where, settings: Settings, who: Identity) -> Identity | None:
+def admit(tx: db.Transaction, settings: Settings, who: Identity) -> Identity | None:
     """Who signed in, with the roles they sign in with, or None if they may not sign in.
 
     Their AgentGov roles, if they have one, for every team or for one. Otherwise the person
@@ -584,14 +584,14 @@ def admit(tx: db.Where, settings: Settings, who: Identity) -> Identity | None:
     return replace(who, roles=[])
 
 
-def people_may_sign_in(tx: db.Where) -> bool:
+def people_may_sign_in(tx: db.Transaction) -> bool:
     """Whether people without an AgentGov role may sign in, to see what was sent to them."""
     from agentgov.registry import features
 
     return any(features.is_on(tx, name) for name in PERSON_FEATURES)
 
 
-def purge_expired(tx: db.Where) -> None:
+def purge_expired(tx: db.Transaction) -> None:
     now = ids.utcnow()
     LoginState.objects.filter(expires_at__lt=now).delete()
     CliLogin.objects.filter(expires_at__lt=now).delete()
@@ -599,7 +599,7 @@ def purge_expired(tx: db.Where) -> None:
 
 
 def begin_login(
-    tx: db.Where,
+    tx: db.Transaction,
     client: OIDCClient,
     *,
     cli_port: int | None = None,
@@ -625,7 +625,7 @@ def begin_login(
     return state, client.authorization_url(state, nonce, verifier)
 
 
-def consume_login(tx: db.Where, state: str) -> tuple[str, str]:
+def consume_login(tx: db.Transaction, state: str) -> tuple[str, str]:
     """Take the sign-in attempt for ``state`` (each completes once): ``(nonce, verifier)``."""
     login = LoginState.objects.filter(pk=state).first()
     if login is None or login.expires_at < ids.utcnow():
@@ -634,12 +634,12 @@ def consume_login(tx: db.Where, state: str) -> tuple[str, str]:
     return login.nonce, login.code_verifier
 
 
-def cli_port(tx: db.Where, state: str) -> int | None:
+def cli_port(tx: db.Transaction, state: str) -> int | None:
     """The CLI's loopback port, if ``agentgov login`` started this sign-in."""
     return CliLogin.objects.filter(pk=state).values_list("port", flat=True).first()
 
 
-def cli_signed_in(tx: db.Where, state: str, who: Identity) -> str:
+def cli_signed_in(tx: db.Transaction, state: str, who: Identity) -> str:
     """The person signed in for the CLI: keep who they are; returns the one-time code."""
     login = CliLogin.objects.filter(pk=state).first()
     if login is None:
@@ -660,7 +660,9 @@ def cli_signed_in(tx: db.Where, state: str, who: Identity) -> str:
     return code
 
 
-def collect_cli_login(tx: db.Where, code: str, verifier: str) -> tuple[str | None, Identity | None]:
+def collect_cli_login(
+    tx: db.Transaction, code: str, verifier: str
+) -> tuple[str | None, Identity | None]:
     """Who signed in for a one-time code, if ``verifier`` matches its PKCE challenge.
 
     Returns the sign-in's state (``None`` for an unknown code) and who signed in
@@ -682,7 +684,7 @@ def collect_cli_login(tx: db.Where, code: str, verifier: str) -> tuple[str | Non
 
 
 def start_session(
-    tx: db.Where, settings: Settings, who: Identity, *, client: str = "browser"
+    tx: db.Transaction, settings: Settings, who: Identity, *, client: str = "browser"
 ) -> tuple[str, AdminSession]:
     """Create the session for a signed-in person; returns its token and record."""
     token = secrets.token_urlsafe(32)
@@ -712,7 +714,7 @@ def start_session(
     return token, record
 
 
-def record_denied(tx: db.Where, who: Identity, *, reason: str = "no AgentGov role") -> None:
+def record_denied(tx: db.Transaction, who: Identity, *, reason: str = "no AgentGov role") -> None:
     ledger.append(
         tx,
         type="admin.login_denied",
@@ -723,14 +725,14 @@ def record_denied(tx: db.Where, who: Identity, *, reason: str = "no AgentGov rol
     )
 
 
-def lookup(tx: db.Where, token: str) -> AdminSession | None:
+def lookup(tx: db.Transaction, token: str) -> AdminSession | None:
     record = AdminSession.objects.filter(token_hash=token_hash(token)).first()
     if record is None or record.expires_at <= ids.utcnow():
         return None
     return record
 
 
-def end_session(tx: db.Where, token: str) -> str | None:
+def end_session(tx: db.Transaction, token: str) -> str | None:
     """Sign out; returns the ID token for the provider logout, if the session existed."""
     record = lookup(tx, token)
     if record is None:
@@ -746,7 +748,7 @@ def end_session(tx: db.Where, token: str) -> str | None:
     return id_token or ""
 
 
-def end_provider_sessions(tx: db.Where, claims: dict[str, Any]) -> list[str]:
+def end_provider_sessions(tx: db.Transaction, claims: dict[str, Any]) -> list[str]:
     """End the sessions a logout token names: those from its provider session (sid), or,
     when it names only a person (sub), all of theirs. Returns the IDs of those ended."""
     sid, sub = claims.get("sid"), claims.get("sub")

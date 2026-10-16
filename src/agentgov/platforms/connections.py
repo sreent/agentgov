@@ -122,23 +122,23 @@ BY_KEY = {c.key: c for c in CONNECTIONS}
 APP_CONNECTIONS = tuple(c.key for c in CONNECTIONS if c.via == "app")
 
 
-def load_state(tx: db.Where, key: str) -> dict[str, Any]:
+def load_state(tx: db.Transaction, key: str) -> dict[str, Any]:
     state = IntegrationState.objects.filter(pk=key).first()
     return dict(state.data or {}) if state is not None else {}
 
 
-def save_state(tx: db.Where, key: str, data: dict[str, Any]) -> None:
+def save_state(tx: db.Transaction, key: str, data: dict[str, Any]) -> None:
     state = IntegrationState.objects.filter(pk=key).first() or IntegrationState(key=key)
     state.data, state.updated_at = data, ids.utcnow()
     state.save(force_insert=state._state.adding)
 
 
-def remember_grants(tx: db.Where, roles: frozenset[str] | None) -> None:
+def remember_grants(tx: db.Transaction, roles: frozenset[str] | None) -> None:
     """Remember which application permissions the app registration holds."""
     save_state(tx, APP_STATE, {"roles": sorted(roles) if roles is not None else None})
 
 
-def granted(tx: db.Where) -> frozenset[str] | None:
+def granted(tx: db.Transaction) -> frozenset[str] | None:
     """The app's application permissions as last seen; ``None`` if unknown."""
     state = IntegrationState.objects.filter(pk=APP_STATE).first()
     roles = (state.data or {}).get("roles") if state is not None else None
@@ -151,7 +151,7 @@ def runnable(connection: Connection, roles: frozenset[str] | None) -> bool:
 
 
 def state(
-    tx: db.Where, settings: Settings, *, threat_detection: dict[str, Any] | None = None
+    tx: db.Transaction, settings: Settings, *, threat_detection: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
     """Each connection, what it needs and how it is doing."""
     roles = granted(tx)

@@ -52,7 +52,7 @@ def _as_asked(
     }
 
 
-def edit(tx: db.Where, fields: Any) -> dict[str, Any]:
+def edit(tx: db.Transaction, fields: Any) -> dict[str, Any]:
     """An edit to many agents, checked once for all of them."""
     if not isinstance(fields, dict) or not fields:
         raise ValidationError(f"say what to change (fields): {', '.join(EDITS)}")
@@ -98,7 +98,7 @@ def _for(agent: Agent, change: dict[str, Any]) -> dict[str, Any]:
 
 
 def agents(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     refs: Any,
     action: str,
@@ -147,7 +147,7 @@ def agents(
     # In the same order every time: two of these at once lock their agents in that order.
     for i, agent in sorted(found.values(), key=lambda x: x[1].id):
         try:
-            with db.transaction_of(tx).savepoint():
+            with tx.savepoint():
                 if check is not None:
                     check(agent)
                 if action == "update":
@@ -178,7 +178,7 @@ def agents(
 
 
 def findings(
-    tx: db.Where,
+    tx: db.Transaction,
     refs: Any,
     action: str,
     *,
@@ -225,7 +225,7 @@ def findings(
             )
             continue
         try:
-            with db.transaction_of(tx).savepoint():
+            with tx.savepoint():
                 if action == "acknowledge":
                     issues.acknowledge(tx, finding, actor=actor)
                 elif action == "dismiss":

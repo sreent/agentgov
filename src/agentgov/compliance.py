@@ -30,6 +30,11 @@ from django.db.models import Count, Min, Q
 from agentgov import __version__, db, ids, ledger, transparency, witness
 from agentgov.config import LEDGER_MIN_DAYS, Settings
 from agentgov.db.models import (
+    ACTIVE,
+    BLOCKED,
+    DELETED,
+    DISCOVERED,
+    PENDING,
     AccessAssignment,
     Agent,
     Blueprint,
@@ -44,13 +49,6 @@ from agentgov.db.models import (
     PlatformSync,
     Team,
     ToolServer,
-)
-from agentgov.models import (
-    ACTIVE,
-    BLOCKED,
-    DELETED,
-    DISCOVERED,
-    PENDING,
 )
 from agentgov.registry import classification, features, posture
 from agentgov.registry import scopes as scope_rules
@@ -179,7 +177,7 @@ class Facts:
         return sum(n for t, n in self.by_type.items() if t.startswith(prefixes))
 
 
-def facts(tx: db.Where, settings: Settings, days: int, now: datetime | None = None) -> Facts:
+def facts(tx: db.Transaction, settings: Settings, days: int, now: datetime | None = None) -> Facts:
     now = now or ids.utcnow()
     since = now - timedelta(days=days)
     agents = list(Agent.objects.exclude(status=DELETED))
@@ -1059,7 +1057,7 @@ features.json              Which of AgentGov's features are on, and how strictly
 """
 
 
-def pack(tx: db.Where, settings: Settings, days: int) -> SpooledTemporaryFile[bytes]:
+def pack(tx: db.Transaction, settings: Settings, days: int) -> SpooledTemporaryFile[bytes]:
     """The evidence pack for the last ``days`` days, as a zip file."""
     import base64
 

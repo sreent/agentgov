@@ -25,10 +25,9 @@ from starlette.testclient import TestClient
 from agentgov import a2a_auth, cli
 from agentgov.api.app import create_app
 from agentgov.config import Settings
-from agentgov.db.models import Agent, LedgerEntry
+from agentgov.db.models import ACTIVE, BLOCKED, PENDING, Agent, LedgerEntry
 from agentgov.gateway import render
 from agentgov.identity import chains
-from agentgov.models import ACTIVE, BLOCKED, PENDING
 from agentgov.opa.bundle import registry_snapshot
 from agentgov.processor import a2a_guard
 from agentgov.processor.control_plane import DecisionRecorder

@@ -36,8 +36,16 @@ from django.db.models import Count
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import mark_changed
-from agentgov.db.models import Agent, ApprovedConnector, Finding, PlatformAgent, PlatformSync
-from agentgov.models import BLOCKED, DELETED, DISCOVERED
+from agentgov.db.models import (
+    BLOCKED,
+    DELETED,
+    DISCOVERED,
+    Agent,
+    ApprovedConnector,
+    Finding,
+    PlatformAgent,
+    PlatformSync,
+)
 from agentgov.platforms.base import Inventory
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, features, findings
@@ -103,7 +111,7 @@ def connector_key(value: Any) -> str | None:
     return value.strip().rstrip("/").rsplit("/", 1)[-1]
 
 
-def _entra_index(tx: db.Where) -> dict[str, str]:
+def _entra_index(tx: db.Transaction) -> dict[str, str]:
     """Registry agent ids by Entra agent ID, to match an agent both sources report."""
     index = {}
     for agent_id, data in PlatformAgent.objects.values_list("agent_id", "data"):
@@ -114,7 +122,7 @@ def _entra_index(tx: db.Where) -> dict[str, str]:
 
 
 def upsert(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     source: str,
     external_id: str,
@@ -192,7 +200,7 @@ def _scope(value: Any) -> str | None:
     return lowered
 
 
-def instructions_checked(tx: db.Where) -> dict[str, Any]:
+def instructions_checked(tx: db.Transaction) -> dict[str, Any]:
     """For each catalog package, the version (last change) whose instructions were read."""
     return {
         record.external_id: (record.data or {}).get("instructions_checked")
@@ -201,7 +209,7 @@ def instructions_checked(tx: db.Where) -> dict[str, Any]:
 
 
 def record_microsoft_365(
-    tx: db.Where,
+    tx: db.Transaction,
     packages: list[dict[str, Any]],
     *,
     include_types: set[str],
@@ -324,7 +332,7 @@ def _connectors(props: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def import_copilot_studio(
-    tx: db.Where, payload: Any, *, actor: str, complete: bool = False
+    tx: db.Transaction, payload: Any, *, actor: str, complete: bool = False
 ) -> dict[str, int]:
     """Store a Power Platform inventory export of Copilot Studio agents. ``complete``: it is
     the whole inventory (as a sync reads it), so the agents missing from it are gone from
@@ -410,7 +418,7 @@ def import_copilot_studio(
     return counts
 
 
-def gone_agents(tx: db.Where) -> set[str]:
+def gone_agents(tx: db.Transaction) -> set[str]:
     """The agents that no platform reporting them reports any more."""
     there: set[str] = set()
     gone: set[str] = set()
@@ -425,7 +433,7 @@ def gone_agents(tx: db.Where) -> set[str]:
 
 
 def record_agent_identities(
-    tx: db.Where, identities: list[dict[str, Any]], *, actor: str | None = None
+    tx: db.Transaction, identities: list[dict[str, Any]], *, actor: str | None = None
 ) -> dict[str, int]:
     """Store the tenant's Entra agent identities (Graph ``agentIdentity`` objects)."""
     counts = {"created": 0, "updated": 0, "skipped": 0, "linked": 0}
@@ -508,11 +516,11 @@ def record_agent_identities(
     return counts
 
 
-def approved_connectors(tx: db.Where) -> list[ApprovedConnector]:
+def approved_connectors(tx: db.Transaction) -> list[ApprovedConnector]:
     return list(ApprovedConnector.objects.order_by("connector_id"))
 
 
-def approve_connector(tx: db.Where, connector_id: str, *, note: str, actor: str) -> None:
+def approve_connector(tx: db.Transaction, connector_id: str, *, note: str, actor: str) -> None:
     key = connector_key(connector_id)
     if key is None or not _CONNECTOR_ID.match(key):
         raise ValidationError(f"{connector_id!r} is not a connector ID (e.g. shared_office365)")
@@ -533,7 +541,7 @@ def approve_connector(tx: db.Where, connector_id: str, *, note: str, actor: str)
     evaluate(tx)
 
 
-def remove_approval(tx: db.Where, connector_id: str, *, actor: str) -> None:
+def remove_approval(tx: db.Transaction, connector_id: str, *, actor: str) -> None:
     key = connector_key(connector_id) or connector_id
     existing = ApprovedConnector.objects.filter(pk=key).first()
     if existing is None:
@@ -553,20 +561,20 @@ def remove_approval(tx: db.Where, connector_id: str, *, actor: str) -> None:
 # ------------------------------------------------------------------- checks
 
 
-def _records(tx: db.Where, source: str) -> list[PlatformAgent]:
+def _records(tx: db.Transaction, source: str) -> list[PlatformAgent]:
     """The source's agents that are still in the registry (not deleted)."""
     deleted = set(Agent.objects.filter(status=DELETED).values_list("id", flat=True))
     found = PlatformAgent.objects.filter(source=source).order_by("name")
     return [r for r in found if r.agent_id not in deleted]
 
 
-def subjects(tx: db.Where, source: str) -> set[str]:
+def subjects(tx: db.Transaction, source: str) -> set[str]:
     """The agents a source reports, deleted or not: its findings are about them, and other
     sources raise findings of the same types about theirs."""
     return set(PlatformAgent.objects.filter(source=source).values_list("agent_id", flat=True))
 
 
-def evaluate(tx: db.Where) -> int:
+def evaluate(tx: db.Transaction) -> int:
     """Raise or resolve the Copilot Studio findings; returns how many are open."""
     approved = {c.connector_id for c in approved_connectors(tx)}
     present: set[str] = set()
@@ -662,7 +670,7 @@ def evaluate(tx: db.Where) -> int:
 
 
 @contextlib.contextmanager
-def first_sync(tx: db.Where, source: str) -> Iterator[None]:
+def first_sync(tx: db.Transaction, source: str) -> Iterator[None]:
     """Around a sync of ``source``: if it is its first, what it finds about its agents
     (theirs, and AgentGov's own, such as unmanaged or high risk) was there before AgentGov
     looked, so it is marked as such (findings.BASELINE) and reaches people in AgentGov
@@ -692,7 +700,7 @@ def failed_sync(source: str, message: str | None) -> str:
 
 
 def record_inventory(
-    tx: db.Where,
+    tx: db.Transaction,
     source: str,
     inventory: Inventory,
     *,
@@ -802,7 +810,7 @@ def record_inventory(
     return counts
 
 
-def sync_failed(tx: db.Where, source: str, message: str, *, actor: str | None) -> None:
+def sync_failed(tx: db.Transaction, source: str, message: str, *, actor: str | None) -> None:
     """A connector couldn't read its platform at all: its agents' findings stay open,
     unverified, until a sync succeeds."""
     set_sync(tx, source, ok=False, counts={}, message=message, actor=actor)
@@ -814,7 +822,7 @@ def sync_failed(tx: db.Where, source: str, message: str, *, actor: str | None) -
     )
 
 
-def refresh_risk(tx: db.Where, settings: Settings) -> None:
+def refresh_risk(tx: db.Transaction, settings: Settings) -> None:
     """After a sync: recompute platform agents' risk now rather than at the next posture
     scan, how many of them are left to review, and which of those blocked in AgentGov their
     platform still runs."""
@@ -833,7 +841,7 @@ TO_REVIEW = "platform.agents_to_review"
 NAMED = 5
 
 
-def review_summary(tx: db.Where) -> None:
+def review_summary(tx: db.Transaction) -> None:
     """One issue per platform with agents found there and not reviewed yet: how many, and
     a few of their names. It goes to the catch-all team, and resolves once none is left.
     (Agents found on platforms each had a finding of their own before: those resolve.)"""
@@ -875,7 +883,7 @@ def review_summary(tx: db.Where) -> None:
 # ------------------------------------------------- acting in Microsoft's platforms
 
 
-def target(tx: db.Where, agent: Agent) -> dict[str, str]:
+def target(tx: db.Transaction, agent: Agent) -> dict[str, str]:
     """Where to block ``agent`` in its own platform: the Copilot Studio agent (quarantine
     needs no Agent 365 licence) when there is one, otherwise the Microsoft 365 package."""
     records = _by_source(tx, agent)
@@ -894,7 +902,7 @@ def target(tx: db.Where, agent: Agent) -> dict[str, str]:
 
 
 def record_platform_block(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     agent: Agent,
     where: dict[str, str],
@@ -994,11 +1002,11 @@ def _stopped(record: PlatformAgent) -> bool:
     return data.get("stopped") is True
 
 
-def _by_source(tx: db.Where, agent: Agent) -> dict[str, PlatformAgent]:
+def _by_source(tx: db.Transaction, agent: Agent) -> dict[str, PlatformAgent]:
     return {r.source: r for r in PlatformAgent.objects.filter(agent_id=agent.id)}
 
 
-def runs_on(tx: db.Where, agent: Agent) -> PlatformAgent | None:
+def runs_on(tx: db.Transaction, agent: Agent) -> PlatformAgent | None:
     """The record of the platform that still runs ``agent``: None once the platform that
     runs it reports it stopped, or none that reported it has it any more."""
     records = _by_source(tx, agent)
@@ -1009,14 +1017,14 @@ def runs_on(tx: db.Where, agent: Agent) -> PlatformAgent | None:
     return None
 
 
-def still_runs_in(tx: db.Where, agent: Agent) -> str | None:
+def still_runs_in(tx: db.Transaction, agent: Agent) -> str | None:
     """The platform that still runs ``agent`` while it is blocked in AgentGov."""
     record = runs_on(tx, agent) if agent.status == BLOCKED else None
     return SOURCES[record.source] if record is not None else None
 
 
 def check_stop(
-    tx: db.Where, settings: Settings, agent: Agent, *, actor: str = SYSTEM_ACTOR
+    tx: db.Transaction, settings: Settings, agent: Agent, *, actor: str = SYSTEM_ACTOR
 ) -> None:
     """Blocking an agent in AgentGov doesn't stop it in its platform, and AgentGov can stop it
     there only as an administrator who signs in (Copilot Studio, Microsoft 365), if at all.
@@ -1093,7 +1101,7 @@ def check_stop(
     )
 
 
-def check_stops(tx: db.Where, settings: Settings) -> None:
+def check_stops(tx: db.Transaction, settings: Settings) -> None:
     """:func:`check_stop` for the agents blocked in AgentGov that platforms report, and for
     those with the issue open."""
     reported = set(PlatformAgent.objects.values_list("agent_id", flat=True))
@@ -1111,7 +1119,7 @@ def check_stops(tx: db.Where, settings: Settings) -> None:
 
 
 def set_sync(
-    tx: db.Where,
+    tx: db.Transaction,
     source: str,
     *,
     ok: bool,
@@ -1146,7 +1154,7 @@ def set_sync(
 
 
 def overview(
-    tx: db.Where, *, m365_configured: bool, connected: set[str] | None = None
+    tx: db.Transaction, *, m365_configured: bool, connected: set[str] | None = None
 ) -> dict[str, Any]:
     """Each source, how many agents it reports and how its last sync went. ``connected``:
     the INVENTORY_SOURCES whose connector is configured."""
@@ -1194,7 +1202,7 @@ def overview(
     return {"sources": sources, "allowlist_active": bool(approved_connectors(tx))}
 
 
-def connector_usage(tx: db.Where) -> dict[str, Any]:
+def connector_usage(tx: db.Transaction) -> dict[str, Any]:
     """Every connector Copilot Studio agents use, approved or not, and who uses it."""
     approved = {c.connector_id: c for c in approved_connectors(tx)}
 
@@ -1231,7 +1239,7 @@ def connector_usage(tx: db.Where) -> dict[str, Any]:
     return {"allowlist_active": bool(approved), "connectors": rows}
 
 
-def for_agent(tx: db.Where, agent_id: str) -> list[dict[str, Any]]:
+def for_agent(tx: db.Transaction, agent_id: str) -> list[dict[str, Any]]:
     """What each platform reports about one agent, with connectors' allowlist status."""
     approved = {c.connector_id for c in approved_connectors(tx)}
     views = []

@@ -66,7 +66,7 @@ def _plain(value: dict[str, Any] | None) -> dict[str, str] | None:
     return {k: value.get(k, "") for k in FIELDS} if value else None
 
 
-def classify(tx: db.Where, agent: Agent, value: Any, *, actor: str) -> bool:
+def classify(tx: db.Transaction, agent: Agent, value: Any, *, actor: str) -> bool:
     """Classify ``agent`` (None: no longer classified); returns whether that changed it.
     The ledger keeps what it was and what it is (agent.classified)."""
     new = normalize(value)

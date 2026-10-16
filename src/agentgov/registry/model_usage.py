@@ -37,7 +37,7 @@ def today() -> str:
     return ids.utcnow().date().isoformat()
 
 
-def tokens_used(tx: db.Where, day: str | None = None) -> dict[str, int]:
+def tokens_used(tx: db.Transaction, day: str | None = None) -> dict[str, int]:
     """Tokens (input and output) each agent used on ``day`` (today by default)."""
     rows = (
         ModelUsage.objects.filter(day=day or today())
@@ -99,7 +99,7 @@ def _int(value: Any) -> int:
 
 
 def _metered(
-    tx: db.Where,
+    tx: db.Transaction,
     agent_id: Any,
     client_id: Any,
     issuer: Any,
@@ -120,7 +120,7 @@ def _metered(
 COUNTS = ("calls", "refused", "input_tokens", "output_tokens", "cost_usd")
 
 
-def ingest_logs(tx: db.Where, payload: dict[str, Any]) -> dict[str, int]:
+def ingest_logs(tx: db.Transaction, payload: dict[str, Any]) -> dict[str, int]:
     """Meter the model calls in agentgateway's access logs (OTLP logs)."""
     stats = {"records": 0, "model_calls": 0, "unidentified": 0}
     providers = {p.name: p for p in model_providers.list_all(tx)}
@@ -196,7 +196,7 @@ def _add(agent_id: str, day: str, provider: str, model: str, counts: dict[str, f
         ModelUsage.objects.create(**key, **counts)
 
 
-def _budgets_reached(tx: db.Where, spent: dict[tuple[str, str], int]) -> None:
+def _budgets_reached(tx: db.Transaction, spent: dict[tuple[str, str], int]) -> None:
     """Record the agents whose usage today reached their budget in this batch, and have OPA
     refuse their further calls."""
     day = today()
@@ -223,7 +223,7 @@ def _budgets_reached(tx: db.Where, spent: dict[tuple[str, str], int]) -> None:
 SPEND_BY = ("owner", "sponsor")
 
 
-def spend(tx: db.Where, rows: list[ModelUsage]) -> dict[str, list[dict[str, Any]]]:
+def spend(tx: db.Transaction, rows: list[ModelUsage]) -> dict[str, list[dict[str, Any]]]:
     """``rows`` added up per owner and per sponsor of their agents, the costliest first.
 
     An agent with several sponsors counts in full for each; an agent without an owner
@@ -262,7 +262,7 @@ def spend(tx: db.Where, rows: list[ModelUsage]) -> dict[str, list[dict[str, Any]
 
 
 def usage(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     days: int = 7,
     agent_id: str | None = None,

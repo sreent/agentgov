@@ -14,18 +14,18 @@ from agentgov.registry.errors import Conflict, NotFound, ValidationError
 from agentgov.registry.versions import changes, start_edit
 
 
-def get(tx: db.Where, ref: str) -> Policy:
+def get(tx: db.Transaction, ref: str) -> Policy:
     policy = Policy.objects.filter(pk=ref).first() or Policy.objects.filter(name=ref).first()
     if policy is None:
         raise NotFound(f"policy {ref!r} not found")
     return policy
 
 
-def list_all(tx: db.Where) -> list[Policy]:
+def list_all(tx: db.Transaction) -> list[Policy]:
     return list(Policy.objects.order_by("name"))
 
 
-def _validate(tx: db.Where, name: str, source: str, enabled: bool) -> None:
+def _validate(tx: db.Transaction, name: str, source: str, enabled: bool) -> None:
     if not isinstance(source, str) or not source.strip():
         raise ValidationError("rego must be a non-empty string")
     if not enabled:
@@ -38,7 +38,7 @@ def _validate(tx: db.Where, name: str, source: str, enabled: bool) -> None:
     rego.check_custom_policy(name, source, others=others, registry=opa_bundle.registry_snapshot(tx))
 
 
-def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> Policy:
+def create(tx: db.Transaction, data: dict[str, Any], *, actor: str) -> Policy:
     name = validation.slug(data.get("name"), "name")
     if Policy.objects.filter(name=name).exists():
         raise Conflict(f"policy {name!r} already exists")
@@ -66,7 +66,7 @@ def create(tx: db.Where, data: dict[str, Any], *, actor: str) -> Policy:
 
 
 def update(
-    tx: db.Where,
+    tx: db.Transaction,
     policy: Policy,
     data: dict[str, Any],
     *,
@@ -100,7 +100,7 @@ def update(
     return True
 
 
-def delete(tx: db.Where, policy: Policy, *, actor: str) -> None:
+def delete(tx: db.Transaction, policy: Policy, *, actor: str) -> None:
     ledger.append(tx, type="policy.deleted", actor=actor, resource=f"policy/{policy.name}")
     policy.delete()
     mark_changed(tx, "policies")

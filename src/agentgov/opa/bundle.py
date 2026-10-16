@@ -30,6 +30,8 @@ from django.db.models import Q
 from agentgov import db, ids
 from agentgov.db import Database
 from agentgov.db.models import (
+    DELETED,
+    DISCOVERED,
     Agent,
     ApprovedConnector,
     Blueprint,
@@ -37,7 +39,6 @@ from agentgov.db.models import (
     Policy,
     ToolServer,
 )
-from agentgov.models import DELETED, DISCOVERED
 from agentgov.opa import WHAT_IF
 from agentgov.opa.signing import SIGNATURES, Signer
 from agentgov.registry import (
@@ -103,7 +104,7 @@ def custom_package(name: str) -> str:
     return "agentgov.custom." + name.replace("-", "_")
 
 
-def registry_snapshot(tx: db.Where) -> dict[str, Any]:
+def registry_snapshot(tx: db.Transaction) -> dict[str, Any]:
     agents: dict[str, Any] = {}
     clients: dict[str, str] = {}
     names: dict[str, str] = {}
@@ -217,7 +218,7 @@ def registry_snapshot(tx: db.Where) -> dict[str, Any]:
     }
 
 
-def custom_modules(tx: db.Where) -> dict[str, str]:
+def custom_modules(tx: db.Transaction) -> dict[str, str]:
     return {
         f"agentgov/custom/{p.name}.rego": p.rego
         for p in Policy.objects.filter(enabled=True).order_by("name")
@@ -231,7 +232,7 @@ class Bundle:
     revision: str
 
 
-def build(tx: db.Where, signer: Signer | None = None) -> Bundle:
+def build(tx: db.Transaction, signer: Signer | None = None) -> Bundle:
     """The bundle as the registry has it now; signed (.signatures.json) with ``signer``."""
     files = {**library_files(), "system/log.rego": SYSTEM_LOG_REGO, **custom_modules(tx)}
     data = registry_snapshot(tx)
@@ -345,7 +346,7 @@ class BundleServer:
                     # Nothing heard of: look again all the same (see MAX_AGE_SECONDS).
 
 
-def record_status(tx: db.Where, status: dict[str, Any]) -> None:
+def record_status(tx: db.Transaction, status: dict[str, Any]) -> None:
     """Keep an OPA instance's status report: when it reported, and the bundle it runs."""
     labels = status.get("labels") or {}
     instance = str(labels.get("id") or "opa")[:100]
@@ -354,7 +355,7 @@ def record_status(tx: db.Where, status: dict[str, Any]) -> None:
     row = rows.first()
     if row is None:
         try:
-            with db.transaction_of(tx).savepoint():
+            with tx.savepoint():
                 IntegrationState.objects.create(key=OPA_STATUS, data={})
         except IntegrityError:
             pass  # another replica added it meanwhile
@@ -375,7 +376,7 @@ def record_status(tx: db.Where, status: dict[str, Any]) -> None:
     row.save()
 
 
-def opa_status(tx: db.Where) -> dict[str, Any]:
+def opa_status(tx: db.Transaction) -> dict[str, Any]:
     """The OPA instances heard from in the last day: when each reported and its bundle."""
     row = IntegrationState.objects.filter(pk=OPA_STATUS).first()
     instances = ((row.data or {}).get("instances") or {}) if row is not None else {}

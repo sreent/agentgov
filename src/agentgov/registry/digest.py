@@ -14,8 +14,7 @@ from typing import Any
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock
-from agentgov.db.models import Agent, Finding, IntegrationState
-from agentgov.models import SEVERITIES
+from agentgov.db.models import SEVERITIES, Agent, Finding, IntegrationState
 from agentgov.registry import finding_types, issues
 
 STATE = "issues-digest"
@@ -52,7 +51,7 @@ def due(settings: Settings, now: datetime) -> str | None:
     return local.date().isoformat()
 
 
-def start(tx: db.Where, day: str, now: datetime) -> dict[str, Any]:
+def start(tx: db.Transaction, day: str, now: datetime) -> dict[str, Any]:
     """The day's state: who has had it, and the tries for those who haven't. A new day
     starts afresh, remembering when the last one started."""
     row = IntegrationState.objects.filter(pk=STATE).first()
@@ -86,7 +85,9 @@ def waiting(state: dict[str, Any], target: tuple[str, str], now: datetime) -> bo
     return after is None or datetime.fromisoformat(after) <= now
 
 
-def gather(tx: db.Where, settings: Settings, since: datetime) -> dict[tuple[str, str], list[Line]]:
+def gather(
+    tx: db.Transaction, settings: Settings, since: datetime
+) -> dict[tuple[str, str], list[Line]]:
     """For each address and chat: the open issues with it now (those at the step of their
     chain it is at), those waiting for someone to take them on first, the most severe
     first."""
@@ -120,7 +121,7 @@ def gather(tx: db.Where, settings: Settings, since: datetime) -> dict[tuple[str,
 
 
 def record(
-    tx: db.Where,
+    tx: db.Transaction,
     day: str,
     target: tuple[str, str],
     lines: list[Line],

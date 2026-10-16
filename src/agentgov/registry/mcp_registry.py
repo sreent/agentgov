@@ -25,8 +25,7 @@ from urllib.parse import urlsplit
 
 from agentgov import db, ids
 from agentgov.config import Settings
-from agentgov.db.models import ToolServer
-from agentgov.models import BLOCKED
+from agentgov.db.models import BLOCKED, ToolServer
 
 API_VERSION = "v0.1"
 SCHEMA = "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
@@ -127,7 +126,7 @@ def server_response(ts: ToolServer, settings: Settings) -> dict[str, Any]:
     }
 
 
-def listed(tx: db.Where, *, include_deleted: bool = False) -> list[ToolServer]:
+def listed(tx: db.Transaction, *, include_deleted: bool = False) -> list[ToolServer]:
     """The tool servers in the registry: listed and approved (or blocked, as deleted)."""
     statuses = ["approved", BLOCKED] if include_deleted else ["approved"]
     return list(ToolServer.objects.filter(developers=True, status__in=statuses).order_by("name"))
@@ -147,7 +146,7 @@ def _after(cursor: str | None) -> str | None:
 
 
 def server_list(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     *,
     cursor: str | None = None,
@@ -180,7 +179,7 @@ def server_list(
 
 
 def find(
-    tx: db.Where, settings: Settings, name: str, *, include_deleted: bool = False
+    tx: db.Transaction, settings: Settings, name: str, *, include_deleted: bool = False
 ) -> ToolServer | None:
     for ts in listed(tx, include_deleted=include_deleted):
         if registry_name(ts, settings) == name:
@@ -188,7 +187,7 @@ def find(
     return None
 
 
-def managed_settings(tx: db.Where, settings: Settings) -> dict[str, Any]:
+def managed_settings(tx: db.Transaction, settings: Settings) -> dict[str, Any]:
     """The registry as Copilot's enterprise managed-settings allowlist."""
     allowed: list[dict[str, Any]] = []
     for ts in listed(tx):

@@ -21,8 +21,7 @@ from typing import Any
 
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
-from agentgov.db.models import Agent, PlatformAgent
-from agentgov.models import DELETED
+from agentgov.db.models import DELETED, Agent, PlatformAgent
 from agentgov.registry import agents as agents_svc
 from agentgov.registry import discovery, findings, risk
 
@@ -46,7 +45,7 @@ DEFENDER_SEVERITY = {
 }
 
 
-def agent_index(tx: db.Where) -> dict[str, str]:
+def agent_index(tx: db.Transaction) -> dict[str, str]:
     """Registry agent ids by every identifier the platform sources reported (lowercase)."""
     index: dict[str, str] = {}
     deleted = set(Agent.objects.filter(status=DELETED).values_list("id", flat=True))
@@ -101,7 +100,7 @@ def _flagged(items: Any, flag: str) -> int:
 # ------------------------------------------------------------------- Purview
 
 
-def record_usage(tx: db.Where, settings: Settings, records: list[dict[str, Any]]) -> dict:
+def record_usage(tx: db.Transaction, settings: Settings, records: list[dict[str, Any]]) -> dict:
     """Agents' use, from ``CopilotInteraction`` audit records."""
     index = agent_index(tx)
     usage: dict[str, dict[str, Any]] = defaultdict(
@@ -182,7 +181,7 @@ def record_usage(tx: db.Where, settings: Settings, records: list[dict[str, Any]]
 
 
 def _remember_usage(
-    tx: db.Where, agent_id: str, entry: dict[str, Any], last_used: datetime
+    tx: db.Transaction, agent_id: str, entry: dict[str, Any], last_used: datetime
 ) -> None:
     """Keep who used the agent lately, and where, on its platform records."""
     for record in PlatformAgent.objects.filter(agent_id=agent_id):
@@ -205,7 +204,7 @@ def _remember_usage(
         record.save()
 
 
-def record_maker_events(tx: db.Where, records: list[dict[str, Any]]) -> dict[str, int]:
+def record_maker_events(tx: db.Transaction, records: list[dict[str, Any]]) -> dict[str, int]:
     """Copilot Studio agents created, published, shared or deleted, into the ledger."""
     index = agent_index(tx)
     counts = {"events": 0, "skipped": 0}
@@ -260,7 +259,7 @@ def is_about_agents(alert: dict[str, Any]) -> bool:
     )
 
 
-def record_alerts(tx: db.Where, settings: Settings, alerts: list[dict[str, Any]]) -> dict:
+def record_alerts(tx: db.Transaction, settings: Settings, alerts: list[dict[str, Any]]) -> dict:
     """Defender alerts about agents, as findings (resolved when Defender resolves them)."""
     index = agent_index(tx)
     counts = {"alerts": 0, "matched": 0, "resolved": 0}

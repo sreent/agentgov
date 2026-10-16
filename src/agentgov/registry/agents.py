@@ -11,14 +11,16 @@ from django.db.models import Q
 from agentgov import db, ids, ledger
 from agentgov.config import Settings
 from agentgov.db import lock, mark_changed
-from agentgov.db.models import AccessAssignment, Agent, AgentInstructions
-from agentgov.models import (
+from agentgov.db.models import (
     ACTIVE,
     AGENT_STATUSES,
     BLOCKED,
     DELETED,
     DISCOVERED,
     PENDING,
+    AccessAssignment,
+    Agent,
+    AgentInstructions,
 )
 from agentgov.registry import (
     approvals,
@@ -80,7 +82,7 @@ def client_id_for(name: str) -> str:
     return f"agent-{name}"
 
 
-def get(tx: db.Where, ref: str) -> Agent:
+def get(tx: db.Transaction, ref: str) -> Agent:
     agent = (
         Agent.objects.filter(pk=ref).first()
         or Agent.objects.filter(Q(name=ref) | Q(client_id=ref)).first()
@@ -91,7 +93,7 @@ def get(tx: db.Where, ref: str) -> Agent:
 
 
 def list_agents(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     status: str | None = None,
     blueprint: str | None = None,
@@ -142,7 +144,7 @@ def a2a_published(agent: Agent) -> bool:
     return bool(agent.a2a_url) and agent.status in A2A_PUBLISHED and not agent.on_platform
 
 
-def _unpublished(tx: db.Where, agent: Agent) -> str | None:
+def _unpublished(tx: db.Transaction, agent: Agent) -> str | None:
     """Why the gateway doesn't publish an agent that serves A2A, if it doesn't."""
     if not agent.a2a_url:
         return None
@@ -165,7 +167,7 @@ def may_call(caller: Agent, target: Agent) -> bool:
 
 
 def a2a_view(
-    tx: db.Where, settings: Settings, agent: Agent, *, reached: set[str] | None = None
+    tx: db.Transaction, settings: Settings, agent: Agent, *, reached: set[str] | None = None
 ) -> dict[str, Any]:
     """Agent to agent: where it is called through the gateway, whom it may call, and who
     may call it (of the agents ``reached``, by ID, for a role for some teams only)."""
@@ -196,7 +198,7 @@ def a2a_view(
     }
 
 
-def _apply(tx: db.Where, agent: Agent, data: dict[str, Any]) -> list[str]:
+def _apply(tx: db.Transaction, agent: Agent, data: dict[str, Any]) -> list[str]:
     changed = []
     for key in EDITABLE:
         if key not in data:
@@ -326,7 +328,7 @@ def reserved_changes(old: Any, new: Any) -> list[str]:
 
 
 def register(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     data: dict[str, Any],
     *,
@@ -385,7 +387,7 @@ def register(
 
 
 def update(
-    tx: db.Where,
+    tx: db.Transaction,
     agent: Agent,
     data: dict[str, Any],
     *,
@@ -429,7 +431,7 @@ def _check_activation(agent: Agent) -> None:
 
 
 def transition(
-    tx: db.Where,
+    tx: db.Transaction,
     settings: Settings,
     agent: Agent,
     action: str,
@@ -486,7 +488,7 @@ def transition(
     return agent
 
 
-def attest(tx: db.Where, agent: Agent, *, actor: str, note: str | None = None) -> Agent:
+def attest(tx: db.Transaction, agent: Agent, *, actor: str, note: str | None = None) -> Agent:
     """Record a sponsor's periodic confirmation that the agent is still needed."""
     lock(tx, agent)
     if agent.status not in (ACTIVE, BLOCKED, PENDING):
@@ -509,7 +511,7 @@ def attest(tx: db.Where, agent: Agent, *, actor: str, note: str | None = None) -
     return agent
 
 
-def purge(tx: db.Where, agent: Agent, *, actor: str) -> None:
+def purge(tx: db.Transaction, agent: Agent, *, actor: str) -> None:
     lock(tx, agent)
     if agent.status != DELETED:
         raise InvalidTransition("only deleted agents can be purged")
@@ -522,7 +524,7 @@ def purge(tx: db.Where, agent: Agent, *, actor: str) -> None:
     mark_changed(tx, "agents")
 
 
-def purge_expired(tx: db.Where, settings: Settings) -> list[str]:
+def purge_expired(tx: db.Transaction, settings: Settings) -> list[str]:
     """Purge the agents deleted longer ago than the retention period (0 keeps them):
     until then they can be restored."""
     days = settings.soft_delete_retention_days
@@ -539,7 +541,9 @@ def purge_expired(tx: db.Where, settings: Settings) -> list[str]:
     return names
 
 
-def _high_risk(tx: db.Where, agent: Agent, result: risk.RiskResult, *, raise_it: bool) -> None:
+def _high_risk(
+    tx: db.Transaction, agent: Agent, result: risk.RiskResult, *, raise_it: bool
+) -> None:
     """The finding that an agent at the gateway is high or critical risk: a threat when what
     it did adds to its risk, otherwise about how it is set up. It resolves once the risk is
     down. An agent on another platform has none: its risk is the sum of its own findings,
@@ -567,7 +571,7 @@ def _high_risk(tx: db.Where, agent: Agent, result: risk.RiskResult, *, raise_it:
     )
 
 
-def refresh_risk(tx: db.Where, settings: Settings, agent: Agent) -> risk.RiskResult:
+def refresh_risk(tx: db.Transaction, settings: Settings, agent: Agent) -> risk.RiskResult:
     """Recompute the agent's risk; publish level changes and apply auto-block."""
     result = risk.evaluate(tx, agent, settings.risk_window_hours)
     level_changed = result.level != agent.risk_level

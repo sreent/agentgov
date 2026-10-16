@@ -53,7 +53,7 @@ def allowed_in(policy: dict[str, Any] | None) -> list[str] | None:
     return sorted(c for c in found if c)
 
 
-def approved(tx: db.Where) -> list[str]:
+def approved(tx: db.Transaction) -> list[str]:
     return sorted(c.connector_id for c in platforms.approved_connectors(tx))
 
 
@@ -82,7 +82,7 @@ def policy_body(connectors: list[str], existing: dict[str, Any] | None) -> dict[
     }
 
 
-def studio_environments(tx: db.Where) -> dict[str, int]:
+def studio_environments(tx: db.Transaction) -> dict[str, int]:
     """Environments with Copilot Studio agents, and how many agents each holds."""
     counts: dict[str, int] = {}
     for record in PlatformAgent.objects.filter(source="copilot-studio"):
@@ -93,7 +93,7 @@ def studio_environments(tx: db.Where) -> dict[str, int]:
 
 
 def preview(
-    tx: db.Where,
+    tx: db.Transaction,
     policies: list[dict[str, Any]],
     targets: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -149,7 +149,7 @@ def preview(
 
 
 def record_push(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     policy_id: str,
     connectors: list[str],
@@ -183,7 +183,7 @@ def record_push(
     )
 
 
-def pushed(tx: db.Where) -> dict[str, Any]:
+def pushed(tx: db.Transaction) -> dict[str, Any]:
     """The last push, and whether the allowlist has changed since."""
     state = connections.load_state(tx, STATE_KEY)
     if not state:

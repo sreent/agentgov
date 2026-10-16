@@ -31,7 +31,7 @@ import httpx
 
 from agentgov import ids, ledger
 from agentgov.config import Settings
-from agentgov.db import Database, Where
+from agentgov.db import Database, Transaction
 from agentgov.db.models import Agent, IntegrationState
 from agentgov.identity.entra_calls import EntraCallers
 from agentgov.processor.detectors import scan_local
@@ -273,7 +273,7 @@ class ThreatDetection:
         )
 
 
-def record(tx: Where, settings: Settings, verdict: Verdict, *, correlation_id: str) -> None:
+def record(tx: Transaction, settings: Settings, verdict: Verdict, *, correlation_id: str) -> None:
     """The evidence for one decision: a ledger entry, the agent's activity and risk."""
     call = verdict.call
     tool = call["tool"]
@@ -378,7 +378,7 @@ def record(tx: Where, settings: Settings, verdict: Verdict, *, correlation_id: s
     agents_svc.refresh_risk(tx, settings, agent)
 
 
-def _count(tx: Where, *, blocked: bool, would_block: bool) -> None:
+def _count(tx: Transaction, *, blocked: bool, would_block: bool) -> None:
     state = IntegrationState.objects.filter(pk=STATE_KEY).first()
     state = state or IntegrationState(key=STATE_KEY, data={})
     data = dict(state.data or {})
@@ -390,7 +390,7 @@ def _count(tx: Where, *, blocked: bool, would_block: bool) -> None:
     state.save(force_insert=state._state.adding)
 
 
-def summary(tx: Where, mode: str) -> dict[str, Any]:
+def summary(tx: Transaction, mode: str) -> dict[str, Any]:
     """How threat detection is doing, for the Platforms page."""
     state = IntegrationState.objects.filter(pk=STATE_KEY).first()
     data = dict(state.data or {}) if state is not None else {}

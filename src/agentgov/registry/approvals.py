@@ -46,7 +46,7 @@ def _expire_stale() -> None:
     ).update(status=EXPIRED)
 
 
-def deciders_for(tx: db.Where, agent: Agent, person: dict[str, Any] | None) -> str:
+def deciders_for(tx: db.Transaction, agent: Agent, person: dict[str, Any] | None) -> str:
     """Who decides a request the agent makes, for the person or on its own."""
     if (
         person
@@ -59,7 +59,7 @@ def deciders_for(tx: db.Where, agent: Agent, person: dict[str, Any] | None) -> s
 
 
 def check_or_request(
-    tx: db.Where,
+    tx: db.Transaction,
     *,
     agent: Agent,
     action: str,
@@ -149,7 +149,7 @@ def check_or_request(
     return "created", req
 
 
-def get(tx: db.Where, approval_id: str) -> ApprovalRequest:
+def get(tx: db.Transaction, approval_id: str) -> ApprovalRequest:
     req = ApprovalRequest.objects.filter(pk=approval_id).first()
     if req is None:
         raise NotFound(f"approval {approval_id} not found")
@@ -157,7 +157,7 @@ def get(tx: db.Where, approval_id: str) -> ApprovalRequest:
 
 
 def list_requests(
-    tx: db.Where,
+    tx: db.Transaction,
     status: str | None = None,
     limit: int = 200,
     agent_ids: set[str] | None = None,
@@ -173,7 +173,7 @@ def list_requests(
 
 
 def list_for_person(
-    tx: db.Where, subject: str | None, status: str | None = None, limit: int = 200
+    tx: db.Transaction, subject: str | None, status: str | None = None, limit: int = 200
 ) -> list[ApprovalRequest]:
     """The requests that wait for this person (or did), by their ID."""
     if not subject:
@@ -199,7 +199,7 @@ def may_decide(
 
 
 def decide(
-    tx: db.Where, req: ApprovalRequest, *, approve: bool, actor: str, note: str | None = None
+    tx: db.Transaction, req: ApprovalRequest, *, approve: bool, actor: str, note: str | None = None
 ) -> ApprovalRequest:
     _expire_stale()
     lock(tx, req)
@@ -228,7 +228,7 @@ def decide(
     return req
 
 
-def cancel_for_agent(tx: db.Where, agent: Agent, *, actor: str, reason: str) -> int:
+def cancel_for_agent(tx: db.Transaction, agent: Agent, *, actor: str, reason: str) -> int:
     """Withdraw an agent's open requests and unused approvals (it was blocked or deleted)."""
     open_requests = list(
         ApprovalRequest.objects.filter(agent_id=agent.id, status__in=(PENDING, APPROVED))

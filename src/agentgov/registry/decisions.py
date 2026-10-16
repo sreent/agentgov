@@ -50,7 +50,9 @@ def _parse_ts(value: Any) -> datetime:
     return ids.utcnow()
 
 
-def record_mcp_decisions(tx: db.Where, settings: Settings, records: list[Any]) -> tuple[int, int]:
+def record_mcp_decisions(
+    tx: db.Transaction, settings: Settings, records: list[Any]
+) -> tuple[int, int]:
     """Store decision records sent by the governance processor: on tool calls, and on
     model calls (``kind: "model"``), whose activity the gateway's access logs count. Each
     record on its own, cleaned first (:func:`clean`): one the database still can't take is
@@ -60,7 +62,7 @@ def record_mcp_decisions(tx: db.Where, settings: Settings, records: list[Any]) -
     stored = rejected = 0
     for rec in records:
         try:
-            with db.transaction_of(tx).savepoint():
+            with tx.savepoint():
                 if not isinstance(rec, dict):
                     raise ValidationError("a decision record is a JSON object")
                 found = _record_mcp(tx, clean(rec))
@@ -77,7 +79,7 @@ def record_mcp_decisions(tx: db.Where, settings: Settings, records: list[Any]) -
     return stored, rejected
 
 
-def _record_mcp(tx: db.Where, rec: dict[str, Any]) -> dict[str, Agent]:
+def _record_mcp(tx: db.Transaction, rec: dict[str, Any]) -> dict[str, Agent]:
     """One decision record into the ledger, the agent's activity and risk signals: the
     agents it touched."""
     touched: dict[str, Agent] = {}
@@ -245,14 +247,16 @@ def _chain(
     return out
 
 
-def _answered_by(tx: db.Where, rec: dict[str, Any]) -> Agent | None:
+def _answered_by(tx: db.Transaction, rec: dict[str, Any]) -> Agent | None:
     """The agent that sent an answer (a decision on an answer names it under "a2a")."""
     target = rec.get("a2a") if isinstance(rec.get("a2a"), dict) else {}
     target_id = target.get("target_id")
     return Agent.objects.filter(pk=target_id).first() if target_id else None
 
 
-def _injected_answer(tx: db.Where, called: Agent, caller: Agent, resource: Any, how: str) -> None:
+def _injected_answer(
+    tx: db.Transaction, called: Agent, caller: Agent, resource: Any, how: str
+) -> None:
     risk.add_signal(tx, called.id, "prompt_injection", resource)
     findings.raise_finding(
         tx,
@@ -270,7 +274,7 @@ def _injected_answer(tx: db.Where, called: Agent, caller: Agent, resource: Any, 
 
 
 def _answer_signals(
-    tx: db.Where,
+    tx: db.Transaction,
     caller: Agent,
     rec: dict[str, Any],
     effect: str | None,
@@ -317,7 +321,7 @@ def _answer_signals(
 _FOUND = {"injection": "instructions aimed at the agent", "jailbreak": "a jailbreak attempt"}
 
 
-def _classified(tx: db.Where, rec: dict[str, Any]) -> list[Agent]:
+def _classified(tx: db.Transaction, rec: dict[str, Any]) -> list[Agent]:
     """A verdict the classifier gave in the background, after the call went on: the
     ledger has it, and what it flagged is a risk signal and a finding, as what the rules
     flag is. The agents whose risk it changed."""
@@ -423,7 +427,7 @@ def _classified(tx: db.Where, rec: dict[str, Any]) -> list[Agent]:
 
 
 def _model_signals(
-    tx: db.Where,
+    tx: db.Transaction,
     agent: Agent,
     phase: str,
     effect: str | None,
@@ -505,7 +509,7 @@ def _model_signals(
         )
 
 
-def record_dropped(tx: db.Where, count: int, *, rejected: bool = False) -> None:
+def record_dropped(tx: db.Transaction, count: int, *, rejected: bool = False) -> None:
     """Decision records the ledger misses: lost by a governance processor whose queue
     overflowed while the control plane couldn't take them, or (``rejected``) sent but not
     storable, even cleaned, which the control plane logged. The calls were decided; the
@@ -538,7 +542,7 @@ def in_process(event: Any) -> bool:
     return not (isinstance(inp, dict) and inp.get(WHAT_IF) is True)
 
 
-def record_opa_decisions(tx: db.Where, events: list[Any]) -> dict[str, int]:
+def record_opa_decisions(tx: db.Transaction, events: list[Any]) -> dict[str, int]:
     """Store OPA decision-log events of in-process enforcement (the toolkit's); skip the
     rest. Each on its own, cleaned first, as decision records are: what an agent gives its
     OPA is in them."""
@@ -548,7 +552,7 @@ def record_opa_decisions(tx: db.Where, events: list[Any]) -> dict[str, int]:
             skipped += 1
             continue
         try:
-            with db.transaction_of(tx).savepoint():
+            with tx.savepoint():
                 _record_opa(tx, clean(event))
         except Exception as exc:  # one event never costs the others theirs
             rejected += 1
@@ -560,7 +564,7 @@ def record_opa_decisions(tx: db.Where, events: list[Any]) -> dict[str, int]:
     return {"stored": stored, "skipped": skipped, **({"rejected": rejected} if rejected else {})}
 
 
-def _record_opa(tx: db.Where, event: dict[str, Any]) -> None:
+def _record_opa(tx: db.Transaction, event: dict[str, Any]) -> None:
     """One in-process decision into the ledger, the agent's activity and risk signals. What
     the agent gave its OPA (the input) is whatever it chose to send: taken as text."""
     inp = event.get("input") or {}
