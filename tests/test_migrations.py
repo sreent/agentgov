@@ -15,6 +15,7 @@ from alembic import command
 from django.core.management import call_command
 from django.db import connections
 from django.db.migrations.loader import MigrationLoader
+from django.test import override_settings
 from sqlalchemy import inspect, text
 from typer.testing import CliRunner
 
@@ -102,8 +103,11 @@ def test_djangos_first_migration_builds_the_schema_alembics_last_leaves(
 
 
 def test_the_migrations_have_every_change_to_the_models() -> None:
+    # The models against the migrations' files alone: with the routers, makemigrations would
+    # also read every database open in this process (or left registered, and dropped since).
     try:
-        call_command("makemigrations", migrations.APP, check=True, dry_run=True, verbosity=0)
+        with override_settings(DATABASE_ROUTERS=[]):
+            call_command("makemigrations", migrations.APP, check=True, dry_run=True, verbosity=0)
     except SystemExit as exc:  # a model changed without a migration
         pytest.fail(f"a model changed without a migration: run scripts/new-migration.sh ({exc})")
 
