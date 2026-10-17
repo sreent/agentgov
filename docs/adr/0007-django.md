@@ -131,21 +131,29 @@ The data layer:
   and PostgreSQL: the same tables, columns, keys, constraints, indexes and defaults. Django's
   PostgreSQL backend adds no indexes of its own for that (`agentgov.db.postgresql`: none of
   the `_like` ones for `LIKE` on keys). `agentgov db upgrade`, and the control plane as it
-  starts, run both, one replica at a time (a PostgreSQL advisory lock): Alembic's up to their
-  last, then Django's, the first recorded as applied rather than run, since Alembic's built
-  its tables (`agentgov.migrations`). `agentgov db status` and `--sql` cover both, and a
-  migration of either that this version doesn't know is refused. New migrations are
+  started, ran both, one replica at a time (a PostgreSQL advisory lock): Alembic's up to
+  their last, then Django's, the first recorded as applied rather than run, since Alembic's
+  built its tables (`agentgov.migrations`). `agentgov db status` and `--sql` covered both, and
+  a migration of either that the version didn't know was refused. New migrations are
   Django's (`scripts/new-migration.sh`, `makemigrations`); SQLAlchemy's models of the
-  tables, which Alembic's were written from, are gone. One difference stays on a database
+  tables, which Alembic's were written from, went. One difference stays on a database
   Django's migrations build: the foreign key from an agent to its blueprint sets it to null
   in Django, not in the database, which Django 5.2 can't declare.
 - [x] The replicas' coordinator off SQLAlchemy's engine: its `LISTEN`, the leader's lock and
   jobs' locks are on PostgreSQL connections of its own, outside the pool, made as Django
-  makes the others (`Database.connect`). SQLAlchemy is left for what Alembic needs: the
-  engine its migrations run on, given the database's URL as AgentGov reads it; and the tests
-  that build and compare schemas with it.
-- [ ] Alembic goes, in a release after the one that runs both: databases from before it are
-  brought up to date by that release first. SQLAlchemy goes with it.
+  makes the others (`Database.connect`). SQLAlchemy was left for what Alembic needed: the
+  engine its migrations ran on, given the database's URL as AgentGov read it; and the tests
+  that built and compared schemas with it.
+- [x] Alembic goes once a version that runs both has brought databases to its last revision.
+  AgentGov had no release yet, so that version is a commit on main (`8470de7c22be`, the
+  merge of Django's migrations) rather than a release, and Alembic went in the next change.
+  A database at Alembic's last revision is taken over as before: Django's first migration
+  recorded, not run, and Alembic's record kept, for that version to run on it again. One
+  Alembic's migrations left at an earlier revision, or one from before AgentGov had
+  migrations, is refused, and the message names that commit, which brings it up to date
+  (`agentgov.migrations`, `tests/test_migrations.py`). SQLAlchemy went with Alembic: the
+  database's URL is read as SQLAlchemy read it (`agentgov.db.parse_url`), and the tests
+  read schemas with Django's introspection.
 
 ## Consequences
 

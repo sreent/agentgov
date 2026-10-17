@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import uuid
 from collections.abc import Iterator
+from contextlib import closing
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
-from sqlalchemy import Engine, create_engine, make_url
-from sqlalchemy.pool import NullPool
 from starlette.testclient import TestClient
 
 from agentgov import db as database
@@ -32,16 +33,28 @@ def opa_available() -> bool:
 requires_opa = pytest.mark.skipif(not opa_available(), reason="opa binary not installed")
 
 
-# With a PostgreSQL server here (an SQLAlchemy URL to any database on it, such as
+# With a PostgreSQL server here (the URL of any database on it, such as
 # postgresql+psycopg://postgres:secret@127.0.0.1:5432/postgres), every test that takes the
 # `settings` fixture runs on a database of its own there instead of SQLite.
 POSTGRES = os.environ.get("AGENTGOV_TEST_POSTGRES_URL")
 TEMPLATE = "agentgov_test_template"
 
 
-def postgres_admin() -> Engine:
+def postgres_admin() -> Any:
+    """A connection to the tests' PostgreSQL server, in autocommit: to make databases and
+    drop them. Its caller closes it."""
     assert POSTGRES
-    return create_engine(POSTGRES, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    server = Database(POSTGRES)
+    try:
+        return server.connect()
+    finally:
+        server.dispose()
+
+
+def postgres_url(name: str) -> str:
+    """The URL of database ``name`` on the tests' PostgreSQL server."""
+    assert POSTGRES
+    return urlsplit(POSTGRES)._replace(path=f"/{name}").geturl()
 
 
 @pytest.fixture(autouse=True)
@@ -58,23 +71,26 @@ def migrated_database(tmp_path_factory: pytest.TempPathFactory) -> Path | str:
     """A database built by the migrations once, copied for each test (tests/test_migrations.py
     covers the migrations themselves): a file, or a template database on PostgreSQL."""
     if POSTGRES:
-        admin = postgres_admin()
-        with admin.connect() as connection:
-            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {TEMPLATE} WITH (FORCE)")
-            connection.exec_driver_sql(f"CREATE DATABASE {TEMPLATE}")
-        db = Database(make_url(POSTGRES).set(database=TEMPLATE).render_as_string(False))
+        with postgres_admin() as admin:
+            admin.execute(f"DROP DATABASE IF EXISTS {TEMPLATE} WITH (FORCE)")
+            admin.execute(f"CREATE DATABASE {TEMPLATE}")
+        db = Database(postgres_url(TEMPLATE))
         migrations.upgrade(db)
         db.dispose()
-        admin.dispose()
         return TEMPLATE
     path = tmp_path_factory.mktemp("schema") / "agentgov.db"
     db = Database(f"sqlite:///{path}")
     migrations.upgrade(db)
-    with db.engine.connect() as connection:
-        # Everything into the main file before it is copied (outside a transaction).
-        connection.connection.dbapi_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     db.dispose()
+    checkpoint(path)
     return path
+
+
+def checkpoint(path: Path) -> None:
+    """Everything in an SQLite database's write-ahead log into its file, before the file is
+    copied."""
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
 @pytest.fixture
@@ -85,17 +101,15 @@ def database_url(tmp_path: Path, migrated_database: Path | str) -> Iterator[str]
         yield f"sqlite:///{tmp_path / 'agentgov.db'}"
         return
     name = f"agentgov_test_{uuid.uuid4().hex[:16]}"
-    admin = postgres_admin()
-    with admin.connect() as connection:
-        connection.exec_driver_sql(f"CREATE DATABASE {name} TEMPLATE {migrated_database}")
+    with postgres_admin() as admin:
+        admin.execute(f"CREATE DATABASE {name} TEMPLATE {migrated_database}")
     try:
-        yield make_url(POSTGRES).set(database=name).render_as_string(False)
+        yield postgres_url(name)
     finally:
         for db in database.live():
             db.dispose()
-        with admin.connect() as connection:
-            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
-        admin.dispose()
+        with postgres_admin() as admin:
+            admin.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
 
 
 @pytest.fixture

@@ -704,8 +704,8 @@ def db_status() -> None:
         _fail(str(exc))
     finally:
         db.dispose()
-    if state.unversioned:
-        current = "none: created before migrations (adopted at the next upgrade)"
+    if state.from_alembic:
+        current = f"{state.current}, Alembic's last revision (Django's migrations take over)"
     else:
         current = state.current or "none: an empty database"
     typer.echo(f"current: {current}")
@@ -730,18 +730,19 @@ def db_upgrade(
         if sql:
             typer.echo(migrations.upgrade_sql(db), nl=False)
             return
-        adopted = migrations.status(db).unversioned
+        from_alembic = migrations.status(db).from_alembic
         applied = migrations.upgrade(db)
     except migrations.SchemaError as exc:
         _fail(str(exc))
     finally:
         db.dispose()
-    if adopted:
-        _done("database", migrations.BASELINE, "adopted (created before migrations)")
-        applied = [revision for revision in applied if revision != migrations.BASELINE]
+    if from_alembic:
+        first = migrations.django_migrations()[0]
+        _done("database", first, "taken over from Alembic's migrations (recorded, not run)")
+        applied = [step for step in applied if step != first]
     if applied:
         _done("database", migrations.head(), "migrated (" + ", ".join(applied) + ")")
-    else:
+    elif not from_alembic:
         _done("database", migrations.head(), "already up to date")
 
 
