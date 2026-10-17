@@ -98,9 +98,10 @@ def django_tables() -> dict[str, dict[str, Any]]:
                 if isinstance(c, UniqueConstraint)
             },
             "indexes": {i.name: sorted(column[name] for name in i.fields) for i in meta.indexes},
-            # What each references, and what the database does to it when that row goes.
+            # What each references; what the database does to it when that row goes, and
+            # when it checks it.
             "foreign keys": {
-                f.column: (f.related_model._meta.db_table, f.target_field.column, keys.rule(f))
+                f.column: (f.related_model._meta.db_table, f.target_field.column, keys.made(f))
                 for f in fields
                 if f.is_relation
             },
@@ -148,9 +149,9 @@ def database_tables(db: Database) -> dict[str, dict[str, Any]]:
                         unique[constraint] = sorted(about["columns"])
                     elif about["index"]:
                         indexes[constraint] = sorted(about["columns"])
-                rules = keys.in_database(connection, name)
+                have = keys.in_database(connection, name)
                 foreign_keys = {
-                    column: (*references, rules[column])
+                    column: (*references, have[column])
                     for column, references in foreign_keys.items()
                 }
                 columns = database_columns(db, cursor, name)

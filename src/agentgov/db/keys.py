@@ -1,17 +1,24 @@
-"""What the database does to a foreign key when the row it names is deleted: what Django does.
-A key Django sets to null when its row goes (``on_delete=SET_NULL``) the database sets to null
-too (``ON DELETE SET NULL``), whoever deletes the row, as AgentGov's schema did before Django's
-migrations built it (docs/adr/0007-django.md).
+"""Foreign keys as AgentGov's database keeps them, which isn't as Django 5.2 makes them
+(docs/adr/0007-django.md):
 
-Django 5.2 writes no such rule into the database, so AgentGov's schema editors do
-(``KeyRules``: agentgov.db.postgresql, agentgov.db.sqlite3), and a migration gives it to the
-keys a database has without it (``AddRulesOnDelete``). Django 6's ``DB_SET_NULL`` replaces
-them, once AgentGov runs on it.
+* Checked as each statement writes them, as Alembic's schema had them, rather than at commit,
+  as Django makes them. Checked at commit, a key would lock the row it names after the ledger's
+  head, which a transaction locks last (agentgov.ledger), and two transactions could each wait
+  for the other.
+* With the database's own rule on delete where Django's is to set the key to null
+  (``on_delete=SET_NULL``): the database sets it to null too (``ON DELETE SET NULL``), whoever
+  deletes the row, as AgentGov's schema did before Django's migrations built it. Django 6's
+  ``DB_SET_NULL`` can replace this, once AgentGov runs on it.
+
+AgentGov's schema editors make keys so (``KeyRules``: agentgov.db.postgresql,
+agentgov.db.sqlite3), and ``RemakeKeys`` makes a database's keys again where they are
+otherwise.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import re
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from django.db.migrations.operations.base import Operation
 from django.db.models import SET_NULL
@@ -21,12 +28,24 @@ if TYPE_CHECKING:
 else:
     _Editor = object
 
+# When the database checks a key: as each statement writes it. Deferrable all the same, as
+# Django's own SQL for keys expects (it sets one IMMEDIATE before dropping it).
+CHECKED = " DEFERRABLE INITIALLY IMMEDIATE"
 # The database's rule for a key, by Django's: setting it to null only, which leaves a row
 # deleted outside Django as Django would. Rows deleted with the one they name (CASCADE) are
 # left to Django, so that none goes without AgentGov's code knowing.
 RULES = {SET_NULL: "SET NULL"}
 # What a key without a rule does, as the databases name it: refuse to be left dangling.
 NO_RULE = "NO ACTION"
+# PostgreSQL's names for the rules (pg_constraint.confdeltype).
+_PG_RULES = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL", "d": "SET DEFAULT"}
+
+
+class Key(NamedTuple):
+    # What the database does to the key when the row it names is deleted.
+    rule: str
+    # Whether the database checks it at commit, rather than as each statement writes it.
+    deferred: bool
 
 
 def is_key(field: Any) -> bool:
@@ -43,59 +62,82 @@ def rule(field: Any) -> str:
     return RULES.get(field.remote_field.on_delete, NO_RULE)
 
 
-def rule_sql(field: Any) -> str:
-    """The clause that gives ``field``'s constraint its rule; none for a field without one."""
-    if not is_key(field) or rule(field) == NO_RULE:
-        return ""
-    return f" ON DELETE {rule(field)}"
+def made(field: Any) -> Key:
+    """``field``'s key as AgentGov's schema editors make it."""
+    return Key(rule(field), deferred="INITIALLY DEFERRED" in CHECKED)
 
 
-def with_rule(clause: str, ruled: str) -> str:
-    """``clause``, a key's SQL or its template, with ``ruled`` where SQL takes it: after the
-    column the key names, before when it is checked."""
-    for checked in ("%(deferrable)s", " DEFERRABLE"):
-        if checked in clause:
-            return clause.replace(checked, ruled + checked, 1)
-    return clause + ruled
+def keyed(clause: str, field: Any) -> str:
+    """``clause``, the SQL Django writes for ``field``'s key or its template, as AgentGov makes
+    the key: with its rule, and checked as each statement writes it."""
+    ruled = "" if rule(field) == NO_RULE else f" ON DELETE {rule(field)}"
+    for deferred in ("%(deferrable)s", " DEFERRABLE INITIALLY DEFERRED"):
+        if deferred in clause:
+            return clause.replace(deferred, ruled + CHECKED, 1)
+    raise ValueError(f"Django wrote a key that says nothing of when it is checked: {clause!r}")
 
 
-def in_database(connection: Any, table: str) -> dict[str, str]:
-    """What the database does to each of ``table``'s foreign keys, by column, when the row it
-    names is deleted; nothing for a table it doesn't have."""
+def in_database(connection: Any, table: str) -> dict[str, Key]:
+    """``table``'s foreign keys as the database has them, by column; none for a table it
+    doesn't have."""
     with connection.cursor() as cursor:
-        if connection.vendor == "sqlite":
-            cursor.execute(f"PRAGMA foreign_key_list({connection.ops.quote_name(table)})")
-            # id, seq, table, from, to, on_update, on_delete, match
-            return {row[3]: row[6] for row in cursor.fetchall()}
-        cursor.execute(
-            "SELECT kcu.column_name, rc.delete_rule "
-            "FROM information_schema.referential_constraints rc "
-            "JOIN information_schema.key_column_usage kcu "
-            "ON kcu.constraint_schema = rc.constraint_schema "
-            "AND kcu.constraint_name = rc.constraint_name "
-            "WHERE kcu.table_schema = current_schema() AND kcu.table_name = %s",
-            [table],
-        )
-        return dict(cursor.fetchall())
+        if connection.vendor != "sqlite":
+            cursor.execute(
+                "SELECT a.attname, c.confdeltype, c.condeferred FROM pg_constraint c "
+                "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] "
+                "WHERE c.contype = 'f' AND c.conrelid = to_regclass(%s)",
+                [table],
+            )
+            return {name: Key(_PG_RULES[kind], deferred) for name, kind, deferred in cursor}
+        cursor.execute(f"PRAGMA foreign_key_list({connection.ops.quote_name(table)})")
+        # id, seq, table, from, to, on_update, on_delete, match
+        rules = {row[3]: row[6] for row in cursor.fetchall()}
+        if not rules:
+            return {}
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = %s", [table])
+        deferred = _deferred(cursor.fetchone()[0])
+        return {column: Key(rules[column], column in deferred) for column in rules}
+
+
+def _deferred(sql: str) -> set[str]:
+    """The columns whose keys SQLite checks at commit, as a table's CREATE TABLE statement
+    declares them: in a column's definition, or after the columns (FOREIGN KEY (...))."""
+    body = sql[sql.index("(") + 1 : sql.rindex(")")]
+    parts, depth, quoted, start = [], 0, False, 0
+    for at, char in enumerate(body):
+        if char == "'":
+            quoted = not quoted
+        elif not quoted and char in "()":
+            depth += 1 if char == "(" else -1
+        elif not quoted and char == "," and depth == 0:
+            parts.append(body[start:at])
+            start = at + 1
+    parts.append(body[start:])
+    columns = set()
+    for part in (part.strip() for part in parts):
+        if "INITIALLY DEFERRED" not in part.upper():
+            continue
+        after = re.match(r"(?:CONSTRAINT\s+\S+\s+)?FOREIGN\s+KEY\s*\(\s*[\"`\[]?(\w+)", part, re.I)
+        columns.add(after[1] if after else part.split()[0].strip('"`[]'))
+    return columns
 
 
 class KeyRules(_Editor):
-    """For AgentGov's schema editors: each foreign key they make has its rule (``rule``), and
-    one whose rule changes is made again."""
+    """For AgentGov's schema editors: each foreign key they make as AgentGov keeps it
+    (``keyed``), and one whose rule changes made again."""
 
     def _create_fk_sql(self, model: Any, field: Any, suffix: str) -> Any:
         # A key made after its table or column (PostgreSQL's).
         statement = super()._create_fk_sql(model, field, suffix)
-        statement.template = with_rule(statement.template, rule_sql(field))
+        statement.template = keyed(statement.template, field)
         return statement
 
     def add_field(self, model: Any, field: Any) -> None:
-        ruled = rule_sql(field)
-        if not ruled or not self.sql_create_column_inline_fk:
+        if not is_key(field) or not self.sql_create_column_inline_fk:
             super().add_field(model, field)
             return
-        # The key written with its column, and its rule with it.
-        self.sql_create_column_inline_fk = with_rule(type(self).sql_create_column_inline_fk, ruled)
+        # A key written with its column.
+        self.sql_create_column_inline_fk = keyed(type(self).sql_create_column_inline_fk, field)
         try:
             super().add_field(model, field)
         finally:
@@ -103,15 +145,16 @@ class KeyRules(_Editor):
 
     def _field_should_be_altered(self, old_field: Any, new_field: Any, ignore: Any = None) -> bool:
         # Django takes on_delete for something the database doesn't keep.
-        changed = super()._field_should_be_altered(old_field, new_field, ignore)
-        return changed or rule_sql(old_field) != rule_sql(new_field)
+        if super()._field_should_be_altered(old_field, new_field, ignore):
+            return True
+        return is_key(old_field) and is_key(new_field) and rule(old_field) != rule(new_field)
 
 
-class AddRulesOnDelete(Operation):
-    """A migration's step: ``model_name``'s foreign keys given, in the database, the rules
-    they lack, on a database Django's migrations built before AgentGov's schema editors wrote
-    them. A key with its rule, and a table not made yet, are left as they are; going back
-    leaves the rules."""
+class RemakeKeys(Operation):
+    """A migration's step: ``model_name``'s foreign keys made again where the database has them
+    otherwise than AgentGov's schema editors make them (``made``), as on a database Django's
+    migrations built before the editors made keys so. A key made so, and a table not made yet,
+    are left as they are; going back leaves the keys."""
 
     reduces_to_sql = True
     reversible = True
@@ -130,18 +173,18 @@ class AddRulesOnDelete(Operation):
         if not self.allow_migrate_model(connection.alias, model):
             return
         have = in_database(connection, model._meta.db_table)
-        lacking = [
+        otherwise = [
             field
             for field in model._meta.local_fields
-            if is_key(field) and field.column in have and have[field.column] != rule(field)
+            if is_key(field) and field.column in have and have[field.column] != made(field)
         ]
-        if not lacking:
+        if not otherwise:
             return
         if connection.vendor == "sqlite":
             # SQLite changes a table's keys only by making the table again.
             schema_editor._remake_table(model)
             return
-        for field in lacking:
+        for field in otherwise:
             for name in schema_editor._constraint_names(model, [field.column], foreign_key=True):
                 schema_editor.execute(schema_editor._delete_fk_sql(model, name))
             schema_editor.execute(
@@ -154,4 +197,8 @@ class AddRulesOnDelete(Operation):
         pass
 
     def describe(self) -> str:
-        return f"Give {self.model_name}'s foreign keys their rules on delete in the database"
+        return f"Make {self.model_name}'s foreign keys again as AgentGov keeps them"
+
+
+# Migration 0002's name for it, when it gave keys their rules on delete alone.
+AddRulesOnDelete = RemakeKeys

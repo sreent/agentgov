@@ -16,7 +16,7 @@ from starlette.testclient import TestClient
 
 from agentgov import db, ledger
 from agentgov.config import Settings
-from agentgov.db.models import LedgerEntry
+from agentgov.db.models import Agent, Blueprint, LedgerEntry
 from agentgov.registry import access_packages, agents, approvals
 from agentgov.registry.errors import InvalidTransition
 from agentgov.runtime import Runtime
@@ -358,6 +358,49 @@ def test_the_chain_head_is_locked_last(pg: Runtime) -> None:
             failed.append(exc)
 
     threads = [threading.Thread(target=append_then_lock), threading.Thread(target=lock_then_append)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert failed == []
+    with pg.db.transaction() as tx:
+        types = list(LedgerEntry.objects.order_by("seq").values_list("type", flat=True))
+        assert types[-2:] == ["test.second", "test.first"]  # in the order they committed
+        assert ledger.verify(tx)["valid"] is True
+
+
+@postgres
+def test_a_key_is_checked_before_the_chain_head_is_locked(pg: Runtime) -> None:
+    """One transaction locks a blueprint, then appends to the ledger; another gives an agent
+    that blueprint, then appends. Were the agent's foreign key checked as the second commits,
+    after it locked the chain's head, each would wait for the other (a deadlock: PostgreSQL
+    fails one); it is checked as the agent is written, so they take turns."""
+    agent_id = _agent(pg)
+    with pg.db.transaction():
+        Blueprint.objects.create(id="bp_turns", name="turns")
+    locked = threading.Event()
+    failed: list[BaseException] = []
+
+    def lock_then_append() -> None:
+        try:
+            with pg.db.transaction() as tx:
+                db.lock(tx, Blueprint.objects.get(pk="bp_turns"))
+                locked.set()
+                time.sleep(0.5)  # the other has written its agent by now
+                ledger.append(tx, type="test.second", actor="test")
+        except BaseException as exc:
+            failed.append(exc)
+
+    def refer_then_append() -> None:
+        try:
+            with pg.db.transaction() as tx:
+                assert locked.wait(5)
+                Agent.objects.filter(pk=agent_id).update(blueprint_id="bp_turns")
+                ledger.append(tx, type="test.first", actor="test")
+        except BaseException as exc:
+            failed.append(exc)
+
+    threads = [threading.Thread(target=run) for run in (lock_then_append, refer_then_append)]
     for thread in threads:
         thread.start()
     for thread in threads:
