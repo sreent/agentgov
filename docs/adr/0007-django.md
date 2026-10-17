@@ -136,12 +136,17 @@ The data layer:
   built its tables (`agentgov.migrations`). `agentgov db status` and `--sql` covered both, and
   a migration of either that the version didn't know was refused. New migrations are
   Django's (`scripts/new-migration.sh`, `makemigrations`); SQLAlchemy's models of the
-  tables, which Alembic's were written from, went. One difference stayed on a database
-  Django's migrations built: the foreign key from an agent to its blueprint set it to null in
-  Django, not in the database, which Django 5.2 doesn't declare. AgentGov's schema editors
-  write that rule into the database for every key Django sets to null, and Django's second
-  migration gives it to a database its first built without it (`agentgov.db.keys`); Django
-  6's `DB_SET_NULL` replaces them once AgentGov runs on it.
+  tables, which Alembic's were written from, went. Two differences stayed on a database
+  Django's migrations built, in its one foreign key, from an agent to its blueprint. Django
+  set it to null when the blueprint went, not the database, as Django 5.2 declares no such
+  rule. And the database checked it at commit, as Django makes keys, after the transaction
+  had locked the chain's head: a transaction that gave an agent a blueprint another had
+  locked, then appended to the ledger, deadlocked with it, which the chart's end-to-end run
+  found. AgentGov's schema editors make keys as Alembic's schema had them, checked as each
+  statement writes them, and with the database's own rule for a key Django sets to null;
+  Django's second and third migrations make again the keys a database has otherwise
+  (`agentgov.db.keys`, `tests/test_concurrency.py`). Django 6's `DB_SET_NULL` can replace
+  the rule once AgentGov runs on it.
 - [x] The replicas' coordinator off SQLAlchemy's engine: its `LISTEN`, the leader's lock and
   jobs' locks are on PostgreSQL connections of its own, outside the pool, made as Django
   makes the others (`Database.connect`). SQLAlchemy was left for what Alembic needed: the

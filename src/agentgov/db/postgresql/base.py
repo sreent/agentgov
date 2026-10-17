@@ -1,6 +1,6 @@
 """Django's PostgreSQL backend, as agentgov.db uses it: TCP keepalives on the server's side
 of every connection too, as on the client's; the schema's indexes, no others; and foreign keys
-with their rules on delete (agentgov.db.keys)."""
+as AgentGov keeps them (agentgov.db.keys)."""
 
 from __future__ import annotations
 

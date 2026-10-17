@@ -10,6 +10,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from django.core.management import call_command
@@ -74,12 +75,17 @@ def _as_alembic_left_it(db: Database, revision: str = migrations.ALEMBIC_LAST) -
         tx.execute("INSERT INTO alembic_version (version_num) VALUES (%s)", [revision])
 
 
-def _rules(db: Database) -> dict[str, str]:
-    """What the database does to the agents' foreign keys when the rows they name go."""
+def _keys(db: Database) -> dict[str, keys.Key]:
+    """The agents' foreign keys as the database has them."""
     try:
         return keys.in_database(connections[db.alias], "agents")
     finally:
         connections[db.alias].close()
+
+
+# The agent's key to its blueprint as AgentGov keeps it: set to null by the database when the
+# blueprint is deleted, and checked as each statement writes it.
+KEPT = keys.Key("SET NULL", deferred=False)
 
 
 def _recorded(db: Database) -> list[str]:
@@ -233,7 +239,7 @@ def test_the_control_plane_can_leave_migrating_to_a_job(settings: Settings, tmp_
 def test_the_database_sets_an_agents_blueprint_to_null(empty: Database) -> None:
     """When the blueprint is deleted, by Django or not, as Django does (agentgov.db.keys)."""
     migrations.upgrade(empty)
-    assert _rules(empty) == {"blueprint_id": "SET NULL"}
+    assert _keys(empty) == {"blueprint_id": KEPT}
     with empty.transaction():
         Blueprint.objects.create(id="bp_1", name="support")
         Agent.objects.create(id="agt_1", name="bot", blueprint_id="bp_1")
@@ -243,26 +249,40 @@ def test_the_database_sets_an_agents_blueprint_to_null(empty: Database) -> None:
         assert Agent.objects.get(pk="agt_1").blueprint_id is None
 
 
-def test_a_key_made_without_its_rule_is_given_it(
-    empty: Database, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("built", "rules", "before"),
+    [
+        # By Django's first migration, before AgentGov's schema editors made keys their way.
+        ("0001_initial", {}, keys.Key("NO ACTION", deferred=True)),
+        # And its second, which gave the key its rule, but still checked it at commit.
+        ("0002_rules_on_delete", keys.RULES, keys.Key("SET NULL", deferred=True)),
+    ],
+)
+def test_a_key_made_otherwise_is_made_again(
+    empty: Database,
+    monkeypatch: pytest.MonkeyPatch,
+    built: str,
+    rules: dict[Any, str],
+    before: keys.Key,
 ) -> None:
-    """On a database Django's first migration built before AgentGov's schema editors wrote the
-    rules on delete, the second gives the key its rule, and the rows stay."""
-    with monkeypatch.context() as before:
-        before.setattr(keys, "RULES", {})  # the schema editors as they were
+    """A database whose key Django's migrations made otherwise than AgentGov keeps it: the next
+    migration makes it again, and the rows stay."""
+    with monkeypatch.context() as then:  # the schema editors as they were
+        then.setattr(keys, "RULES", rules)
+        then.setattr(keys, "CHECKED", " DEFERRABLE INITIALLY DEFERRED")
         try:
-            first = migrations.django_migrations()[0]
-            call_command("migrate", migrations.APP, first, database=empty.alias, verbosity=0)
+            call_command("migrate", migrations.APP, built, database=empty.alias, verbosity=0)
         finally:
             connections[empty.alias].close()
-    assert _rules(empty) == {"blueprint_id": "NO ACTION"}
+    assert _keys(empty) == {"blueprint_id": before}
     with empty.transaction():
         Blueprint.objects.create(id="bp_1", name="support")
         Agent.objects.create(id="agt_1", name="bot", blueprint_id="bp_1")
-    assert "ON DELETE SET NULL" in migrations.upgrade_sql(empty)
+    assert "ON DELETE SET NULL DEFERRABLE INITIALLY IMMEDIATE" in migrations.upgrade_sql(empty)
 
-    assert migrations.upgrade(empty) == migrations.django_migrations()[1:]
-    assert _rules(empty) == {"blueprint_id": "SET NULL"}
+    every = migrations.django_migrations()
+    assert migrations.upgrade(empty) == every[every.index(built) + 1 :]
+    assert _keys(empty) == {"blueprint_id": KEPT}
     with empty.transaction():
         assert Agent.objects.get(pk="agt_1").blueprint_id == "bp_1"
 
@@ -280,7 +300,7 @@ def test_a_key_whose_rule_changes_is_made_again(empty: Database) -> None:
         for old, new in ((kept, protected), (protected, kept)):
             with connection.schema_editor() as editor:
                 editor.alter_field(Agent, old, new)
-            assert keys.in_database(connection, "agents") == {"blueprint_id": keys.rule(new)}
+            assert keys.in_database(connection, "agents") == {"blueprint_id": keys.made(new)}
     finally:
         connection.close()
 
@@ -306,7 +326,7 @@ class TestCli:
 
         sql = runner.invoke(cli.app, ["db", "upgrade", "--sql"], env=env)
         assert sql.exit_code == 0 and 'CREATE TABLE "agents"' in sql.output
-        assert "ON DELETE SET NULL" in sql.output
+        assert "ON DELETE SET NULL DEFERRABLE INITIALLY IMMEDIATE" in sql.output
         assert "INSERT INTO django_migrations" in sql.output
 
         done = runner.invoke(cli.app, ["db", "upgrade"], env=env)

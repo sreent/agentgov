@@ -1,7 +1,7 @@
 """Django's SQLite backend, as agentgov.db uses it: a connection goes back to a pool when a
 transaction ends rather than closing, as Django's PostgreSQL backend does with psycopg's,
-since opening one takes longer than most transactions; and foreign keys with their rules on
-delete (agentgov.db.keys)."""
+since opening one takes longer than most transactions; and foreign keys as AgentGov keeps
+them (agentgov.db.keys)."""
 
 from __future__ import annotations
 
@@ -53,11 +53,10 @@ POOLS: dict[str, Pool] = {}
 class DatabaseSchemaEditor(keys.KeyRules, schema.DatabaseSchemaEditor):
     def table_sql(self, model: Any) -> tuple[str, Any]:
         # SQLite takes a table's keys only as the table is made: each is written at the end of
-        # its column's definition, and its rule goes into it.
+        # its column's definition, as AgentGov keeps it.
         sql, params = super().table_sql(model)
         for field in model._meta.local_fields:
-            ruled = keys.rule_sql(field)
-            if not ruled:
+            if not keys.is_key(field):
                 continue
             key = self.sql_create_inline_fk % {
                 "to_table": self.quote_name(field.target_field.model._meta.db_table),
@@ -66,7 +65,7 @@ class DatabaseSchemaEditor(keys.KeyRules, schema.DatabaseSchemaEditor):
             column = re.search(rf"(?:\(|, ){re.escape(self.quote_name(field.column))} ", sql)
             assert column is not None, field.column
             at = sql.index(key, column.end())
-            sql = sql[:at] + keys.with_rule(key, ruled) + sql[at + len(key) :]
+            sql = sql[:at] + keys.keyed(key, field) + sql[at + len(key) :]
         return sql, params
 
 
