@@ -136,9 +136,12 @@ The data layer:
   built its tables (`agentgov.migrations`). `agentgov db status` and `--sql` covered both, and
   a migration of either that the version didn't know was refused. New migrations are
   Django's (`scripts/new-migration.sh`, `makemigrations`); SQLAlchemy's models of the
-  tables, which Alembic's were written from, went. One difference stays on a database
-  Django's migrations build: the foreign key from an agent to its blueprint sets it to null
-  in Django, not in the database, which Django 5.2 can't declare.
+  tables, which Alembic's were written from, went. One difference stayed on a database
+  Django's migrations built: the foreign key from an agent to its blueprint set it to null in
+  Django, not in the database, which Django 5.2 doesn't declare. AgentGov's schema editors
+  write that rule into the database for every key Django sets to null, and Django's second
+  migration gives it to a database its first built without it (`agentgov.db.keys`); Django
+  6's `DB_SET_NULL` replaces them once AgentGov runs on it.
 - [x] The replicas' coordinator off SQLAlchemy's engine: its `LISTEN`, the leader's lock and
   jobs' locks are on PostgreSQL connections of its own, outside the pool, made as Django
   makes the others (`Database.connect`). SQLAlchemy was left for what Alembic needed: the

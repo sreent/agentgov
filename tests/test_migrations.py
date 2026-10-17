@@ -4,6 +4,7 @@ refuse schemas this version doesn't know."""
 
 from __future__ import annotations
 
+import copy
 import os
 import threading
 import uuid
@@ -14,13 +15,14 @@ import pytest
 from django.core.management import call_command
 from django.db import connections
 from django.db.migrations.loader import MigrationLoader
+from django.db.models import PROTECT
 from django.test import override_settings
 from typer.testing import CliRunner
 
 from agentgov import cli, migrations
 from agentgov.config import Settings
-from agentgov.db import Database
-from agentgov.db.models import Blueprint
+from agentgov.db import Database, keys
+from agentgov.db.models import Agent, Blueprint
 from agentgov.runtime import Runtime
 
 runner = CliRunner()
@@ -72,6 +74,14 @@ def _as_alembic_left_it(db: Database, revision: str = migrations.ALEMBIC_LAST) -
         tx.execute("INSERT INTO alembic_version (version_num) VALUES (%s)", [revision])
 
 
+def _rules(db: Database) -> dict[str, str]:
+    """What the database does to the agents' foreign keys when the rows they name go."""
+    try:
+        return keys.in_database(connections[db.alias], "agents")
+    finally:
+        connections[db.alias].close()
+
+
 def _recorded(db: Database) -> list[str]:
     """Django's migrations the database has recorded as applied."""
     with db.transaction() as tx:
@@ -115,16 +125,17 @@ def test_a_database_alembics_migrations_left_is_taken_over(empty: Database) -> N
     _as_alembic_left_it(empty)
     with empty.transaction():
         Blueprint.objects.create(id="bp_1", name="support")
+    every = migrations.django_migrations()
     state = migrations.status(empty)
     assert state.from_alembic
-    assert (state.current, state.pending) == (migrations.ALEMBIC_LAST, ["0001_initial"])
+    assert (state.current, state.pending) == (migrations.ALEMBIC_LAST, every)
     sql = migrations.upgrade_sql(empty)
     assert 'CREATE TABLE "agents"' not in sql
     assert "INSERT INTO django_migrations" in sql and "'0001_initial'" in sql
 
-    assert migrations.upgrade(empty) == ["0001_initial"]
+    assert migrations.upgrade(empty) == every
     assert migrations.status(empty).up_to_date
-    assert _recorded(empty) == ["0001_initial"]
+    assert _recorded(empty) == every
     with empty.transaction() as tx:
         assert Blueprint.objects.get(pk="bp_1").name == "support"
         # Alembic's record stays, for the version before, should it run on the database again.
@@ -148,7 +159,7 @@ def test_a_database_at_an_earlier_alembic_revision_is_refused(empty: Database) -
             attempt(empty)
     with empty.transaction() as tx:  # what that version does
         tx.execute("UPDATE alembic_version SET version_num = %s", [migrations.ALEMBIC_LAST])
-    assert migrations.upgrade(empty) == ["0001_initial"]
+    assert migrations.upgrade(empty) == migrations.django_migrations()
 
 
 def test_a_database_from_before_migrations_is_refused(empty: Database) -> None:
@@ -219,6 +230,61 @@ def test_the_control_plane_can_leave_migrating_to_a_job(settings: Settings, tmp_
         rt.db.dispose()
 
 
+def test_the_database_sets_an_agents_blueprint_to_null(empty: Database) -> None:
+    """When the blueprint is deleted, by Django or not, as Django does (agentgov.db.keys)."""
+    migrations.upgrade(empty)
+    assert _rules(empty) == {"blueprint_id": "SET NULL"}
+    with empty.transaction():
+        Blueprint.objects.create(id="bp_1", name="support")
+        Agent.objects.create(id="agt_1", name="bot", blueprint_id="bp_1")
+    with empty.transaction() as tx:
+        tx.execute("DELETE FROM blueprints WHERE id = 'bp_1'")
+    with empty.transaction():
+        assert Agent.objects.get(pk="agt_1").blueprint_id is None
+
+
+def test_a_key_made_without_its_rule_is_given_it(
+    empty: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a database Django's first migration built before AgentGov's schema editors wrote the
+    rules on delete, the second gives the key its rule, and the rows stay."""
+    with monkeypatch.context() as before:
+        before.setattr(keys, "RULES", {})  # the schema editors as they were
+        try:
+            first = migrations.django_migrations()[0]
+            call_command("migrate", migrations.APP, first, database=empty.alias, verbosity=0)
+        finally:
+            connections[empty.alias].close()
+    assert _rules(empty) == {"blueprint_id": "NO ACTION"}
+    with empty.transaction():
+        Blueprint.objects.create(id="bp_1", name="support")
+        Agent.objects.create(id="agt_1", name="bot", blueprint_id="bp_1")
+    assert "ON DELETE SET NULL" in migrations.upgrade_sql(empty)
+
+    assert migrations.upgrade(empty) == migrations.django_migrations()[1:]
+    assert _rules(empty) == {"blueprint_id": "SET NULL"}
+    with empty.transaction():
+        assert Agent.objects.get(pk="agt_1").blueprint_id == "bp_1"
+
+
+def test_a_key_whose_rule_changes_is_made_again(empty: Database) -> None:
+    """Django changes nothing in the database when a key's on_delete changes; AgentGov's schema
+    editors make the key again, with its new rule."""
+    migrations.upgrade(empty)
+    kept = Agent._meta.get_field("blueprint")
+    protected = copy.copy(kept)
+    protected.remote_field = copy.copy(kept.remote_field)
+    protected.remote_field.on_delete = PROTECT
+    connection = connections[empty.alias]
+    try:
+        for old, new in ((kept, protected), (protected, kept)):
+            with connection.schema_editor() as editor:
+                editor.alter_field(Agent, old, new)
+            assert keys.in_database(connection, "agents") == {"blueprint_id": keys.rule(new)}
+    finally:
+        connection.close()
+
+
 def test_foreign_keys_are_enforced_after_migrating(db: Database) -> None:
     """Django's migrations turn SQLite's foreign keys off while they alter tables; the
     connections the transactions take after have them on."""
@@ -240,6 +306,7 @@ class TestCli:
 
         sql = runner.invoke(cli.app, ["db", "upgrade", "--sql"], env=env)
         assert sql.exit_code == 0 and 'CREATE TABLE "agents"' in sql.output
+        assert "ON DELETE SET NULL" in sql.output
         assert "INSERT INTO django_migrations" in sql.output
 
         done = runner.invoke(cli.app, ["db", "upgrade"], env=env)

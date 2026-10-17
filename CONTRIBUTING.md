@@ -204,9 +204,11 @@ numbered one. Read it before you commit: Django asks whether a field was renamed
 can't tell, and moving data between columns is yours to write (`RunPython` or `RunSQL`).
 Keep each migration working on both PostgreSQL and SQLite, and give a new column a
 `db_default` or make it nullable: while an upgrade rolls out, the version before still
-writes rows without it. Alembic's migrations built the schema before Django's
-([ADR 0007](docs/adr/0007-django.md)), and are gone: a database they took to their last
-revision is taken over as it is (`src/agentgov/migrations.py`).
+writes rows without it. A foreign key Django sets to null when the row it names is deleted
+(`on_delete=SET_NULL`) is set to null by the database too: AgentGov's database backends
+write that rule into its constraint (`src/agentgov/db/keys.py`). Alembic's migrations built
+the schema before Django's ([ADR 0007](docs/adr/0007-django.md)), and are gone: a database
+they took to their last revision is taken over as it is (`src/agentgov/migrations.py`).
 
 Code that uses the database takes the transaction it runs in (`agentgov.db.Transaction`,
 which `db.transaction()` opens) and queries with Django's models. A model's `save()` writes

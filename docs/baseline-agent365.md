@@ -63,7 +63,7 @@ users who delegate to agents), and much of it is preview with frequent API chang
 | Sponsors and owners told about their agents' problems | ✅ | Issues go to an agent's owner, then its sponsors, then its team, by email and in their Teams or Slack channels, and escalate when nobody acknowledges them; people without an AgentGov role sign in to see and acknowledge their own ([issues](issues.md)) |
 | Kill switch | ✅ | `block` disables the Keycloak client and denies at the gateway within a second (OPA long polling) |
 | Administrators sign in with their organisation account | ✅ | Single sign-on to the admin UI, CLI and API through **Keycloak** or your own OpenID Connect provider (Microsoft Entra ID, Okta, Google...); provider groups map to `admin`, `approver`, `secops`, `auditor`, `registrar`, and roles can be given in AgentGov ([administration](administration.md#your-identity-provider)) |
-| Delegated admin roles, limited to a unit's agents | ⏳ | Roles apply to every agent: a team's admins can't yet be limited to their team's agents. Teams route issues, but aren't boundaries |
+| Delegated admin roles, limited to a unit's agents | ✅ | Each role but `person` and `service` can be held for one team's agents only (`approver@sales`), from the identity provider's groups, given in AgentGov or on an API key: its holder sees and acts on that team's agents and what hangs off them, keeps their changes within the team and loosens nothing that governs its agents ([administration](administration.md#roles-for-one-team)) |
 
 ### Visualization and observability
 

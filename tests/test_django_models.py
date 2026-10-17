@@ -14,7 +14,7 @@ from django.core import checks
 from django.db import connections
 from django.db.models import Field, UniqueConstraint, Value
 
-from agentgov.db import Database
+from agentgov.db import Database, keys
 from agentgov.db import models as django_models
 
 # --------------------------------------------------------------------------- the schema
@@ -98,8 +98,9 @@ def django_tables() -> dict[str, dict[str, Any]]:
                 if isinstance(c, UniqueConstraint)
             },
             "indexes": {i.name: sorted(column[name] for name in i.fields) for i in meta.indexes},
+            # What each references, and what the database does to it when that row goes.
             "foreign keys": {
-                f.column: (f.related_model._meta.db_table, f.target_field.column)
+                f.column: (f.related_model._meta.db_table, f.target_field.column, keys.rule(f))
                 for f in fields
                 if f.is_relation
             },
@@ -142,11 +143,16 @@ def database_tables(db: Database) -> dict[str, dict[str, Any]]:
                     if about["primary_key"] or about["check"]:
                         continue
                     if about["foreign_key"]:
-                        foreign_keys[about["columns"][0]] = tuple(about["foreign_key"])
+                        foreign_keys[about["columns"][0]] = about["foreign_key"]
                     elif about["unique"]:
                         unique[constraint] = sorted(about["columns"])
                     elif about["index"]:
                         indexes[constraint] = sorted(about["columns"])
+                rules = keys.in_database(connection, name)
+                foreign_keys = {
+                    column: (*references, rules[column])
+                    for column, references in foreign_keys.items()
+                }
                 columns = database_columns(db, cursor, name)
                 kinds = {column: database_kind(kind) for column, kind, _, _ in columns}
                 tables[name] = {
